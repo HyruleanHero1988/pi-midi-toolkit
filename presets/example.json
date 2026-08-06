@@ -1,0 +1,22 @@
+{
+  "name": "example-keys-ch3-full-vel",
+  "ports": {
+    "input": "Controller",
+    "output": "Synth"
+  },
+  "channel_map": {
+    "mode": "all_to",
+    "channel": 2
+  },
+  "cc_map": [
+    {
+      "in_channel": 0,
+      "in_cc": 1,
+      "out_channel": 2,
+      "out_cc": 11
+    }
+  ],
+  "velocity": {
+    "mode": "always_full"
+  }
+}

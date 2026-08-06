@@ -1,0 +1,18 @@
+# Example cross-compile config for Raspberry Pi 2 (armv7).
+# Copy to `.cargo/config.toml` after installing a linker, OR use the `cross` tool:
+#
+#   cargo install cross --git https://github.com/cross-rs/cross
+#   cross build --release -p midi-engine --target armv7-unknown-linux-gnueabihf
+#
+# Native linker alternative (Debian/WSL often easier than MSVC host):
+#
+#   [target.armv7-unknown-linux-gnueabihf]
+#   linker = "arm-linux-gnueabihf-gcc"
+#
+# Then:
+#   rustup target add armv7-unknown-linux-gnueabihf
+#   cargo build --release -p midi-engine --target armv7-unknown-linux-gnueabihf
+
+[build]
+# Uncomment to default all builds to the Pi target (usually leave commented on Windows).
+# target = "armv7-unknown-linux-gnueabihf"

@@ -1,0 +1,15 @@
+{
+  "name": "mpk-mini-to-synth-ch3",
+  "ports": {
+    "input": "MPK",
+    "output": "MIDI"
+  },
+  "channel_map": {
+    "mode": "all_to",
+    "channel": 2
+  },
+  "cc_map": [],
+  "velocity": {
+    "mode": "always_full"
+  }
+}

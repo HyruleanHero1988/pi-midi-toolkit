@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=MIDI Tone
+Comment=Hear/see MPK MIDI - sine diagnostic
+Exec=/home/ray/midi-tone/run.sh --input MPK
+Path=/home/ray/midi-tone
+Icon=audio-headphones
+Terminal=false
+Categories=AudioVideo;Audio;Midi;
+StartupNotify=true
