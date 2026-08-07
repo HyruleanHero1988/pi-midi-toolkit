@@ -41,7 +41,7 @@ Factory **Prog Select → Pad 1** (MPC program) maps knobs to CC70–77:
 
 | Knob | CC | Control |
 |------|----|---------|
-| 1 | 70 | **Morph** — blend through the whole wavetable stack |
+| 1 | 70 | **Morph** — blend between the chosen A/B pair |
 | 2 | 71 | Tone / brightness (low-pass) |
 | 3 | 72 | Attack |
 | 4 | 73 | Release |
@@ -55,7 +55,9 @@ If a knob does nothing, check the event log for its CC number — your MPK progr
 
 ### Voices / wavetables
 
-Tap **VOICES** (or the current voice name) for a full-screen grid of large buttons — one per loaded wavetable. **PREV / NEXT** still step one at a time; Knob 1 morphs continuously between them.
+Tap **VOICES** (or the current voice name) for a full-screen grid of large buttons — one per loaded wavetable. **PREV / NEXT** still step one at a time.
+
+Tap **MORPH** to pick a pair: arm **A** or **B**, tap two voices, **DONE**. Knob 1 then blends only **A → B** (not the whole library). **SWAP** flips the pair.
 
 Drop any mono single-cycle `.wav` into `wavetables/` and restart — the stem becomes the voice name.
 

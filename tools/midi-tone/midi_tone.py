@@ -184,7 +184,10 @@ class SineEngine:
         self._voice_names = list(tables.keys())
         self._table_list = [tables[n] for n in self._voice_names]
         self._waveform = self._voice_names[0]
-        self._morph = 0.0  # 0..1 across the whole voice stack
+        # Morph is always between a chosen pair (A ↔ B), not the whole stack.
+        self._morph_a = 0
+        self._morph_b = 1 if len(self._voice_names) > 1 else 0
+        self._morph = 0.0  # 0 = pure A, 1 = pure B
         self._morph_table = self._table_list[0].copy()
         self._morph_dirty = False
         self._tone = 1.0  # 0=dark .. 1=bright (open)
@@ -208,36 +211,28 @@ class SineEngine:
 
     def _rebuild_morph_table_unlocked(self) -> None:
         n = len(self._table_list)
-        if n <= 1:
-            self._morph_table[:] = self._table_list[0]
-            self._waveform = self._voice_names[0]
-            self._morph_dirty = False
-            return
-        pos = max(0.0, min(1.0, self._morph)) * (n - 1)
-        i0 = int(pos)
-        i1 = min(i0 + 1, n - 1)
-        frac = float(pos - i0)
-        a = self._table_list[i0]
-        b = self._table_list[i1]
-        # (1-frac)*a + frac*b — one blended oscillator table for the whole block
+        ia = max(0, min(n - 1, self._morph_a))
+        ib = max(0, min(n - 1, self._morph_b))
+        self._morph_a, self._morph_b = ia, ib
+        frac = max(0.0, min(1.0, self._morph))
+        a = self._table_list[ia]
+        b = self._table_list[ib]
+        # (1-frac)*A + frac*B — one blended oscillator table for the whole block
         np.multiply(a, np.float32(1.0 - frac), out=self._morph_table)
         self._morph_table += b * np.float32(frac)
-        # Nearest name for UI / PREV-NEXT sync
-        nearest = int(round(pos))
-        self._waveform = self._voice_names[nearest]
+        self._waveform = self._voice_names[ia if frac < 0.5 else ib]
         self._morph_dirty = False
 
     def morph_neighbors(self) -> Tuple[str, str, float]:
-        """Return (left_voice, right_voice, blend_frac 0..1)."""
+        """Return (voice_a, voice_b, blend_frac 0..1)."""
         with self._lock:
-            n = len(self._voice_names)
-            if n <= 1:
-                name = self._voice_names[0]
-                return name, name, 0.0
-            pos = max(0.0, min(1.0, self._morph)) * (n - 1)
-            i0 = int(pos)
-            i1 = min(i0 + 1, n - 1)
-            return self._voice_names[i0], self._voice_names[i1], float(pos - i0)
+            a = self._voice_names[self._morph_a]
+            b = self._voice_names[self._morph_b]
+            return a, b, max(0.0, min(1.0, self._morph))
+
+    def morph_pair_indices(self) -> Tuple[int, int]:
+        with self._lock:
+            return self._morph_a, self._morph_b
 
     def start(self) -> None:
         if self._stream is not None:
@@ -388,22 +383,44 @@ class SineEngine:
             self._mod = max(0.0, min(1.0, value / 127.0))
 
     def set_morph(self, value: float) -> None:
-        """Wavetable morph position 0..1 (or MIDI 0..127 if > 1)."""
+        """Blend A→B: 0..1 (or MIDI 0..127 if > 1)."""
         if value > 1.0:
             value = value / 127.0
         with self._lock:
             self._morph = max(0.0, min(1.0, float(value)))
             self._morph_dirty = True
 
-    def set_morph_index(self, index: int) -> None:
-        """Jump morph to an exact voice index (PREV/NEXT)."""
+    def set_morph_pair(self, index_a: int, index_b: int, *, morph: Optional[float] = None) -> None:
+        """Choose the two voices Knob 1 morphs between."""
         with self._lock:
             n = len(self._voice_names)
-            if n <= 1:
-                self._morph = 0.0
+            self._morph_a = max(0, min(n - 1, int(index_a)))
+            self._morph_b = max(0, min(n - 1, int(index_b)))
+            if morph is not None:
+                self._morph = max(0.0, min(1.0, float(morph)))
+            self._morph_dirty = True
+            self._rebuild_morph_table_unlocked()
+
+    def set_morph_endpoint(self, which: str, index: int) -> None:
+        """Set A or B without changing the other side."""
+        which = which.lower().strip()
+        with self._lock:
+            n = len(self._voice_names)
+            idx = max(0, min(n - 1, int(index)))
+            if which == "b":
+                self._morph_b = idx
             else:
-                idx = max(0, min(n - 1, int(index)))
-                self._morph = idx / float(n - 1)
+                self._morph_a = idx
+            self._morph_dirty = True
+            self._rebuild_morph_table_unlocked()
+
+    def set_morph_index(self, index: int) -> None:
+        """PREV/NEXT / VOICES: set A to this voice and park morph at pure A."""
+        with self._lock:
+            n = len(self._voice_names)
+            idx = max(0, min(n - 1, int(index)))
+            self._morph_a = idx
+            self._morph = 0.0
             self._morph_dirty = True
             self._rebuild_morph_table_unlocked()
 
@@ -701,6 +718,12 @@ class MidiToneApp:
         self._grid_open = False
         self._grid_frame: Optional[tk.Frame] = None
         self._grid_btns: Dict[str, tk.Button] = {}
+        self._morph_ui_open = False
+        self._morph_frame: Optional[tk.Frame] = None
+        self._morph_pick_side = "a"  # which endpoint the next grid tap sets
+        self._morph_side_btns: Dict[str, tk.Button] = {}
+        self._morph_grid_btns: Dict[str, tk.Button] = {}
+        self._morph_status_lbl: Optional[tk.Label] = None
 
         # Bottom touch bar packed first so it never gets crushed / lost
         self._touch = tk.Frame(self.root, bg="#111111")
@@ -745,8 +768,11 @@ class MidiToneApp:
         self._mk_touch_btn(row3, "VOICES", self._open_voice_grid, bg="#458588").pack(
             side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=8
         )
+        self._mk_touch_btn(row3, "MORPH", self._open_morph_menu, bg="#b16286").pack(
+            side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=8
+        )
         self._full_vel_btn = self._mk_touch_btn(
-            row3, "FULL VELOCITY: ON", self._toggle_full_vel, bg="#689d6a"
+            row3, "FULL VEL: ON", self._toggle_full_vel, bg="#689d6a"
         )
         self._full_vel_btn.pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=8)
 
@@ -817,23 +843,23 @@ class MidiToneApp:
         # Select first voice explicitly
         self.engine.set_waveform(self._voice_names[self._voice_index])
         self.root.after(40, self._drain_queue)
+        # Default morph pair: first voice ↔ second (or same if only one)
+        if len(self._voice_names) > 1:
+            self.engine.set_morph_pair(0, 1, morph=0.0)
         self._append_log(f"Listening on: {port_name}")
-        self._append_log(f"Loaded {len(self._voice_names)} voices — tap VOICES for the grid.")
+        self._append_log(f"Loaded {len(self._voice_names)} voices — VOICES grid / MORPH pair.")
         self._append_log(
             "MPK knobs (CC70–77): morph / tone / attack / release / "
             "vib depth / vib rate / — / level"
         )
-        self._append_log("Joystick Y = vibrato amount (CC1). Ch10 pads = pressure volume.")
+        self._append_log("MORPH menu: pick A + B, then Knob 1 blends A→B.")
         self._append_log("If knobs do nothing: Prog Select + Pad 1 (MPC program).")
         print("ui: construction complete", flush=True)
 
     def _voice_label_text(self) -> str:
         left, right, blend = self.engine.morph_neighbors()
-        if left == right or blend < 0.02:
-            name = left
-            return f"{self._voice_index + 1}/{len(self._voice_names)}  {name.upper()}"
-        if blend > 0.98:
-            return f"{self._voice_index + 1}/{len(self._voice_names)}  {right.upper()}"
+        if left == right:
+            return f"{self._voice_index + 1}/{len(self._voice_names)}  {left.upper()}"
         pct = int(round(blend * 100))
         return f"{left.upper()} → {right.upper()}  {pct}%"
 
@@ -845,12 +871,15 @@ class MidiToneApp:
         else:
             morph_txt = f"{left}→{right}"
         return (
-            f"Morph:{int(st['morph'] * 100):3d}% ({morph_txt})  "
+            f"Morph:{int(blend * 100):3d}% ({morph_txt})  "
             f"Tone:{int(st['tone'] * 127):3d}  "
             f"Lvl:{int(st['level'] * 127):3d}  "
             f"Bend:{st['bend']:+.2f}  "
             f"Vib:{int(st['mod'] * 127)}"
         )
+
+    def _overlay_busy(self) -> bool:
+        return self._grid_open or self._morph_ui_open or self._log_expanded
 
     def _mk_touch_btn(self, parent: tk.Misc, text: str, command, bg: str = "#3c3836") -> tk.Button:
         """Touch-friendly button: fire on press (resistive panels often miss click)."""
@@ -882,6 +911,7 @@ class MidiToneApp:
             return
         self._voice_index = idx % len(self._voice_names)
         name = self._voice_names[self._voice_index]
+        # VOICES / PREV / NEXT set morph-A and park at pure A (B stays as morph target)
         self.engine.set_morph_index(self._voice_index)
         if self._voice_lbl is not None:
             self._voice_lbl.configure(text=self._voice_label_text())
@@ -892,23 +922,26 @@ class MidiToneApp:
             self._paint_voice_grid()
             if close_grid:
                 self._close_voice_grid()
+        if self._morph_ui_open:
+            self._paint_morph_menu()
 
     def _sync_voice_index_from_morph(self) -> None:
-        """Keep PREV/NEXT index aligned when Knob1 morph moves."""
-        n = len(self._voice_names)
-        if n <= 1:
-            self._voice_index = 0
-            return
-        pos = self.engine.morph() * (n - 1)
-        self._voice_index = int(round(pos))
+        """Keep UI index on the nearer morph endpoint while Knob1 moves."""
+        a_idx, b_idx = self.engine.morph_pair_indices()
+        blend = self.engine.morph()
+        self._voice_index = a_idx if blend < 0.5 else b_idx
         if self._voice_lbl is not None:
             self._voice_lbl.configure(text=self._voice_label_text())
         if self._grid_open:
             self._paint_voice_grid()
+        if self._morph_ui_open:
+            self._paint_morph_menu()
 
     def _open_voice_grid(self) -> None:
         if self._grid_open:
             return
+        if self._morph_ui_open:
+            self._close_morph_menu(restore_main=False)
         if self._log_expanded:
             # Leave log fullscreen first so packing stays sane
             self._toggle_log_fullscreen()
@@ -1016,6 +1049,184 @@ class MidiToneApp:
             self._voice_lbl.configure(text=self._voice_label_text())
         self.mod_var.set(self._format_mod_line())
 
+    def _open_morph_menu(self) -> None:
+        """Pick morph endpoints A and B; Knob 1 blends A→B."""
+        if self._morph_ui_open:
+            return
+        if self._grid_open:
+            self._close_voice_grid()
+            # close_voice_grid restores main/touch — hide again below
+        if self._log_expanded:
+            self._toggle_log_fullscreen()
+
+        self._morph_ui_open = True
+        self._morph_pick_side = "a"
+        self._main.pack_forget()
+        self._touch.pack_forget()
+
+        self._morph_frame = tk.Frame(self.root, bg="#111111")
+        self._morph_frame.pack(fill=tk.BOTH, expand=True)
+
+        header = tk.Frame(self._morph_frame, bg="#111111")
+        header.pack(fill=tk.X, padx=6, pady=(6, 2))
+        tk.Label(
+            header,
+            text="MORPH PAIR",
+            font=("DejaVu Sans", 16, "bold"),
+            fg="#fbf1c7",
+            bg="#111111",
+        ).pack(side=tk.LEFT)
+        self._morph_status_lbl = tk.Label(
+            header,
+            text="tap A or B, then a voice",
+            font=("DejaVu Sans", 11),
+            fg="#a89984",
+            bg="#111111",
+        )
+        self._morph_status_lbl.pack(side=tk.RIGHT)
+
+        # A / B selector row
+        pair_row = tk.Frame(self._morph_frame, bg="#111111")
+        pair_row.pack(fill=tk.X, padx=6, pady=(4, 6))
+        self._morph_side_btns = {}
+        for side, label in (("a", "A"), ("b", "B")):
+            btn = self._mk_touch_btn(
+                pair_row,
+                f"{label}: …",
+                lambda s=side: self._set_morph_pick_side(s),
+                bg="#3c3836",
+            )
+            btn.configure(font=("DejaVu Sans", 14, "bold"), pady=14)
+            btn.pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3)
+            self._morph_side_btns[side] = btn
+
+        swap_btn = self._mk_touch_btn(pair_row, "SWAP", self._swap_morph_pair, bg="#504945")
+        swap_btn.configure(font=("DejaVu Sans", 13, "bold"), pady=14)
+        swap_btn.pack(side=tk.LEFT, fill=tk.BOTH, padx=3)
+
+        # Voice grid for assigning the armed side
+        body = tk.Frame(self._morph_frame, bg="#111111")
+        body.pack(fill=tk.BOTH, expand=True, padx=4, pady=2)
+        canvas = tk.Canvas(body, bg="#111111", highlightthickness=0, bd=0)
+        scroll = ttk.Scrollbar(body, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=scroll.set)
+        scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        inner = tk.Frame(canvas, bg="#111111")
+        window_id = canvas.create_window((0, 0), window=inner, anchor="nw")
+
+        def _on_inner_configure(_event: object = None) -> None:
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        def _on_canvas_configure(event: tk.Event) -> None:  # type: ignore[name-defined]
+            canvas.itemconfigure(window_id, width=event.width)
+
+        inner.bind("<Configure>", _on_inner_configure)
+        canvas.bind("<Configure>", _on_canvas_configure)
+        canvas.bind("<ButtonPress-1>", lambda e: canvas.scan_mark(e.x, e.y))
+        canvas.bind("<B1-Motion>", lambda e: canvas.scan_dragto(e.x, e.y, gain=1))
+
+        cols = 4 if len(self._voice_names) > 8 else 3
+        self._morph_grid_btns = {}
+        for i, name in enumerate(self._voice_names):
+            r, c = divmod(i, cols)
+            btn = self._mk_touch_btn(
+                inner,
+                name.upper(),
+                lambda idx=i: self._assign_morph_endpoint(idx),
+                bg="#3c3836",
+            )
+            btn.configure(font=("DejaVu Sans", 12, "bold"), pady=14)
+            btn.grid(row=r, column=c, sticky="nsew", padx=3, pady=3, ipadx=2, ipady=6)
+            self._morph_grid_btns[name] = btn
+        for c in range(cols):
+            inner.grid_columnconfigure(c, weight=1)
+
+        footer = tk.Frame(self._morph_frame, bg="#111111")
+        footer.pack(fill=tk.X, padx=6, pady=6)
+        self._mk_touch_btn(footer, "DONE", self._close_morph_menu, bg="#689d6a").pack(
+            side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=14
+        )
+        self._mk_touch_btn(footer, "CANCEL", self._close_morph_menu, bg="#9d0006").pack(
+            side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=14
+        )
+        self._paint_morph_menu()
+
+    def _set_morph_pick_side(self, side: str) -> None:
+        self._morph_pick_side = "b" if side == "b" else "a"
+        self._paint_morph_menu()
+
+    def _assign_morph_endpoint(self, idx: int) -> None:
+        side = self._morph_pick_side
+        self.engine.set_morph_endpoint(side, idx)
+        name = self._voice_names[idx]
+        # After setting A, auto-arm B so picking a pair is two taps
+        if side == "a":
+            self._morph_pick_side = "b"
+            self._voice_index = idx
+        else:
+            self._morph_pick_side = "a"
+        self.last_var.set(f"Morph {side.upper()} → {name.upper()}")
+        self._q_put(("log", f"Morph {side.upper()} → {name}", False))
+        self._paint_morph_menu()
+        if self._voice_lbl is not None:
+            self._voice_lbl.configure(text=self._voice_label_text())
+        self.mod_var.set(self._format_mod_line())
+
+    def _swap_morph_pair(self) -> None:
+        a, b = self.engine.morph_pair_indices()
+        blend = self.engine.morph()
+        # Swap endpoints and invert blend so the sound stays put
+        self.engine.set_morph_pair(b, a, morph=1.0 - blend)
+        self._q_put(("log", "Morph pair swapped", False))
+        self._paint_morph_menu()
+        if self._voice_lbl is not None:
+            self._voice_lbl.configure(text=self._voice_label_text())
+        self.mod_var.set(self._format_mod_line())
+
+    def _paint_morph_menu(self) -> None:
+        if not self._morph_ui_open:
+            return
+        a_name, b_name, blend = self.engine.morph_neighbors()
+        for side, btn in self._morph_side_btns.items():
+            name = a_name if side == "a" else b_name
+            armed = side == self._morph_pick_side
+            label = f"{'●' if armed else '○'} {side.upper()}: {name.upper()}"
+            color = "#b16286" if armed else "#3c3836"
+            btn.configure(text=label, bg=color, activebackground=color)
+        if self._morph_status_lbl is not None:
+            self._morph_status_lbl.configure(
+                text=f"Knob1 blends  {a_name} → {b_name}  ({int(blend * 100)}%)"
+            )
+        for name, btn in self._morph_grid_btns.items():
+            if name == a_name and name == b_name:
+                color = "#689d6a"
+            elif name == a_name:
+                color = "#458588"
+            elif name == b_name:
+                color = "#d3869b"
+            else:
+                color = "#3c3836"
+            btn.configure(bg=color, activebackground=color)
+
+    def _close_morph_menu(self, restore_main: bool = True) -> None:
+        if not self._morph_ui_open:
+            return
+        if self._morph_frame is not None:
+            self._morph_frame.destroy()
+            self._morph_frame = None
+        self._morph_side_btns = {}
+        self._morph_grid_btns = {}
+        self._morph_status_lbl = None
+        self._morph_ui_open = False
+        if restore_main:
+            self._main.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+            self._touch.pack(side=tk.BOTTOM, fill=tk.X, padx=6, pady=6)
+            if self._voice_lbl is not None:
+                self._voice_lbl.configure(text=self._voice_label_text())
+            self.mod_var.set(self._format_mod_line())
+
     def _prev_voice(self) -> None:
         self._select_voice_index(self._voice_index - 1)
 
@@ -1059,11 +1270,11 @@ class MidiToneApp:
         if self._full_vel_btn is not None:
             if self._full_vel:
                 self._full_vel_btn.configure(
-                    text="FULL VELOCITY: ON", bg="#689d6a", activebackground="#689d6a"
+                    text="FULL VEL: ON", bg="#689d6a", activebackground="#689d6a"
                 )
             else:
                 self._full_vel_btn.configure(
-                    text="FULL VELOCITY: OFF", bg="#3c3836", activebackground="#3c3836"
+                    text="FULL VEL: OFF", bg="#3c3836", activebackground="#3c3836"
                 )
         self._append_log(f"Full velocity → {'ON' if self._full_vel else 'OFF'}")
 
@@ -1278,7 +1489,7 @@ class MidiToneApp:
             self.last_var.set(pending)
             self._pending_cont_log = None
         # Keep touch bar stacked above log chrome if packing ever races
-        if not self._log_expanded and not self._grid_open:
+        if not self._overlay_busy():
             try:
                 self._touch.lift()
             except Exception:
