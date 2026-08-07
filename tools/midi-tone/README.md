@@ -55,7 +55,9 @@ If a knob does nothing, check the event log for its CC number — your MPK progr
 
 ### Voices / wavetables
 
-Use **PREV / NEXT** on the touch bar (or tap the voice name). Drop any mono single-cycle `.wav` into `wavetables/` and restart — the stem becomes the voice name.
+Tap **VOICES** (or the current voice name) for a full-screen grid of large buttons — one per loaded wavetable. **PREV / NEXT** still step one at a time; Knob 1 morphs continuously between them.
+
+Drop any mono single-cycle `.wav` into `wavetables/` and restart — the stem becomes the voice name.
 
 Fetch more AKWF cycles (needs network):
 

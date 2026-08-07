@@ -698,6 +698,9 @@ class MidiToneApp:
         self._full_vel_btn: Optional[tk.Button] = None
         self._voice_lbl: Optional[tk.Label] = None
         self._log_expanded = False
+        self._grid_open = False
+        self._grid_frame: Optional[tk.Frame] = None
+        self._grid_btns: Dict[str, tk.Button] = {}
 
         # Bottom touch bar packed first so it never gets crushed / lost
         self._touch = tk.Frame(self.root, bg="#111111")
@@ -715,7 +718,7 @@ class MidiToneApp:
             side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3
         )
 
-        # Voice picker — prev / name / next (fits many wavetables on a small panel)
+        # Voice picker — prev / name / next + full grid
         row2 = tk.Frame(self._touch, bg="#111111")
         row2.pack(fill=tk.X, pady=(0, 6))
         self._mk_touch_btn(row2, "◀ PREV", self._prev_voice, bg="#3c3836").pack(
@@ -731,18 +734,21 @@ class MidiToneApp:
             pady=12,
         )
         self._voice_lbl.pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3)
-        # Tap the name to jump forward too (big hit target)
-        self._voice_lbl.bind("<ButtonPress-1>", lambda _e: self._next_voice())
+        # Tap the name → open the voice grid (easier than blind PREV/NEXT)
+        self._voice_lbl.bind("<ButtonPress-1>", lambda _e: self._open_voice_grid())
         self._mk_touch_btn(row2, "NEXT ▶", self._next_voice, bg="#3c3836").pack(
             side=tk.LEFT, fill=tk.BOTH, padx=3, ipady=10
         )
 
         row3 = tk.Frame(self._touch, bg="#111111")
         row3.pack(fill=tk.X)
+        self._mk_touch_btn(row3, "VOICES", self._open_voice_grid, bg="#458588").pack(
+            side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=8
+        )
         self._full_vel_btn = self._mk_touch_btn(
             row3, "FULL VELOCITY: ON", self._toggle_full_vel, bg="#689d6a"
         )
-        self._full_vel_btn.pack(fill=tk.BOTH, ipady=8)
+        self._full_vel_btn.pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=8)
 
         self._main = tk.Frame(self.root, bg="#111111")
         self._main.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
@@ -812,7 +818,7 @@ class MidiToneApp:
         self.engine.set_waveform(self._voice_names[self._voice_index])
         self.root.after(40, self._drain_queue)
         self._append_log(f"Listening on: {port_name}")
-        self._append_log(f"Loaded {len(self._voice_names)} voices (PREV/NEXT or Knob1 morph).")
+        self._append_log(f"Loaded {len(self._voice_names)} voices — tap VOICES for the grid.")
         self._append_log(
             "MPK knobs (CC70–77): morph / tone / attack / release / "
             "vib depth / vib rate / — / level"
@@ -871,7 +877,7 @@ class MidiToneApp:
         btn.bind("<ButtonPress-1>", _fire)
         return btn
 
-    def _select_voice_index(self, idx: int) -> None:
+    def _select_voice_index(self, idx: int, *, close_grid: bool = False) -> None:
         if not self._voice_names:
             return
         self._voice_index = idx % len(self._voice_names)
@@ -882,6 +888,10 @@ class MidiToneApp:
         self.mod_var.set(self._format_mod_line())
         self.last_var.set(f"Voice → {name.upper()}")
         self._q_put(("log", f"Voice → {name}", False))
+        if self._grid_open:
+            self._paint_voice_grid()
+            if close_grid:
+                self._close_voice_grid()
 
     def _sync_voice_index_from_morph(self) -> None:
         """Keep PREV/NEXT index aligned when Knob1 morph moves."""
@@ -893,6 +903,118 @@ class MidiToneApp:
         self._voice_index = int(round(pos))
         if self._voice_lbl is not None:
             self._voice_lbl.configure(text=self._voice_label_text())
+        if self._grid_open:
+            self._paint_voice_grid()
+
+    def _open_voice_grid(self) -> None:
+        if self._grid_open:
+            return
+        if self._log_expanded:
+            # Leave log fullscreen first so packing stays sane
+            self._toggle_log_fullscreen()
+        self._grid_open = True
+        self._main.pack_forget()
+        self._touch.pack_forget()
+
+        self._grid_frame = tk.Frame(self.root, bg="#111111")
+        self._grid_frame.pack(fill=tk.BOTH, expand=True)
+
+        header = tk.Frame(self._grid_frame, bg="#111111")
+        header.pack(fill=tk.X, padx=6, pady=(6, 4))
+        tk.Label(
+            header,
+            text="VOICES — tap one",
+            font=("DejaVu Sans", 16, "bold"),
+            fg="#fbf1c7",
+            bg="#111111",
+        ).pack(side=tk.LEFT)
+        tk.Label(
+            header,
+            text=f"{len(self._voice_names)} loaded",
+            font=("DejaVu Sans", 12),
+            fg="#a89984",
+            bg="#111111",
+        ).pack(side=tk.RIGHT)
+
+        # Scrollable canvas so many wavetables still fit on a 5" panel
+        body = tk.Frame(self._grid_frame, bg="#111111")
+        body.pack(fill=tk.BOTH, expand=True, padx=4, pady=2)
+        canvas = tk.Canvas(body, bg="#111111", highlightthickness=0, bd=0)
+        scroll = ttk.Scrollbar(body, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=scroll.set)
+        scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        inner = tk.Frame(canvas, bg="#111111")
+        window_id = canvas.create_window((0, 0), window=inner, anchor="nw")
+
+        def _on_inner_configure(_event: object = None) -> None:
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        def _on_canvas_configure(event: tk.Event) -> None:  # type: ignore[name-defined]
+            canvas.itemconfigure(window_id, width=event.width)
+
+        inner.bind("<Configure>", _on_inner_configure)
+        canvas.bind("<Configure>", _on_canvas_configure)
+
+        # Drag-to-scroll helps when the resistive panel has no wheel
+        self._grid_drag_y = 0
+
+        def _drag_start(event: tk.Event) -> None:  # type: ignore[name-defined]
+            self._grid_drag_y = event.y
+            canvas.scan_mark(event.x, event.y)
+
+        def _drag_move(event: tk.Event) -> None:  # type: ignore[name-defined]
+            canvas.scan_dragto(event.x, event.y, gain=1)
+
+        canvas.bind("<ButtonPress-1>", _drag_start)
+        canvas.bind("<B1-Motion>", _drag_move)
+
+        cols = 4 if len(self._voice_names) > 8 else 3
+        self._grid_btns = {}
+        for i, name in enumerate(self._voice_names):
+            r, c = divmod(i, cols)
+            btn = self._mk_touch_btn(
+                inner,
+                name.upper(),
+                lambda idx=i: self._select_voice_index(idx, close_grid=True),
+                bg="#3c3836",
+            )
+            btn.configure(font=("DejaVu Sans", 13, "bold"), pady=18)
+            btn.grid(row=r, column=c, sticky="nsew", padx=3, pady=3, ipadx=4, ipady=8)
+            self._grid_btns[name] = btn
+        for c in range(cols):
+            inner.grid_columnconfigure(c, weight=1)
+
+        footer = tk.Frame(self._grid_frame, bg="#111111")
+        footer.pack(fill=tk.X, padx=6, pady=6)
+        self._mk_touch_btn(footer, "CLOSE", self._close_voice_grid, bg="#9d0006").pack(
+            fill=tk.BOTH, ipady=14
+        )
+        self._paint_voice_grid()
+
+    def _paint_voice_grid(self) -> None:
+        if not self._grid_btns:
+            return
+        current = self._voice_names[self._voice_index] if self._voice_names else ""
+        for name, btn in self._grid_btns.items():
+            on = name == current
+            color = "#458588" if on else "#3c3836"
+            btn.configure(bg=color, activebackground=color)
+
+    def _close_voice_grid(self) -> None:
+        if not self._grid_open:
+            return
+        if self._grid_frame is not None:
+            self._grid_frame.destroy()
+            self._grid_frame = None
+        self._grid_btns = {}
+        self._grid_open = False
+        self._main.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        self._touch.pack(side=tk.BOTTOM, fill=tk.X, padx=6, pady=6)
+        if self._voice_lbl is not None:
+            self._voice_lbl.configure(text=self._voice_label_text())
+        self.mod_var.set(self._format_mod_line())
 
     def _prev_voice(self) -> None:
         self._select_voice_index(self._voice_index - 1)
@@ -1156,7 +1278,7 @@ class MidiToneApp:
             self.last_var.set(pending)
             self._pending_cont_log = None
         # Keep touch bar stacked above log chrome if packing ever races
-        if not self._log_expanded:
+        if not self._log_expanded and not self._grid_open:
             try:
                 self._touch.lift()
             except Exception:
