@@ -1,10 +1,11 @@
-# midi-tone (Phase 0 diagnostic)
+# midi-tone (Phase 0 diagnostic → tiny DIY soft-synth)
 
 Hear and see MIDI from the **Akai MPK mini** on the Pi **without** USB-DIN or a hardware synth.
 
 - Opens a MIDI input (prefers a port name containing `MPK`)
-- Note-on → sine tone through the Pi audio jack / HDMI
-- Tk UI: last event (large), active notes, scrolling event log
+- Note-on → wavetable tone through the Pi audio jack / HDMI
+- Tk UI: last event, active notes, scrolling event log, touch voice picker
+- Bundled [Adventure Kid (AKWF)](https://github.com/KristofferKarlAxelEkstrand/AKWF-FREE) single-cycles (**CC0**) plus built-in sine/square/saw/triangle
 
 ## On the Pi (via SSH is fine)
 
@@ -24,7 +25,26 @@ export XDG_RUNTIME_DIR=/run/user/$(id -u)
 ./run.sh --input MPK
 ```
 
-Plug headphones or speakers into the Pi. Play the MPK — you should hear sines and see Note On/Off / CC lines.
+Useful flags:
+
+```bash
+./run.sh --input MPK --voices 12          # polyphony (default 12)
+./run.sh --waves-dir ./wavetables         # extra single-cycle WAVs
+./run.sh --list                           # MIDI ports + loaded voices
+```
+
+Plug headphones or speakers into the Pi. Play the MPK — you should hear tones and see Note On/Off / CC lines.
+
+### Voices / wavetables
+
+Use **PREV / NEXT** on the touch bar (or tap the voice name). Drop any mono single-cycle `.wav` into `wavetables/` and restart — the stem becomes the voice name.
+
+Fetch more AKWF cycles (needs network):
+
+```bash
+./venv/bin/python fetch_akwf.py --list
+./venv/bin/python fetch_akwf.py --all
+```
 
 ### Desktop icon
 
@@ -51,3 +71,9 @@ python midi_tone.py --input MPK
 ## Panic
 
 UI button **All Notes Off**, or MIDI CC 123.
+
+## Touch tips (Pi panel)
+
+- Buttons fire on **press** (resistive panels often miss a full click).
+- Log fullscreen is an explicit **EXPAND LOG** button (double-tap was removed — bounce was hiding the controls).
+- If taps feel vertically offset: `./calibrate-touch-y.sh`

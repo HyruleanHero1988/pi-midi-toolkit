@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-midi-tone — Phase 0 diagnostic: MPK (or any MIDI in) → sine soft-synth + event UI.
+midi-tone — Phase 0 diagnostic turned tiny DIY soft-synth.
 
-Proves USB MIDI host path on the Pi without USB-DIN / hardware synth.
+MPK (or any MIDI in) → wavetable soft-synth + event UI.
 Keep lean for Raspberry Pi 2 (wavetable synth, capped polyphony).
 """
 
@@ -10,11 +10,13 @@ from __future__ import annotations
 
 import argparse
 import math
+import pathlib
 import queue
 import sys
 import threading
 import time
 import tkinter as tk
+import wave
 from dataclasses import dataclass
 from tkinter import ttk
 from typing import Dict, List, Optional, Tuple
@@ -41,24 +43,84 @@ except ImportError as e:
 SAMPLE_RATE = 44100
 BLOCKSIZE = 1024
 LATENCY_SEC = 0.08
-MAX_VOICES = 4
+DEFAULT_MAX_VOICES = 12
 TABLE_SIZE = 2048
 TABLE_MASK = TABLE_SIZE - 1
-LOG_MAX = 80
+LOG_MAX = 60
+EVENT_Q_MAX = 200
 # MIDI channel 10 (1-based) = index 9 — MPK drum pads
 DRUM_CHANNEL = 9
 NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
+HERE = pathlib.Path(__file__).resolve().parent
+DEFAULT_WAVETABLE_DIR = HERE / "wavetables"
 
-_t = np.linspace(0.0, 1.0, TABLE_SIZE, endpoint=False, dtype=np.float64)
-SINE_TABLE = np.sin(2.0 * np.pi * _t).astype(np.float32)
-# Band-limited-ish cheap shapes (single-cycle); fine for diagnostic tones
-SQUARE_TABLE = np.where(_t < 0.5, 0.35, -0.35).astype(np.float32)
-SAW_TABLE = (2.0 * (_t - np.floor(_t + 0.5))).astype(np.float32) * 0.35
-WAVETABLES = {
-    "sine": SINE_TABLE,
-    "square": SQUARE_TABLE,
-    "saw": SAW_TABLE,
-}
+
+def _builtin_tables() -> Dict[str, np.ndarray]:
+    t = np.linspace(0.0, 1.0, TABLE_SIZE, endpoint=False, dtype=np.float64)
+    sine = np.sin(2.0 * np.pi * t).astype(np.float32)
+    square = np.where(t < 0.5, 0.35, -0.35).astype(np.float32)
+    saw = (2.0 * (t - np.floor(t + 0.5))).astype(np.float32) * 0.35
+    triangle = (2.0 * np.abs(2.0 * (t - np.floor(t + 0.5))) - 1.0).astype(np.float32) * 0.35
+    return {
+        "sine": sine,
+        "square": square,
+        "saw": saw,
+        "triangle": triangle,
+    }
+
+
+def _load_wav_mono(path: pathlib.Path) -> np.ndarray:
+    with wave.open(str(path), "rb") as w:
+        ch = w.getnchannels()
+        sw = w.getsampwidth()
+        n = w.getnframes()
+        raw = w.readframes(n)
+    if sw == 2:
+        x = np.frombuffer(raw, dtype="<i2").astype(np.float32) / 32768.0
+    elif sw == 4:
+        # int32 PCM or float32 — detect by range later; treat as int32 first
+        as_i = np.frombuffer(raw, dtype="<i4")
+        if np.max(np.abs(as_i)) > 8:
+            x = as_i.astype(np.float32) / 2147483648.0
+        else:
+            x = np.frombuffer(raw, dtype="<f4").copy()
+    else:
+        raise ValueError(f"{path}: unsupported sample width {sw}")
+    if ch > 1:
+        x = x.reshape(-1, ch).mean(axis=1)
+    return x
+
+
+def _resample_cycle(x: np.ndarray, n: int = TABLE_SIZE) -> np.ndarray:
+    if len(x) == n:
+        y = x.astype(np.float32, copy=True)
+    else:
+        phase = np.linspace(0.0, 1.0, n, endpoint=False, dtype=np.float64)
+        idx = phase * len(x)
+        i0 = np.floor(idx).astype(np.int64) % len(x)
+        i1 = (i0 + 1) % len(x)
+        frac = (idx - np.floor(idx)).astype(np.float32)
+        y = (x[i0] * (1.0 - frac) + x[i1] * frac).astype(np.float32)
+    peak = float(np.max(np.abs(y))) or 1.0
+    return (y / peak) * np.float32(0.35)
+
+
+def load_wavetables(directory: pathlib.Path) -> Dict[str, np.ndarray]:
+    """Built-ins first, then any *.wav in directory (stem = voice name)."""
+    tables = _builtin_tables()
+    if directory.is_dir():
+        for path in sorted(directory.glob("*.wav")):
+            name = path.stem.lower().strip()
+            if not name:
+                continue
+            # Keep core procedural oscillators; files can add/replace everything else
+            if name in ("sine", "square", "saw", "triangle"):
+                continue
+            try:
+                tables[name] = _resample_cycle(_load_wav_mono(path))
+            except Exception as exc:
+                print(f"wavetable skip {path.name}: {exc}", flush=True)
+    return tables
 
 
 def midi_note_name(note: int) -> str:
@@ -77,16 +139,25 @@ class Voice:
     releasing: bool = False
     amp: float = 0.0
     target_amp: float = 0.0
+    age: int = 0  # bump on each note_on for steal ordering
 
 
 class SineEngine:
-    """Wavetable synth (sine / square / saw) — light enough for Pi 2."""
+    """Wavetable synth — light enough for Pi 2."""
 
-    ATTACK_SEC = 0.015
-    RELEASE_SEC = 0.040
+    ATTACK_SEC = 0.012
+    RELEASE_SEC = 0.030
 
-    def __init__(self, sample_rate: int = SAMPLE_RATE) -> None:
+    def __init__(
+        self,
+        tables: Dict[str, np.ndarray],
+        sample_rate: int = SAMPLE_RATE,
+        max_voices: int = DEFAULT_MAX_VOICES,
+    ) -> None:
+        if not tables:
+            raise ValueError("no wavetables loaded")
         self.sample_rate = sample_rate
+        self.max_voices = max(1, int(max_voices))
         self._lock = threading.Lock()
         self._voices: Dict[Tuple[int, int], Voice] = {}
         self._stream: Optional[sd.OutputStream] = None
@@ -96,15 +167,22 @@ class SineEngine:
         self._vib_hz = 5.0
         self._vib_depth_semis = 0.5
         self._vib_phase = 0.0
-        self._waveform = "sine"
-        self._table = WAVETABLES["sine"]
+        self._tables = tables
+        self._voice_names = list(tables.keys())
+        self._waveform = self._voice_names[0]
+        self._table = tables[self._waveform]
         self._scratch = np.zeros(BLOCKSIZE * 2, dtype=np.float32)
         self._phase_buf = np.zeros(BLOCKSIZE * 2, dtype=np.float32)
+        self._frac_buf = np.zeros(BLOCKSIZE * 2, dtype=np.float32)
         self._arange = np.arange(BLOCKSIZE * 2, dtype=np.float32)
         self._ramp = np.zeros(BLOCKSIZE * 2, dtype=np.float32)
+        self._note_serial = 0
         # Drum pad gate: aftertouch may only change volume while the pad note is held.
-        # Never revive a pad after note-off (sticky aftertouch was leaving notes hung).
         self._drum_gate: Dict[int, bool] = {}
+
+    @property
+    def voice_names(self) -> List[str]:
+        return list(self._voice_names)
 
     def start(self) -> None:
         if self._stream is not None:
@@ -157,7 +235,8 @@ class SineEngine:
         self._stream.start()
         print(
             f"audio: wavetable sr={self.sample_rate} block={BLOCKSIZE} "
-            f"latency={LATENCY_SEC}s voices<={MAX_VOICES} "
+            f"latency={LATENCY_SEC}s voices<={self.max_voices} "
+            f"tables={len(self._tables)} "
             f"device={getattr(self._stream, 'device', None)}",
             flush=True,
         )
@@ -170,6 +249,18 @@ class SineEngine:
         with self._lock:
             self._voices.clear()
 
+    def _steal_key(self) -> Optional[Tuple[int, int]]:
+        """Pick a voice to drop: releasing/quiet/oldest first. Never None if non-empty."""
+        best: Optional[Tuple[int, int]] = None
+        best_score: Optional[Tuple[int, float, int]] = None
+        for key, v in self._voices.items():
+            # Lower tuple wins. Prefer releasing, then quieter, then older.
+            score = (0 if v.releasing else 1, v.amp, v.age)
+            if best_score is None or score < best_score:
+                best_score = score
+                best = key
+        return best
+
     def note_on(self, channel: int, note: int, velocity: int) -> None:
         if velocity <= 0:
             self.note_off(channel, note)
@@ -180,6 +271,8 @@ class SineEngine:
         scale = 0.16 if (channel & 0x0F) == DRUM_CHANNEL else 0.12
         target = vel * scale
         with self._lock:
+            self._note_serial += 1
+            serial = self._note_serial
             if (channel & 0x0F) == DRUM_CHANNEL:
                 self._drum_gate[key[1]] = True
             existing = self._voices.get(key)
@@ -188,16 +281,29 @@ class SineEngine:
                 existing.releasing = False
                 existing.velocity = vel
                 existing.target_amp = target
+                existing.age = serial
                 return
-            if key not in self._voices and len(self._voices) >= MAX_VOICES:
-                drop = next(iter(self._voices))
-                del self._voices[drop]
+            if existing is not None:
+                # Same key re-trigger: reuse slot, restart envelope/phase
+                existing.note = note & 0x7F
+                existing.velocity = vel
+                existing.phase = 0.0
+                existing.releasing = False
+                existing.amp = 0.0
+                existing.target_amp = target
+                existing.age = serial
+                return
+            if len(self._voices) >= self.max_voices:
+                drop = self._steal_key()
+                if drop is not None:
+                    del self._voices[drop]
             self._voices[key] = Voice(
                 note=note & 0x7F,
                 velocity=vel,
                 amp=0.0,
                 target_amp=target,
                 releasing=False,
+                age=serial,
             )
 
     def note_off(self, channel: int, note: int) -> None:
@@ -227,11 +333,7 @@ class SineEngine:
             self._mod = max(0.0, min(1.0, value / 127.0))
 
     def set_pad_pressure(self, channel: int, note: Optional[int], value: int) -> None:
-        """Live volume for held drum pads (aftertouch / pressure).
-
-        Only affects pads whose note is still gated on. After note-off, pressure is
-        ignored so sticky aftertouch cannot keep a pad singing forever.
-        """
+        """Live volume for held drum pads (aftertouch / pressure)."""
         if (channel & 0x0F) != DRUM_CHANNEL:
             return
         vel = max(0, min(127, value)) / 127.0
@@ -243,7 +345,6 @@ class SineEngine:
                     for n, held in self._drum_gate.items()
                     if held
                 ]
-                # Also include any currently sounding drum voices still gated
                 for (ch, n), v in self._voices.items():
                     if ch == DRUM_CHANNEL and self._drum_gate.get(n, False):
                         if (ch, n) not in keys:
@@ -260,24 +361,22 @@ class SineEngine:
                         v.releasing = True
                         v.target_amp = 0.0
                     continue
-                # Pressure > 0: volume only while the pad note is still held
                 if not self._drum_gate.get(n, False):
                     continue
-                if v is None:
-                    continue
-                if v.releasing:
+                if v is None or v.releasing:
                     continue
                 v.velocity = vel
                 v.target_amp = target
 
-    def set_waveform(self, name: str) -> None:
+    def set_waveform(self, name: str) -> bool:
         name = name.lower().strip()
-        table = WAVETABLES.get(name)
+        table = self._tables.get(name)
         if table is None:
-            return
+            return False
         with self._lock:
             self._waveform = name
             self._table = table
+        return True
 
     def waveform(self) -> str:
         with self._lock:
@@ -292,11 +391,13 @@ class SineEngine:
         if frames > self._scratch.shape[0]:
             self._scratch = np.zeros(frames, dtype=np.float32)
             self._phase_buf = np.zeros(frames, dtype=np.float32)
+            self._frac_buf = np.zeros(frames, dtype=np.float32)
             self._arange = np.arange(frames, dtype=np.float32)
             self._ramp = np.zeros(frames, dtype=np.float32)
         buf = self._scratch[:frames]
         buf.fill(0.0)
         ph = self._phase_buf[:frames]
+        frac = self._frac_buf[:frames]
         arange = self._arange[:frames]
         ramp = self._ramp[:frames]
         sr = float(self.sample_rate)
@@ -322,8 +423,11 @@ class SineEngine:
             hz = midi_to_hz(v.note) * (2.0 ** ((bend + vib_semis) / 12.0))
             phase_inc = (hz * TABLE_SIZE) / sr
             np.add(v.phase, arange * np.float32(phase_inc), out=ph)
-            indices = np.bitwise_and(ph.astype(np.int32), TABLE_MASK)
-            wave = table[indices]
+            # Linear interpolation (nicer for sampled AKWF cycles)
+            np.subtract(ph, np.floor(ph), out=frac)
+            i0 = np.bitwise_and(ph.astype(np.int32), TABLE_MASK)
+            i1 = np.bitwise_and(i0 + 1, TABLE_MASK)
+            wave = table[i0] * (1.0 - frac) + table[i1] * frac
 
             start_amp = v.amp
             if v.releasing:
@@ -334,14 +438,12 @@ class SineEngine:
                     start_amp + attack_per_samp * frames * max(v.target_amp, 0.05),
                 )
             elif v.target_amp < start_amp:
-                # Glide down when pad pressure / velocity softens
                 end_amp = max(
                     v.target_amp,
                     start_amp - release_per_samp * frames * max(start_amp, 0.05),
                 )
             else:
                 end_amp = start_amp
-            # Per-sample linear envelope — avoids boundary pops
             np.multiply(arange, np.float32((end_amp - start_amp) / float(denom)), out=ramp)
             np.add(ramp, np.float32(start_amp), out=ramp)
             buf += wave * ramp
@@ -382,13 +484,22 @@ def format_message(msg: mido.Message) -> str:
 
 
 class MidiToneApp:
-    def __init__(self, port_filter: str, list_only: bool) -> None:
+    def __init__(
+        self,
+        port_filter: str,
+        list_only: bool,
+        max_voices: int,
+        waves_dir: pathlib.Path,
+    ) -> None:
         self.port_filter = port_filter.strip().lower()
-        self.event_q: queue.Queue = queue.Queue()
-        self.engine = SineEngine()
+        self.event_q: queue.Queue = queue.Queue(maxsize=EVENT_Q_MAX)
+        self._tables = load_wavetables(waves_dir)
+        self.engine = SineEngine(self._tables, max_voices=max_voices)
         self._inport: Optional[mido.ports.BaseInput] = None
         self._poll_thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
+        self._voice_names = self.engine.voice_names
+        self._voice_index = 0
 
         if list_only:
             self._print_ports()
@@ -399,8 +510,8 @@ class MidiToneApp:
             sys.exit("No MIDI input ports found. Is the MPK plugged in?")
 
         print(f"midi: opening input '{port_name}'", flush=True)
+        print(f"voices: {', '.join(self._voice_names)}", flush=True)
 
-        # Must exist before MIDI thread starts
         self._full_vel = True
 
         # Create the Tk root BEFORE opening PortAudio — on Pi + labwc/Xwayland,
@@ -422,41 +533,55 @@ class MidiToneApp:
         self._poll_thread.start()
         print("midi: poll thread started", flush=True)
 
-        self._waveform = "sine"
-        self._wave_btns: Dict[str, tk.Button] = {}
         self._full_vel_btn: Optional[tk.Button] = None
+        self._voice_lbl: Optional[tk.Label] = None
+        self._log_expanded = False
 
-        # Bottom touch bar is packed first (side=BOTTOM) so it never gets crushed
+        # Bottom touch bar packed first so it never gets crushed / lost
         self._touch = tk.Frame(self.root, bg="#111111")
         self._touch.pack(side=tk.BOTTOM, fill=tk.X, padx=6, pady=6)
 
         row1 = tk.Frame(self._touch, bg="#111111")
         row1.pack(fill=tk.X, pady=(0, 6))
-        self._touch_btn(row1, "ALL NOTES OFF", self._panic, bg="#9d0006").pack(
+        self._mk_touch_btn(row1, "ALL NOTES OFF", self._panic, bg="#9d0006").pack(
             side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3
         )
-        self._touch_btn(row1, "CLEAR LOG", self._clear_log, bg="#504945").pack(
+        self._mk_touch_btn(row1, "CLEAR LOG", self._clear_log, bg="#504945").pack(
+            side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3
+        )
+        self._mk_touch_btn(row1, "EXPAND LOG", self._toggle_log_fullscreen, bg="#3c3836").pack(
             side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3
         )
 
+        # Voice picker — prev / name / next (fits many wavetables on a small panel)
         row2 = tk.Frame(self._touch, bg="#111111")
         row2.pack(fill=tk.X, pady=(0, 6))
-        for name in ("sine", "square", "saw"):
-            btn = self._touch_btn(
-                row2, name.upper(), lambda n=name: self._select_wave(n), bg="#3c3836"
-            )
-            btn.pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=10)
-            self._wave_btns[name] = btn
-        self._paint_wave_btns()
+        self._mk_touch_btn(row2, "◀ PREV", self._prev_voice, bg="#3c3836").pack(
+            side=tk.LEFT, fill=tk.BOTH, padx=3, ipady=10
+        )
+        self._voice_lbl = tk.Label(
+            row2,
+            text=self._voice_label_text(),
+            font=("DejaVu Sans", 16, "bold"),
+            fg="#fbf1c7",
+            bg="#458588",
+            padx=8,
+            pady=12,
+        )
+        self._voice_lbl.pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3)
+        # Tap the name to jump forward too (big hit target)
+        self._voice_lbl.bind("<ButtonPress-1>", lambda _e: self._next_voice())
+        self._mk_touch_btn(row2, "NEXT ▶", self._next_voice, bg="#3c3836").pack(
+            side=tk.LEFT, fill=tk.BOTH, padx=3, ipady=10
+        )
 
         row3 = tk.Frame(self._touch, bg="#111111")
         row3.pack(fill=tk.X)
-        self._full_vel_btn = self._touch_btn(
+        self._full_vel_btn = self._mk_touch_btn(
             row3, "FULL VELOCITY: ON", self._toggle_full_vel, bg="#689d6a"
         )
         self._full_vel_btn.pack(fill=tk.BOTH, ipady=8)
 
-        # Everything above the touch bar lives here
         self._main = tk.Frame(self.root, bg="#111111")
         self._main.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
 
@@ -494,7 +619,7 @@ class MidiToneApp:
         mod_lbl.pack(fill=tk.X, padx=8, pady=(2, 0))
 
         self._log_title = tk.Label(
-            self._main, text="Event log  (double-tap to expand)", font=("DejaVu Sans", 10),
+            self._main, text="Event log", font=("DejaVu Sans", 10),
             fg="#a89984", bg="#111111", anchor="w",
         )
         self._log_title.pack(fill=tk.X, padx=8, pady=(6, 2))
@@ -511,7 +636,6 @@ class MidiToneApp:
         self.log.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scroll.pack(side=tk.RIGHT, fill=tk.Y)
 
-        # Explicit order for reliable fullscreen restore (pack order matters)
         self._log_chrome = [
             (header, dict(fill=tk.X, padx=8, pady=(8, 2))),
             (last_lbl, dict(fill=tk.X, padx=8, pady=4)),
@@ -519,34 +643,63 @@ class MidiToneApp:
             (mod_lbl, dict(fill=tk.X, padx=8, pady=(2, 0))),
             (self._log_title, dict(fill=tk.X, padx=8, pady=(6, 2))),
         ]
-        self._log_expanded = False
-        self._last_log_tap = 0.0
         self._exit_log_btn: Optional[tk.Button] = None
-        self.log.bind("<Button-1>", self._on_log_tap)
 
         self._active_notes: Dict[Tuple[int, int], int] = {}
-        self.root.after(50, self._drain_queue)
+        # Select first voice explicitly
+        self.engine.set_waveform(self._voice_names[self._voice_index])
+        self.root.after(40, self._drain_queue)
         self._append_log(f"Listening on: {port_name}")
-        self._append_log("Touch UI: large pads at bottom.")
+        self._append_log(f"Loaded {len(self._voice_names)} voices (PREV/NEXT).")
         self._append_log("Ch10 pads: velocity + aftertouch → volume.")
-        self._append_log("Double-tap the log to fill the screen.")
+        self._append_log("Use EXPAND LOG — double-tap disabled (touch bounce).")
         print("ui: construction complete", flush=True)
 
-    def _touch_btn(self, parent: tk.Misc, text: str, command, bg: str = "#3c3836") -> tk.Button:
-        return tk.Button(
-            parent, text=text, command=command,
+    def _voice_label_text(self) -> str:
+        name = self._voice_names[self._voice_index]
+        return f"{self._voice_index + 1}/{len(self._voice_names)}  {name.upper()}"
+
+    def _mk_touch_btn(self, parent: tk.Misc, text: str, command, bg: str = "#3c3836") -> tk.Button:
+        """Touch-friendly button: fire on press (resistive panels often miss click)."""
+        btn = tk.Button(
+            parent, text=text,
             font=("DejaVu Sans", 14, "bold"), fg="#fbf1c7", bg=bg,
             activeforeground="#fbf1c7", activebackground=bg,
             relief=tk.FLAT, bd=0, padx=8, pady=12, cursor="hand2",
+            takefocus=0,
         )
 
-    def _on_log_tap(self, _event: object = None) -> None:
-        now = time.monotonic()
-        if now - self._last_log_tap <= 0.45:
-            self._last_log_tap = 0.0
-            self._toggle_log_fullscreen()
-        else:
-            self._last_log_tap = now
+        def _fire(_event: object = None) -> str:
+            # Debounce bounce from ADS7846. Fire on press only — pairing
+            # ButtonPress + Button.command double-triggers on release.
+            now = time.monotonic()
+            last = getattr(btn, "_last_fire", 0.0)
+            if now - last < 0.18:
+                return "break"
+            btn._last_fire = now  # type: ignore[attr-defined]
+            command()
+            return "break"
+
+        # No command= callback: resistive panels often never complete a click.
+        btn.bind("<ButtonPress-1>", _fire)
+        return btn
+
+    def _select_voice_index(self, idx: int) -> None:
+        if not self._voice_names:
+            return
+        self._voice_index = idx % len(self._voice_names)
+        name = self._voice_names[self._voice_index]
+        self.engine.set_waveform(name)
+        if self._voice_lbl is not None:
+            self._voice_lbl.configure(text=self._voice_label_text())
+        self.last_var.set(f"Voice → {name.upper()}")
+        self._q_put(("log", f"Voice → {name}", False))
+
+    def _prev_voice(self) -> None:
+        self._select_voice_index(self._voice_index - 1)
+
+    def _next_voice(self) -> None:
+        self._select_voice_index(self._voice_index + 1)
 
     def _toggle_log_fullscreen(self) -> None:
         now = time.monotonic()
@@ -560,7 +713,7 @@ class MidiToneApp:
             self._touch.pack_forget()
             self._log_frame.pack_configure(padx=4, pady=(4, 0))
             self.log.configure(font=("DejaVu Sans Mono", 14))
-            self._exit_log_btn = self._touch_btn(
+            self._exit_log_btn = self._mk_touch_btn(
                 self.root, "EXIT FULLSCREEN LOG", self._toggle_log_fullscreen, bg="#9d0006"
             )
             self._exit_log_btn.pack(side=tk.BOTTOM, fill=tk.X, padx=6, pady=6, ipady=14)
@@ -570,31 +723,15 @@ class MidiToneApp:
             if self._exit_log_btn is not None:
                 self._exit_log_btn.destroy()
                 self._exit_log_btn = None
-            # Unpack log first so chrome can be packed above it again
             self._log_frame.pack_forget()
             for w, opts in self._log_chrome:
                 w.pack(**opts)
             self._log_frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 4))
+            # Always restore the touch bar last so it stays visible
             self._touch.pack(side=tk.BOTTOM, fill=tk.X, padx=6, pady=6)
             self.log.configure(font=("DejaVu Sans Mono", 11))
             self._log_expanded = False
             self.log.see(tk.END)
-
-    def _paint_wave_btns(self) -> None:
-        for name, btn in self._wave_btns.items():
-            on = name == self._waveform
-            color = "#458588" if on else "#3c3836"
-            btn.configure(bg=color, activebackground=color)
-
-    def _select_wave(self, name: str) -> None:
-        name = name.lower().strip()
-        if name not in WAVETABLES:
-            return
-        self._waveform = name
-        self.engine.set_waveform(name)
-        self._paint_wave_btns()
-        self.last_var.set(f"Waveform → {name.upper()}")
-        self._append_log(f"Waveform → {name}")
 
     def _toggle_full_vel(self) -> None:
         self._full_vel = not self._full_vel
@@ -617,6 +754,7 @@ class MidiToneApp:
         print("MIDI inputs:")
         for i, n in enumerate(names):
             print(f"  [{i}] {n}")
+        print(f"Wavetables ({len(self._voice_names)}): {', '.join(self._voice_names)}")
 
     def _pick_port(self) -> Optional[str]:
         names = mido.get_input_names()
@@ -629,7 +767,6 @@ class MidiToneApp:
             print(f"No input matching '{self.port_filter}'. Available:", flush=True)
             for n in names:
                 print(f"  {n}", flush=True)
-            # Fall back so the UI still opens (MPK may be unplugged)
             print(f"Falling back to: {names[0]}", flush=True)
             return names[0]
         for n in names:
@@ -644,21 +781,36 @@ class MidiToneApp:
                 for msg in self._inport.iter_pending():
                     self._handle_midi(msg)
             except Exception as exc:
-                # Don't kill the MIDI thread silently — surface it in the UI/log
                 tb = __import__("traceback").format_exc()
                 print(tb, flush=True)
-                self.event_q.put(("log", f"MIDI ERROR: {exc}", False))
+                self._q_put(("log", f"MIDI ERROR: {exc}", False))
             time.sleep(0.001)
+
+    def _q_put(self, item: tuple) -> None:
+        """Never block the MIDI thread on a full UI queue — drop oldest junk."""
+        try:
+            self.event_q.put_nowait(item)
+            return
+        except queue.Full:
+            pass
+        try:
+            self.event_q.get_nowait()
+        except queue.Empty:
+            pass
+        try:
+            self.event_q.put_nowait(item)
+        except queue.Full:
+            pass
 
     def _put_continuous_log(self, line: str) -> None:
         """Throttle high-rate messages so the Tk queue can't freeze the UI."""
         now = time.monotonic()
-        if now - getattr(self, "_last_cont_put", 0.0) < 0.05:
+        if now - getattr(self, "_last_cont_put", 0.0) < 0.08:
             self._pending_cont_log = line
             return
         self._last_cont_put = now
         self._pending_cont_log = None
-        self.event_q.put(("log", line, True))
+        self._q_put(("log", line, True))
 
     def _handle_midi(self, msg: mido.Message) -> None:
         continuous = msg.type == "pitchwheel" or (
@@ -667,10 +819,9 @@ class MidiToneApp:
 
         if msg.type == "note_on" and msg.velocity > 0:
             is_drum = msg.channel == DRUM_CHANNEL
-            # Pads always use real velocity; keys honor "Always full velocity"
             vel = msg.velocity if is_drum or not self._full_vel else 127
             self.engine.note_on(msg.channel, msg.note, vel)
-            self.event_q.put(("on", msg.channel, msg.note, vel))
+            self._q_put(("on", msg.channel, msg.note, vel))
             if is_drum:
                 line = (
                     f"Pad      ch{msg.channel + 1}  {midi_note_name(msg.note)} "
@@ -683,11 +834,11 @@ class MidiToneApp:
                 )
             else:
                 line = format_message(msg)
-            self.event_q.put(("log", line, False))
+            self._q_put(("log", line, False))
         elif msg.type == "note_off" or (msg.type == "note_on" and msg.velocity == 0):
             self.engine.note_off(msg.channel, msg.note)
-            self.event_q.put(("off", msg.channel, msg.note))
-            self.event_q.put(("log", format_message(msg), False))
+            self._q_put(("off", msg.channel, msg.note))
+            self._q_put(("log", format_message(msg), False))
         elif msg.type == "polytouch":
             self.engine.set_pad_pressure(msg.channel, msg.note, msg.value)
             if msg.channel == DRUM_CHANNEL:
@@ -707,27 +858,29 @@ class MidiToneApp:
                 self._put_continuous_log(format_message(msg))
         elif msg.type == "pitchwheel":
             self.engine.set_pitch_bend(msg.pitch)
-            self.event_q.put(("mod",))
+            self._q_put(("mod",))
             self._put_continuous_log(format_message(msg))
         elif msg.type == "control_change":
             if msg.control == 1:
                 self.engine.set_mod_wheel(msg.value)
-                self.event_q.put(("mod",))
+                self._q_put(("mod",))
                 self._put_continuous_log(format_message(msg))
             elif msg.control == 123:
                 self.engine.all_notes_off()
-                self.event_q.put(("panic",))
-                self.event_q.put(("log", format_message(msg), False))
+                self._q_put(("panic",))
+                self._q_put(("log", format_message(msg), False))
             else:
-                self.event_q.put(("log", format_message(msg), continuous))
+                self._q_put(("log", format_message(msg), continuous))
         else:
-            self.event_q.put(("log", format_message(msg), False))
+            self._q_put(("log", format_message(msg), False))
 
     def _drain_queue(self) -> None:
-        # Cap work per tick so a flood can't freeze the UI for seconds
+        # Cap work per tick so a flood can't freeze touch for seconds
         processed = 0
+        backlog = self.event_q.qsize()
+        limit = 12 if backlog > 80 else 24
         try:
-            while processed < 40:
+            while processed < limit:
                 item = self.event_q.get_nowait()
                 processed += 1
                 kind = item[0]
@@ -736,7 +889,7 @@ class MidiToneApp:
                     self.last_var.set(line)
                     if continuous:
                         now = time.monotonic()
-                        if now - getattr(self, "_last_cont_log", 0.0) >= 0.08:
+                        if now - getattr(self, "_last_cont_log", 0.0) >= 0.12:
                             self._last_cont_log = now
                             self._append_log(line)
                     else:
@@ -763,8 +916,14 @@ class MidiToneApp:
         if pending is not None:
             self.last_var.set(pending)
             self._pending_cont_log = None
+        # Keep touch bar stacked above log chrome if packing ever races
+        if not self._log_expanded:
+            try:
+                self._touch.lift()
+            except Exception:
+                pass
         if not self._stop.is_set():
-            self.root.after(50, self._drain_queue)
+            self.root.after(40, self._drain_queue)
 
     def _refresh_active(self) -> None:
         if not self._active_notes:
@@ -780,9 +939,15 @@ class MidiToneApp:
         ts = time.strftime("%H:%M:%S")
         self.log.configure(state=tk.NORMAL)
         self.log.insert(tk.END, f"{ts}  {line}\n")
-        end_line = int(float(self.log.index("end-1c").split(".")[0]))
-        if end_line > LOG_MAX:
-            self.log.delete("1.0", f"{end_line - LOG_MAX}.0")
+        # Trim less often — Text ops are expensive on the Pi and starve touch
+        if not hasattr(self, "_log_lines"):
+            self._log_lines = 0
+        self._log_lines += 1
+        if self._log_lines > LOG_MAX + 20:
+            end_line = int(float(self.log.index("end-1c").split(".")[0]))
+            if end_line > LOG_MAX:
+                self.log.delete("1.0", f"{end_line - LOG_MAX}.0")
+            self._log_lines = LOG_MAX
         self.log.see(tk.END)
         self.log.configure(state=tk.DISABLED)
 
@@ -790,6 +955,7 @@ class MidiToneApp:
         self.log.configure(state=tk.NORMAL)
         self.log.delete("1.0", tk.END)
         self.log.configure(state=tk.DISABLED)
+        self._log_lines = 0
 
     def _panic(self) -> None:
         self.engine.all_notes_off()
@@ -815,9 +981,21 @@ def main() -> None:
     import faulthandler
 
     faulthandler.enable()
-    parser = argparse.ArgumentParser(description="MIDI → sine diagnostic with event UI")
+    parser = argparse.ArgumentParser(description="MIDI → wavetable soft-synth with event UI")
     parser.add_argument("--input", "-i", default="", help="MIDI input name substring")
     parser.add_argument("--list", "-l", action="store_true", help="List MIDI inputs")
+    parser.add_argument(
+        "--voices",
+        type=int,
+        default=DEFAULT_MAX_VOICES,
+        help=f"Max polyphony (default {DEFAULT_MAX_VOICES})",
+    )
+    parser.add_argument(
+        "--waves-dir",
+        type=pathlib.Path,
+        default=DEFAULT_WAVETABLE_DIR,
+        help="Directory of single-cycle WAV voices",
+    )
     args = parser.parse_args()
 
     try:
@@ -826,7 +1004,12 @@ def main() -> None:
         pass
 
     print("midi-tone: starting", flush=True)
-    app = MidiToneApp(port_filter=args.input, list_only=args.list)
+    app = MidiToneApp(
+        port_filter=args.input,
+        list_only=args.list,
+        max_voices=args.voices,
+        waves_dir=args.waves_dir,
+    )
     if not args.list:
         print("midi-tone: entering mainloop", flush=True)
         app.run()

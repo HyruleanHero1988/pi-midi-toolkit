@@ -20,6 +20,7 @@ CREDS = HERE / ".pi-credentials"
 
 FILES = [
     "midi_tone.py",
+    "fetch_akwf.py",
     "requirements.txt",
     "run.sh",
     "launch-desktop.sh",
@@ -30,6 +31,11 @@ FILES = [
     "fix-audio-headphones.sh",
     "enable-gpio-touch.sh",
     "calibrate-touch-y.sh",
+]
+
+# Extra tree copied recursively (wavetable single-cycles + license)
+DIRS = [
+    "wavetables",
 ]
 
 
@@ -99,13 +105,27 @@ def deploy(restart: bool) -> None:
                 remote = f"{remote_dir}/{name}"
                 print(f"put {name} -> {remote}")
                 sftp.put(str(local), remote)
+
+            for dirname in DIRS:
+                local_dir = HERE / dirname
+                if not local_dir.is_dir():
+                    print(f"skip missing dir {dirname}")
+                    continue
+                remote_subdir = f"{remote_dir}/{dirname}"
+                run(client, f"mkdir -p {remote_subdir}")
+                for path in sorted(local_dir.iterdir()):
+                    if not path.is_file():
+                        continue
+                    remote_path = f"{remote_subdir}/{path.name}"
+                    print(f"put {dirname}/{path.name} -> {remote_path}")
+                    sftp.put(str(path), remote_path)
         finally:
             sftp.close()
 
         run(
             client,
             f"sed -i 's/\\r$//' {remote_dir}/*.sh {remote_dir}/*.desktop 2>/dev/null; "
-            f"chmod +x {remote_dir}/*.sh",
+            f"chmod +x {remote_dir}/*.sh {remote_dir}/fetch_akwf.py 2>/dev/null || true",
         )
         # Refresh menu/desktop launchers so they keep using the venv via run.sh
         run(client, f"bash {remote_dir}/install-desktop-shortcut.sh", check=False)
