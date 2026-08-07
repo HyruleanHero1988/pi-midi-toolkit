@@ -639,6 +639,200 @@ class SineEngine:
                     self._voices.pop(k, None)
 
 
+@dataclass
+class LoopEvent:
+    t: float  # seconds from record start
+    on: bool
+    channel: int
+    note: int
+    velocity: int
+
+
+class MidiLooper:
+    """Simple free-timing MIDI note looper (record → play on repeat)."""
+
+    def __init__(
+        self,
+        engine: "SineEngine",
+        emit,  # callable matching event_q tuples: ("on",...) / ("off",...)
+    ) -> None:
+        self._engine = engine
+        self._emit = emit
+        self._lock = threading.Lock()
+        self._events: List[LoopEvent] = []
+        self._recording = False
+        self._playing = False
+        self._rec_t0 = 0.0
+        self._loop_len = 0.0
+        self._stop_play = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+        self._held: set[Tuple[int, int]] = set()
+
+    def is_recording(self) -> bool:
+        with self._lock:
+            return self._recording
+
+    def is_playing(self) -> bool:
+        with self._lock:
+            return self._playing
+
+    def event_count(self) -> int:
+        with self._lock:
+            return len(self._events)
+
+    def loop_length(self) -> float:
+        with self._lock:
+            return self._loop_len
+
+    def status(self) -> Dict[str, object]:
+        with self._lock:
+            return {
+                "recording": self._recording,
+                "playing": self._playing,
+                "events": len(self._events),
+                "length": self._loop_len,
+            }
+
+    def start_record(self) -> None:
+        self.stop_playback()
+        with self._lock:
+            self._events = []
+            self._recording = True
+            self._rec_t0 = time.monotonic()
+            self._loop_len = 0.0
+
+    def stop_record(self) -> None:
+        with self._lock:
+            if not self._recording:
+                return
+            self._recording = False
+            elapsed = time.monotonic() - self._rec_t0
+            if self._events:
+                last = max(e.t for e in self._events)
+                self._loop_len = max(elapsed, last + 0.05)
+            else:
+                self._loop_len = 0.0
+
+    def toggle_record(self) -> bool:
+        if self.is_recording():
+            self.stop_record()
+            return False
+        self.start_record()
+        return True
+
+    def record_note(self, on: bool, channel: int, note: int, velocity: int) -> None:
+        with self._lock:
+            if not self._recording:
+                return
+            t = time.monotonic() - self._rec_t0
+            self._events.append(
+                LoopEvent(
+                    t=t,
+                    on=on,
+                    channel=channel & 0x0F,
+                    note=note & 0x7F,
+                    velocity=max(1, min(127, int(velocity))) if on else 0,
+                )
+            )
+
+    def clear(self) -> None:
+        self.stop_playback()
+        with self._lock:
+            self._events = []
+            self._loop_len = 0.0
+            self._recording = False
+
+    def start_playback(self) -> bool:
+        if self.is_recording():
+            self.stop_record()
+        with self._lock:
+            if not self._events or self._loop_len <= 0.0:
+                return False
+            if self._playing:
+                return True
+            self._playing = True
+            self._stop_play.clear()
+        self._thread = threading.Thread(target=self._play_loop, daemon=True)
+        self._thread.start()
+        return True
+
+    def stop_playback(self) -> None:
+        self._stop_play.set()
+        thread = self._thread
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=1.5)
+        self._thread = None
+        with self._lock:
+            self._playing = False
+        self._release_held()
+
+    def toggle_playback(self) -> bool:
+        if self.is_playing():
+            self.stop_playback()
+            return False
+        return self.start_playback()
+
+    def _release_held(self) -> None:
+        held = list(self._held)
+        self._held.clear()
+        for ch, note in held:
+            try:
+                self._engine.note_off(ch, note)
+            except Exception:
+                pass
+            try:
+                self._emit(("off", ch, note))
+            except Exception:
+                pass
+
+    def _play_loop(self) -> None:
+        while not self._stop_play.is_set():
+            with self._lock:
+                events = list(self._events)
+                loop_len = self._loop_len
+            if not events or loop_len <= 0.0:
+                break
+            cycle_t0 = time.monotonic()
+            self._release_held()
+            for ev in events:
+                if self._stop_play.is_set():
+                    self._release_held()
+                    with self._lock:
+                        self._playing = False
+                    return
+                target = cycle_t0 + ev.t
+                while True:
+                    remain = target - time.monotonic()
+                    if remain <= 0:
+                        break
+                    if self._stop_play.wait(min(0.003, remain)):
+                        self._release_held()
+                        with self._lock:
+                            self._playing = False
+                        return
+                if ev.on:
+                    self._engine.note_on(ev.channel, ev.note, ev.velocity)
+                    self._held.add((ev.channel, ev.note))
+                    self._emit(("on", ev.channel, ev.note, ev.velocity))
+                else:
+                    self._engine.note_off(ev.channel, ev.note)
+                    self._held.discard((ev.channel, ev.note))
+                    self._emit(("off", ev.channel, ev.note))
+            end = cycle_t0 + loop_len
+            while True:
+                remain = end - time.monotonic()
+                if remain <= 0:
+                    break
+                if self._stop_play.wait(min(0.003, remain)):
+                    self._release_held()
+                    with self._lock:
+                        self._playing = False
+                    return
+            self._release_held()
+        with self._lock:
+            self._playing = False
+
+
 def format_message(msg: mido.Message) -> str:
     if msg.type == "note_on":
         if msg.velocity == 0:
@@ -724,9 +918,39 @@ class MidiToneApp:
         self._morph_side_btns: Dict[str, tk.Button] = {}
         self._morph_grid_btns: Dict[str, tk.Button] = {}
         self._morph_status_lbl: Optional[tk.Label] = None
+        self._mode = "synth"  # synth | looper
+        self._mode_btns: Dict[str, tk.Button] = {}
+        self._looper = MidiLooper(self.engine, self._q_put)
+        self._loop_status_var = tk.StringVar(value="Loop empty — tap RECORD, play notes, STOP, then PLAY.")
+        self._loop_rec_btn: Optional[tk.Button] = None
+        self._loop_play_btn: Optional[tk.Button] = None
+
+        # Persistent mode navigation (always visible)
+        self._nav = tk.Frame(self.root, bg="#1d2021")
+        self._nav.pack(side=tk.TOP, fill=tk.X, padx=0, pady=0)
+        tk.Label(
+            self._nav, text="midi-tone", font=("DejaVu Sans", 14, "bold"),
+            fg="#fbf1c7", bg="#1d2021", padx=10, pady=8,
+        ).pack(side=tk.LEFT)
+        nav_modes = tk.Frame(self._nav, bg="#1d2021")
+        nav_modes.pack(side=tk.RIGHT, padx=4, pady=4)
+        for key, label in (("synth", "SYNTH"), ("looper", "LOOPER")):
+            btn = self._mk_touch_btn(
+                nav_modes, label, lambda m=key: self._switch_mode(m), bg="#3c3836"
+            )
+            btn.configure(font=("DejaVu Sans", 13, "bold"), pady=8, padx=16)
+            btn.pack(side=tk.LEFT, padx=3)
+            self._mode_btns[key] = btn
+
+        # Mode content host
+        self._mode_host = tk.Frame(self.root, bg="#111111")
+        self._mode_host.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+
+        self._synth_shell = tk.Frame(self._mode_host, bg="#111111")
+        self._looper_shell = tk.Frame(self._mode_host, bg="#111111")
 
         # Bottom touch bar packed first so it never gets crushed / lost
-        self._touch = tk.Frame(self.root, bg="#111111")
+        self._touch = tk.Frame(self._synth_shell, bg="#111111")
         self._touch.pack(side=tk.BOTTOM, fill=tk.X, padx=6, pady=6)
 
         row1 = tk.Frame(self._touch, bg="#111111")
@@ -776,13 +1000,13 @@ class MidiToneApp:
         )
         self._full_vel_btn.pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=8)
 
-        self._main = tk.Frame(self.root, bg="#111111")
+        self._main = tk.Frame(self._synth_shell, bg="#111111")
         self._main.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
 
         header = tk.Frame(self._main, bg="#111111")
         header.pack(fill=tk.X, padx=8, pady=(8, 2))
         tk.Label(
-            header, text="midi-tone", font=("DejaVu Sans", 18, "bold"),
+            header, text="Synth", font=("DejaVu Sans", 18, "bold"),
             fg="#fbf1c7", bg="#111111",
         ).pack(side=tk.LEFT)
         tk.Label(
@@ -846,13 +1070,17 @@ class MidiToneApp:
         # Default morph pair: first voice ↔ second (or same if only one)
         if len(self._voice_names) > 1:
             self.engine.set_morph_pair(0, 1, morph=0.0)
+
+        self._build_looper_mode()
+        self._switch_mode("synth")
+
         self._append_log(f"Listening on: {port_name}")
         self._append_log(f"Loaded {len(self._voice_names)} voices — VOICES grid / MORPH pair.")
         self._append_log(
             "MPK knobs (CC70–77): morph / tone / attack / release / "
             "vib depth / vib rate / — / level"
         )
-        self._append_log("MORPH menu: pick A + B, then Knob 1 blends A→B.")
+        self._append_log("Modes: SYNTH / LOOPER (top right). MORPH: pick A+B, Knob1 blends.")
         self._append_log("If knobs do nothing: Prog Select + Pad 1 (MPC program).")
         print("ui: construction complete", flush=True)
 
@@ -880,6 +1108,174 @@ class MidiToneApp:
 
     def _overlay_busy(self) -> bool:
         return self._grid_open or self._morph_ui_open or self._log_expanded
+
+    def _build_looper_mode(self) -> None:
+        shell = self._looper_shell
+        for w in shell.winfo_children():
+            w.destroy()
+
+        header = tk.Frame(shell, bg="#111111")
+        header.pack(fill=tk.X, padx=8, pady=(10, 4))
+        tk.Label(
+            header, text="Looper", font=("DejaVu Sans", 18, "bold"),
+            fg="#fbf1c7", bg="#111111",
+        ).pack(side=tk.LEFT)
+        tk.Label(
+            header, text="MIDI notes only · free timing",
+            font=("DejaVu Sans", 11), fg="#a89984", bg="#111111",
+        ).pack(side=tk.RIGHT)
+
+        status = tk.Label(
+            shell, textvariable=self._loop_status_var,
+            font=("DejaVu Sans", 14, "bold"),
+            fg="#fabd2f", bg="#111111",
+            wraplength=760, justify=tk.LEFT, anchor="w",
+        )
+        status.pack(fill=tk.X, padx=10, pady=(8, 12))
+
+        # Giant transport buttons
+        row1 = tk.Frame(shell, bg="#111111")
+        row1.pack(fill=tk.BOTH, expand=True, padx=8, pady=4)
+        self._loop_rec_btn = self._mk_touch_btn(
+            row1, "RECORD", self._loop_toggle_record, bg="#9d0006"
+        )
+        self._loop_rec_btn.configure(font=("DejaVu Sans", 20, "bold"), pady=28)
+        self._loop_rec_btn.pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=4)
+
+        self._loop_play_btn = self._mk_touch_btn(
+            row1, "PLAY", self._loop_toggle_play, bg="#689d6a"
+        )
+        self._loop_play_btn.configure(font=("DejaVu Sans", 20, "bold"), pady=28)
+        self._loop_play_btn.pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=4)
+
+        row2 = tk.Frame(shell, bg="#111111")
+        row2.pack(fill=tk.X, padx=8, pady=(4, 10))
+        self._mk_touch_btn(row2, "STOP", self._loop_stop, bg="#504945").pack(
+            side=tk.LEFT, expand=True, fill=tk.BOTH, padx=4, ipady=18
+        )
+        self._mk_touch_btn(row2, "CLEAR", self._loop_clear, bg="#3c3836").pack(
+            side=tk.LEFT, expand=True, fill=tk.BOTH, padx=4, ipady=18
+        )
+        self._mk_touch_btn(row2, "ALL NOTES OFF", self._panic, bg="#9d0006").pack(
+            side=tk.LEFT, expand=True, fill=tk.BOTH, padx=4, ipady=18
+        )
+
+        tip = tk.Label(
+            shell,
+            text="1) RECORD  2) play notes on the MPK  3) RECORD again to stop  4) PLAY loops it",
+            font=("DejaVu Sans", 11), fg="#83a598", bg="#111111",
+            wraplength=760, justify=tk.LEFT, anchor="w",
+        )
+        tip.pack(fill=tk.X, padx=10, pady=(0, 10))
+        self._paint_looper_buttons()
+
+    def _switch_mode(self, mode: str) -> None:
+        mode = mode if mode in ("synth", "looper") else "synth"
+        # Close synth-only overlays before swapping shells
+        if self._grid_open:
+            self._close_voice_grid(restore_main=False)
+        if self._morph_ui_open:
+            self._close_morph_menu(restore_main=False)
+        if self._log_expanded:
+            self._toggle_log_fullscreen()
+
+        self._mode = mode
+        self._synth_shell.pack_forget()
+        self._looper_shell.pack_forget()
+        if self._grid_frame is not None:
+            self._grid_frame.pack_forget()
+        if self._morph_frame is not None:
+            self._morph_frame.pack_forget()
+
+        if mode == "looper":
+            self._looper_shell.pack(fill=tk.BOTH, expand=True)
+            self._refresh_loop_status()
+        else:
+            self._synth_shell.pack(fill=tk.BOTH, expand=True)
+            # Ensure synth children are packed (overlays may have forgotten them)
+            try:
+                self._main.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+            except Exception:
+                pass
+            try:
+                self._touch.pack(side=tk.BOTTOM, fill=tk.X, padx=6, pady=6)
+            except Exception:
+                pass
+        self._paint_mode_btns()
+
+    def _paint_mode_btns(self) -> None:
+        for key, btn in self._mode_btns.items():
+            on = key == self._mode
+            color = "#458588" if on else "#3c3836"
+            btn.configure(bg=color, activebackground=color)
+
+    def _refresh_loop_status(self) -> None:
+        st = self._looper.status()
+        n = int(st["events"])
+        length = float(st["length"])
+        if st["recording"]:
+            msg = f"● RECORDING…  {n} events  (tap RECORD to stop)"
+        elif st["playing"]:
+            msg = f"▶ PLAYING loop  {length:.2f}s · {n} events  (tap PLAY to stop)"
+        elif n == 0:
+            msg = "Loop empty — tap RECORD, play notes, RECORD again, then PLAY."
+        else:
+            msg = f"Ready  {length:.2f}s · {n} events — tap PLAY to loop."
+        self._loop_status_var.set(msg)
+        self._paint_looper_buttons()
+
+    def _paint_looper_buttons(self) -> None:
+        if self._loop_rec_btn is not None:
+            if self._looper.is_recording():
+                self._loop_rec_btn.configure(
+                    text="● STOP REC", bg="#cc241d", activebackground="#cc241d"
+                )
+            else:
+                self._loop_rec_btn.configure(
+                    text="RECORD", bg="#9d0006", activebackground="#9d0006"
+                )
+        if self._loop_play_btn is not None:
+            if self._looper.is_playing():
+                self._loop_play_btn.configure(
+                    text="■ STOP", bg="#d79921", activebackground="#d79921"
+                )
+            else:
+                self._loop_play_btn.configure(
+                    text="PLAY", bg="#689d6a", activebackground="#689d6a"
+                )
+
+    def _loop_toggle_record(self) -> None:
+        recording = self._looper.toggle_record()
+        self._q_put(("log", "Loop RECORD start" if recording else "Loop RECORD stop", False))
+        self._q_put(("loop",))
+        self._refresh_loop_status()
+
+    def _loop_toggle_play(self) -> None:
+        if self._looper.is_playing():
+            self._looper.stop_playback()
+            self._q_put(("log", "Loop PLAY stop", False))
+        else:
+            if not self._looper.start_playback():
+                self._q_put(("log", "Loop empty — record something first", False))
+            else:
+                self._q_put(("log", "Loop PLAY start", False))
+        self._q_put(("loop",))
+        self._refresh_loop_status()
+
+    def _loop_stop(self) -> None:
+        if self._looper.is_recording():
+            self._looper.stop_record()
+        if self._looper.is_playing():
+            self._looper.stop_playback()
+        self._q_put(("log", "Loop STOP", False))
+        self._q_put(("loop",))
+        self._refresh_loop_status()
+
+    def _loop_clear(self) -> None:
+        self._looper.clear()
+        self._q_put(("log", "Loop CLEAR", False))
+        self._q_put(("loop",))
+        self._refresh_loop_status()
 
     def _mk_touch_btn(self, parent: tk.Misc, text: str, command, bg: str = "#3c3836") -> tk.Button:
         """Touch-friendly button: fire on press (resistive panels often miss click)."""
@@ -940,16 +1336,17 @@ class MidiToneApp:
     def _open_voice_grid(self) -> None:
         if self._grid_open:
             return
+        if self._mode != "synth":
+            self._switch_mode("synth")
         if self._morph_ui_open:
             self._close_morph_menu(restore_main=False)
         if self._log_expanded:
             # Leave log fullscreen first so packing stays sane
             self._toggle_log_fullscreen()
         self._grid_open = True
-        self._main.pack_forget()
-        self._touch.pack_forget()
+        self._synth_shell.pack_forget()
 
-        self._grid_frame = tk.Frame(self.root, bg="#111111")
+        self._grid_frame = tk.Frame(self._mode_host, bg="#111111")
         self._grid_frame.pack(fill=tk.BOTH, expand=True)
 
         header = tk.Frame(self._grid_frame, bg="#111111")
@@ -1035,7 +1432,7 @@ class MidiToneApp:
             color = "#458588" if on else "#3c3836"
             btn.configure(bg=color, activebackground=color)
 
-    def _close_voice_grid(self) -> None:
+    def _close_voice_grid(self, restore_main: bool = True) -> None:
         if not self._grid_open:
             return
         if self._grid_frame is not None:
@@ -1043,28 +1440,30 @@ class MidiToneApp:
             self._grid_frame = None
         self._grid_btns = {}
         self._grid_open = False
-        self._main.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
-        self._touch.pack(side=tk.BOTTOM, fill=tk.X, padx=6, pady=6)
-        if self._voice_lbl is not None:
-            self._voice_lbl.configure(text=self._voice_label_text())
-        self.mod_var.set(self._format_mod_line())
+        if restore_main and self._mode == "synth":
+            self._synth_shell.pack(fill=tk.BOTH, expand=True)
+            self._main.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+            self._touch.pack(side=tk.BOTTOM, fill=tk.X, padx=6, pady=6)
+            if self._voice_lbl is not None:
+                self._voice_lbl.configure(text=self._voice_label_text())
+            self.mod_var.set(self._format_mod_line())
 
     def _open_morph_menu(self) -> None:
         """Pick morph endpoints A and B; Knob 1 blends A→B."""
         if self._morph_ui_open:
             return
+        if self._mode != "synth":
+            self._switch_mode("synth")
         if self._grid_open:
-            self._close_voice_grid()
-            # close_voice_grid restores main/touch — hide again below
+            self._close_voice_grid(restore_main=False)
         if self._log_expanded:
             self._toggle_log_fullscreen()
 
         self._morph_ui_open = True
         self._morph_pick_side = "a"
-        self._main.pack_forget()
-        self._touch.pack_forget()
+        self._synth_shell.pack_forget()
 
-        self._morph_frame = tk.Frame(self.root, bg="#111111")
+        self._morph_frame = tk.Frame(self._mode_host, bg="#111111")
         self._morph_frame.pack(fill=tk.BOTH, expand=True)
 
         header = tk.Frame(self._morph_frame, bg="#111111")
@@ -1220,7 +1619,8 @@ class MidiToneApp:
         self._morph_grid_btns = {}
         self._morph_status_lbl = None
         self._morph_ui_open = False
-        if restore_main:
+        if restore_main and self._mode == "synth":
+            self._synth_shell.pack(fill=tk.BOTH, expand=True)
             self._main.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
             self._touch.pack(side=tk.BOTTOM, fill=tk.X, padx=6, pady=6)
             if self._voice_lbl is not None:
@@ -1386,7 +1786,10 @@ class MidiToneApp:
             is_drum = msg.channel == DRUM_CHANNEL
             vel = msg.velocity if is_drum or not self._full_vel else 127
             self.engine.note_on(msg.channel, msg.note, vel)
+            self._looper.record_note(True, msg.channel, msg.note, vel)
             self._q_put(("on", msg.channel, msg.note, vel))
+            if self._looper.is_recording():
+                self._q_put(("loop",))
             if is_drum:
                 line = (
                     f"Pad      ch{msg.channel + 1}  {midi_note_name(msg.note)} "
@@ -1402,7 +1805,10 @@ class MidiToneApp:
             self._q_put(("log", line, False))
         elif msg.type == "note_off" or (msg.type == "note_on" and msg.velocity == 0):
             self.engine.note_off(msg.channel, msg.note)
+            self._looper.record_note(False, msg.channel, msg.note, 0)
             self._q_put(("off", msg.channel, msg.note))
+            if self._looper.is_recording():
+                self._q_put(("loop",))
             self._q_put(("log", format_message(msg), False))
         elif msg.type == "polytouch":
             self.engine.set_pad_pressure(msg.channel, msg.note, msg.value)
@@ -1482,6 +1888,8 @@ class MidiToneApp:
                 elif kind == "panic":
                     self._active_notes.clear()
                     self._refresh_active()
+                elif kind == "loop":
+                    self._refresh_loop_status()
         except queue.Empty:
             pass
         pending = getattr(self, "_pending_cont_log", None)
@@ -1489,7 +1897,7 @@ class MidiToneApp:
             self.last_var.set(pending)
             self._pending_cont_log = None
         # Keep touch bar stacked above log chrome if packing ever races
-        if not self._overlay_busy():
+        if self._mode == "synth" and not self._overlay_busy():
             try:
                 self._touch.lift()
             except Exception:
@@ -1530,13 +1938,21 @@ class MidiToneApp:
         self._log_lines = 0
 
     def _panic(self) -> None:
+        if self._looper.is_playing():
+            self._looper.stop_playback()
         self.engine.all_notes_off()
         self._active_notes.clear()
         self._refresh_active()
+        self._refresh_loop_status()
         self._append_log("All Notes Off")
 
     def _on_close(self) -> None:
         self._stop.set()
+        try:
+            self._looper.stop_playback()
+            self._looper.stop_record()
+        except Exception:
+            pass
         if self._inport is not None:
             try:
                 self._inport.close()
