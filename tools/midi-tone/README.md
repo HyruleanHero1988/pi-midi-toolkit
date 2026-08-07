@@ -35,6 +35,24 @@ Useful flags:
 
 Plug headphones or speakers into the Pi. Play the MPK — you should hear tones and see Note On/Off / CC lines.
 
+### MPK mini knobs (morph + tone)
+
+Factory **Prog Select → Pad 1** (MPC program) maps knobs to CC70–77:
+
+| Knob | CC | Control |
+|------|----|---------|
+| 1 | 70 | **Morph** — blend through the whole wavetable stack |
+| 2 | 71 | Tone / brightness (low-pass) |
+| 3 | 72 | Attack |
+| 4 | 73 | Release |
+| 5 | 74 | Vibrato depth |
+| 6 | 75 | Vibrato rate |
+| 8 | 77 | Level |
+
+Joystick Y still sends **CC1** = vibrato amount. PREV/NEXT jumps morph to a voice; Knob 1 sweeps continuously between them.
+
+If a knob does nothing, check the event log for its CC number — your MPK program may differ.
+
 ### Voices / wavetables
 
 Use **PREV / NEXT** on the touch bar (or tap the voice name). Drop any mono single-cycle `.wav` into `wavetables/` and restart — the stem becomes the voice name.

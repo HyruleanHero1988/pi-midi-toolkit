@@ -54,6 +54,17 @@ NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
 HERE = pathlib.Path(__file__).resolve().parent
 DEFAULT_WAVETABLE_DIR = HERE / "wavetables"
 
+# Akai MPK mini mk3 factory knobs (Prog Select → Pad 1 / MPC program): CC70–77
+CC_MORPH = 70          # Knob 1 — scan / blend through wavetable stack
+CC_TONE = 71           # Knob 2 — brightness (low-pass)
+CC_ATTACK = 72         # Knob 3 — amp attack
+CC_RELEASE = 73        # Knob 4 — amp release
+CC_VIB_DEPTH = 74      # Knob 5 — vibrato depth
+CC_VIB_RATE = 75       # Knob 6 — vibrato rate
+CC_LEVEL = 77          # Knob 8 — output level
+# Knob 7 (CC76) reserved / free for later
+KNOB_CCS = {CC_MORPH, CC_TONE, CC_ATTACK, CC_RELEASE, CC_VIB_DEPTH, CC_VIB_RATE, CC_LEVEL}
+
 
 def _builtin_tables() -> Dict[str, np.ndarray]:
     t = np.linspace(0.0, 1.0, TABLE_SIZE, endpoint=False, dtype=np.float64)
@@ -145,8 +156,10 @@ class Voice:
 class SineEngine:
     """Wavetable synth — light enough for Pi 2."""
 
-    ATTACK_SEC = 0.012
-    RELEASE_SEC = 0.030
+    ATTACK_SEC_MIN = 0.002
+    ATTACK_SEC_MAX = 0.400
+    RELEASE_SEC_MIN = 0.010
+    RELEASE_SEC_MAX = 0.800
 
     def __init__(
         self,
@@ -169,8 +182,16 @@ class SineEngine:
         self._vib_phase = 0.0
         self._tables = tables
         self._voice_names = list(tables.keys())
+        self._table_list = [tables[n] for n in self._voice_names]
         self._waveform = self._voice_names[0]
-        self._table = tables[self._waveform]
+        self._morph = 0.0  # 0..1 across the whole voice stack
+        self._morph_table = self._table_list[0].copy()
+        self._morph_dirty = False
+        self._tone = 1.0  # 0=dark .. 1=bright (open)
+        self._level = 1.0
+        self._attack_sec = 0.012
+        self._release_sec = 0.030
+        self._filter_state = 0.0
         self._scratch = np.zeros(BLOCKSIZE * 2, dtype=np.float32)
         self._phase_buf = np.zeros(BLOCKSIZE * 2, dtype=np.float32)
         self._frac_buf = np.zeros(BLOCKSIZE * 2, dtype=np.float32)
@@ -179,10 +200,44 @@ class SineEngine:
         self._note_serial = 0
         # Drum pad gate: aftertouch may only change volume while the pad note is held.
         self._drum_gate: Dict[int, bool] = {}
+        self._rebuild_morph_table_unlocked()
 
     @property
     def voice_names(self) -> List[str]:
         return list(self._voice_names)
+
+    def _rebuild_morph_table_unlocked(self) -> None:
+        n = len(self._table_list)
+        if n <= 1:
+            self._morph_table[:] = self._table_list[0]
+            self._waveform = self._voice_names[0]
+            self._morph_dirty = False
+            return
+        pos = max(0.0, min(1.0, self._morph)) * (n - 1)
+        i0 = int(pos)
+        i1 = min(i0 + 1, n - 1)
+        frac = float(pos - i0)
+        a = self._table_list[i0]
+        b = self._table_list[i1]
+        # (1-frac)*a + frac*b — one blended oscillator table for the whole block
+        np.multiply(a, np.float32(1.0 - frac), out=self._morph_table)
+        self._morph_table += b * np.float32(frac)
+        # Nearest name for UI / PREV-NEXT sync
+        nearest = int(round(pos))
+        self._waveform = self._voice_names[nearest]
+        self._morph_dirty = False
+
+    def morph_neighbors(self) -> Tuple[str, str, float]:
+        """Return (left_voice, right_voice, blend_frac 0..1)."""
+        with self._lock:
+            n = len(self._voice_names)
+            if n <= 1:
+                name = self._voice_names[0]
+                return name, name, 0.0
+            pos = max(0.0, min(1.0, self._morph)) * (n - 1)
+            i0 = int(pos)
+            i1 = min(i0 + 1, n - 1)
+            return self._voice_names[i0], self._voice_names[i1], float(pos - i0)
 
     def start(self) -> None:
         if self._stream is not None:
@@ -332,6 +387,71 @@ class SineEngine:
         with self._lock:
             self._mod = max(0.0, min(1.0, value / 127.0))
 
+    def set_morph(self, value: float) -> None:
+        """Wavetable morph position 0..1 (or MIDI 0..127 if > 1)."""
+        if value > 1.0:
+            value = value / 127.0
+        with self._lock:
+            self._morph = max(0.0, min(1.0, float(value)))
+            self._morph_dirty = True
+
+    def set_morph_index(self, index: int) -> None:
+        """Jump morph to an exact voice index (PREV/NEXT)."""
+        with self._lock:
+            n = len(self._voice_names)
+            if n <= 1:
+                self._morph = 0.0
+            else:
+                idx = max(0, min(n - 1, int(index)))
+                self._morph = idx / float(n - 1)
+            self._morph_dirty = True
+            self._rebuild_morph_table_unlocked()
+
+    def set_tone(self, value: float) -> None:
+        """Brightness 0..1 (MIDI 0..127 accepted)."""
+        if value > 1.0:
+            value = value / 127.0
+        with self._lock:
+            self._tone = max(0.0, min(1.0, float(value)))
+
+    def set_level(self, value: float) -> None:
+        if value > 1.0:
+            value = value / 127.0
+        with self._lock:
+            self._level = max(0.0, min(1.0, float(value)))
+
+    def set_attack(self, value: float) -> None:
+        if value > 1.0:
+            value = value / 127.0
+        t = max(0.0, min(1.0, float(value)))
+        # Exponential-ish feel: low knob = snappy
+        sec = self.ATTACK_SEC_MIN * ((self.ATTACK_SEC_MAX / self.ATTACK_SEC_MIN) ** t)
+        with self._lock:
+            self._attack_sec = sec
+
+    def set_release(self, value: float) -> None:
+        if value > 1.0:
+            value = value / 127.0
+        t = max(0.0, min(1.0, float(value)))
+        sec = self.RELEASE_SEC_MIN * ((self.RELEASE_SEC_MAX / self.RELEASE_SEC_MIN) ** t)
+        with self._lock:
+            self._release_sec = sec
+
+    def set_vib_depth(self, value: float) -> None:
+        if value > 1.0:
+            value = value / 127.0
+        with self._lock:
+            # 0..2 semitones
+            self._vib_depth_semis = max(0.0, min(1.0, float(value))) * 2.0
+
+    def set_vib_rate(self, value: float) -> None:
+        if value > 1.0:
+            value = value / 127.0
+        t = max(0.0, min(1.0, float(value)))
+        # ~1 Hz .. ~9 Hz
+        with self._lock:
+            self._vib_hz = 1.0 + t * 8.0
+
     def set_pad_pressure(self, channel: int, note: Optional[int], value: int) -> None:
         """Live volume for held drum pads (aftertouch / pressure)."""
         if (channel & 0x0F) != DRUM_CHANNEL:
@@ -370,21 +490,36 @@ class SineEngine:
 
     def set_waveform(self, name: str) -> bool:
         name = name.lower().strip()
-        table = self._tables.get(name)
-        if table is None:
+        if name not in self._tables:
             return False
-        with self._lock:
-            self._waveform = name
-            self._table = table
+        try:
+            idx = self._voice_names.index(name)
+        except ValueError:
+            return False
+        self.set_morph_index(idx)
         return True
 
     def waveform(self) -> str:
         with self._lock:
             return self._waveform
 
-    def modulation_state(self) -> Tuple[float, float]:
+    def morph(self) -> float:
         with self._lock:
-            return self._bend_semitones, self._mod
+            return self._morph
+
+    def modulation_state(self) -> Dict[str, float]:
+        with self._lock:
+            return {
+                "bend": self._bend_semitones,
+                "mod": self._mod,
+                "morph": self._morph,
+                "tone": self._tone,
+                "level": self._level,
+                "attack": self._attack_sec,
+                "release": self._release_sec,
+                "vib_hz": self._vib_hz,
+                "vib_depth": self._vib_depth_semis,
+            }
 
     def _callback(self, outdata, frames, time_info, status) -> None:  # noqa: ANN001
         del time_info, status
@@ -401,21 +536,30 @@ class SineEngine:
         arange = self._arange[:frames]
         ramp = self._ramp[:frames]
         sr = float(self.sample_rate)
-        attack_per_samp = 1.0 / max(1.0, self.ATTACK_SEC * sr)
-        release_per_samp = 1.0 / max(1.0, self.RELEASE_SEC * sr)
 
         with self._lock:
+            if self._morph_dirty:
+                self._rebuild_morph_table_unlocked()
             items = list(self._voices.items())
             bend = self._bend_semitones
             mod = self._mod
-            table = self._table
+            vib_hz = self._vib_hz
+            vib_depth = self._vib_depth_semis
+            table = self._morph_table
+            tone = self._tone
+            level = self._level
+            attack_sec = self._attack_sec
+            release_sec = self._release_sec
+
+        attack_per_samp = 1.0 / max(1.0, attack_sec * sr)
+        release_per_samp = 1.0 / max(1.0, release_sec * sr)
 
         vib_semis = 0.0
-        if mod > 0.01:
-            self._vib_phase += 2.0 * math.pi * self._vib_hz * (frames / sr)
+        if mod > 0.01 and vib_depth > 0.001:
+            self._vib_phase += 2.0 * math.pi * vib_hz * (frames / sr)
             if self._vib_phase > 2.0 * math.pi:
                 self._vib_phase %= 2.0 * math.pi
-            vib_semis = self._vib_depth_semis * mod * math.sin(self._vib_phase)
+            vib_semis = vib_depth * mod * math.sin(self._vib_phase)
 
         dead: List[Tuple[int, int]] = []
         denom = np.float32(max(frames - 1, 1))
@@ -452,6 +596,24 @@ class SineEngine:
             if v.releasing and v.amp < 0.0005:
                 dead.append(key)
 
+        # Cheap bus low-pass for "tone" knob (moving average). tone=1 → open.
+        if tone < 0.999 and frames > 0:
+            win = max(1, int(round((1.0 - tone) * 48.0)))
+            if win > 1:
+                kernel = np.ones(win, dtype=np.float32) / np.float32(win)
+                # Continue from last filter state so block edges don't click
+                pad_left = np.full(win - 1, self._filter_state, dtype=np.float32)
+                padded = np.concatenate([pad_left, buf])
+                filtered = np.convolve(padded, kernel, mode="valid")
+                buf[:] = filtered[:frames]
+                self._filter_state = float(buf[-1])
+            else:
+                self._filter_state = float(buf[-1])
+        elif frames > 0:
+            self._filter_state = float(buf[-1])
+
+        if level < 0.999:
+            buf *= np.float32(level)
         np.clip(buf, -0.95, 0.95, out=buf)
         outdata[:, 0] = buf
         if dead:
@@ -611,10 +773,10 @@ class MidiToneApp:
         )
         active_lbl.pack(fill=tk.X, padx=8)
 
-        self.mod_var = tk.StringVar(value="Bend: 0.00 st   CC1 (vib): 0")
+        self.mod_var = tk.StringVar(value=self._format_mod_line())
         mod_lbl = tk.Label(
             self._main, textvariable=self.mod_var,
-            font=("DejaVu Sans Mono", 12), fg="#d3869b", bg="#111111", anchor="w",
+            font=("DejaVu Sans Mono", 11), fg="#d3869b", bg="#111111", anchor="w",
         )
         mod_lbl.pack(fill=tk.X, padx=8, pady=(2, 0))
 
@@ -650,14 +812,39 @@ class MidiToneApp:
         self.engine.set_waveform(self._voice_names[self._voice_index])
         self.root.after(40, self._drain_queue)
         self._append_log(f"Listening on: {port_name}")
-        self._append_log(f"Loaded {len(self._voice_names)} voices (PREV/NEXT).")
-        self._append_log("Ch10 pads: velocity + aftertouch → volume.")
-        self._append_log("Use EXPAND LOG — double-tap disabled (touch bounce).")
+        self._append_log(f"Loaded {len(self._voice_names)} voices (PREV/NEXT or Knob1 morph).")
+        self._append_log(
+            "MPK knobs (CC70–77): morph / tone / attack / release / "
+            "vib depth / vib rate / — / level"
+        )
+        self._append_log("Joystick Y = vibrato amount (CC1). Ch10 pads = pressure volume.")
+        self._append_log("If knobs do nothing: Prog Select + Pad 1 (MPC program).")
         print("ui: construction complete", flush=True)
 
     def _voice_label_text(self) -> str:
-        name = self._voice_names[self._voice_index]
-        return f"{self._voice_index + 1}/{len(self._voice_names)}  {name.upper()}"
+        left, right, blend = self.engine.morph_neighbors()
+        if left == right or blend < 0.02:
+            name = left
+            return f"{self._voice_index + 1}/{len(self._voice_names)}  {name.upper()}"
+        if blend > 0.98:
+            return f"{self._voice_index + 1}/{len(self._voice_names)}  {right.upper()}"
+        pct = int(round(blend * 100))
+        return f"{left.upper()} → {right.upper()}  {pct}%"
+
+    def _format_mod_line(self) -> str:
+        st = self.engine.modulation_state()
+        left, right, blend = self.engine.morph_neighbors()
+        if left == right:
+            morph_txt = left
+        else:
+            morph_txt = f"{left}→{right}"
+        return (
+            f"Morph:{int(st['morph'] * 100):3d}% ({morph_txt})  "
+            f"Tone:{int(st['tone'] * 127):3d}  "
+            f"Lvl:{int(st['level'] * 127):3d}  "
+            f"Bend:{st['bend']:+.2f}  "
+            f"Vib:{int(st['mod'] * 127)}"
+        )
 
     def _mk_touch_btn(self, parent: tk.Misc, text: str, command, bg: str = "#3c3836") -> tk.Button:
         """Touch-friendly button: fire on press (resistive panels often miss click)."""
@@ -689,11 +876,23 @@ class MidiToneApp:
             return
         self._voice_index = idx % len(self._voice_names)
         name = self._voice_names[self._voice_index]
-        self.engine.set_waveform(name)
+        self.engine.set_morph_index(self._voice_index)
         if self._voice_lbl is not None:
             self._voice_lbl.configure(text=self._voice_label_text())
+        self.mod_var.set(self._format_mod_line())
         self.last_var.set(f"Voice → {name.upper()}")
         self._q_put(("log", f"Voice → {name}", False))
+
+    def _sync_voice_index_from_morph(self) -> None:
+        """Keep PREV/NEXT index aligned when Knob1 morph moves."""
+        n = len(self._voice_names)
+        if n <= 1:
+            self._voice_index = 0
+            return
+        pos = self.engine.morph() * (n - 1)
+        self._voice_index = int(round(pos))
+        if self._voice_lbl is not None:
+            self._voice_lbl.configure(text=self._voice_label_text())
 
     def _prev_voice(self) -> None:
         self._select_voice_index(self._voice_index - 1)
@@ -812,9 +1011,42 @@ class MidiToneApp:
         self._pending_cont_log = None
         self._q_put(("log", line, True))
 
+    def _handle_knob_cc(self, control: int, value: int) -> Optional[str]:
+        """Map MPK factory knobs. Returns a short UI label or None if unmapped."""
+        if control == CC_MORPH:
+            self.engine.set_morph(value)
+            left, right, blend = self.engine.morph_neighbors()
+            if left == right:
+                return f"Morph  {value}  ({left})"
+            return f"Morph  {value}  ({left}→{right} {int(blend * 100)}%)"
+        if control == CC_TONE:
+            self.engine.set_tone(value)
+            return f"Tone   {value}"
+        if control == CC_ATTACK:
+            self.engine.set_attack(value)
+            st = self.engine.modulation_state()
+            return f"Attack {value}  ({st['attack'] * 1000:.0f} ms)"
+        if control == CC_RELEASE:
+            self.engine.set_release(value)
+            st = self.engine.modulation_state()
+            return f"Release {value}  ({st['release'] * 1000:.0f} ms)"
+        if control == CC_VIB_DEPTH:
+            self.engine.set_vib_depth(value)
+            st = self.engine.modulation_state()
+            return f"VibDepth {value}  ({st['vib_depth']:.2f} st)"
+        if control == CC_VIB_RATE:
+            self.engine.set_vib_rate(value)
+            st = self.engine.modulation_state()
+            return f"VibRate {value}  ({st['vib_hz']:.1f} Hz)"
+        if control == CC_LEVEL:
+            self.engine.set_level(value)
+            return f"Level  {value}"
+        return None
+
     def _handle_midi(self, msg: mido.Message) -> None:
         continuous = msg.type == "pitchwheel" or (
-            msg.type == "control_change" and msg.control == 1
+            msg.type == "control_change"
+            and (msg.control == 1 or msg.control in KNOB_CCS)
         )
 
         if msg.type == "note_on" and msg.velocity > 0:
@@ -865,6 +1097,13 @@ class MidiToneApp:
                 self.engine.set_mod_wheel(msg.value)
                 self._q_put(("mod",))
                 self._put_continuous_log(format_message(msg))
+            elif msg.control in KNOB_CCS:
+                label = self._handle_knob_cc(msg.control, msg.value)
+                self._q_put(("mod",))
+                if msg.control == CC_MORPH:
+                    self._q_put(("morph",))
+                if label:
+                    self._put_continuous_log(label)
             elif msg.control == 123:
                 self.engine.all_notes_off()
                 self._q_put(("panic",))
@@ -903,10 +1142,10 @@ class MidiToneApp:
                     self._active_notes.pop((ch, note), None)
                     self._refresh_active()
                 elif kind == "mod":
-                    bend, mod = self.engine.modulation_state()
-                    self.mod_var.set(
-                        f"Bend: {bend:+.2f} st   CC1 (vib): {int(mod * 127)}"
-                    )
+                    self.mod_var.set(self._format_mod_line())
+                elif kind == "morph":
+                    self._sync_voice_index_from_morph()
+                    self.mod_var.set(self._format_mod_line())
                 elif kind == "panic":
                     self._active_notes.clear()
                     self._refresh_active()
