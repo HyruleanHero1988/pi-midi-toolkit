@@ -4,7 +4,9 @@ Hear and see MIDI from the **Akai MPK mini** on the Pi **without** USB-DIN or a 
 
 - Opens a MIDI input (prefers a port name containing `MPK`)
 - Note-on → wavetable tone through the Pi audio jack / HDMI
-- Tk UI: last event, active notes, scrolling event log, touch voice picker
+- **Modes** (top right): **SYNTH** and **LOOPER** — fully separate UIs
+- Synth: voices, A/B morph, knobs, event log
+- Looper: record a MIDI note sequence, play it on repeat
 - Bundled [Adventure Kid (AKWF)](https://github.com/KristofferKarlAxelEkstrand/AKWF-FREE) single-cycles (**CC0**) plus built-in sine/square/saw/triangle
 
 ## On the Pi (via SSH is fine)
@@ -52,6 +54,23 @@ Factory **Prog Select → Pad 1** (MPC program) maps knobs to CC70–77:
 Joystick Y still sends **CC1** = vibrato amount. PREV/NEXT jumps morph to a voice; Knob 1 sweeps continuously between them.
 
 If a knob does nothing, check the event log for its CC number — your MPK program may differ.
+
+### Modes
+
+Top-right tabs stay visible:
+
+- **SYNTH** — wavetable soft-synth, voice grid, morph pair, event log
+- **LOOPER** — record MIDI notes, then play them back on a loop (free timing; notes only)
+
+### Looper
+
+1. Open **LOOPER**
+2. Tap **RECORD**, play notes on the MPK
+3. Tap **RECORD** again (or **STOP**) to finish
+4. Tap **PLAY** to loop; tap **PLAY**/**STOP** to halt
+5. **CLEAR** wipes the take
+
+Live playing still works while a loop runs. Voice/morph/knob settings from Synth apply to looped notes too.
 
 ### Voices / wavetables
 
