@@ -4,9 +4,10 @@ Hear and see MIDI from the **Akai MPK mini** on the Pi **without** USB-DIN or a 
 
 - Opens a MIDI input (prefers a port name containing `MPK`)
 - Note-on → wavetable tone through the Pi audio jack / HDMI
-- **Modes** (top right): **SYNTH** and **LOOPER** — fully separate UIs
-- Synth: voices, A/B morph, knobs, event log
+- **Modes** (top right): **SYNTH**, **LOOPER**, **LOG** — fully separate UIs
+- Synth: voices, A/B morph, knobs, live status
 - Looper: record a MIDI note sequence, play it on repeat
+- Log: full scrolling MIDI/event history
 - Bundled [Adventure Kid (AKWF)](https://github.com/KristofferKarlAxelEkstrand/AKWF-FREE) single-cycles (**CC0**) plus built-in sine/square/saw/triangle
 
 ## On the Pi (via SSH is fine)
@@ -59,8 +60,9 @@ If a knob does nothing, check the event log for its CC number — your MPK progr
 
 Top-right tabs stay visible:
 
-- **SYNTH** — wavetable soft-synth, voice grid, morph pair, event log
+- **SYNTH** — wavetable soft-synth, voice grid, morph pair
 - **LOOPER** — record MIDI notes, then play them back on a loop (free timing; notes only)
+- **LOG** — full event history (also has CLEAR / panic)
 
 ### Looper
 
@@ -116,5 +118,5 @@ UI button **All Notes Off**, or MIDI CC 123.
 ## Touch tips (Pi panel)
 
 - Buttons fire on **press** (resistive panels often miss a full click).
-- Log fullscreen is an explicit **EXPAND LOG** button (double-tap was removed — bounce was hiding the controls).
+- Event history lives in **LOG** mode (not buried under the synth controls).
 - If taps feel vertically offset: `./calibrate-touch-y.sh`

@@ -908,7 +908,6 @@ class MidiToneApp:
 
         self._full_vel_btn: Optional[tk.Button] = None
         self._voice_lbl: Optional[tk.Label] = None
-        self._log_expanded = False
         self._grid_open = False
         self._grid_frame: Optional[tk.Frame] = None
         self._grid_btns: Dict[str, tk.Button] = {}
@@ -918,7 +917,7 @@ class MidiToneApp:
         self._morph_side_btns: Dict[str, tk.Button] = {}
         self._morph_grid_btns: Dict[str, tk.Button] = {}
         self._morph_status_lbl: Optional[tk.Label] = None
-        self._mode = "synth"  # synth | looper
+        self._mode = "synth"  # synth | looper | log
         self._mode_btns: Dict[str, tk.Button] = {}
         self._looper = MidiLooper(self.engine, self._q_put)
         self._loop_status_var = tk.StringVar(value="Loop empty — tap RECORD, play notes, STOP, then PLAY.")
@@ -934,11 +933,11 @@ class MidiToneApp:
         ).pack(side=tk.LEFT)
         nav_modes = tk.Frame(self._nav, bg="#1d2021")
         nav_modes.pack(side=tk.RIGHT, padx=4, pady=4)
-        for key, label in (("synth", "SYNTH"), ("looper", "LOOPER")):
+        for key, label in (("synth", "SYNTH"), ("looper", "LOOPER"), ("log", "LOG")):
             btn = self._mk_touch_btn(
                 nav_modes, label, lambda m=key: self._switch_mode(m), bg="#3c3836"
             )
-            btn.configure(font=("DejaVu Sans", 13, "bold"), pady=8, padx=16)
+            btn.configure(font=("DejaVu Sans", 13, "bold"), pady=8, padx=14)
             btn.pack(side=tk.LEFT, padx=3)
             self._mode_btns[key] = btn
 
@@ -948,6 +947,7 @@ class MidiToneApp:
 
         self._synth_shell = tk.Frame(self._mode_host, bg="#111111")
         self._looper_shell = tk.Frame(self._mode_host, bg="#111111")
+        self._log_shell = tk.Frame(self._mode_host, bg="#111111")
 
         # Bottom touch bar packed first so it never gets crushed / lost
         self._touch = tk.Frame(self._synth_shell, bg="#111111")
@@ -956,12 +956,6 @@ class MidiToneApp:
         row1 = tk.Frame(self._touch, bg="#111111")
         row1.pack(fill=tk.X, pady=(0, 6))
         self._mk_touch_btn(row1, "ALL NOTES OFF", self._panic, bg="#9d0006").pack(
-            side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3
-        )
-        self._mk_touch_btn(row1, "CLEAR LOG", self._clear_log, bg="#504945").pack(
-            side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3
-        )
-        self._mk_touch_btn(row1, "EXPAND LOG", self._toggle_log_fullscreen, bg="#3c3836").pack(
             side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3
         )
 
@@ -1034,34 +1028,15 @@ class MidiToneApp:
             self._main, textvariable=self.mod_var,
             font=("DejaVu Sans Mono", 11), fg="#d3869b", bg="#111111", anchor="w",
         )
-        mod_lbl.pack(fill=tk.X, padx=8, pady=(2, 0))
+        mod_lbl.pack(fill=tk.X, padx=8, pady=(2, 8))
 
-        self._log_title = tk.Label(
-            self._main, text="Event log", font=("DejaVu Sans", 10),
-            fg="#a89984", bg="#111111", anchor="w",
-        )
-        self._log_title.pack(fill=tk.X, padx=8, pady=(6, 2))
-
-        self._log_frame = tk.Frame(self._main, bg="#111111")
-        self._log_frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 4))
-        self.log = tk.Text(
-            self._log_frame, height=6, font=("DejaVu Sans Mono", 11),
-            bg="#1d2021", fg="#ebdbb2", insertbackground="#ebdbb2",
-            relief=tk.FLAT, state=tk.DISABLED,
-        )
-        scroll = ttk.Scrollbar(self._log_frame, command=self.log.yview)
-        self.log.configure(yscrollcommand=scroll.set)
-        self.log.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        scroll.pack(side=tk.RIGHT, fill=tk.Y)
-
-        self._log_chrome = [
-            (header, dict(fill=tk.X, padx=8, pady=(8, 2))),
-            (last_lbl, dict(fill=tk.X, padx=8, pady=4)),
-            (active_lbl, dict(fill=tk.X, padx=8)),
-            (mod_lbl, dict(fill=tk.X, padx=8, pady=(2, 0))),
-            (self._log_title, dict(fill=tk.X, padx=8, pady=(6, 2))),
-        ]
-        self._exit_log_btn: Optional[tk.Button] = None
+        # Spacer so synth isn't empty under the status lines
+        tk.Label(
+            self._main,
+            text="Use VOICES / MORPH below · open LOG mode for the full event history",
+            font=("DejaVu Sans", 11), fg="#a89984", bg="#111111",
+            anchor="w",
+        ).pack(fill=tk.X, padx=8, pady=(12, 0))
 
         self._active_notes: Dict[Tuple[int, int], int] = {}
         # Select first voice explicitly
@@ -1072,6 +1047,7 @@ class MidiToneApp:
             self.engine.set_morph_pair(0, 1, morph=0.0)
 
         self._build_looper_mode()
+        self._build_log_mode()
         self._switch_mode("synth")
 
         self._append_log(f"Listening on: {port_name}")
@@ -1080,7 +1056,7 @@ class MidiToneApp:
             "MPK knobs (CC70–77): morph / tone / attack / release / "
             "vib depth / vib rate / — / level"
         )
-        self._append_log("Modes: SYNTH / LOOPER (top right). MORPH: pick A+B, Knob1 blends.")
+        self._append_log("Modes: SYNTH / LOOPER / LOG (top right).")
         self._append_log("If knobs do nothing: Prog Select + Pad 1 (MPC program).")
         print("ui: construction complete", flush=True)
 
@@ -1107,7 +1083,51 @@ class MidiToneApp:
         )
 
     def _overlay_busy(self) -> bool:
-        return self._grid_open or self._morph_ui_open or self._log_expanded
+        return self._grid_open or self._morph_ui_open
+
+    def _build_log_mode(self) -> None:
+        shell = self._log_shell
+        for w in shell.winfo_children():
+            w.destroy()
+
+        header = tk.Frame(shell, bg="#111111")
+        header.pack(fill=tk.X, padx=8, pady=(10, 4))
+        tk.Label(
+            header, text="Event log", font=("DejaVu Sans", 18, "bold"),
+            fg="#fbf1c7", bg="#111111",
+        ).pack(side=tk.LEFT)
+        tk.Label(
+            header, text="MIDI + UI actions",
+            font=("DejaVu Sans", 11), fg="#a89984", bg="#111111",
+        ).pack(side=tk.RIGHT)
+
+        self._log_last_lbl = tk.Label(
+            shell, textvariable=self.last_var,
+            font=("DejaVu Sans Mono", 14, "bold"), fg="#fabd2f", bg="#111111",
+            wraplength=760, justify=tk.LEFT, anchor="w",
+        )
+        self._log_last_lbl.pack(fill=tk.X, padx=10, pady=(4, 6))
+
+        body = tk.Frame(shell, bg="#111111")
+        body.pack(fill=tk.BOTH, expand=True, padx=8, pady=2)
+        self.log = tk.Text(
+            body, font=("DejaVu Sans Mono", 13),
+            bg="#1d2021", fg="#ebdbb2", insertbackground="#ebdbb2",
+            relief=tk.FLAT, state=tk.DISABLED,
+        )
+        scroll = ttk.Scrollbar(body, command=self.log.yview)
+        self.log.configure(yscrollcommand=scroll.set)
+        self.log.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scroll.pack(side=tk.RIGHT, fill=tk.Y)
+
+        footer = tk.Frame(shell, bg="#111111")
+        footer.pack(fill=tk.X, padx=8, pady=8)
+        self._mk_touch_btn(footer, "CLEAR LOG", self._clear_log, bg="#504945").pack(
+            side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=16
+        )
+        self._mk_touch_btn(footer, "ALL NOTES OFF", self._panic, bg="#9d0006").pack(
+            side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=16
+        )
 
     def _build_looper_mode(self) -> None:
         shell = self._looper_shell
@@ -1170,18 +1190,17 @@ class MidiToneApp:
         self._paint_looper_buttons()
 
     def _switch_mode(self, mode: str) -> None:
-        mode = mode if mode in ("synth", "looper") else "synth"
+        mode = mode if mode in ("synth", "looper", "log") else "synth"
         # Close synth-only overlays before swapping shells
         if self._grid_open:
             self._close_voice_grid(restore_main=False)
         if self._morph_ui_open:
             self._close_morph_menu(restore_main=False)
-        if self._log_expanded:
-            self._toggle_log_fullscreen()
 
         self._mode = mode
         self._synth_shell.pack_forget()
         self._looper_shell.pack_forget()
+        self._log_shell.pack_forget()
         if self._grid_frame is not None:
             self._grid_frame.pack_forget()
         if self._morph_frame is not None:
@@ -1190,6 +1209,12 @@ class MidiToneApp:
         if mode == "looper":
             self._looper_shell.pack(fill=tk.BOTH, expand=True)
             self._refresh_loop_status()
+        elif mode == "log":
+            self._log_shell.pack(fill=tk.BOTH, expand=True)
+            try:
+                self.log.see(tk.END)
+            except Exception:
+                pass
         else:
             self._synth_shell.pack(fill=tk.BOTH, expand=True)
             # Ensure synth children are packed (overlays may have forgotten them)
@@ -1340,9 +1365,6 @@ class MidiToneApp:
             self._switch_mode("synth")
         if self._morph_ui_open:
             self._close_morph_menu(restore_main=False)
-        if self._log_expanded:
-            # Leave log fullscreen first so packing stays sane
-            self._toggle_log_fullscreen()
         self._grid_open = True
         self._synth_shell.pack_forget()
 
@@ -1456,8 +1478,6 @@ class MidiToneApp:
             self._switch_mode("synth")
         if self._grid_open:
             self._close_voice_grid(restore_main=False)
-        if self._log_expanded:
-            self._toggle_log_fullscreen()
 
         self._morph_ui_open = True
         self._morph_pick_side = "a"
@@ -1632,38 +1652,6 @@ class MidiToneApp:
 
     def _next_voice(self) -> None:
         self._select_voice_index(self._voice_index + 1)
-
-    def _toggle_log_fullscreen(self) -> None:
-        now = time.monotonic()
-        if now - getattr(self, "_last_log_toggle", 0.0) < 0.35:
-            return
-        self._last_log_toggle = now
-
-        if not self._log_expanded:
-            for w, _opts in self._log_chrome:
-                w.pack_forget()
-            self._touch.pack_forget()
-            self._log_frame.pack_configure(padx=4, pady=(4, 0))
-            self.log.configure(font=("DejaVu Sans Mono", 14))
-            self._exit_log_btn = self._mk_touch_btn(
-                self.root, "EXIT FULLSCREEN LOG", self._toggle_log_fullscreen, bg="#9d0006"
-            )
-            self._exit_log_btn.pack(side=tk.BOTTOM, fill=tk.X, padx=6, pady=6, ipady=14)
-            self._log_expanded = True
-            self.last_var.set("Log fullscreen — tap EXIT to leave")
-        else:
-            if self._exit_log_btn is not None:
-                self._exit_log_btn.destroy()
-                self._exit_log_btn = None
-            self._log_frame.pack_forget()
-            for w, opts in self._log_chrome:
-                w.pack(**opts)
-            self._log_frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 4))
-            # Always restore the touch bar last so it stays visible
-            self._touch.pack(side=tk.BOTTOM, fill=tk.X, padx=6, pady=6)
-            self.log.configure(font=("DejaVu Sans Mono", 11))
-            self._log_expanded = False
-            self.log.see(tk.END)
 
     def _toggle_full_vel(self) -> None:
         self._full_vel = not self._full_vel
