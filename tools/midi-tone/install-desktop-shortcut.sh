@@ -20,8 +20,9 @@ if [[ ! -x "$APP_DIR/.venv/bin/python" ]]; then
   exit 1
 fi
 
-# Must use run.sh (venv + audio env). System python3 has no sounddevice/mido.
-EXEC="$APP_DIR/run.sh --input MPK"
+# Prefer launch-desktop.sh so missing MPK doesn't prevent the UI from opening,
+# and so SSH/desktop launches detach cleanly.
+EXEC="$APP_DIR/launch-desktop.sh"
 
 write_desktop() {
   local target="$1"

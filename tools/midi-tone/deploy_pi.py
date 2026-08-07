@@ -22,11 +22,14 @@ FILES = [
     "midi_tone.py",
     "requirements.txt",
     "run.sh",
+    "launch-desktop.sh",
     "setup-venv.sh",
     "install-desktop-shortcut.sh",
     "midi-tone.desktop",
     "README.md",
     "fix-audio-headphones.sh",
+    "enable-gpio-touch.sh",
+    "calibrate-touch-y.sh",
 ]
 
 
@@ -113,7 +116,7 @@ def deploy(restart: bool) -> None:
             start = (
                 f"bash -lc 'export DISPLAY=:0 XDG_RUNTIME_DIR=/run/user/$(id -u); "
                 f"cd {remote_dir}; "
-                f"nohup ./run.sh --input MPK >/tmp/midi-tone.log 2>&1 & echo $!'"
+                f"./launch-desktop.sh'"
             )
             run(client, start)
             time.sleep(1.5)

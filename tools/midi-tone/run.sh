@@ -14,6 +14,8 @@ fi
 # Common Debian/Pi stutter fix: give Pulse/PipeWire more buffering
 export PULSE_LATENCY_MSEC="${PULSE_LATENCY_MSEC:-80}"
 export PIPEWIRE_LATENCY="${PIPEWIRE_LATENCY:-1024/44100}"
+# Prefer X11/Xwayland for Tk (labwc)
+export GDK_BACKEND="${GDK_BACKEND:-x11}"
 
 # Keep analog jack unmuted (HDMI screens often leave PCM at -inf)
 amixer -c 1 set PCM 100% unmute >/dev/null 2>&1 || true

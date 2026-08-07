@@ -398,20 +398,29 @@ class MidiToneApp:
         if port_name is None:
             sys.exit("No MIDI input ports found. Is the MPK plugged in?")
 
+        print(f"midi: opening input '{port_name}'", flush=True)
+
         # Must exist before MIDI thread starts
         self._full_vel = True
 
-        self.engine.start()
-        self._inport = mido.open_input(port_name)
-        self._poll_thread = threading.Thread(target=self._midi_loop, daemon=True)
-        self._poll_thread.start()
-
-
+        # Create the Tk root BEFORE opening PortAudio — on Pi + labwc/Xwayland,
+        # starting audio first then Tk can abort during tk.Tk() with no traceback.
+        print("ui: creating Tk root", flush=True)
         self.root = tk.Tk()
+        print("ui: Tk root ok", flush=True)
         self.root.title("midi-tone")
-        self.root.geometry("800x480")
+        self.root.geometry("800x420")
         self.root.configure(bg="#111111")
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.root.update_idletasks()
+
+        self.engine.start()
+        print("midi: audio engine started", flush=True)
+        self._inport = mido.open_input(port_name)
+        print("midi: input port open", flush=True)
+        self._poll_thread = threading.Thread(target=self._midi_loop, daemon=True)
+        self._poll_thread.start()
+        print("midi: poll thread started", flush=True)
 
         self._waveform = "sine"
         self._wave_btns: Dict[str, tk.Button] = {}
@@ -521,6 +530,7 @@ class MidiToneApp:
         self._append_log("Touch UI: large pads at bottom.")
         self._append_log("Ch10 pads: velocity + aftertouch → volume.")
         self._append_log("Double-tap the log to fill the screen.")
+        print("ui: construction complete", flush=True)
 
     def _touch_btn(self, parent: tk.Misc, text: str, command, bg: str = "#3c3836") -> tk.Button:
         return tk.Button(
@@ -616,10 +626,12 @@ class MidiToneApp:
             for n in names:
                 if self.port_filter in n.lower():
                     return n
-            print(f"No input matching '{self.port_filter}'. Available:")
+            print(f"No input matching '{self.port_filter}'. Available:", flush=True)
             for n in names:
-                print(f"  {n}")
-            sys.exit(1)
+                print(f"  {n}", flush=True)
+            # Fall back so the UI still opens (MPK may be unplugged)
+            print(f"Falling back to: {names[0]}", flush=True)
+            return names[0]
         for n in names:
             if "mpk" in n.lower():
                 return n
@@ -800,6 +812,9 @@ class MidiToneApp:
 
 
 def main() -> None:
+    import faulthandler
+
+    faulthandler.enable()
     parser = argparse.ArgumentParser(description="MIDI → sine diagnostic with event UI")
     parser.add_argument("--input", "-i", default="", help="MIDI input name substring")
     parser.add_argument("--list", "-l", action="store_true", help="List MIDI inputs")
@@ -810,9 +825,12 @@ def main() -> None:
     except Exception:
         pass
 
+    print("midi-tone: starting", flush=True)
     app = MidiToneApp(port_filter=args.input, list_only=args.list)
     if not args.list:
+        print("midi-tone: entering mainloop", flush=True)
         app.run()
+        print("midi-tone: mainloop exited", flush=True)
 
 
 if __name__ == "__main__":
