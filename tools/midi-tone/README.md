@@ -88,13 +88,13 @@ Live playing still works while a loop runs. Voice/morph/knob settings from Synth
 
 Ways to get files into `songs/`:
 
-1. **Bundled demos (offline)** — `demo-songs/` ships in the repo/deploy. On **first launch**, midi-tone copies them into `songs/` (no internet needed). See `demo-songs/LICENSE.txt`.
+1. **Bundled demos (offline)** — `demo-songs/` ships **12 classical Mutopia MIDIs** with the deploy (Bach, Beethoven, Debussy, Joplin, Mozart, Satie, …). On launch, any missing ones are copied into `songs/` (no internet). See `demo-songs/LICENSE.txt`.
 2. **Record your own** — LOOPER → record → **SONGS** → **SAVE LOOP** (writes `take-001.mid`, `take-002.mid`, …)
-3. **Optional online pack** — if the Pi has network:
+3. **Optional online refresh** — if the Pi has network:
    ```bash
    cd ~/midi-tone
    ./venv/bin/python fetch_songs.py --list
-   ./venv/bin/python fetch_songs.py --starter
+   ./venv/bin/python fetch_songs.py --all
    ```
 4. **Copy / scp any `.mid`** into `songs/` — it shows up in the list next time you open SONGS (or restart).
 

@@ -190,7 +190,7 @@ In `midi-tone` today: free-timing note record → loop into the soft-synth. Late
 | Library | All `*.mid` / `*.midi` in `tools/midi-tone/songs/` (gitignored) |
 | Load (UI) | Chunky scrolling list + ▲ UP / ▼ DOWN; tap a row → **PLAY** |
 | Save | Export current **Looper** take → new `take-NNN.mid`; or drop any `.mid` into `songs/` |
-| Demo pack | Bundled `demo-songs/` (Mutopia PD) ships with deploy; seeded once into `songs/` for offline use. Optional `fetch_songs.py --starter` when online. |
+| Demo pack | Bundled `demo-songs/` (~12 Mutopia classical MIDIs) ships with deploy; missing files seeded into `songs/` on launch. Optional `fetch_songs.py --all` when online. |
 | Play | Schedule note/CC events to **local soft-synth** and/or **USB MIDI out → DIN** |
 | Tempo | Touch BPM − / + (and show file’s native tempo); scales playback rate |
 | Transport | Play / Stop / optional song-loop; All Notes Off on stop |

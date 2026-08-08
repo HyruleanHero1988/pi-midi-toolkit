@@ -1,18 +1,24 @@
 Bundled demo MIDI files for midi-tone (offline appliance).
 
 Source: The Mutopia Project — https://www.mutopiaproject.org/
-These are computer-generated MIDI previews of editions based on
-public-domain works. Mutopia lists each piece as Public Domain.
+Computer-generated MIDI previews of editions based on public-domain works
+(except where noted). See each piece page on Mutopia for license details.
 
-| Slot file     | Piece                          | Mutopia path |
-|---------------|--------------------------------|--------------|
-| song-01.mid   | Bach WTC I Prelude 1           | ftp/BachJS/BWV846/wtk1-prelude1/ |
-| song-02.mid   | Beethoven Für Elise            | ftp/BeethovenLv/WoO59/fur_Elise_WoO59/ |
-| song-03.mid   | Beethoven Ode to Joy           | ftp/BeethovenLv/ode/ |
-| song-04.mid   | Greensleeves                   | ftp/Traditional/greensleeves/ |
-| song-05.mid   | Pachelbel Canon in D           | ftp/PachelbelJ/CanonInD/ |
+File                   Title                            License
+---------------------- -------------------------------- -------
+bach-prelude.mid       Bach WTC I Prelude 1             Public Domain
+fur-elise.mid          Beethoven Für Elise              Public Domain
+ode-to-joy.mid         Beethoven Ode to Joy             Public Domain
+greensleeves.mid       Greensleeves                     Public Domain
+maple-leaf.mid         Joplin Maple Leaf Rag            Public Domain
+clair-de-lune.mid      Debussy Clair de Lune            Public Domain
+mozart-facile.mid      Mozart Sonata Facile I           Public Domain
+pachelbel.mid          Pachelbel Canon in D             Public Domain
+bach-air.mid           Bach Air on the G String         Public Domain
+arbeau-belle.mid       Arbeau Belle qui tiens ma Vie    Public Domain
+blue-danube.mid        Strauss Blue Danube (theme)      CC-BY-SA 4.0
+satie-gym1.mid         Satie Gymnopédie 1               Public Domain
 
-On first launch, midi-tone copies these into ./songs/ (gitignored /
-Pi-local) and writes ./songs/.seeded-from-demo so they persist offline
-and are not re-copied over your edits. Optional online refresh:
-  ./venv/bin/python fetch_songs.py --starter
+On launch, midi-tone copies any missing files from this folder into ./songs/
+(never overwrites). Optional online refresh: ./venv/bin/python fetch_songs.py --all
+

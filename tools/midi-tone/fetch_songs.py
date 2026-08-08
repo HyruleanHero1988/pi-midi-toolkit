@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
-"""Fetch a curated Mutopia Project MIDI starter pack into ./songs (Public Domain / CC).
+"""Fetch Mutopia Project MIDI demos into ./songs (Public Domain / CC).
 
-Sources: https://www.mutopiaproject.org/  (LilyPond editions of public-domain works)
-Each piece's page lists its license; this catalog prefers Public Domain entries.
+A classical pack already ships in ./demo-songs/ and is copied into ./songs/
+on launch (no network). Use this script only when online to refresh or
+pull individual aliases.
 
-A small Public Domain pack already ships in ./demo-songs/ and is copied into
-./songs/ on first midi-tone launch (no network). Use this script only when
-online if you want the fuller catalog or to refresh slots.
+Sources: https://www.mutopiaproject.org/
 
-Usage (on the Pi, with network):
+Usage:
   ./venv/bin/python fetch_songs.py --list
-  ./venv/bin/python fetch_songs.py --starter          # fill song-01..08
-  ./venv/bin/python fetch_songs.py fur-elise maple
-  ./venv/bin/python fetch_songs.py --starter --force  # overwrite existing slots
+  ./venv/bin/python fetch_songs.py --all              # full catalog → alias.mid
+  ./venv/bin/python fetch_songs.py fur-elise maple-leaf
+  ./venv/bin/python fetch_songs.py --all --force      # overwrite
 """
 
 from __future__ import annotations
@@ -31,7 +30,6 @@ except ImportError:
 HERE = pathlib.Path(__file__).resolve().parent
 OUT = HERE / "songs"
 BASE = "https://www.mutopiaproject.org"
-SONG_SLOTS = 8
 
 # alias -> (ftp-relative path, title, license note)
 CATALOG: dict[str, tuple[str, str, str]] = {
@@ -97,21 +95,8 @@ CATALOG: dict[str, tuple[str, str, str]] = {
     ),
 }
 
-# Default pack order for --starter → song-01.mid … song-08.mid
-STARTER = (
-    "bach-prelude",
-    "fur-elise",
-    "ode-to-joy",
-    "greensleeves",
-    "maple-leaf",
-    "clair-de-lune",
-    "mozart-facile",
-    "pachelbel",
-)
-
-
-def slot_path(out_dir: pathlib.Path, slot: int) -> pathlib.Path:
-    return out_dir / f"song-{slot + 1:02d}.mid"
+# Bundled offline in demo-songs/ (same set)
+BUNDLED = tuple(CATALOG.keys())
 
 
 def download(url: str) -> bytes:
@@ -131,7 +116,6 @@ def stamp_title(raw: bytes, title: str) -> bytes:
     if not mid.tracks:
         mid.tracks.append(mido.MidiTrack())
     track = mid.tracks[0]
-    # Remove existing names so our title wins
     cleaned = [
         m
         for m in track
@@ -179,14 +163,19 @@ def main() -> None:
     parser.add_argument("aliases", nargs="*", help="Catalog aliases to fetch")
     parser.add_argument("--list", action="store_true", help="List catalog and exit")
     parser.add_argument(
+        "--all",
+        action="store_true",
+        help=f"Download the full {len(BUNDLED)}-song classical pack (alias.mid names)",
+    )
+    parser.add_argument(
         "--starter",
         action="store_true",
-        help=f"Download the {len(STARTER)}-song starter pack into song-01..{len(STARTER):02d}.mid",
+        help="Same as --all (kept for older docs/scripts)",
     )
     parser.add_argument(
         "--force",
         action="store_true",
-        help="Overwrite existing slot files",
+        help="Overwrite existing files",
     )
     parser.add_argument(
         "--out-dir",
@@ -198,43 +187,36 @@ def main() -> None:
     out_dir = args.out_dir
 
     if args.list:
-        print("alias                 license")
-        print("-----                 -------")
+        print("alias                  license                       title")
+        print("-----                  -------                       -----")
         for alias, (_rel, title, lic) in CATALOG.items():
-            mark = " *" if alias in STARTER else "  "
+            mark = " *" if alias in BUNDLED else "  "
             print(f"{alias:20s}{mark} {lic:28s}  {title}")
         print()
-        print("* = included in --starter → song-01.mid …")
+        print(f"* = bundled offline in demo-songs/ ({len(BUNDLED)} files)")
         print(f"Source: {BASE}")
         return
 
-    if not args.starter and not args.aliases:
+    want_all = args.all or args.starter
+    if not want_all and not args.aliases:
         parser.print_help()
-        print("\nTip: ./venv/bin/python fetch_songs.py --starter")
+        print("\nTip: ./venv/bin/python fetch_songs.py --all")
+        print("Offline pack already ships in demo-songs/ (no network needed).")
         return
 
+    aliases = list(BUNDLED) if want_all else []
+    for a in args.aliases:
+        if a not in aliases:
+            aliases.append(a)
+
     ok = 0
-    if args.starter:
-        for i, alias in enumerate(STARTER):
-            if i >= SONG_SLOTS:
-                break
-            if fetch_alias(alias, slot_path(out_dir, i), force=args.force):
-                ok += 1
-    for i, alias in enumerate(args.aliases):
-        # Named fetches after --starter go into remaining slots, else spill by alias name.
-        if args.starter:
-            slot = len(STARTER) + i
-        else:
-            slot = i
-        if slot >= SONG_SLOTS:
-            dest = out_dir / f"{alias}.mid"
-        else:
-            dest = slot_path(out_dir, slot)
+    for alias in aliases:
+        dest = out_dir / f"{alias}.mid"
         if fetch_alias(alias, dest, force=args.force):
             ok += 1
 
     print(f"done — {ok} file(s) written under {out_dir}")
-    print("In midi-tone: open SONGS, tap a filled slot, then PLAY.")
+    print("In midi-tone: open SONGS, scroll, tap a file, then PLAY.")
 
 
 if __name__ == "__main__":

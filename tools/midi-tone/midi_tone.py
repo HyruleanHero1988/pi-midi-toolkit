@@ -83,18 +83,16 @@ def list_song_files(directory: pathlib.Path = SONGS_DIR) -> List[pathlib.Path]:
 
 
 def seed_demo_songs() -> int:
-    """Copy bundled demo-songs into ./songs once (offline-friendly).
+    """Copy any missing bundled demos into ./songs/ (offline-friendly).
 
-    Does not overwrite existing slot files. Writes a marker so a later DELETE
-    stays empty instead of resurrecting demos every boot.
+    Never overwrites existing files — if you DELETE a demo it stays gone.
+    New demos added in a later deploy still appear on the next launch.
     """
     if not DEMO_SONGS_DIR.is_dir():
         return 0
     SONGS_DIR.mkdir(parents=True, exist_ok=True)
-    if SONG_SEED_MARKER.is_file():
-        return 0
     copied = 0
-    for src in sorted(DEMO_SONGS_DIR.glob("song-*.mid")):
+    for src in sorted(DEMO_SONGS_DIR.glob("*.mid")):
         dest = SONGS_DIR / src.name
         if dest.exists():
             continue
@@ -103,14 +101,15 @@ def seed_demo_songs() -> int:
             copied += 1
         except Exception as exc:
             print(f"demo song seed failed ({src.name}): {exc}", flush=True)
-    try:
-        SONG_SEED_MARKER.write_text(
-            "Seeded from demo-songs/ (Mutopia Public Domain pack).\n"
-            "Delete this marker to allow re-seeding empty slots on next start.\n",
-            encoding="utf-8",
-        )
-    except Exception as exc:
-        print(f"demo song marker write failed: {exc}", flush=True)
+    if copied:
+        try:
+            SONG_SEED_MARKER.write_text(
+                "Demo songs copied from demo-songs/ (Mutopia pack).\n"
+                "Missing demos are filled on launch; existing/deleted files are left alone.\n",
+                encoding="utf-8",
+            )
+        except Exception as exc:
+            print(f"demo song marker write failed: {exc}", flush=True)
     return copied
 
 # Akai MPK mini mk3 factory knobs (Prog Select → Pad 1 / MPC program): CC70–77
@@ -1612,7 +1611,9 @@ class MidiToneApp:
         )
         self._append_log("Modes: SYNTH / LOOPER / SONGS / PRESETS / LOG (top right).")
         if seeded:
-            self._append_log(f"Seeded {seeded} demo song(s) into songs/ (stays offline).")
+            self._append_log(
+                f"Added {seeded} demo song(s) from demo-songs/ (offline classical pack)."
+            )
         if restored:
             self._append_log(f"Restored session from {SETTINGS_PATH.name}")
         else:
