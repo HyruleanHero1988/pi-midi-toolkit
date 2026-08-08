@@ -360,7 +360,7 @@ flowchart LR
 - Remap feels like a direct cable under UI abuse
 - Drum pads can roll at set per-pad rates without timing flubs
 - Record a phrase, loop it live, save/load `.mid` songs with tempo, play to soft-synth or USB→DIN
-- Later: launch multiple recorded phrases from a touch grid **and MPK drum pads** (Phase 3c)
+- Phrases / Pads: launch recorded clips from a touch grid **and MPK drum pads** (Phase 3c; implementing)
 - Dev loop is SSH/deploy-based; imaging is exceptional
 - No coupling to play-my-synth
 
