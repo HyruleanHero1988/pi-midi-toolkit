@@ -4184,6 +4184,9 @@ class MidiToneApp:
                 )
             else:
                 line = format_message(msg)
+            # Key press restores morph knobs — refresh status if we left DRUMS focus
+            if not is_drum and was_drum_focus and not self.engine.drum_knob_focus():
+                self._q_put(("mod",))
             self._q_put(("log", line, False))
         elif msg.type == "note_off" or (msg.type == "note_on" and msg.velocity == 0):
             # Phrase-launch pads have no held note — but drum takes while recording do
