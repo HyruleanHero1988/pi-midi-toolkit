@@ -165,21 +165,21 @@ Started as: prove **MPK → Pi** with a tiny soft synth (no DIN required).
 
 This is still **not** MIDI-out thru. It’s the playable local mode of the appliance.
 
-### Phase 0b — Toy drum voices on MPK pads (soft-synth; implementing)
+### Phase 0b — Toy drum voices on MPK pads (soft-synth) — **done on `cursor/midi-tone-drum-voices-1052`**
 
 **Was:** channel-10 pad hits were the same wavetable voices as piano keys.  
-**Now (branch `cursor/midi-tone-drum-voices-1052`):** Synsonics-style / analog drum-machine character — drums as **short synthesized hits**, not sustained pitched oscillators.
+**Now:** Synsonics-style / analog drum-machine character — drums as **short synthesized hits**, not sustained pitched oscillators. Full **16-pad MPK kit** (Bank A 36–43 + Bank B 44–51).
 
 | Piece | Approach |
 |-------|----------|
 | Trigger | MPK pads → MIDI ch10 (already `DRUM_CHANNEL`) |
-| Models | Small set of **procedural** voices: kick (sine + pitch drop), tom (similar, higher), snare (tone + noise), hat/cymbal (filtered noise). Map GM-ish pad notes → model |
+| Models | **16 distinct procedural one-shots**: kick, snare, clap, hats, toms, rim, rimshot, shaker, cowbell, clave, ride, etc. Factory MPC notes 36–51 |
 | vs keys | Keyboard channels keep wavetable morph synth; **only ch10** uses drum engine |
 | Pitch | Per-hit base pitch + **pitch envelope** (how far/fast it drops) — the “tune” knob on a drum machine |
 | Stretch / decay | Envelope times: body decay, noise decay; longer = flabbier / “stretched” hit (not time-stretch DSP) |
 | Noise | Amount + color (LP/HP) for snare/hat; shared or per-model |
 | Level / punch | Velocity → amplitude; optional click/transient gain |
-| UI / knobs | When last event was a pad (or a DRUMS submode): reuse MPK knobs for **pitch, decay/stretch, noise, tone** instead of (or layered under) key-synth morph. Persist in `settings.json` |
+| UI / knobs | Pad-hit (~5s) or **DRUM KNOBS** lock → knobs 1–4 = pitch / drum-tone / stretch / noise; level always. Persist `drum_*` in `settings.json` / presets |
 | Not required | Sample ROMs, full GM drum kit, convolution. Keep Pi 2 cheap (a few envelopes + noise + 1–2 oscillators per voice) |
 
 **Out of path:** Rust thru/remap does not synthesize audio. Phrases/Pads mode (3c) *launches MIDI clips* from pads — orthogonal; drum voices are “what a pad sounds like in Synth mode.”
