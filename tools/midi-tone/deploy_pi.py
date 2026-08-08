@@ -21,6 +21,7 @@ CREDS = HERE / ".pi-credentials"
 FILES = [
     "midi_tone.py",
     "fetch_akwf.py",
+    "fetch_songs.py",
     "requirements.txt",
     "run.sh",
     "launch-desktop.sh",
@@ -39,6 +40,7 @@ FILES = [
 DIRS = [
     "wavetables",
     "kiosk",
+    "demo-songs",  # offline Mutopia demos; seeded into songs/ on first launch
 ]
 
 

@@ -13,6 +13,7 @@ import json
 import math
 import pathlib
 import queue
+import shutil
 import sys
 import threading
 import time
@@ -58,12 +59,46 @@ SETTINGS_PATH = HERE / "settings.json"
 PRESETS_DIR = HERE / "user-presets"
 PRESET_SLOTS = 8
 SONGS_DIR = HERE / "songs"
+DEMO_SONGS_DIR = HERE / "demo-songs"
+SONG_SEED_MARKER = SONGS_DIR / ".seeded-from-demo"
 SONG_SLOTS = 8
 DEFAULT_SONG_BPM = 120
 SONG_OUT_MODES = ("local", "usb", "both")
 # Prefer these substrings when auto-picking USB→DIN output
 SONG_OUT_PREFER = ("u2midi", "uxmidi", "hxmidi", "din", "usb midi", "midi out", "mio", "um-")
 SETTINGS_VERSION = 1
+
+
+def seed_demo_songs() -> int:
+    """Copy bundled demo-songs into ./songs once (offline-friendly).
+
+    Does not overwrite existing slot files. Writes a marker so a later DELETE
+    stays empty instead of resurrecting demos every boot.
+    """
+    if not DEMO_SONGS_DIR.is_dir():
+        return 0
+    SONGS_DIR.mkdir(parents=True, exist_ok=True)
+    if SONG_SEED_MARKER.is_file():
+        return 0
+    copied = 0
+    for src in sorted(DEMO_SONGS_DIR.glob("song-*.mid")):
+        dest = SONGS_DIR / src.name
+        if dest.exists():
+            continue
+        try:
+            shutil.copy2(src, dest)
+            copied += 1
+        except Exception as exc:
+            print(f"demo song seed failed ({src.name}): {exc}", flush=True)
+    try:
+        SONG_SEED_MARKER.write_text(
+            "Seeded from demo-songs/ (Mutopia Public Domain pack).\n"
+            "Delete this marker to allow re-seeding empty slots on next start.\n",
+            encoding="utf-8",
+        )
+    except Exception as exc:
+        print(f"demo song marker write failed: {exc}", flush=True)
+    return copied
 
 # Akai MPK mini mk3 factory knobs (Prog Select → Pad 1 / MPC program): CC70–77
 CC_MORPH = 70          # Knob 1 — scan / blend through wavetable stack
@@ -1531,6 +1566,10 @@ class MidiToneApp:
         if len(self._voice_names) > 1:
             self.engine.set_morph_pair(0, 1, morph=0.0)
 
+        PRESETS_DIR.mkdir(parents=True, exist_ok=True)
+        SONGS_DIR.mkdir(parents=True, exist_ok=True)
+        seeded = seed_demo_songs()
+
         self._build_looper_mode()
         self._build_songs_mode()
         self._build_presets_mode()
@@ -1554,14 +1593,14 @@ class MidiToneApp:
             "vib depth / vib rate / — / level"
         )
         self._append_log("Modes: SYNTH / LOOPER / SONGS / PRESETS / LOG (top right).")
+        if seeded:
+            self._append_log(f"Seeded {seeded} demo song(s) into songs/ (stays offline).")
         if restored:
             self._append_log(f"Restored session from {SETTINGS_PATH.name}")
         else:
             self._append_log("No settings.json yet — changes will autosave.")
         self._append_log("If knobs do nothing: Prog Select + Pad 1 (MPC program).")
         print("ui: construction complete", flush=True)
-        PRESETS_DIR.mkdir(parents=True, exist_ok=True)
-        SONGS_DIR.mkdir(parents=True, exist_ok=True)
         self.root.after(2000, self._autosave_tick)
 
     def _voice_label_text(self) -> str:
@@ -1779,10 +1818,10 @@ class MidiToneApp:
 
         tip = tk.Label(
             shell,
-            text=(
+                text=(
                 "Load = tap a filled slot (highlights purple), then PLAY. "
-                "Or LOOPER → SAVE LOOP → SLOT. "
-                "Demo pack: ./venv/bin/python fetch_songs.py --starter"
+                "Demos ship offline in demo-songs/ (seeded once into songs/). "
+                "Or LOOPER → SAVE LOOP → SLOT."
             ),
             font=("DejaVu Sans", 11),
             fg="#a89984",

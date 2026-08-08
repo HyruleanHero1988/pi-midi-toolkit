@@ -4,6 +4,10 @@
 Sources: https://www.mutopiaproject.org/  (LilyPond editions of public-domain works)
 Each piece's page lists its license; this catalog prefers Public Domain entries.
 
+A small Public Domain pack already ships in ./demo-songs/ and is copied into
+./songs/ on first midi-tone launch (no network). Use this script only when
+online if you want the fuller catalog or to refresh slots.
+
 Usage (on the Pi, with network):
   ./venv/bin/python fetch_songs.py --list
   ./venv/bin/python fetch_songs.py --starter          # fill song-01..08

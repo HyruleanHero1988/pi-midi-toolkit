@@ -1,0 +1,18 @@
+Bundled demo MIDI files for midi-tone (offline appliance).
+
+Source: The Mutopia Project — https://www.mutopiaproject.org/
+These are computer-generated MIDI previews of editions based on
+public-domain works. Mutopia lists each piece as Public Domain.
+
+| Slot file     | Piece                          | Mutopia path |
+|---------------|--------------------------------|--------------|
+| song-01.mid   | Bach WTC I Prelude 1           | ftp/BachJS/BWV846/wtk1-prelude1/ |
+| song-02.mid   | Beethoven Für Elise            | ftp/BeethovenLv/WoO59/fur_Elise_WoO59/ |
+| song-03.mid   | Beethoven Ode to Joy           | ftp/BeethovenLv/ode/ |
+| song-04.mid   | Greensleeves                   | ftp/Traditional/greensleeves/ |
+| song-05.mid   | Pachelbel Canon in D           | ftp/PachelbelJ/CanonInD/ |
+
+On first launch, midi-tone copies these into ./songs/ (gitignored /
+Pi-local) and writes ./songs/.seeded-from-demo so they persist offline
+and are not re-copied over your edits. Optional online refresh:
+  ./venv/bin/python fetch_songs.py --starter

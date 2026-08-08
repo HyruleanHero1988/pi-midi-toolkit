@@ -88,15 +88,17 @@ Live playing still works while a loop runs. Voice/morph/knob settings from Synth
 
 Ways to get files into slots:
 
-1. **Record your own** — LOOPER → record → **SONGS** → select slot → **SAVE LOOP → SLOT**
-2. **Demo pack (Mutopia, mostly Public Domain)** — on the Pi with network:
+1. **Bundled demos (offline)** — `demo-songs/` ships in the repo/deploy. On **first launch**, midi-tone copies them into `songs/` and leaves them there (no internet needed after deploy). See `demo-songs/LICENSE.txt`.
+2. **Record your own** — LOOPER → record → **SONGS** → select slot → **SAVE LOOP → SLOT**
+3. **Optional online refresh** — only if the Pi has network:
    ```bash
    cd ~/midi-tone
    ./venv/bin/python fetch_songs.py --list
    ./venv/bin/python fetch_songs.py --starter
    ```
-   Then restart midi-tone (or switch away from SONGS and back) and tap a slot.
-3. **Copy a `.mid` in by hand** — write/scp to `songs/song-01.mid` … `song-08.mid`, then tap that slot.
+4. **Copy a `.mid` in by hand** — write/scp to `songs/song-01.mid` … `song-08.mid`, then tap that slot.
+
+`songs/` is Pi-local (gitignored). Redeploying code does **not** wipe it; only **DELETE** in the UI removes a slot.
 
 Transport:
 
