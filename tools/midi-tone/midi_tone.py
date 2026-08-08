@@ -615,7 +615,14 @@ class SineEngine:
                 best = key
         return best
 
-    def note_on(self, channel: int, note: int, velocity: int) -> None:
+    def note_on(
+        self,
+        channel: int,
+        note: int,
+        velocity: int,
+        *,
+        steal_knobs: bool = True,
+    ) -> None:
         if velocity <= 0:
             self.note_off(channel, note)
             return
@@ -623,8 +630,11 @@ class SineEngine:
         n = note & 0x7F
         vel = velocity / 127.0
         if ch == DRUM_CHANNEL:
-            self._drum_note_on(n, vel)
+            self._drum_note_on(n, vel, steal_knobs=steal_knobs)
             return
+        # Playing keys hands knobs back to morph/tone (unless DRUM KNOBS locked)
+        if steal_knobs:
+            self.clear_drum_focus()
         key = (ch, n)
         target = vel * 0.12
         with self._lock:
@@ -654,12 +664,16 @@ class SineEngine:
                 age=serial,
             )
 
-    def _drum_note_on(self, note: int, velocity: float) -> None:
+    def _drum_note_on(
+        self, note: int, velocity: float, *, steal_knobs: bool = True
+    ) -> None:
         with self._lock:
             self._note_serial += 1
             serial = self._note_serial
             self._drum_gate[note] = True
-            self._drum_focus_until = time.monotonic() + self.DRUM_FOCUS_SEC
+            # Live pad hits may redirect knobs; phrase/looper/song playback must not
+            if steal_knobs and not self._drum_lock:
+                self._drum_focus_until = time.monotonic() + self.DRUM_FOCUS_SEC
             if len(self._drums) >= self.MAX_DRUM_HITS and note not in self._drums:
                 oldest = min(self._drums.values(), key=lambda h: h.age)
                 self._drums.pop(oldest.note, None)
@@ -829,10 +843,19 @@ class SineEngine:
             self._drum_lock = bool(locked)
             if self._drum_lock:
                 self._drum_focus_until = time.monotonic() + 3600.0
+            else:
+                # Unlock immediately returns knobs to morph/tone
+                self._drum_focus_until = 0.0
 
     def drum_lock(self) -> bool:
         with self._lock:
             return self._drum_lock
+
+    def clear_drum_focus(self) -> None:
+        """Drop temporary drum-knob capture (does not clear DRUM KNOBS lock)."""
+        with self._lock:
+            if not self._drum_lock:
+                self._drum_focus_until = 0.0
 
     def touch_drum_focus(self) -> None:
         with self._lock:
@@ -922,7 +945,7 @@ class SineEngine:
                 "drum_decay": float(self._drum_decay),
                 "drum_noise": float(self._drum_noise),
                 "drum_tone": float(self._drum_tone),
-                "drum_lock": bool(self._drum_lock),
+                # drum_lock is a session UI toggle only — never persist
             }
 
     def apply_settings(self, data: Dict[str, Any]) -> None:
@@ -957,8 +980,9 @@ class SineEngine:
                 self._drum_noise = max(0.0, min(1.0, float(data["drum_noise"])))
             if "drum_tone" in data:
                 self._drum_tone = max(0.0, min(1.0, float(data["drum_tone"])))
-            if "drum_lock" in data:
-                self._drum_lock = bool(data["drum_lock"])
+            # Ignore persisted drum_lock — it was stealing morph across restarts
+            self._drum_lock = False
+            self._drum_focus_until = 0.0
             self._morph_dirty = True
             self._rebuild_morph_table_unlocked()
 
@@ -1294,7 +1318,9 @@ class MidiLooper:
                             self._playing = False
                         return
                 if ev.on:
-                    self._engine.note_on(ev.channel, ev.note, ev.velocity)
+                    self._engine.note_on(
+                        ev.channel, ev.note, ev.velocity, steal_knobs=False
+                    )
                     self._held.add((ev.channel, ev.note))
                     self._emit(("on", ev.channel, ev.note, ev.velocity))
                 else:
@@ -1705,7 +1731,9 @@ class PhrasePadBank:
                 if stop_ev.is_set():
                     break
                 if ev.on:
-                    self._engine.note_on(ev.channel, ev.note, ev.velocity)
+                    self._engine.note_on(
+                        ev.channel, ev.note, ev.velocity, steal_knobs=False
+                    )
                     with self._lock:
                         self._held.setdefault(idx, set()).add((ev.channel, ev.note))
                     self._emit(("on", ev.channel, ev.note, ev.velocity))
@@ -2072,7 +2100,9 @@ class SongPlayer:
                 self._held.discard((msg.channel, msg.note))
                 self._emit(("off", msg.channel, msg.note))
             else:
-                self._engine.note_on(msg.channel, msg.note, msg.velocity)
+                self._engine.note_on(
+                    msg.channel, msg.note, msg.velocity, steal_knobs=False
+                )
                 self._held.add((msg.channel, msg.note))
                 self._emit(("on", msg.channel, msg.note, msg.velocity))
         elif msg.type == "note_off":
@@ -3196,6 +3226,12 @@ class MidiToneApp:
     def _toggle_drum_lock(self) -> None:
         self.engine.set_drum_lock(not self.engine.drum_lock())
         self._paint_drum_lock_btn()
+        self.mod_var.set(self._format_mod_line())
+        self._append_log(
+            "DRUM KNOBS ON — Knob 1–4 edit drums"
+            if self.engine.drum_lock()
+            else "DRUM KNOBS OFF — Knob 1 is morph again"
+        )
         self._mark_settings_dirty()
         self.mod_var.set(self._format_mod_line())
         self._append_log(
@@ -3764,6 +3800,12 @@ class MidiToneApp:
             self._switch_mode("synth")
         if self._grid_open:
             self._close_voice_grid(restore_main=False)
+        # Hand knobs back to morph while editing the pair
+        if self.engine.drum_lock():
+            self.engine.set_drum_lock(False)
+            self._paint_drum_lock_btn()
+        else:
+            self.engine.clear_drum_focus()
 
         self._morph_ui_open = True
         self._morph_pick_side = "a"
@@ -4117,6 +4159,7 @@ class MidiToneApp:
                     )
                     return
             vel = msg.velocity if is_drum or not self._full_vel else 127
+            was_drum_focus = self.engine.drum_knob_focus()
             self.engine.note_on(msg.channel, msg.note, vel)
             self._looper.record_note(True, msg.channel, msg.note, vel)
             if pads_mode or phrase_recording:
