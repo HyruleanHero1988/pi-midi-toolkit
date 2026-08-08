@@ -30,7 +30,7 @@ todos:
     content: "Phase 3b: Songs mode — save/load .mid, tempo, play to soft-synth and/or USB→DIN"
     status: in_progress
   - id: phrase-pads
-    content: "Phase 3c (later): Phrases/Pads — grid of cells each holding a recorded MIDI phrase; tap to launch"
+    content: "Phase 3c (later): Phrases/Pads — grid of recorded MIDI phrases; launch via touch squares and MPK drum pads"
     status: pending
   - id: arp
     content: "Phase 4 (optional distinct mode): key-relative step pattern transposed by held root"
@@ -327,6 +327,7 @@ flowchart LR
 - Remap feels like a direct cable under UI abuse
 - Drum pads can roll at set per-pad rates without timing flubs
 - Record a phrase, loop it live, save/load `.mid` songs with tempo, play to soft-synth or USB→DIN
+- Later: launch multiple recorded phrases from a touch pad grid (Phase 3c)
 - Dev loop is SSH/deploy-based; imaging is exceptional
 - No coupling to play-my-synth
 
