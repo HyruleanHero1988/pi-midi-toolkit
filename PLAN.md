@@ -315,6 +315,28 @@ Optional comfort: **Cursor/VS Code Remote SSH** into the Pi so the editor runs a
 ### When a finished install image *might* show up later
 Only when you want “flash SD → boots straight into the MIDI box” without SSH setup — e.g. cloning the same device for yourself or others. Until then, stock Pi OS + a setup script is enough. “Golden image” just means that frozen, ready-to-clone install; it is **not** part of the daily edit loop.
 
+### Multi-unit / OTA (parked — only one unit today)
+
+Not building this yet. Capture the ladder so we don’t overbuild or forget it when a second box (e.g. brother’s clone) appears.
+
+**Reality check:** daily SSH push (`tools/midi-tone/deploy_pi.py`, `deploy/deploy.sh`) already *is* the update path for a LAN appliance. True “finds the Pi anywhere” OTA is a different product tier. The instrument can stay offline forever; network is only needed **when you choose to update**.
+
+| Approach | When | Notes |
+|----------|------|-------|
+| **SSH push (now)** | 1 unit, home LAN | Keep. Highest leverage. |
+| **Multi-host deploy list** | 2+ units on LAN | Same script, host list / `.pi-credentials` variants. Small change. |
+| **Golden SD image** | Cloning a box for someone else | Flash once → boots kiosk. Best “gift a unit” path. Not the daily loop. |
+| **Pull-on-boot / timer from Releases** | Hands-off updates when online | Tag release → Pi checks version → download tarball → swap app dir → restart kiosk. Preserve user data. |
+| **Fleet OTA (Mender / RAUC / balena)** | Many units / field unattended | Overkill for 1–2 MIDI boxes. Skip until fleet exists. |
+
+**If/when multi-unit lands, remember:**
+- Per-device identity (hostname / `device-id`)
+- Deploy must **never wipe** user content: `settings.json`, `songs/`, `phrases/`, `user-presets/`
+- Optional version stamp in the UI so you know what’s running
+- Updates are opt-in / occasional; offline play stays first-class
+
+**High-leverage slice later (still small):** host list in deploy + a version file + “update from release” script that won’t touch user data. Full fleet OTA waits until there are more than two units.
+
 ## OS / hardware
 
 **Current target: Raspberry Pi 2 Model B v1.1 + touchscreen already on the desk.** MIDI itself is tiny (1980s-era bandwidth); the Pi 2 is enough **if we stay disciplined**. If the board becomes a real ceiling later, move the same software to a Pi 4/5 — architecture should not assume Pi 2 forever, just run well on it now.
