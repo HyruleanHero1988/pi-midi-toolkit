@@ -64,13 +64,13 @@ Top-right tabs stay visible:
 
 - **SYNTH** — wavetable soft-synth, voice grid, morph pair
 - **LOOPER** — record MIDI notes, then play them back on a loop (free timing; notes only)
-- **SONGS** — Standard MIDI File slots: tempo, play local and/or USB→DIN
+- **SONGS** — lists every `.mid` / `.midi` in `songs/`; big ▲ UP / ▼ DOWN to scroll; tempo; LOCAL/USB out
 - **PRESETS** — 8 touch slots: SAVE / LOAD / DELETE current sound + full-velocity
 - **LOG** — full event history (also has CLEAR / panic)
 
 Last session autosaves to `settings.json` (gitignored) every few seconds and on quit.
-Named slots live in `user-presets/slot-01.json` … `slot-08.json`.
-Song files live in `songs/song-01.mid` … `song-08.mid`.
+Named presets live in `user-presets/slot-01.json` … `slot-08.json`.
+Song files live as whatever you put in `songs/` (any `.mid` name).
 
 ### Looper
 
@@ -84,21 +84,21 @@ Live playing still works while a loop runs. Voice/morph/knob settings from Synth
 
 ### Songs
 
-**How to load a song:** open **SONGS** and **tap a filled slot**. That loads `songs/song-XX.mid` (slot turns purple). Then **PLAY**.
+**How to load:** open **SONGS**, use **▲ UP / ▼ DOWN** if needed, **tap a file row** (turns purple), then **PLAY**.
 
-Ways to get files into slots:
+Ways to get files into `songs/`:
 
-1. **Bundled demos (offline)** — `demo-songs/` ships in the repo/deploy. On **first launch**, midi-tone copies them into `songs/` and leaves them there (no internet needed after deploy). See `demo-songs/LICENSE.txt`.
-2. **Record your own** — LOOPER → record → **SONGS** → select slot → **SAVE LOOP → SLOT**
-3. **Optional online refresh** — only if the Pi has network:
+1. **Bundled demos (offline)** — `demo-songs/` ships in the repo/deploy. On **first launch**, midi-tone copies them into `songs/` (no internet needed). See `demo-songs/LICENSE.txt`.
+2. **Record your own** — LOOPER → record → **SONGS** → **SAVE LOOP** (writes `take-001.mid`, `take-002.mid`, …)
+3. **Optional online pack** — if the Pi has network:
    ```bash
    cd ~/midi-tone
    ./venv/bin/python fetch_songs.py --list
    ./venv/bin/python fetch_songs.py --starter
    ```
-4. **Copy a `.mid` in by hand** — write/scp to `songs/song-01.mid` … `song-08.mid`, then tap that slot.
+4. **Copy / scp any `.mid`** into `songs/` — it shows up in the list next time you open SONGS (or restart).
 
-`songs/` is Pi-local (gitignored). Redeploying code does **not** wipe it; only **DELETE** in the UI removes a slot.
+`songs/` is Pi-local (gitignored). Redeploying code does **not** wipe it; **DELETE** removes the selected file.
 
 Transport:
 
