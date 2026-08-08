@@ -165,6 +165,28 @@ Started as: prove **MPK → Pi** with a tiny soft synth (no DIN required).
 
 This is still **not** MIDI-out thru. It’s the playable local mode of the appliance.
 
+### Phase 0b — Toy drum voices on MPK pads (later; soft-synth only)
+
+**Today:** channel-10 pad hits are the same wavetable voices as piano keys (only a bit louder / retrigger-friendly). That’s why pads feel like “notes,” not drums.
+
+**Wanted:** Synsonics-style / analog drum-machine character — drums as **short synthesized hits**, not sustained pitched oscillators. Real gear (Synsonics, TR-style, etc.) is usually pitched decay + noise + envelopes, not samples.
+
+| Piece | Approach |
+|-------|----------|
+| Trigger | MPK pads → MIDI ch10 (already `DRUM_CHANNEL`) |
+| Models | Small set of **procedural** voices: kick (sine + pitch drop), tom (similar, higher), snare (tone + noise), hat/cymbal (filtered noise). Map GM-ish pad notes → model |
+| vs keys | Keyboard channels keep wavetable morph synth; **only ch10** uses drum engine |
+| Pitch | Per-hit base pitch + **pitch envelope** (how far/fast it drops) — the “tune” knob on a drum machine |
+| Stretch / decay | Envelope times: body decay, noise decay; longer = flabbier / “stretched” hit (not time-stretch DSP) |
+| Noise | Amount + color (LP/HP) for snare/hat; shared or per-model |
+| Level / punch | Velocity → amplitude; optional click/transient gain |
+| UI / knobs | When last event was a pad (or a DRUMS submode): reuse MPK knobs for **pitch, decay/stretch, noise, tone** instead of (or layered under) key-synth morph. Persist in `settings.json` |
+| Not required | Sample ROMs, full GM drum kit, convolution. Keep Pi 2 cheap (a few envelopes + noise + 1–2 oscillators per voice) |
+
+**Out of path:** Rust thru/remap does not synthesize audio. Phrases/Pads mode (3c) *launches MIDI clips* from pads — orthogonal; drum voices are “what a pad sounds like in Synth mode.”
+
+**Inspiration note:** Synsonics = analog voice circuits per drum. We approximate that with simple DSP, not by modeling their schematic exactly.
+
 ## Phase 1 — Remap MVP (engine CLI first; Map mode UI next)
 
 Engine side is largely built: JSON presets + SSH/CLI. Prove channel/CC/velocity remap on real MIDI hardware when DIN synth is available.
