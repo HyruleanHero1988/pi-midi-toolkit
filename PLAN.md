@@ -53,7 +53,7 @@ isProject: false
 | **Synth** | Local wavetable soft-synth (what `tools/midi-tone` is becoming) |
 | **Looper** | Record/play free-timing MIDI note loops into that synth |
 | **Songs** | Save/load Standard MIDI Files (`.mid`); tempo; play to soft-synth and/or **USB→DIN** |
-| **Phrases / Pads** *(later)* | Grid of cells; each holds a recorded MIDI phrase; tap a square to launch it |
+| **Phrases / Pads** *(later)* | Grid of recorded MIDI phrases; launch from touch squares **and MPK mini drum pads** |
 | **Presets** | Save/load synth settings (JSON slots); last session autosaved |
 | **Map / Thru** | Channel / CC / velocity remap; ports; learn — drives the Rust engine |
 | **Log** | Event history / commissioning |
@@ -206,15 +206,29 @@ Not a DAW: no piano roll, no multi-track edit. Just “keep songs, set tempo, se
 
 ## Phase 3c — Phrases / Pads (clip-launch grid; later)
 
-**Idea (parked):** a touch grid (e.g. 4×4) where each square holds a short recorded MIDI sequence. Tap a filled square to play that phrase into the soft-synth and/or USB→DIN. Empty square → arm record into that cell. Optional hold-to-stop / clear.
+**Idea (parked):** a touch grid (e.g. 4×4 or 2×4 to match the MPK) where each cell holds a short recorded MIDI sequence. Launch a filled cell into the soft-synth and/or USB→DIN. Empty cell → arm record into that cell. Optional hold-to-stop / clear.
+
+### Launch inputs (both required)
+
+| Input | Behavior |
+|-------|----------|
+| **Touch square** | Tap cell on the kiosk grid to play / arm-record |
+| **MPK mini drum pads** | Pad hit launches the mapped phrase cell (hardware performance path) |
+
+**MPK mapping notes:**
+- Pads arrive on **MIDI channel 10** (already special-cased as `DRUM_CHANNEL` in midi-tone).
+- In **Phrases mode**, ch10 note-ons should **launch phrase cells**, not play the soft-synth drum hit (or make that a toggle: *pads → phrases* vs *pads → drums*).
+- Default: pad bank order → cell 1…N (document factory MPK note numbers; allow remap later).
+- Velocity of the pad hit can scale phrase velocity or be ignored (fixed phrase dynamics) — pick a simple default first.
+- Keyboard keys stay available for live play / recording into an armed cell.
 
 | vs existing mode | Difference |
 |------------------|------------|
 | **Looper** | One free-timing loop on repeat |
 | **Songs** | Whole `.mid` files + tempo transport |
-| **Phrases / Pads** | Many one-shot (or gated) *phrases*; launch like an MPC / clip launcher |
+| **Phrases / Pads** | Many one-shot (or gated) *phrases*; launch like an MPC / clip launcher from **screen or drum pads** |
 
-**Why it fits this box:** huge touch targets, works blind/SSH-friendly layouts, no piano roll. Content is *your* takes — assemble a performance from squares. Same capture buffer family as LOOPER; different launcher UI. Persist cells as small `.mid` or JSON event lists under e.g. `tools/midi-tone/phrases/`.
+**Why it fits this box:** huge touch targets *and* the MPK pads you already have in hand; works when you’re not looking at the screen. Content is *your* takes. Same capture buffer family as LOOPER; different launcher UI. Persist cells as small `.mid` or JSON event lists under e.g. `tools/midi-tone/phrases/`.
 
 **Not now:** ship after Songs feels solid. Don’t block Map/thru on this.
 
@@ -327,7 +341,7 @@ flowchart LR
 - Remap feels like a direct cable under UI abuse
 - Drum pads can roll at set per-pad rates without timing flubs
 - Record a phrase, loop it live, save/load `.mid` songs with tempo, play to soft-synth or USB→DIN
-- Later: launch multiple recorded phrases from a touch pad grid (Phase 3c)
+- Later: launch multiple recorded phrases from a touch grid **and MPK drum pads** (Phase 3c)
 - Dev loop is SSH/deploy-based; imaging is exceptional
 - No coupling to play-my-synth
 
