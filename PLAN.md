@@ -129,7 +129,7 @@ CME’s PC/Mac app **configures their USB MIDI interfaces**. Filters, routes, an
 | Channel remap | **Have** (`channel_map` in Rust presets) |
 | CC remap + learn | **Have** (`cc_map` + `learn` CLI) |
 | Velocity reshape | **Have** (full / clamp / curve) |
-| Presets save/load/recall | **Have** as JSON on disk; kiosk Map UI + midi-tone synth presets next |
+| Presets save/load/recall | **Have** as JSON on disk (Rust engine maps + midi-tone synth slots); kiosk Map UI next |
 | MIDI filter (block ch / msg types) | **Natural next** on Rust hot path |
 | Rich mapper (msg-type transform, invert, min/max, compress/expand, keep original, note transpose, multi-rule banks) | **Doable**; bigger than current remap — good Map-mode target |
 | Thru / merge / multi-port matrix | **Partial:** 1→1 thru today; merge/split matrix = later multi-port work |
@@ -145,9 +145,10 @@ CME’s PC/Mac app **configures their USB MIDI interfaces**. Filters, routes, an
 Started as: prove **MPK → Pi** with a tiny soft synth (no DIN required).
 
 **Became the live product surface** in `tools/midi-tone`:
-- Wavetable voices, A/B morph, MPK knobs, modes (Synth / Looper / Log)
+- Wavetable voices, A/B morph, MPK knobs, modes (Synth / Looper / Presets / Log)
 - Kiosk session (`kiosk.sh` / Openbox) so the box boots into the UI
-- Persist last-session settings + named synth presets (JSON on disk)
+- **Session autosave** → `tools/midi-tone/settings.json` (full velocity, voice, morph A/B, tone/level/attack/release/vib, etc.) every ~2s when dirty and on quit
+- **Named presets** → `tools/midi-tone/user-presets/slot-01.json` … `slot-08.json` (SAVE / LOAD / DELETE in PRESETS mode)
 
 This is still **not** MIDI-out thru. It’s the playable local mode of the appliance.
 
