@@ -999,6 +999,11 @@ class SineEngine:
             level = self._level
             attack_sec = self._attack_sec
             release_sec = self._release_sec
+            # Live drum macros (knobs must affect ringing hits, not only the next one)
+            drum_pitch = self._drum_pitch
+            drum_decay = self._drum_decay
+            drum_noise = self._drum_noise
+            drum_tone = self._drum_tone
 
         attack_per_samp = 1.0 / max(1.0, attack_sec * sr)
         release_per_samp = 1.0 / max(1.0, release_sec * sr)
@@ -1046,7 +1051,17 @@ class SineEngine:
                 dead.append(key)
 
         # Procedural ch10 drums (Synsonics-ish) — mixed before key bus tone filter
-        dead_drums = self._render_drums(buf, frames, sr, drum_hits, arange)
+        dead_drums = self._render_drums(
+            buf,
+            frames,
+            sr,
+            drum_hits,
+            arange,
+            pitch=drum_pitch,
+            decay=drum_decay,
+            noise_amt=drum_noise,
+            tone=drum_tone,
+        )
 
         # Cheap bus low-pass for "tone" knob (moving average). tone=1 → open.
         if tone < 0.999 and frames > 0:
@@ -1086,6 +1101,11 @@ class SineEngine:
         sr: float,
         hits: List[DrumHit],
         arange: np.ndarray,
+        *,
+        pitch: float,
+        decay: float,
+        noise_amt: float,
+        tone: float,
     ) -> List[int]:
         """Add analog-style drum hits into buf. Returns note keys that finished."""
         dead: List[int] = []
@@ -1094,9 +1114,14 @@ class SineEngine:
         two_pi = 2.0 * math.pi
         inv_sr = 1.0 / sr
         for hit in hits:
+            # Keep hit snapshot in sync so UI/debug stay honest; audio uses live macros
+            hit.pitch = pitch
+            hit.decay = decay
+            hit.noise = noise_amt
+            hit.tone = tone
             t = (hit.pos + arange) * np.float32(inv_sr)
             white = (np.random.random(frames).astype(np.float32) * 2.0 - 1.0)
-            win = max(1, int(round((1.0 - hit.tone) * 16.0)))
+            win = max(1, int(round((1.0 - tone) * 16.0)))
             if win <= 1:
                 noise = white
                 hit.noise_state = float(white[-1])
@@ -1112,10 +1137,10 @@ class SineEngine:
                 arange=arange,
                 white=white,
                 noise=noise,
-                pitch=hit.pitch,
-                decay=hit.decay,
-                noise_amt=hit.noise,
-                tone=hit.tone,
+                pitch=pitch,
+                decay=decay,
+                noise_amt=noise_amt,
+                tone=tone,
                 vel=hit.velocity * hit.amp_scale,
                 phase=hit.phase,
                 two_pi=two_pi,
@@ -4027,6 +4052,15 @@ class MidiToneApp:
         self._pending_cont_log = None
         self._q_put(("log", line, True))
 
+    def _knob_ui_feedback(self, label: Optional[str], *, morph: bool = False) -> None:
+        """Coalesce high-rate knob UI updates — don't flood the event queue."""
+        self._mod_dirty = True
+        if morph:
+            self._morph_dirty_ui = True
+        if label:
+            # Status line only; skip log spam (was making knobs feel laggy on Pi)
+            self._pending_cont_log = label
+
     def _handle_knob_cc(self, control: int, value: int) -> Optional[str]:
         """Map MPK factory knobs. Returns a short UI label or None if unmapped."""
         # Only in explicit DRUM MODE do knobs edit drum macros
@@ -4215,11 +4249,10 @@ class MidiToneApp:
             elif msg.control in KNOB_CCS:
                 drum_focus = self.engine.drum_knob_focus()
                 label = self._handle_knob_cc(msg.control, msg.value)
-                self._q_put(("mod",))
-                if msg.control == CC_MORPH and not drum_focus:
-                    self._q_put(("morph",))
-                if label:
-                    self._put_continuous_log(label)
+                self._knob_ui_feedback(
+                    label,
+                    morph=(msg.control == CC_MORPH and not drum_focus),
+                )
             elif msg.control == 123:
                 self.engine.all_notes_off()
                 self._q_put(("panic",))
@@ -4258,10 +4291,10 @@ class MidiToneApp:
                     self._active_notes.pop((ch, note), None)
                     self._refresh_active()
                 elif kind == "mod":
-                    self.mod_var.set(self._format_mod_line())
+                    self._mod_dirty = True
                 elif kind == "morph":
-                    self._sync_voice_index_from_morph()
-                    self.mod_var.set(self._format_mod_line())
+                    self._morph_dirty_ui = True
+                    self._mod_dirty = True
                 elif kind == "panic":
                     self._active_notes.clear()
                     self._refresh_active()
@@ -4277,6 +4310,14 @@ class MidiToneApp:
         if pending is not None:
             self.last_var.set(pending)
             self._pending_cont_log = None
+        # Apply coalesced knob/mod UI once per tick (keeps drum knobs snappy)
+        if getattr(self, "_morph_dirty_ui", False):
+            self._morph_dirty_ui = False
+            self._sync_voice_index_from_morph()
+            self._mod_dirty = True
+        if getattr(self, "_mod_dirty", False):
+            self._mod_dirty = False
+            self.mod_var.set(self._format_mod_line())
         # Keep touch bar stacked above log chrome if packing ever races
         if self._mode == "synth" and not self._overlay_busy():
             try:
