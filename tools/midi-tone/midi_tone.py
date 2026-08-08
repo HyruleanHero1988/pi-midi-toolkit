@@ -61,12 +61,25 @@ PRESET_SLOTS = 8
 SONGS_DIR = HERE / "songs"
 DEMO_SONGS_DIR = HERE / "demo-songs"
 SONG_SEED_MARKER = SONGS_DIR / ".seeded-from-demo"
-SONG_SLOTS = 8
+SONG_LIST_VISIBLE = 4  # chunky rows on screen at once
 DEFAULT_SONG_BPM = 120
 SONG_OUT_MODES = ("local", "usb", "both")
 # Prefer these substrings when auto-picking USB→DIN output
 SONG_OUT_PREFER = ("u2midi", "uxmidi", "hxmidi", "din", "usb midi", "midi out", "mio", "um-")
 SETTINGS_VERSION = 1
+
+
+def list_song_files(directory: pathlib.Path = SONGS_DIR) -> List[pathlib.Path]:
+    """All Standard MIDI Files in songs/ (sorted, case-insensitive)."""
+    if not directory.is_dir():
+        return []
+    files = [
+        p
+        for p in directory.iterdir()
+        if p.is_file() and p.suffix.lower() in (".mid", ".midi")
+    ]
+    files.sort(key=lambda p: p.name.lower())
+    return files
 
 
 def seed_demo_songs() -> int:
@@ -1425,14 +1438,19 @@ class MidiToneApp:
         self._preset_slot_btns: Dict[int, tk.Button] = {}
         self._active_preset_name: Optional[str] = None
         self._song_status_var = tk.StringVar(
-            value="Songs: tap a filled slot to load, set BPM, then PLAY (LOCAL or USB→DIN)."
+            value="Songs: tap a file to load, set BPM, then PLAY (LOCAL or USB→DIN)."
         )
-        self._song_slot = 0
-        self._song_slot_btns: Dict[int, tk.Button] = {}
+        self._song_files: List[pathlib.Path] = []
+        self._song_selected: Optional[str] = None  # filename in songs/
+        self._song_scroll = 0
+        self._song_row_btns: List[tk.Button] = []
+        self._song_title_cache: Dict[str, str] = {}
         self._song_play_btn: Optional[tk.Button] = None
         self._song_out_btn: Optional[tk.Button] = None
         self._song_loop_btn: Optional[tk.Button] = None
         self._song_bpm_lbl: Optional[tk.Label] = None
+        self._song_up_btn: Optional[tk.Button] = None
+        self._song_down_btn: Optional[tk.Button] = None
         self._settings_dirty = False
         self._suppress_autosave = False
 
@@ -1635,7 +1653,7 @@ class MidiToneApp:
             "active_preset": self._active_preset_name,
             "synth": self.engine.snapshot_settings(),
             "songs": {
-                "slot": int(self._song_slot),
+                "selected": self._song_selected,
                 "bpm": float(self._songs.bpm()),
                 "loop": bool(self._songs.loop_enabled()),
                 "out_mode": self._songs.out_mode(),
@@ -1655,17 +1673,22 @@ class MidiToneApp:
                 self.engine.apply_settings(synth)
             songs = data.get("songs")
             if isinstance(songs, dict):
-                if "slot" in songs:
-                    self._song_slot = max(0, min(SONG_SLOTS - 1, int(songs["slot"])))
                 if "bpm" in songs:
                     self._songs.set_bpm(float(songs["bpm"]))
                 if "loop" in songs:
                     self._songs.set_loop(bool(songs["loop"]))
                 if "out_mode" in songs:
                     self._songs.set_out_mode(str(songs["out_mode"]))
-                # Reload selected slot file if present (tempo already applied)
-                path = self._song_path(self._song_slot)
-                if path.is_file():
+                selected = songs.get("selected")
+                if not selected and "slot" in songs:
+                    # Back-compat with older slot-based settings
+                    try:
+                        selected = f"song-{int(songs['slot']) + 1:02d}.mid"
+                    except Exception:
+                        selected = None
+                self._refresh_song_file_list(prefer=str(selected) if selected else None)
+                path = self._selected_song_path()
+                if path is not None and path.is_file():
                     self._songs.load(path)
                     if "bpm" in songs:
                         self._songs.set_bpm(float(songs["bpm"]))
@@ -1719,17 +1742,60 @@ class MidiToneApp:
     def _preset_path(self, slot: int) -> pathlib.Path:
         return PRESETS_DIR / f"slot-{slot + 1:02d}.json"
 
-    def _song_path(self, slot: int) -> pathlib.Path:
-        return SONGS_DIR / f"song-{slot + 1:02d}.mid"
+    def _selected_song_path(self) -> Optional[pathlib.Path]:
+        if not self._song_selected:
+            return None
+        path = SONGS_DIR / self._song_selected
+        return path if path.is_file() else None
+
+    def _refresh_song_file_list(self, prefer: Optional[str] = None) -> None:
+        """Rescan songs/ and keep selection/scroll coherent."""
+        SONGS_DIR.mkdir(parents=True, exist_ok=True)
+        self._song_files = list_song_files(SONGS_DIR)
+        names = {p.name for p in self._song_files}
+        chosen = prefer if prefer in names else None
+        if chosen is None and self._song_selected in names:
+            chosen = self._song_selected
+        if chosen is None and self._song_files:
+            chosen = self._song_files[0].name
+        self._song_selected = chosen
+        if not self._song_files:
+            self._song_scroll = 0
+            return
+        idx = 0
+        if chosen:
+            for i, p in enumerate(self._song_files):
+                if p.name == chosen:
+                    idx = i
+                    break
+        max_scroll = max(0, len(self._song_files) - SONG_LIST_VISIBLE)
+        # Keep selection visible
+        if idx < self._song_scroll:
+            self._song_scroll = idx
+        elif idx >= self._song_scroll + SONG_LIST_VISIBLE:
+            self._song_scroll = idx - SONG_LIST_VISIBLE + 1
+        self._song_scroll = max(0, min(max_scroll, self._song_scroll))
+
+    def _next_take_path(self) -> pathlib.Path:
+        SONGS_DIR.mkdir(parents=True, exist_ok=True)
+        n = 1
+        while True:
+            path = SONGS_DIR / f"take-{n:03d}.mid"
+            if not path.exists():
+                return path
+            n += 1
+            if n > 9999:
+                return SONGS_DIR / f"take-{int(time.time())}.mid"
 
     def _build_songs_mode(self) -> None:
         shell = self._songs_shell
         for w in shell.winfo_children():
             w.destroy()
         SONGS_DIR.mkdir(parents=True, exist_ok=True)
+        self._refresh_song_file_list(prefer=self._song_selected)
 
         header = tk.Frame(shell, bg="#111111")
-        header.pack(fill=tk.X, padx=8, pady=(10, 4))
+        header.pack(fill=tk.X, padx=8, pady=(8, 2))
         tk.Label(
             header, text="Songs", font=("DejaVu Sans", 18, "bold"),
             fg="#fbf1c7", bg="#111111",
@@ -1760,78 +1826,78 @@ class MidiToneApp:
 
         status = tk.Label(
             shell, textvariable=self._song_status_var,
-            font=("DejaVu Sans", 13, "bold"),
+            font=("DejaVu Sans", 12, "bold"),
             fg="#fabd2f", bg="#111111",
             wraplength=760, justify=tk.LEFT, anchor="w",
         )
-        status.pack(fill=tk.X, padx=10, pady=(4, 8))
+        status.pack(fill=tk.X, padx=10, pady=(2, 4))
 
-        grid = tk.Frame(shell, bg="#111111")
-        grid.pack(fill=tk.BOTH, expand=True, padx=8, pady=4)
-        self._song_slot_btns = {}
-        cols = 4
-        for i in range(SONG_SLOTS):
-            r, c = divmod(i, cols)
+        # Chunky list with dedicated scroll targets (no tiny scrollbar)
+        list_wrap = tk.Frame(shell, bg="#111111")
+        list_wrap.pack(fill=tk.BOTH, expand=True, padx=8, pady=2)
+
+        self._song_up_btn = self._mk_touch_btn(
+            list_wrap, "▲  UP", lambda: self._song_scroll_by(-SONG_LIST_VISIBLE), bg="#504945"
+        )
+        self._song_up_btn.configure(font=("DejaVu Sans", 16, "bold"), pady=10)
+        self._song_up_btn.pack(fill=tk.X, pady=(0, 4), ipady=6)
+
+        rows = tk.Frame(list_wrap, bg="#111111")
+        rows.pack(fill=tk.BOTH, expand=True)
+        self._song_row_btns = []
+        for i in range(SONG_LIST_VISIBLE):
             btn = self._mk_touch_btn(
-                grid,
-                self._song_slot_label(i),
-                lambda idx=i: self._select_song_slot(idx),
+                rows,
+                "",
+                lambda idx=i: self._select_song_row(idx),
                 bg="#3c3836",
             )
-            btn.configure(font=("DejaVu Sans", 12, "bold"), pady=14)
-            btn.grid(row=r, column=c, sticky="nsew", padx=3, pady=3, ipady=4)
-            self._song_slot_btns[i] = btn
-        for c in range(cols):
-            grid.grid_columnconfigure(c, weight=1)
-        for r in range((SONG_SLOTS + cols - 1) // cols):
-            grid.grid_rowconfigure(r, weight=1)
+            btn.configure(
+                font=("DejaVu Sans", 14, "bold"),
+                anchor="w",
+                justify=tk.LEFT,
+                pady=12,
+            )
+            btn.pack(fill=tk.BOTH, expand=True, pady=2, ipady=8)
+            self._song_row_btns.append(btn)
+
+        self._song_down_btn = self._mk_touch_btn(
+            list_wrap, "▼  DOWN", lambda: self._song_scroll_by(SONG_LIST_VISIBLE), bg="#504945"
+        )
+        self._song_down_btn.configure(font=("DejaVu Sans", 16, "bold"), pady=10)
+        self._song_down_btn.pack(fill=tk.X, pady=(4, 0), ipady=6)
 
         row_a = tk.Frame(shell, bg="#111111")
-        row_a.pack(fill=tk.X, padx=8, pady=(6, 4))
+        row_a.pack(fill=tk.X, padx=8, pady=(6, 3))
         self._song_play_btn = self._mk_touch_btn(
             row_a, "PLAY", self._song_toggle_play, bg="#689d6a"
         )
-        self._song_play_btn.pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=14)
+        self._song_play_btn.pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=12)
         self._mk_touch_btn(row_a, "STOP", self._song_stop, bg="#d79921").pack(
-            side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=14
-        )
-
-        row_b = tk.Frame(shell, bg="#111111")
-        row_b.pack(fill=tk.X, padx=8, pady=4)
-        self._mk_touch_btn(
-            row_b, "SAVE LOOP → SLOT", self._song_save_from_looper, bg="#458588"
-        ).pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=12)
-        self._mk_touch_btn(row_b, "DELETE", self._song_delete_selected, bg="#9d0006").pack(
             side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=12
         )
 
+        row_b = tk.Frame(shell, bg="#111111")
+        row_b.pack(fill=tk.X, padx=8, pady=3)
+        self._mk_touch_btn(
+            row_b, "SAVE LOOP", self._song_save_from_looper, bg="#458588"
+        ).pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=10)
+        self._mk_touch_btn(row_b, "DELETE", self._song_delete_selected, bg="#9d0006").pack(
+            side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=10
+        )
+
         row_c = tk.Frame(shell, bg="#111111")
-        row_c.pack(fill=tk.X, padx=8, pady=(4, 10))
+        row_c.pack(fill=tk.X, padx=8, pady=(3, 8))
         self._song_out_btn = self._mk_touch_btn(
             row_c, "OUT: LOCAL", self._song_cycle_out_mode, bg="#3c3836"
         )
-        self._song_out_btn.pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=10)
+        self._song_out_btn.pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=8)
         self._song_loop_btn = self._mk_touch_btn(
             row_c, "SONG LOOP: OFF", self._song_toggle_loop, bg="#3c3836"
         )
-        self._song_loop_btn.pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=10)
+        self._song_loop_btn.pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=8)
 
-        tip = tk.Label(
-            shell,
-                text=(
-                "Load = tap a filled slot (highlights purple), then PLAY. "
-                "Demos ship offline in demo-songs/ (seeded once into songs/). "
-                "Or LOOPER → SAVE LOOP → SLOT."
-            ),
-            font=("DejaVu Sans", 11),
-            fg="#a89984",
-            bg="#111111",
-            wraplength=760,
-            justify=tk.LEFT,
-            anchor="w",
-        )
-        tip.pack(fill=tk.X, padx=10, pady=(0, 8))
-        self._paint_song_slots()
+        self._paint_song_list()
         self._paint_song_controls()
         self._refresh_song_status()
 
@@ -1839,6 +1905,11 @@ class MidiToneApp:
         return f"{int(round(self._songs.bpm()))} BPM"
 
     def _song_title_from_file(self, path: pathlib.Path) -> str:
+        key = path.name
+        cached = self._song_title_cache.get(key)
+        if cached is not None:
+            return cached
+        title = path.stem
         try:
             mid = mido.MidiFile(str(path))
             for tr in mid.tracks:
@@ -1846,65 +1917,98 @@ class MidiToneApp:
                     if msg.is_meta and msg.type in ("track_name", "sequence_name"):
                         name = (msg.name or "").strip()
                         if name:
-                            return name[:22]
+                            title = name
+                            break
                     if msg.is_meta and msg.type == "text":
                         text = (msg.text or "").strip()
                         if text:
-                            return text[:22]
+                            title = text
+                            break
+                else:
+                    continue
+                break
         except Exception:
             pass
-        return path.stem
+        title = title[:40]
+        self._song_title_cache[key] = title
+        return title
 
-    def _song_slot_label(self, slot: int) -> str:
-        path = self._song_path(slot)
-        if path.is_file():
-            try:
-                mid = mido.MidiFile(str(path))
-                bpm = _midifile_native_bpm(mid)
-                n = sum(
-                    1
-                    for tr in mid.tracks
-                    for m in tr
-                    if m.type == "note_on" and getattr(m, "velocity", 0) > 0
-                )
-                title = self._song_title_from_file(path)
-                return f"{slot + 1}\n{title}\n{int(bpm)}bpm · {n}n"
-            except Exception:
-                return f"{slot + 1}\n{path.stem}\n(saved)"
-        return f"{slot + 1}\nEMPTY\n(tap after save)"
+    def _song_row_label(self, path: pathlib.Path) -> str:
+        title = self._song_title_from_file(path)
+        if title.lower() == path.stem.lower() or title == path.stem:
+            return f"  {path.name}"
+        return f"  {title}\n  {path.name}"
 
-    def _select_song_slot(self, slot: int) -> None:
-        self._song_slot = max(0, min(SONG_SLOTS - 1, slot))
-        path = self._song_path(self._song_slot)
-        if path.is_file():
-            if self._songs.load(path):
-                self._append_log(f"Song loaded: {path.name}")
-            else:
-                self._song_status_var.set(f"Failed to load {path.name}")
-                self._paint_song_slots()
-                return
+    def _song_scroll_by(self, delta: int) -> None:
+        if not self._song_files:
+            return
+        max_scroll = max(0, len(self._song_files) - SONG_LIST_VISIBLE)
+        self._song_scroll = max(0, min(max_scroll, self._song_scroll + int(delta)))
+        self._paint_song_list()
+
+    def _select_song_row(self, row: int) -> None:
+        idx = self._song_scroll + row
+        if idx < 0 or idx >= len(self._song_files):
+            return
+        path = self._song_files[idx]
+        self._song_selected = path.name
+        if self._songs.is_playing():
+            self._songs.stop()
+        if self._songs.load(path):
+            self._append_log(f"Song loaded: {path.name}")
         else:
-            self._songs.clear()
+            self._song_status_var.set(f"Failed to load {path.name}")
         self._mark_settings_dirty()
-        self._paint_song_slots()
+        self._paint_song_list()
         self._paint_song_controls()
         self._refresh_song_status()
 
-    def _paint_song_slots(self) -> None:
-        for i, btn in self._song_slot_btns.items():
-            exists = self._song_path(i).is_file()
-            selected = i == self._song_slot
-            if selected:
-                color = "#b16286"
-            elif exists:
-                color = "#458588"
-            else:
-                color = "#3c3836"
+    def _paint_song_list(self) -> None:
+        total = len(self._song_files)
+        max_scroll = max(0, total - SONG_LIST_VISIBLE)
+        self._song_scroll = max(0, min(max_scroll, self._song_scroll))
+        for row, btn in enumerate(self._song_row_btns):
+            idx = self._song_scroll + row
+            if idx >= total:
+                btn.configure(
+                    text="",
+                    state=tk.DISABLED,
+                    bg="#1d2021",
+                    activebackground="#1d2021",
+                    disabledforeground="#665c54",
+                )
+                continue
+            path = self._song_files[idx]
+            selected = path.name == self._song_selected
+            color = "#b16286" if selected else "#458588"
             btn.configure(
-                text=self._song_slot_label(i),
+                text=self._song_row_label(path),
+                state=tk.NORMAL,
                 bg=color,
                 activebackground=color,
+                fg="#fbf1c7",
             )
+        if self._song_up_btn is not None:
+            can_up = self._song_scroll > 0
+            self._song_up_btn.configure(
+                state=tk.NORMAL if can_up else tk.DISABLED,
+                bg="#504945" if can_up else "#1d2021",
+                activebackground="#504945" if can_up else "#1d2021",
+                disabledforeground="#665c54",
+            )
+        if self._song_down_btn is not None:
+            can_down = self._song_scroll < max_scroll
+            self._song_down_btn.configure(
+                state=tk.NORMAL if can_down else tk.DISABLED,
+                bg="#504945" if can_down else "#1d2021",
+                activebackground="#504945" if can_down else "#1d2021",
+                disabledforeground="#665c54",
+            )
+
+    def _paint_song_slots(self) -> None:
+        """Compat name used by mode switch / seed — refresh list from disk."""
+        self._refresh_song_file_list(prefer=self._song_selected)
+        self._paint_song_list()
 
     def _paint_song_controls(self) -> None:
         if self._song_bpm_lbl is not None:
@@ -1938,24 +2042,27 @@ class MidiToneApp:
     def _refresh_song_status(self) -> None:
         st = self._songs.status()
         path = st.get("path")
-        name = pathlib.Path(str(path)).name if path else f"slot {self._song_slot + 1} (empty)"
+        name = pathlib.Path(str(path)).name if path else (self._song_selected or "(none)")
+        nfiles = len(self._song_files)
         out = str(st["out_mode"]).upper()
         out_name = st.get("out_name") or "—"
-        if st["playing"]:
+        if nfiles == 0:
+            msg = "songs/ is empty — SAVE LOOP, or drop .mid files in. Demos seed on first launch."
+        elif st["playing"]:
             msg = (
                 f"▶ PLAYING {name}  @ {int(round(float(st['bpm'])))} BPM  "
                 f"(file {int(round(float(st['file_bpm'])))})  out={out} ({out_name})"
             )
         elif int(st["events"]) == 0:
             msg = (
-                f"{name} empty — record in LOOPER, then SAVE LOOP → SLOT. "
+                f"{nfiles} file(s) — tap one to load. "
                 f"Tempo {int(round(float(st['bpm'])))} BPM · out={out}"
             )
         else:
             msg = (
                 f"Ready {name}  {float(st['duration']):.1f}s · {st['events']} ev  "
                 f"@ {int(round(float(st['bpm'])))} BPM (file {int(round(float(st['file_bpm'])))})  "
-                f"out={out}"
+                f"out={out}  [{self._song_scroll + 1}-{min(nfiles, self._song_scroll + SONG_LIST_VISIBLE)}/{nfiles}]"
             )
         self._song_status_var.set(msg)
         self._paint_song_controls()
@@ -1999,16 +2106,15 @@ class MidiToneApp:
             self._songs.stop()
             self._q_put(("log", "Song PLAY stop", False))
         else:
-            # Prefer loaded slot; reload from disk if needed
-            path = self._song_path(self._song_slot)
-            if self._songs.event_count() == 0 and path.is_file():
+            path = self._selected_song_path()
+            if self._songs.event_count() == 0 and path is not None:
                 self._songs.load(path)
             if not self._songs.start():
                 mode = self._songs.out_mode()
                 if mode == "usb":
                     self._q_put(("log", "Song PLAY failed — no USB MIDI out", False))
                 else:
-                    self._q_put(("log", "Song empty — SAVE LOOP first", False))
+                    self._q_put(("log", "Song empty — tap a file or SAVE LOOP", False))
             else:
                 self._q_put(("log", "Song PLAY start", False))
         self._q_put(("song",))
@@ -2028,19 +2134,26 @@ class MidiToneApp:
             return
         if self._songs.is_playing():
             self._songs.stop()
-        path = self._song_path(self._song_slot)
+        path = self._next_take_path()
         bpm = self._songs.bpm()
         try:
             SONGS_DIR.mkdir(parents=True, exist_ok=True)
             mid = looper_events_to_midifile(events, loop_len, bpm=bpm)
+            # Title for list label
+            if mid.tracks:
+                mid.tracks[0].insert(
+                    0, mido.MetaMessage("track_name", name=path.stem, time=0)
+                )
             tmp = path.with_suffix(".mid.tmp")
             mid.save(str(tmp))
             tmp.replace(path)
+            self._song_title_cache.pop(path.name, None)
+            self._refresh_song_file_list(prefer=path.name)
             self._songs.load(path)
             self._songs.set_bpm(bpm)
             self._mark_settings_dirty()
             self._save_settings_file(SETTINGS_PATH, quiet=True)
-            self._paint_song_slots()
+            self._paint_song_list()
             self._refresh_song_status()
             self._append_log(f"Song saved: {path.name} ({len(events)} events @ {int(bpm)} BPM)")
             self._song_status_var.set(f"Saved looper → {path.name}")
@@ -2049,20 +2162,28 @@ class MidiToneApp:
             self._append_log(f"Song SAVE error: {exc}")
 
     def _song_delete_selected(self) -> None:
-        path = self._song_path(self._song_slot)
+        path = self._selected_song_path()
         if self._songs.is_playing():
             self._songs.stop()
-        if not path.is_file():
-            self._song_status_var.set(f"Slot {self._song_slot + 1} already empty.")
+        if path is None:
+            self._song_status_var.set("Nothing selected to delete.")
             return
         try:
+            name = path.name
             path.unlink()
+            self._song_title_cache.pop(name, None)
             self._songs.clear()
+            self._song_selected = None
+            self._refresh_song_file_list()
+            # Autoload neighbor if any remain
+            nxt = self._selected_song_path()
+            if nxt is not None:
+                self._songs.load(nxt)
             self._mark_settings_dirty()
-            self._paint_song_slots()
+            self._paint_song_list()
             self._refresh_song_status()
-            self._append_log(f"Song deleted: {path.name}")
-            self._song_status_var.set(f"Deleted {path.name}")
+            self._append_log(f"Song deleted: {name}")
+            self._song_status_var.set(f"Deleted {name}")
         except Exception as exc:
             self._song_status_var.set(f"Delete failed: {exc}")
 
@@ -2361,6 +2482,7 @@ class MidiToneApp:
             self._refresh_loop_status()
         elif mode == "songs":
             self._songs_shell.pack(fill=tk.BOTH, expand=True)
+            # Rescan directory each visit so dropped-in .mid files appear
             self._paint_song_slots()
             self._refresh_song_status()
         elif mode == "presets":

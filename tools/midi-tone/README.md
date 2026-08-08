@@ -7,7 +7,7 @@ Hear and see MIDI from the **Akai MPK mini** on the Pi **without** USB-DIN or a 
 - **Modes** (top right): **SYNTH**, **LOOPER**, **SONGS**, **PRESETS**, **LOG** — fully separate UIs
 - Synth: voices, A/B morph, knobs, live status
 - Looper: record a MIDI note sequence, play it on repeat
-- Songs: save looper takes as `.mid`, set tempo, play to soft-synth and/or USB→DIN
+- Songs: scrolling list of every `.mid` in `songs/`, tempo, play local and/or USB→DIN
 - Presets: 8 save slots + autosave last session (`settings.json`)
 - Log: full scrolling MIDI/event history
 - Bundled [Adventure Kid (AKWF)](https://github.com/KristofferKarlAxelEkstrand/AKWF-FREE) single-cycles (**CC0**) plus built-in sine/square/saw/triangle
