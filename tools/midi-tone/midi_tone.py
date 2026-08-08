@@ -200,26 +200,210 @@ def midi_to_hz(note: int) -> float:
     return 440.0 * (2.0 ** ((note - 69) / 12.0))
 
 
+# MPK mini mk3 factory pad notes (Prog Select → Pad 1 / MPC): Bank A = 36–43, Bank B = 44–51.
+# Layout per bank: pads 1–4 bottom L→R, pads 5–8 top L→R.
+MPK_PAD_KIT: Dict[int, str] = {
+    # Bank A
+    36: "kick",
+    37: "snare",
+    38: "clap",
+    39: "hat_closed",
+    40: "hat_open",
+    41: "tom_lo",
+    42: "tom_mid",
+    43: "rim",
+    # Bank B
+    44: "kick_tight",
+    45: "rimshot",
+    46: "shaker",
+    47: "hat_pedal",
+    48: "tom_hi",
+    49: "cowbell",
+    50: "clave",
+    51: "ride",
+}
+
+# Extra GM-ish aliases so other pad programs still land somewhere useful
+_DRUM_ALIASES: Dict[int, str] = {
+    35: "kick",
+    52: "ride",
+    55: "hat_open",
+    57: "ride",
+    59: "ride",
+}
+
+
 def drum_model_for_note(note: int) -> str:
-    """Map MIDI note (ch10 / GM-ish) → procedural drum model."""
+    """Map MIDI note (ch10) → one of 16 procedural drum / one-shot models."""
     n = note & 0x7F
-    if n in (35, 36):
-        return "kick"
-    if n in (37, 39):
-        return "clap"
-    if n in (38, 40):
-        return "snare"
-    if n in (41, 43, 45, 47, 48, 50):
-        return "tom"
-    if n in (42, 44, 46, 49, 51, 52, 55, 57, 59):
-        return "hat"
-    if n < 38:
-        return "kick"
-    if n < 42:
-        return "snare"
-    if n < 50:
-        return "tom"
-    return "hat"
+    if n in MPK_PAD_KIT:
+        return MPK_PAD_KIT[n]
+    if n in _DRUM_ALIASES:
+        return _DRUM_ALIASES[n]
+    # Unknown note: cycle through the kit so every pad still sounds distinct
+    models = list(dict.fromkeys(MPK_PAD_KIT.values()))
+    return models[n % len(models)]
+
+
+def synthesize_drum(
+    model: str,
+    *,
+    t: np.ndarray,
+    arange: np.ndarray,
+    white: np.ndarray,
+    noise: np.ndarray,
+    pitch: float,
+    decay: float,
+    noise_amt: float,
+    tone: float,
+    vel: float,
+    phase: float,
+    two_pi: float,
+    inv_sr: float,
+) -> Tuple[np.ndarray, float, float]:
+    """Render one block of a procedural drum. Returns (audio, dur_sec, new_phase)."""
+    # Pitch-envelope body (kick / toms / tight kick)
+    if model in ("kick", "kick_tight", "tom_lo", "tom_mid", "tom_hi"):
+        if model == "kick":
+            f0 = 50.0 * (2.0 ** ((pitch - 0.5) * 1.8))
+            f_end = 28.0 + 16.0 * pitch
+            drop_tau = 0.016 + 0.05 * (1.0 - decay)
+            body_tau = 0.07 + 0.40 * decay
+            amp = 0.38
+        elif model == "kick_tight":
+            f0 = 68.0 * (2.0 ** ((pitch - 0.5) * 1.6))
+            f_end = 40.0 + 20.0 * pitch
+            drop_tau = 0.010 + 0.03 * (1.0 - decay)
+            body_tau = 0.035 + 0.18 * decay
+            amp = 0.34
+        elif model == "tom_lo":
+            f0 = 85.0 * (2.0 ** ((pitch - 0.5) * 1.8))
+            f_end = 55.0 + 25.0 * pitch
+            drop_tau = 0.025 + 0.07 * (1.0 - decay)
+            body_tau = 0.08 + 0.38 * decay
+            amp = 0.32
+        elif model == "tom_mid":
+            f0 = 120.0 * (2.0 ** ((pitch - 0.5) * 1.8))
+            f_end = 75.0 + 30.0 * pitch
+            drop_tau = 0.022 + 0.06 * (1.0 - decay)
+            body_tau = 0.06 + 0.30 * decay
+            amp = 0.30
+        else:  # tom_hi
+            f0 = 170.0 * (2.0 ** ((pitch - 0.5) * 1.8))
+            f_end = 100.0 + 40.0 * pitch
+            drop_tau = 0.018 + 0.05 * (1.0 - decay)
+            body_tau = 0.045 + 0.22 * decay
+            amp = 0.28
+        freq = f_end + (f0 - f_end) * np.exp(-t / np.float32(drop_tau))
+        phase_inc = two_pi * freq * inv_sr
+        phases = phase + np.cumsum(phase_inc)
+        new_phase = float(phases[-1] % two_pi)
+        env = np.exp(-t / np.float32(body_tau))
+        click = np.exp(-t / np.float32(0.0035)) * np.float32(0.18 * vel)
+        body = np.sin(phases) * env * np.float32(amp * vel)
+        sig = body + click * white + noise * np.float32(0.05 * noise_amt * vel) * env
+        return sig.astype(np.float32, copy=False), body_tau * 4.5, new_phase
+
+    if model in ("snare", "rimshot"):
+        f0 = (200.0 if model == "rimshot" else 175.0) * (2.0 ** ((pitch - 0.5) * 1.4))
+        body_tau = 0.018 + 0.10 * decay if model == "rimshot" else 0.03 + 0.18 * decay
+        noise_tau = 0.025 + 0.14 * decay if model == "rimshot" else 0.04 + 0.28 * decay
+        phase_inc = two_pi * f0 * inv_sr
+        phases = phase + phase_inc * (arange + 1.0)
+        new_phase = float(phases[-1] % two_pi)
+        tone_env = np.exp(-t / np.float32(body_tau))
+        noise_env = np.exp(-t / np.float32(noise_tau))
+        body_amp = 0.10 if model == "rimshot" else 0.16
+        noise_amp = (0.28 + 0.45 * noise_amt) if model == "rimshot" else (0.18 + 0.40 * noise_amt)
+        click = np.exp(-t / np.float32(0.002)) * np.float32(0.25 * vel if model == "rimshot" else 0.12 * vel)
+        sig = np.sin(phases) * tone_env * np.float32(body_amp * vel)
+        sig += noise * noise_env * np.float32(noise_amp * vel)
+        sig += click * white
+        return sig.astype(np.float32, copy=False), max(body_tau, noise_tau) * 5.0, new_phase
+
+    if model == "clap":
+        noise_tau = 0.03 + 0.22 * decay
+        noise_env = np.exp(-t / np.float32(noise_tau))
+        bursts = (
+            np.exp(-((t - 0.000) ** 2) / 0.0000008)
+            + np.exp(-((t - 0.012) ** 2) / 0.0000010)
+            + np.exp(-((t - 0.024) ** 2) / 0.0000012)
+        )
+        sig = noise * (bursts * np.float32(0.45) + noise_env * np.float32(0.28))
+        sig *= np.float32((0.28 + 0.4 * noise_amt) * vel)
+        return sig.astype(np.float32, copy=False), noise_tau * 5.0, phase
+
+    if model in ("hat_closed", "hat_open", "hat_pedal", "ride", "shaker"):
+        if model == "hat_open":
+            noise_tau = 0.05 + 0.40 * decay
+            amp = 0.14 + 0.30 * noise_amt
+        elif model == "hat_pedal":
+            noise_tau = 0.008 + 0.04 * decay
+            amp = 0.12 + 0.22 * noise_amt
+        elif model == "ride":
+            noise_tau = 0.12 + 0.55 * decay
+            amp = 0.10 + 0.22 * noise_amt
+        elif model == "shaker":
+            noise_tau = 0.02 + 0.10 * decay
+            amp = 0.12 + 0.28 * noise_amt
+        else:  # hat_closed
+            noise_tau = 0.015 + 0.08 * decay
+            amp = 0.14 + 0.30 * noise_amt
+        bright = white - noise * np.float32(0.85)
+        noise_env = np.exp(-t / np.float32(noise_tau))
+        if model == "shaker":
+            # Grainy amplitude modulation
+            grain = 0.55 + 0.45 * np.sin(two_pi * (40.0 + 80.0 * pitch) * t)
+            sig = bright * noise_env * grain * np.float32(amp * vel)
+        else:
+            sig = bright * noise_env * np.float32(amp * vel)
+        sig = sig * np.float32(0.35 + 0.65 * tone) + noise * noise_env * np.float32(
+            0.10 * (1.0 - tone) * vel
+        )
+        return sig.astype(np.float32, copy=False), noise_tau * 5.5, phase
+
+    if model == "rim":
+        # Short woodblock / stick click
+        f0 = 520.0 * (2.0 ** ((pitch - 0.5) * 1.2))
+        body_tau = 0.012 + 0.05 * decay
+        phase_inc = two_pi * f0 * inv_sr
+        phases = phase + phase_inc * (arange + 1.0)
+        new_phase = float(phases[-1] % two_pi)
+        env = np.exp(-t / np.float32(body_tau))
+        sig = np.sin(phases) * env * np.float32(0.22 * vel)
+        sig += white * np.exp(-t / np.float32(0.004)) * np.float32(0.18 * vel)
+        return sig.astype(np.float32, copy=False), body_tau * 5.0, new_phase
+
+    if model == "cowbell":
+        # Two inharmonic partials (classic analog cowbell trick)
+        f1 = 540.0 * (2.0 ** ((pitch - 0.5) * 1.0))
+        f2 = 800.0 * (2.0 ** ((pitch - 0.5) * 1.0))
+        body_tau = 0.05 + 0.28 * decay
+        env = np.exp(-t / np.float32(body_tau))
+        phase_inc1 = two_pi * f1 * inv_sr
+        phase_inc2 = two_pi * f2 * inv_sr
+        p1 = phase + phase_inc1 * (arange + 1.0)
+        p2 = phase * 1.37 + phase_inc2 * (arange + 1.0)
+        new_phase = float(p1[-1] % two_pi)
+        sig = (np.sin(p1) + 0.7 * np.sin(p2)) * env * np.float32(0.18 * vel)
+        sig += noise * env * np.float32(0.04 * noise_amt * vel)
+        return sig.astype(np.float32, copy=False), body_tau * 5.0, new_phase
+
+    if model == "clave":
+        f0 = 1800.0 * (2.0 ** ((pitch - 0.5) * 0.8))
+        body_tau = 0.008 + 0.035 * decay
+        phase_inc = two_pi * f0 * inv_sr
+        phases = phase + phase_inc * (arange + 1.0)
+        new_phase = float(phases[-1] % two_pi)
+        env = np.exp(-t / np.float32(body_tau))
+        sig = np.sin(phases) * env * np.float32(0.20 * vel)
+        return sig.astype(np.float32, copy=False), body_tau * 6.0, new_phase
+
+    # Fallback: short closed hat
+    noise_tau = 0.02 + 0.08 * decay
+    noise_env = np.exp(-t / np.float32(noise_tau))
+    sig = (white - noise * 0.8) * noise_env * np.float32(0.15 * vel)
+    return sig.astype(np.float32, copy=False), noise_tau * 5.0, phase
 
 
 @dataclass
@@ -259,7 +443,7 @@ class SineEngine:
     ATTACK_SEC_MAX = 0.400
     RELEASE_SEC_MIN = 0.010
     RELEASE_SEC_MAX = 0.800
-    MAX_DRUM_HITS = 8
+    MAX_DRUM_HITS = 16  # full MPK A+B pad bank polyphony
     DRUM_FOCUS_SEC = 5.0
 
     def __init__(
@@ -488,9 +672,9 @@ class SineEngine:
         with self._lock:
             if (channel & 0x0F) == DRUM_CHANNEL:
                 self._drum_gate[key[1]] = False
-                # One-shots keep decaying; open-hat-style: release shortens remaining
+                # One-shots keep decaying; open hat shortens if pad released early
                 hit = self._drums.get(key[1])
-                if hit is not None and hit.model == "hat":
+                if hit is not None and hit.model == "hat_open":
                     hit.decay *= 0.35
                 return
             v = self._voices.get(key)
@@ -889,16 +1073,8 @@ class SineEngine:
         inv_sr = 1.0 / sr
         for hit in hits:
             t = (hit.pos + arange) * np.float32(inv_sr)
-            pitch = hit.pitch
-            decay = hit.decay
-            noise_amt = hit.noise
-            tone = hit.tone
-            vel = hit.velocity * hit.amp_scale
-            model = hit.model
-
-            # Shared noise (moving-average “LP”; higher tone → shorter / brighter)
             white = (np.random.random(frames).astype(np.float32) * 2.0 - 1.0)
-            win = max(1, int(round((1.0 - tone) * 16.0)))
+            win = max(1, int(round((1.0 - hit.tone) * 16.0)))
             if win <= 1:
                 noise = white
                 hit.noise_state = float(white[-1])
@@ -908,74 +1084,25 @@ class SineEngine:
                 noise = np.convolve(np.concatenate([pad, white]), kernel, mode="valid")[:frames]
                 hit.noise_state = float(noise[-1])
 
-            if model == "kick":
-                f0 = 48.0 * (2.0 ** ((pitch - 0.5) * 1.8))
-                f_end = 28.0 + 18.0 * pitch
-                drop_tau = 0.015 + 0.05 * (1.0 - decay)
-                body_tau = 0.06 + 0.42 * decay
-                freq = f_end + (f0 - f_end) * np.exp(-t / np.float32(drop_tau))
-                phase_inc = two_pi * freq * inv_sr
-                phases = hit.phase + np.cumsum(phase_inc)
-                hit.phase = float(phases[-1] % two_pi)
-                env = np.exp(-t / np.float32(body_tau))
-                click = np.exp(-t / np.float32(0.004)) * np.float32(0.22 * vel)
-                body = np.sin(phases) * env * np.float32(0.38 * vel)
-                # Tiny noise tick
-                sig = body + click * white + noise * np.float32(0.06 * noise_amt * vel) * env
-                dur = body_tau * 4.5
-            elif model == "tom":
-                f0 = 90.0 * (2.0 ** ((pitch - 0.5) * 2.2 + (hit.note % 12) * 0.04))
-                f_end = 55.0 + 40.0 * pitch
-                drop_tau = 0.02 + 0.06 * (1.0 - decay)
-                body_tau = 0.05 + 0.35 * decay
-                freq = f_end + (f0 - f_end) * np.exp(-t / np.float32(drop_tau))
-                phase_inc = two_pi * freq * inv_sr
-                phases = hit.phase + np.cumsum(phase_inc)
-                hit.phase = float(phases[-1] % two_pi)
-                env = np.exp(-t / np.float32(body_tau))
-                sig = np.sin(phases) * env * np.float32(0.32 * vel)
-                sig += noise * np.float32(0.10 * noise_amt * vel) * env
-                dur = body_tau * 4.5
-            elif model == "snare":
-                f0 = 180.0 * (2.0 ** ((pitch - 0.5) * 1.4))
-                body_tau = 0.03 + 0.18 * decay
-                noise_tau = 0.04 + 0.28 * decay
-                phase_inc = two_pi * f0 * inv_sr
-                phases = hit.phase + phase_inc * (arange + 1.0)
-                hit.phase = float(phases[-1] % two_pi)
-                tone_env = np.exp(-t / np.float32(body_tau))
-                noise_env = np.exp(-t / np.float32(noise_tau))
-                sig = np.sin(phases) * tone_env * np.float32(0.16 * vel)
-                sig += noise * noise_env * np.float32((0.18 + 0.40 * noise_amt) * vel)
-                dur = max(body_tau, noise_tau) * 5.0
-            elif model == "clap":
-                # A few early bursts + noise tail
-                noise_tau = 0.03 + 0.22 * decay
-                noise_env = np.exp(-t / np.float32(noise_tau))
-                bursts = (
-                    np.exp(-((t - 0.000) ** 2) / 0.0000008)
-                    + np.exp(-((t - 0.012) ** 2) / 0.0000010)
-                    + np.exp(-((t - 0.024) ** 2) / 0.0000012)
-                )
-                sig = noise * (bursts * np.float32(0.45) + noise_env * np.float32(0.28))
-                sig *= np.float32((0.28 + 0.4 * noise_amt) * vel)
-                dur = noise_tau * 5.0
-            else:  # hat / cymbal
-                open_hat = hit.note in (46, 49, 57)
-                noise_tau = (0.04 + 0.35 * decay) if open_hat else (0.015 + 0.08 * decay)
-                # Brighter: highpass ≈ white - lp
-                bright = white - noise * np.float32(0.85)
-                noise_env = np.exp(-t / np.float32(noise_tau))
-                sig = bright * noise_env * np.float32((0.14 + 0.32 * noise_amt) * vel)
-                # tone darkens by mixing more LP
-                sig = sig * np.float32(0.35 + 0.65 * tone) + noise * noise_env * np.float32(
-                    0.12 * (1.0 - tone) * vel
-                )
-                dur = noise_tau * 5.5
-
-            buf += sig.astype(np.float32, copy=False)
+            audio, dur, new_phase = synthesize_drum(
+                hit.model,
+                t=t,
+                arange=arange,
+                white=white,
+                noise=noise,
+                pitch=hit.pitch,
+                decay=hit.decay,
+                noise_amt=hit.noise,
+                tone=hit.tone,
+                vel=hit.velocity * hit.amp_scale,
+                phase=hit.phase,
+                two_pi=two_pi,
+                inv_sr=inv_sr,
+            )
+            hit.phase = new_phase
+            buf += audio
             hit.pos += frames
-            if hit.pos > int(dur * sr) or float(np.max(np.abs(sig))) < 0.0002:
+            if hit.pos > int(dur * sr) or float(np.max(np.abs(audio))) < 0.0002:
                 dead.append(hit.note)
         return dead
 
@@ -3373,7 +3500,7 @@ class MidiToneApp:
             if is_drum:
                 model = drum_model_for_note(msg.note)
                 line = (
-                    f"Pad/{model:5s} ch{msg.channel + 1}  {midi_note_name(msg.note)} "
+                    f"Pad/{model:<10} ch{msg.channel + 1}  {midi_note_name(msg.note)} "
                     f"({msg.note})  vel {msg.velocity}"
                 )
                 self._q_put(("mod",))  # refresh DRUMS status line

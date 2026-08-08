@@ -58,17 +58,22 @@ Joystick Y still sends **CC1** = vibrato amount. PREV/NEXT jumps morph to a voic
 
 If a knob does nothing, check the event log for its CC number — your MPK program may differ.
 
-### Drum pads (channel 10)
+### Drum pads (channel 10) — all 16 MPK pads
 
-MPK drum pads no longer play pitched wavetable keys. They trigger **procedural analog-style hits** (Synsonics / TR-ish):
+MPK drum pads no longer play pitched wavetable keys. They trigger **procedural analog-style one-shots** (Synsonics / TR-ish).
 
-| Model | Typical GM notes |
-|-------|------------------|
-| kick | 35–36 |
-| snare | 38, 40 |
-| clap | 37, 39 |
-| tom | 41, 43, 45, 47, 48, 50 |
-| hat | 42, 44, 46 (open), 49, … |
+Factory MPC program (`Prog Select` → Pad 1): **Bank A = notes 36–43**, **Bank B = 44–51** (8 pads × 2 banks). Pads 1–4 are the bottom row L→R; 5–8 the top row.
+
+| Bank A note | Sound | Bank B note | Sound |
+|-------------|-------|-------------|-------|
+| 36 | kick | 44 | kick_tight |
+| 37 | snare | 45 | rimshot |
+| 38 | clap | 46 | shaker |
+| 39 | hat_closed | 47 | hat_pedal |
+| 40 | hat_open | 48 | tom_hi |
+| 41 | tom_lo | 49 | cowbell |
+| 42 | tom_mid | 50 | clave |
+| 43 | rim | 51 | ride |
 
 **Drum knobs** (after you hit a pad, for ~5s — or tap **DRUM KNOBS** to lock):
 
@@ -80,7 +85,7 @@ MPK drum pads no longer play pitched wavetable keys. They trigger **procedural a
 | 4 | 73 | Noise amount |
 | 8 | 77 | Master level (always) |
 
-Keyboard notes keep the wavetable morph synth. Pad aftertouch still trims the ringing hit.
+Keyboard notes keep the wavetable morph synth. Pad aftertouch still trims the ringing hit. If a pad program uses other note numbers, unknown notes still cycle through the 16 voices.
 
 ### Modes
 
