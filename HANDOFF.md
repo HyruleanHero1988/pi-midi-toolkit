@@ -18,7 +18,7 @@ Open this folder as the Cursor workspace.
 
 **Songs mode:** save looper takes as `.mid`, set BPM, play to local synth and/or USB MIDI out (DIN adapter). Files in `tools/midi-tone/songs/`.
 
-**Later (PLAN Phase 0b):** ch10 MPK pads → analog-style drum voices (pitch env, noise, decay/stretch), not pitched wavetable keys — Synsonics-ish toy drums.
+**Phase 0b (branch `cursor/midi-tone-drum-voices-1052`):** ch10 MPK pads → analog-style drum voices (kick/snare/tom/hat/clap; pitch / stretch / noise / tone knobs).
 
 Playing notes is intentional, not a throwaway diagnostic. Mapper stays required for when USB-DIN → hardware synth is available; same box / same UI shell.
 

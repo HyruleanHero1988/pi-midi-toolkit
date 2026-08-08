@@ -5,7 +5,7 @@ Hear and see MIDI from the **Akai MPK mini** on the Pi **without** USB-DIN or a 
 - Opens a MIDI input (prefers a port name containing `MPK`)
 - Note-on → wavetable tone through the Pi audio jack / HDMI
 - **Modes** (top right): **SYNTH**, **LOOPER**, **SONGS**, **PRESETS**, **LOG** — fully separate UIs
-- Synth: voices, A/B morph, knobs, live status
+- Synth: voices, A/B morph, knobs, live status; **MPK pads (ch10) = analog drum voices** (kick/snare/tom/hat/clap)
 - Looper: record a MIDI note sequence, play it on repeat
 - Songs: scrolling list of every `.mid` in `songs/`, tempo, play local and/or USB→DIN
 - Presets: 8 save slots + autosave last session (`settings.json`)
@@ -57,6 +57,30 @@ Factory **Prog Select → Pad 1** (MPC program) maps knobs to CC70–77:
 Joystick Y still sends **CC1** = vibrato amount. PREV/NEXT jumps morph to a voice; Knob 1 sweeps continuously between them.
 
 If a knob does nothing, check the event log for its CC number — your MPK program may differ.
+
+### Drum pads (channel 10)
+
+MPK drum pads no longer play pitched wavetable keys. They trigger **procedural analog-style hits** (Synsonics / TR-ish):
+
+| Model | Typical GM notes |
+|-------|------------------|
+| kick | 35–36 |
+| snare | 38, 40 |
+| clap | 37, 39 |
+| tom | 41, 43, 45, 47, 48, 50 |
+| hat | 42, 44, 46 (open), 49, … |
+
+**Drum knobs** (after you hit a pad, for ~5s — or tap **DRUM KNOBS** to lock):
+
+| Knob | CC | Drum control |
+|------|----|----------------|
+| 1 | 70 | Pitch / tune |
+| 2 | 71 | Noise brightness (tone) |
+| 3 | 72 | Stretch / decay length |
+| 4 | 73 | Noise amount |
+| 8 | 77 | Master level (always) |
+
+Keyboard notes keep the wavetable morph synth. Pad aftertouch still trims the ringing hit.
 
 ### Modes
 

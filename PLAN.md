@@ -31,7 +31,7 @@ todos:
     status: in_progress
   - id: drum-voices
     content: "Phase 0b (toy synth): ch10 pads use analog-style drum voices (pitch env, noise, decay/stretch) not pitched wavetable keys"
-    status: pending
+    status: in_progress
   - id: phrase-pads
     content: "Phase 3c (later): Phrases/Pads — grid of recorded MIDI phrases; launch via touch squares and MPK drum pads"
     status: pending
@@ -165,11 +165,10 @@ Started as: prove **MPK → Pi** with a tiny soft synth (no DIN required).
 
 This is still **not** MIDI-out thru. It’s the playable local mode of the appliance.
 
-### Phase 0b — Toy drum voices on MPK pads (later; soft-synth only)
+### Phase 0b — Toy drum voices on MPK pads (soft-synth; implementing)
 
-**Today:** channel-10 pad hits are the same wavetable voices as piano keys (only a bit louder / retrigger-friendly). That’s why pads feel like “notes,” not drums.
-
-**Wanted:** Synsonics-style / analog drum-machine character — drums as **short synthesized hits**, not sustained pitched oscillators. Real gear (Synsonics, TR-style, etc.) is usually pitched decay + noise + envelopes, not samples.
+**Was:** channel-10 pad hits were the same wavetable voices as piano keys.  
+**Now (branch `cursor/midi-tone-drum-voices-1052`):** Synsonics-style / analog drum-machine character — drums as **short synthesized hits**, not sustained pitched oscillators.
 
 | Piece | Approach |
 |-------|----------|
