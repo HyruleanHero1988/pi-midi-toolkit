@@ -102,6 +102,32 @@ Then double-click **MIDI Tone** on the desktop. If needed: right-click → **All
 
 **SSH note:** Tk needs a display. Prefer a terminal *on the Pi desktop*. Over SSH use `ssh -X ray@192.168.1.225` (X11 forwarding) if your PC has an X server.
 
+### Kiosk mode (no Pi desktop shell)
+
+Boots a minimal **X11 + Openbox** session that only runs midi-tone fullscreen (restart loop if it crashes). No wallpaper / panel / file manager.
+
+```bash
+cd ~/midi-tone
+sed -i 's/\r$//' *.sh kiosk/openbox/* kiosk/*.desktop
+chmod +x install-kiosk.sh kiosk.sh
+./install-kiosk.sh
+```
+
+Then:
+1. `sudo raspi-config` → **Advanced Options → Wayland → X11**
+2. `sudo raspi-config` → **System Options → Boot / Auto Login → Desktop Autologin**
+3. Choose session **MIDI Tone Kiosk** (install writes `~/.dmrc`)
+4. Reboot
+
+Manual test: `./kiosk.sh`  
+Logs: `/tmp/midi-tone-kiosk.log`
+
+Files:
+- `kiosk.sh` — session entry (Openbox + app restart loop + `--fullscreen`)
+- `kiosk/openbox/rc.xml` — undecorated maximized windows
+- `kiosk/midi-tone-kiosk.desktop` — X session definition
+- `install-kiosk.sh` — packages + session install
+
 ## On Windows (optional host test)
 
 ```powershell

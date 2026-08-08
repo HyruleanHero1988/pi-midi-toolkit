@@ -24,6 +24,8 @@ FILES = [
     "requirements.txt",
     "run.sh",
     "launch-desktop.sh",
+    "kiosk.sh",
+    "install-kiosk.sh",
     "setup-venv.sh",
     "install-desktop-shortcut.sh",
     "midi-tone.desktop",
@@ -33,9 +35,10 @@ FILES = [
     "calibrate-touch-y.sh",
 ]
 
-# Extra tree copied recursively (wavetable single-cycles + license)
+# Extra trees copied recursively
 DIRS = [
     "wavetables",
+    "kiosk",
 ]
 
 
@@ -111,20 +114,24 @@ def deploy(restart: bool) -> None:
                 if not local_dir.is_dir():
                     print(f"skip missing dir {dirname}")
                     continue
-                remote_subdir = f"{remote_dir}/{dirname}"
-                run(client, f"mkdir -p {remote_subdir}")
-                for path in sorted(local_dir.iterdir()):
-                    if not path.is_file():
+                # Create the whole tree once, then upload files
+                run(client, f"mkdir -p {remote_dir}/{dirname}")
+                for path in sorted(local_dir.rglob("*")):
+                    if path.is_dir():
+                        rel_dir = path.relative_to(HERE).as_posix()
+                        run(client, f"mkdir -p {remote_dir}/{rel_dir}", check=False)
                         continue
-                    remote_path = f"{remote_subdir}/{path.name}"
-                    print(f"put {dirname}/{path.name} -> {remote_path}")
+                    rel = path.relative_to(HERE).as_posix()
+                    remote_path = f"{remote_dir}/{rel}"
+                    print(f"put {rel} -> {remote_path}")
                     sftp.put(str(path), remote_path)
         finally:
             sftp.close()
 
         run(
             client,
-            f"sed -i 's/\\r$//' {remote_dir}/*.sh {remote_dir}/*.desktop 2>/dev/null; "
+            f"sed -i 's/\\r$//' {remote_dir}/*.sh {remote_dir}/*.desktop "
+            f"{remote_dir}/kiosk/*.desktop {remote_dir}/kiosk/openbox/* 2>/dev/null; "
             f"chmod +x {remote_dir}/*.sh {remote_dir}/fetch_akwf.py 2>/dev/null || true",
         )
         # Refresh menu/desktop launchers so they keep using the venv via run.sh

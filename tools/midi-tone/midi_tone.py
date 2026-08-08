@@ -863,6 +863,7 @@ class MidiToneApp:
         list_only: bool,
         max_voices: int,
         waves_dir: pathlib.Path,
+        fullscreen: bool = False,
     ) -> None:
         self.port_filter = port_filter.strip().lower()
         self.event_q: queue.Queue = queue.Queue(maxsize=EVENT_Q_MAX)
@@ -873,6 +874,7 @@ class MidiToneApp:
         self._stop = threading.Event()
         self._voice_names = self.engine.voice_names
         self._voice_index = 0
+        self._fullscreen = bool(fullscreen)
 
         if list_only:
             self._print_ports()
@@ -896,6 +898,16 @@ class MidiToneApp:
         self.root.geometry("800x420")
         self.root.configure(bg="#111111")
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+        if self._fullscreen:
+            # Kiosk: fill the screen (Openbox also forces maximize/fullscreen)
+            try:
+                self.root.attributes("-fullscreen", True)
+            except Exception:
+                try:
+                    self.root.attributes("-zoomed", True)
+                except Exception:
+                    self.root.state("zoomed")
+            print("ui: fullscreen", flush=True)
         self.root.update_idletasks()
 
         self.engine.start()
@@ -1972,6 +1984,11 @@ def main() -> None:
         default=DEFAULT_WAVETABLE_DIR,
         help="Directory of single-cycle WAV voices",
     )
+    parser.add_argument(
+        "--fullscreen",
+        action="store_true",
+        help="Fill the screen (used by kiosk.sh)",
+    )
     args = parser.parse_args()
 
     try:
@@ -1985,6 +2002,7 @@ def main() -> None:
         list_only=args.list,
         max_voices=args.voices,
         waves_dir=args.waves_dir,
+        fullscreen=args.fullscreen,
     )
     if not args.list:
         print("midi-tone: entering mainloop", flush=True)
