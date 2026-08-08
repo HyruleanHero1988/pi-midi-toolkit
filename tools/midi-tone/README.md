@@ -4,9 +4,10 @@ Hear and see MIDI from the **Akai MPK mini** on the Pi **without** USB-DIN or a 
 
 - Opens a MIDI input (prefers a port name containing `MPK`)
 - Note-on → wavetable tone through the Pi audio jack / HDMI
-- **Modes** (top right): **SYNTH**, **LOOPER**, **PRESETS**, **LOG** — fully separate UIs
+- **Modes** (top right): **SYNTH**, **LOOPER**, **SONGS**, **PRESETS**, **LOG** — fully separate UIs
 - Synth: voices, A/B morph, knobs, live status
 - Looper: record a MIDI note sequence, play it on repeat
+- Songs: save looper takes as `.mid`, set tempo, play to soft-synth and/or USB→DIN
 - Presets: 8 save slots + autosave last session (`settings.json`)
 - Log: full scrolling MIDI/event history
 - Bundled [Adventure Kid (AKWF)](https://github.com/KristofferKarlAxelEkstrand/AKWF-FREE) single-cycles (**CC0**) plus built-in sine/square/saw/triangle
@@ -63,11 +64,13 @@ Top-right tabs stay visible:
 
 - **SYNTH** — wavetable soft-synth, voice grid, morph pair
 - **LOOPER** — record MIDI notes, then play them back on a loop (free timing; notes only)
+- **SONGS** — Standard MIDI File slots: tempo, play local and/or USB→DIN
 - **PRESETS** — 8 touch slots: SAVE / LOAD / DELETE current sound + full-velocity
 - **LOG** — full event history (also has CLEAR / panic)
 
 Last session autosaves to `settings.json` (gitignored) every few seconds and on quit.
 Named slots live in `user-presets/slot-01.json` … `slot-08.json`.
+Song files live in `songs/song-01.mid` … `song-08.mid`.
 
 ### Looper
 
@@ -78,6 +81,16 @@ Named slots live in `user-presets/slot-01.json` … `slot-08.json`.
 5. **CLEAR** wipes the take
 
 Live playing still works while a loop runs. Voice/morph/knob settings from Synth apply to looped notes too.
+
+### Songs
+
+1. Record a take in **LOOPER**
+2. Open **SONGS**, pick a slot, tap **SAVE LOOP → SLOT**
+3. Set **BPM** (− / + / ±5); optional **SONG LOOP**
+4. **OUT:** cycle **LOCAL** (soft-synth) → **USB** (MIDI out / DIN adapter) → **BOTH**
+5. **PLAY** / **STOP**
+
+Song playback to USB is a file player path (not live thru remap). Plug the USB→DIN adapter when you want hardware out.
 
 ### Voices / wavetables
 

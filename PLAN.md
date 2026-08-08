@@ -24,8 +24,11 @@ todos:
     content: "Phase 2: per-pad/note auto-retrigger with configurable interval"
     status: pending
   - id: phrase-loop
-    content: "Phase 3: record note sequence → live loop; optional SMF export of takes/loops"
-    status: pending
+    content: "Phase 3a: live MIDI note looper in kiosk (done in midi-tone); overdub/quantize later"
+    status: in_progress
+  - id: songs-smf
+    content: "Phase 3b: Songs mode — save/load .mid, tempo, play to soft-synth and/or USB→DIN"
+    status: in_progress
   - id: arp
     content: "Phase 4 (optional distinct mode): key-relative step pattern transposed by held root"
     status: pending
@@ -45,7 +48,8 @@ isProject: false
 | Mode (UI) | Job |
 |-----------|-----|
 | **Synth** | Local wavetable soft-synth (what `tools/midi-tone` is becoming) |
-| **Looper** | Record/play MIDI note loops into that synth (and later into thru) |
+| **Looper** | Record/play free-timing MIDI note loops into that synth |
+| **Songs** | Save/load Standard MIDI Files (`.mid`); tempo; play to soft-synth and/or **USB→DIN** |
 | **Presets** | Save/load synth settings (JSON slots); last session autosaved |
 | **Map / Thru** | Channel / CC / velocity remap; ports; learn — drives the Rust engine |
 | **Log** | Event history / commissioning |
@@ -54,10 +58,11 @@ Boot path: `install-kiosk.sh` + X11 Openbox session (already started). No normal
 
 ### Architecture rule (still true)
 
-- **Rust `midi-engine`:** MIDI thru hot path only (ALSA in → transform → out). RT-friendly, no UI work.
-- **Kiosk UI (Tk today, still a separate process from the engine):** config + local soft-synth + transport. Talks to the engine over IPC/files when Map mode is active.
-- **UI never sits on the thru hot path.** Touching Map screens must not add jitter to DIN-out notes.
-- Soft-synth audio is allowed in Synth/Looper modes; that path is *not* the remap thru path.
+- **Rust `midi-engine`:** MIDI **thru/remap** hot path only (ALSA in → transform → out). RT-friendly, no UI work.
+- **Kiosk UI (Tk today, still a separate process from the engine):** config + local soft-synth + transport + **song file player**. Talks to the engine over IPC/files when Map mode is active.
+- **UI never sits on the thru hot path.** Touching Map screens must not add jitter to live thru notes.
+- Soft-synth audio is allowed in Synth/Looper/Songs (local preview); that path is *not* the remap thru path.
+- **Songs → DIN** is a *player* path (schedule `.mid` events out a USB MIDI port), not live thru. v1 may open MIDI out from the kiosk; later the engine can own the scheduler if we want RT priority / remap-on-playback.
 
 ### Why both
 
@@ -145,10 +150,11 @@ CME’s PC/Mac app **configures their USB MIDI interfaces**. Filters, routes, an
 Started as: prove **MPK → Pi** with a tiny soft synth (no DIN required).
 
 **Became the live product surface** in `tools/midi-tone`:
-- Wavetable voices, A/B morph, MPK knobs, modes (Synth / Looper / Presets / Log)
+- Wavetable voices, A/B morph, MPK knobs, modes (Synth / Looper / Songs / Presets / Log)
 - Kiosk session (`kiosk.sh` / Openbox) so the box boots into the UI
 - **Session autosave** → `tools/midi-tone/settings.json` (full velocity, voice, morph A/B, tone/level/attack/release/vib, etc.) every ~2s when dirty and on quit
 - **Named presets** → `tools/midi-tone/user-presets/slot-01.json` … `slot-08.json` (SAVE / LOAD / DELETE in PRESETS mode)
+- **Songs** → `tools/midi-tone/songs/song-XX.mid` with tempo + LOCAL/USB/BOTH out (see Phase 3b)
 
 This is still **not** MIDI-out thru. It’s the playable local mode of the appliance.
 
@@ -171,12 +177,26 @@ Engine side is largely built: JSON presets + SSH/CLI. Prove channel/CC/velocity 
 - Optional velocity of repeats (fixed / follow first hit / decay)
 - Hot path: note-on arms a slot; RT timer re-sends note-on/off pairs; note-off or second hit clears
 
-## Phase 3 — Phrase record / loop (+ SMF)
+## Phase 3a — Live phrase looper (kiosk; started)
 
-- **Record:** post-transform events into lock-free ring (what the synth heard)
-- **Loop:** promote buffer to a clip; RT scheduler repeats clip; overdub later if needed
-- **Transport:** Record / Stop / Play loop / Clear — big touch targets
-- **SMF:** export take or loop as `.mid` Type 0 offline (same capture path, file is a bonus)
+In `midi-tone` today: free-timing note record → loop into the soft-synth. Later: overdub, quantize, optional feed into thru/Songs.
+
+## Phase 3b — Songs / SMF player (cheap win; in progress)
+
+**Why it’s basically free:** `mido` is already a dependency; Standard MIDI Files are tiny; tempo is just scaling event wait times. No DSP, no sampling, no new hardware beyond the USB→DIN adapter you already want for Map.
+
+| Piece | Behavior |
+|-------|----------|
+| Library | `tools/midi-tone/songs/song-01.mid` … slots on disk (gitignored) |
+| Save | Export current **Looper** take → Type 0 `.mid` (also accept dropped-in files later) |
+| Play | Schedule note/CC events to **local soft-synth** and/or **USB MIDI out → DIN** |
+| Tempo | Touch BPM − / + (and show file’s native tempo); scales playback rate |
+| Transport | Play / Stop / optional song-loop; All Notes Off on stop |
+| Out target | `LOCAL` / `USB` / `BOTH` — pick DIN-ish output port by name when USB enabled |
+
+Not a DAW: no piano roll, no multi-track edit. Just “keep songs, set tempo, send them out the DIN.”
+
+**Engine note:** live remap thru stays in Rust. Song playback can start in the kiosk; if DIN playback needs RT scheduling or “play through the remap chain,” move the SMF clock into `midi-engine` and keep the UI as transport/library only.
 
 ## Phase 4 — Key-relative arpeggiator
 
@@ -284,7 +304,7 @@ flowchart LR
 - Synth mode is fun/usable on Pi 2; Map mode configures thru without a second app
 - Remap feels like a direct cable under UI abuse
 - Drum pads can roll at set per-pad rates without timing flubs
-- Record a phrase, loop it live, optionally save `.mid`
+- Record a phrase, loop it live, save/load `.mid` songs with tempo, play to soft-synth or USB→DIN
 - Dev loop is SSH/deploy-based; imaging is exceptional
 - No coupling to play-my-synth
 

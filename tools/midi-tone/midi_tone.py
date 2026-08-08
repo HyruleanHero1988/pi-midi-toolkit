@@ -57,6 +57,12 @@ DEFAULT_WAVETABLE_DIR = HERE / "wavetables"
 SETTINGS_PATH = HERE / "settings.json"
 PRESETS_DIR = HERE / "user-presets"
 PRESET_SLOTS = 8
+SONGS_DIR = HERE / "songs"
+SONG_SLOTS = 8
+DEFAULT_SONG_BPM = 120
+SONG_OUT_MODES = ("local", "usb", "both")
+# Prefer these substrings when auto-picking USB→DIN output
+SONG_OUT_PREFER = ("u2midi", "uxmidi", "hxmidi", "din", "usb midi", "midi out", "mio", "um-")
 SETTINGS_VERSION = 1
 
 # Akai MPK mini mk3 factory knobs (Prog Select → Pad 1 / MPC program): CC70–77
@@ -789,6 +795,10 @@ class MidiLooper:
             self._loop_len = 0.0
             self._recording = False
 
+    def snapshot(self) -> Tuple[List[LoopEvent], float]:
+        with self._lock:
+            return list(self._events), float(self._loop_len)
+
     def start_playback(self) -> bool:
         if self.is_recording():
             self.stop_record()
@@ -876,6 +886,398 @@ class MidiLooper:
                         self._playing = False
                     return
             self._release_held()
+        with self._lock:
+            self._playing = False
+
+
+def _sec_to_ticks(seconds: float, bpm: float, ticks_per_beat: int) -> int:
+    return max(0, int(round(float(seconds) * (float(bpm) / 60.0) * ticks_per_beat)))
+
+
+def looper_events_to_midifile(
+    events: List[LoopEvent],
+    loop_len: float,
+    bpm: float = DEFAULT_SONG_BPM,
+    ticks_per_beat: int = 480,
+) -> mido.MidiFile:
+    """Build a Type 0 SMF from free-timing looper note events."""
+    bpm = max(20.0, min(400.0, float(bpm)))
+    mid = mido.MidiFile(type=0, ticks_per_beat=ticks_per_beat)
+    track = mido.MidiTrack()
+    mid.tracks.append(track)
+    track.append(mido.MetaMessage("set_tempo", tempo=mido.bpm2tempo(bpm), time=0))
+    # At equal times, note-offs before note-ons (cleaner for chords / legato)
+    ordered = sorted(events, key=lambda e: (e.t, 0 if not e.on else 1))
+    last_tick = 0
+    for ev in ordered:
+        tick = _sec_to_ticks(ev.t, bpm, ticks_per_beat)
+        delta = max(0, tick - last_tick)
+        last_tick = tick
+        if ev.on:
+            track.append(
+                mido.Message(
+                    "note_on",
+                    channel=ev.channel & 0x0F,
+                    note=ev.note & 0x7F,
+                    velocity=max(1, min(127, int(ev.velocity))),
+                    time=delta,
+                )
+            )
+        else:
+            track.append(
+                mido.Message(
+                    "note_off",
+                    channel=ev.channel & 0x0F,
+                    note=ev.note & 0x7F,
+                    velocity=0,
+                    time=delta,
+                )
+            )
+    # Pad to loop length so re-import keeps the gap at the end
+    end_tick = _sec_to_ticks(max(loop_len, 0.0), bpm, ticks_per_beat)
+    pad = max(0, end_tick - last_tick)
+    track.append(mido.MetaMessage("end_of_track", time=pad))
+    return mid
+
+
+def _midifile_native_bpm(mid: mido.MidiFile) -> float:
+    for track in mid.tracks:
+        for msg in track:
+            if msg.type == "set_tempo":
+                return float(mido.tempo2bpm(msg.tempo))
+    return float(DEFAULT_SONG_BPM)
+
+
+def pick_song_output_name(prefer_substr: str = "") -> Optional[str]:
+    """Choose a USB MIDI out port for DIN playback (never a obvious virtual loopback)."""
+    try:
+        names = list(mido.get_output_names())
+    except Exception:
+        return None
+    if not names:
+        return None
+    prefer = prefer_substr.strip().lower()
+    lowered = [(n, n.lower()) for n in names]
+
+    def score(item: Tuple[str, str]) -> Tuple[int, str]:
+        name, low = item
+        s = 0
+        if prefer and prefer in low:
+            s += 100
+        for i, needle in enumerate(SONG_OUT_PREFER):
+            if needle in low:
+                s += 50 - i
+        if "through" in low or "midi through" in low:
+            s -= 40
+        if "mpk" in low:
+            s -= 20  # controller ports are usually inputs; still de-prioritize
+        return (-s, name)
+
+    lowered.sort(key=score)
+    return lowered[0][0]
+
+
+class SongPlayer:
+    """Play a Standard MIDI File into the soft-synth and/or a USB MIDI out port."""
+
+    def __init__(self, engine: "SineEngine", emit) -> None:
+        self._engine = engine
+        self._emit = emit
+        self._lock = threading.Lock()
+        self._events: List[Tuple[float, mido.Message]] = []
+        self._file_bpm = float(DEFAULT_SONG_BPM)
+        self._bpm = float(DEFAULT_SONG_BPM)
+        self._path: Optional[pathlib.Path] = None
+        self._playing = False
+        self._loop = False
+        self._out_mode = "local"  # local | usb | both
+        self._outport: Optional[Any] = None
+        self._out_name: Optional[str] = None
+        self._stop_play = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+        self._held: set[Tuple[int, int]] = set()
+
+    def is_playing(self) -> bool:
+        with self._lock:
+            return self._playing
+
+    def path(self) -> Optional[pathlib.Path]:
+        with self._lock:
+            return self._path
+
+    def bpm(self) -> float:
+        with self._lock:
+            return self._bpm
+
+    def file_bpm(self) -> float:
+        with self._lock:
+            return self._file_bpm
+
+    def loop_enabled(self) -> bool:
+        with self._lock:
+            return self._loop
+
+    def set_loop(self, enabled: bool) -> None:
+        with self._lock:
+            self._loop = bool(enabled)
+
+    def out_mode(self) -> str:
+        with self._lock:
+            return self._out_mode
+
+    def set_out_mode(self, mode: str) -> None:
+        mode = mode if mode in SONG_OUT_MODES else "local"
+        with self._lock:
+            self._out_mode = mode
+
+    def out_port_name(self) -> Optional[str]:
+        with self._lock:
+            return self._out_name
+
+    def event_count(self) -> int:
+        with self._lock:
+            return len(self._events)
+
+    def duration(self) -> float:
+        with self._lock:
+            if not self._events:
+                return 0.0
+            return float(self._events[-1][0])
+
+    def status(self) -> Dict[str, object]:
+        with self._lock:
+            return {
+                "playing": self._playing,
+                "bpm": self._bpm,
+                "file_bpm": self._file_bpm,
+                "loop": self._loop,
+                "out_mode": self._out_mode,
+                "out_name": self._out_name,
+                "events": len(self._events),
+                "duration": self._events[-1][0] if self._events else 0.0,
+                "path": str(self._path) if self._path else None,
+            }
+
+    def set_bpm(self, bpm: float) -> None:
+        with self._lock:
+            self._bpm = max(20.0, min(400.0, float(bpm)))
+
+    def nudge_bpm(self, delta: float) -> float:
+        with self._lock:
+            self._bpm = max(20.0, min(400.0, self._bpm + float(delta)))
+            return self._bpm
+
+    def clear(self) -> None:
+        self.stop()
+        with self._lock:
+            self._events = []
+            self._path = None
+            self._file_bpm = float(DEFAULT_SONG_BPM)
+
+    def load(self, path: pathlib.Path) -> bool:
+        self.stop()
+        try:
+            mid = mido.MidiFile(str(path))
+        except Exception as exc:
+            print(f"song load failed ({path}): {exc}", flush=True)
+            return False
+        file_bpm = _midifile_native_bpm(mid)
+        timed: List[Tuple[float, mido.Message]] = []
+        t = 0.0
+        try:
+            for msg in mid:
+                t += float(msg.time)
+                if msg.is_meta:
+                    continue
+                if msg.type in (
+                    "note_on",
+                    "note_off",
+                    "control_change",
+                    "program_change",
+                    "pitchwheel",
+                    "aftertouch",
+                    "polytouch",
+                ):
+                    timed.append((t, msg.copy(time=0)))
+        except Exception as exc:
+            print(f"song parse failed ({path}): {exc}", flush=True)
+            return False
+        with self._lock:
+            self._events = timed
+            self._path = path
+            self._file_bpm = file_bpm
+            # Keep user tempo unless this is the first load this session
+            if self._bpm <= 0:
+                self._bpm = file_bpm
+        return True
+
+    def ensure_outport(self, prefer_substr: str = "") -> Optional[str]:
+        """Open (or keep) a MIDI output port. Returns port name or None."""
+        with self._lock:
+            if self._outport is not None and self._out_name:
+                return self._out_name
+        name = pick_song_output_name(prefer_substr)
+        if not name:
+            return None
+        try:
+            port = mido.open_output(name)
+        except Exception as exc:
+            print(f"song MIDI out open failed ({name}): {exc}", flush=True)
+            return None
+        with self._lock:
+            self._outport = port
+            self._out_name = name
+        return name
+
+    def close_outport(self) -> None:
+        with self._lock:
+            port = self._outport
+            self._outport = None
+            self._out_name = None
+        if port is not None:
+            try:
+                port.close()
+            except Exception:
+                pass
+
+    def start(self) -> bool:
+        with self._lock:
+            if not self._events:
+                return False
+            if self._playing:
+                return True
+            mode = self._out_mode
+        if mode in ("usb", "both"):
+            if not self.ensure_outport():
+                if mode == "usb":
+                    return False
+        with self._lock:
+            self._playing = True
+            self._stop_play.clear()
+        self._thread = threading.Thread(target=self._play_loop, daemon=True)
+        self._thread.start()
+        return True
+
+    def stop(self) -> None:
+        self._stop_play.set()
+        thread = self._thread
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=1.5)
+        self._thread = None
+        with self._lock:
+            self._playing = False
+        self._release_held(send_midi=True)
+
+    def toggle(self) -> bool:
+        if self.is_playing():
+            self.stop()
+            return False
+        return self.start()
+
+    def _want_local(self) -> bool:
+        with self._lock:
+            return self._out_mode in ("local", "both")
+
+    def _want_usb(self) -> bool:
+        with self._lock:
+            return self._out_mode in ("usb", "both")
+
+    def _release_held(self, *, send_midi: bool) -> None:
+        held = list(self._held)
+        self._held.clear()
+        for ch, note in held:
+            if self._want_local():
+                try:
+                    self._engine.note_off(ch, note)
+                except Exception:
+                    pass
+                try:
+                    self._emit(("off", ch, note))
+                except Exception:
+                    pass
+            if send_midi and self._want_usb():
+                port = self._outport
+                if port is not None:
+                    try:
+                        port.send(mido.Message("note_off", channel=ch, note=note, velocity=0))
+                    except Exception:
+                        pass
+        if send_midi and self._want_usb():
+            port = self._outport
+            if port is not None:
+                for ch in range(16):
+                    try:
+                        port.send(mido.Message("control_change", channel=ch, control=123, value=0))
+                    except Exception:
+                        pass
+
+    def _dispatch(self, msg: mido.Message) -> None:
+        local = self._want_local()
+        usb = self._want_usb()
+        if usb:
+            port = self._outport
+            if port is not None:
+                try:
+                    port.send(msg)
+                except Exception:
+                    pass
+        if not local:
+            return
+        if msg.type == "note_on":
+            if msg.velocity <= 0:
+                self._engine.note_off(msg.channel, msg.note)
+                self._held.discard((msg.channel, msg.note))
+                self._emit(("off", msg.channel, msg.note))
+            else:
+                self._engine.note_on(msg.channel, msg.note, msg.velocity)
+                self._held.add((msg.channel, msg.note))
+                self._emit(("on", msg.channel, msg.note, msg.velocity))
+        elif msg.type == "note_off":
+            self._engine.note_off(msg.channel, msg.note)
+            self._held.discard((msg.channel, msg.note))
+            self._emit(("off", msg.channel, msg.note))
+        elif msg.type == "control_change":
+            # Soft-synth only understands a few CCs via the live path; ignore here.
+            pass
+        elif msg.type == "pitchwheel":
+            try:
+                self._engine.set_pitch_bend(msg.pitch)
+            except Exception:
+                pass
+
+    def _play_loop(self) -> None:
+        while not self._stop_play.is_set():
+            with self._lock:
+                events = list(self._events)
+                bpm = self._bpm
+                file_bpm = self._file_bpm
+                loop = self._loop
+            if not events:
+                break
+            # Scale file-native seconds so user BPM matches musical intent
+            scale = (file_bpm / bpm) if bpm > 1e-6 else 1.0
+            t0 = time.monotonic()
+            self._release_held(send_midi=True)
+            for abs_t, msg in events:
+                if self._stop_play.is_set():
+                    self._release_held(send_midi=True)
+                    with self._lock:
+                        self._playing = False
+                    return
+                target = t0 + abs_t * scale
+                while True:
+                    remain = target - time.monotonic()
+                    if remain <= 0:
+                        break
+                    if self._stop_play.wait(min(0.003, remain)):
+                        self._release_held(send_midi=True)
+                        with self._lock:
+                            self._playing = False
+                        return
+                self._dispatch(msg)
+            if not loop or self._stop_play.is_set():
+                break
+        self._release_held(send_midi=True)
         with self._lock:
             self._playing = False
 
@@ -976,9 +1378,10 @@ class MidiToneApp:
         self._morph_side_btns: Dict[str, tk.Button] = {}
         self._morph_grid_btns: Dict[str, tk.Button] = {}
         self._morph_status_lbl: Optional[tk.Label] = None
-        self._mode = "synth"  # synth | looper | log | presets
+        self._mode = "synth"  # synth | looper | songs | log | presets
         self._mode_btns: Dict[str, tk.Button] = {}
         self._looper = MidiLooper(self.engine, self._q_put)
+        self._songs = SongPlayer(self.engine, self._q_put)
         self._loop_status_var = tk.StringVar(value="Loop empty — tap RECORD, play notes, STOP, then PLAY.")
         self._loop_rec_btn: Optional[tk.Button] = None
         self._loop_play_btn: Optional[tk.Button] = None
@@ -986,6 +1389,15 @@ class MidiToneApp:
         self._preset_slot = 0
         self._preset_slot_btns: Dict[int, tk.Button] = {}
         self._active_preset_name: Optional[str] = None
+        self._song_status_var = tk.StringVar(
+            value="Songs: save a looper take, set tempo, play local or USB→DIN."
+        )
+        self._song_slot = 0
+        self._song_slot_btns: Dict[int, tk.Button] = {}
+        self._song_play_btn: Optional[tk.Button] = None
+        self._song_out_btn: Optional[tk.Button] = None
+        self._song_loop_btn: Optional[tk.Button] = None
+        self._song_bpm_lbl: Optional[tk.Label] = None
         self._settings_dirty = False
         self._suppress_autosave = False
 
@@ -1001,14 +1413,15 @@ class MidiToneApp:
         for key, label in (
             ("synth", "SYNTH"),
             ("looper", "LOOPER"),
+            ("songs", "SONGS"),
             ("presets", "PRESETS"),
             ("log", "LOG"),
         ):
             btn = self._mk_touch_btn(
                 nav_modes, label, lambda m=key: self._switch_mode(m), bg="#3c3836"
             )
-            btn.configure(font=("DejaVu Sans", 12, "bold"), pady=8, padx=10)
-            btn.pack(side=tk.LEFT, padx=2)
+            btn.configure(font=("DejaVu Sans", 11, "bold"), pady=8, padx=6)
+            btn.pack(side=tk.LEFT, padx=1)
             self._mode_btns[key] = btn
 
         # Mode content host
@@ -1017,6 +1430,7 @@ class MidiToneApp:
 
         self._synth_shell = tk.Frame(self._mode_host, bg="#111111")
         self._looper_shell = tk.Frame(self._mode_host, bg="#111111")
+        self._songs_shell = tk.Frame(self._mode_host, bg="#111111")
         self._presets_shell = tk.Frame(self._mode_host, bg="#111111")
         self._log_shell = tk.Frame(self._mode_host, bg="#111111")
 
@@ -1118,6 +1532,7 @@ class MidiToneApp:
             self.engine.set_morph_pair(0, 1, morph=0.0)
 
         self._build_looper_mode()
+        self._build_songs_mode()
         self._build_presets_mode()
         self._build_log_mode()
         self._switch_mode("synth")
@@ -1126,6 +1541,8 @@ class MidiToneApp:
         restored = self._load_settings_file(SETTINGS_PATH)
         self._paint_full_vel_btn()
         self._sync_voice_index_from_morph()
+        self._paint_song_slots()
+        self._refresh_song_status()
         if self._voice_lbl is not None:
             self._voice_lbl.configure(text=self._voice_label_text())
         self.mod_var.set(self._format_mod_line())
@@ -1136,7 +1553,7 @@ class MidiToneApp:
             "MPK knobs (CC70–77): morph / tone / attack / release / "
             "vib depth / vib rate / — / level"
         )
-        self._append_log("Modes: SYNTH / LOOPER / PRESETS / LOG (top right).")
+        self._append_log("Modes: SYNTH / LOOPER / SONGS / PRESETS / LOG (top right).")
         if restored:
             self._append_log(f"Restored session from {SETTINGS_PATH.name}")
         else:
@@ -1144,6 +1561,7 @@ class MidiToneApp:
         self._append_log("If knobs do nothing: Prog Select + Pad 1 (MPC program).")
         print("ui: construction complete", flush=True)
         PRESETS_DIR.mkdir(parents=True, exist_ok=True)
+        SONGS_DIR.mkdir(parents=True, exist_ok=True)
         self.root.after(2000, self._autosave_tick)
 
     def _voice_label_text(self) -> str:
@@ -1177,6 +1595,12 @@ class MidiToneApp:
             "full_velocity": bool(self._full_vel),
             "active_preset": self._active_preset_name,
             "synth": self.engine.snapshot_settings(),
+            "songs": {
+                "slot": int(self._song_slot),
+                "bpm": float(self._songs.bpm()),
+                "loop": bool(self._songs.loop_enabled()),
+                "out_mode": self._songs.out_mode(),
+            },
         }
 
     def _apply_session_dict(self, data: Dict[str, Any]) -> None:
@@ -1190,6 +1614,22 @@ class MidiToneApp:
             synth = data.get("synth")
             if isinstance(synth, dict):
                 self.engine.apply_settings(synth)
+            songs = data.get("songs")
+            if isinstance(songs, dict):
+                if "slot" in songs:
+                    self._song_slot = max(0, min(SONG_SLOTS - 1, int(songs["slot"])))
+                if "bpm" in songs:
+                    self._songs.set_bpm(float(songs["bpm"]))
+                if "loop" in songs:
+                    self._songs.set_loop(bool(songs["loop"]))
+                if "out_mode" in songs:
+                    self._songs.set_out_mode(str(songs["out_mode"]))
+                # Reload selected slot file if present (tempo already applied)
+                path = self._song_path(self._song_slot)
+                if path.is_file():
+                    self._songs.load(path)
+                    if "bpm" in songs:
+                        self._songs.set_bpm(float(songs["bpm"]))
             self._settings_dirty = False
         finally:
             self._suppress_autosave = False
@@ -1239,6 +1679,326 @@ class MidiToneApp:
 
     def _preset_path(self, slot: int) -> pathlib.Path:
         return PRESETS_DIR / f"slot-{slot + 1:02d}.json"
+
+    def _song_path(self, slot: int) -> pathlib.Path:
+        return SONGS_DIR / f"song-{slot + 1:02d}.mid"
+
+    def _build_songs_mode(self) -> None:
+        shell = self._songs_shell
+        for w in shell.winfo_children():
+            w.destroy()
+        SONGS_DIR.mkdir(parents=True, exist_ok=True)
+
+        header = tk.Frame(shell, bg="#111111")
+        header.pack(fill=tk.X, padx=8, pady=(10, 4))
+        tk.Label(
+            header, text="Songs", font=("DejaVu Sans", 18, "bold"),
+            fg="#fbf1c7", bg="#111111",
+        ).pack(side=tk.LEFT)
+        bpm_row = tk.Frame(header, bg="#111111")
+        bpm_row.pack(side=tk.RIGHT)
+        self._mk_touch_btn(bpm_row, "BPM −", lambda: self._song_nudge_bpm(-1), bg="#3c3836").pack(
+            side=tk.LEFT, padx=2, ipady=4
+        )
+        self._song_bpm_lbl = tk.Label(
+            bpm_row,
+            text=self._song_bpm_label(),
+            font=("DejaVu Sans", 14, "bold"),
+            fg="#fabd2f",
+            bg="#111111",
+            padx=8,
+        )
+        self._song_bpm_lbl.pack(side=tk.LEFT)
+        self._mk_touch_btn(bpm_row, "BPM +", lambda: self._song_nudge_bpm(1), bg="#3c3836").pack(
+            side=tk.LEFT, padx=2, ipady=4
+        )
+        self._mk_touch_btn(bpm_row, "−5", lambda: self._song_nudge_bpm(-5), bg="#3c3836").pack(
+            side=tk.LEFT, padx=2, ipady=4
+        )
+        self._mk_touch_btn(bpm_row, "+5", lambda: self._song_nudge_bpm(5), bg="#3c3836").pack(
+            side=tk.LEFT, padx=2, ipady=4
+        )
+
+        status = tk.Label(
+            shell, textvariable=self._song_status_var,
+            font=("DejaVu Sans", 13, "bold"),
+            fg="#fabd2f", bg="#111111",
+            wraplength=760, justify=tk.LEFT, anchor="w",
+        )
+        status.pack(fill=tk.X, padx=10, pady=(4, 8))
+
+        grid = tk.Frame(shell, bg="#111111")
+        grid.pack(fill=tk.BOTH, expand=True, padx=8, pady=4)
+        self._song_slot_btns = {}
+        cols = 4
+        for i in range(SONG_SLOTS):
+            r, c = divmod(i, cols)
+            btn = self._mk_touch_btn(
+                grid,
+                self._song_slot_label(i),
+                lambda idx=i: self._select_song_slot(idx),
+                bg="#3c3836",
+            )
+            btn.configure(font=("DejaVu Sans", 12, "bold"), pady=14)
+            btn.grid(row=r, column=c, sticky="nsew", padx=3, pady=3, ipady=4)
+            self._song_slot_btns[i] = btn
+        for c in range(cols):
+            grid.grid_columnconfigure(c, weight=1)
+        for r in range((SONG_SLOTS + cols - 1) // cols):
+            grid.grid_rowconfigure(r, weight=1)
+
+        row_a = tk.Frame(shell, bg="#111111")
+        row_a.pack(fill=tk.X, padx=8, pady=(6, 4))
+        self._song_play_btn = self._mk_touch_btn(
+            row_a, "PLAY", self._song_toggle_play, bg="#689d6a"
+        )
+        self._song_play_btn.pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=14)
+        self._mk_touch_btn(row_a, "STOP", self._song_stop, bg="#d79921").pack(
+            side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=14
+        )
+
+        row_b = tk.Frame(shell, bg="#111111")
+        row_b.pack(fill=tk.X, padx=8, pady=4)
+        self._mk_touch_btn(
+            row_b, "SAVE LOOP → SLOT", self._song_save_from_looper, bg="#458588"
+        ).pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=12)
+        self._mk_touch_btn(row_b, "DELETE", self._song_delete_selected, bg="#9d0006").pack(
+            side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=12
+        )
+
+        row_c = tk.Frame(shell, bg="#111111")
+        row_c.pack(fill=tk.X, padx=8, pady=(4, 10))
+        self._song_out_btn = self._mk_touch_btn(
+            row_c, "OUT: LOCAL", self._song_cycle_out_mode, bg="#3c3836"
+        )
+        self._song_out_btn.pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=10)
+        self._song_loop_btn = self._mk_touch_btn(
+            row_c, "SONG LOOP: OFF", self._song_toggle_loop, bg="#3c3836"
+        )
+        self._song_loop_btn.pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=10)
+
+        tip = tk.Label(
+            shell,
+            text="Record in LOOPER → SAVE LOOP here. USB/BOTH needs a USB→DIN adapter selected as MIDI out.",
+            font=("DejaVu Sans", 11),
+            fg="#a89984",
+            bg="#111111",
+            wraplength=760,
+            justify=tk.LEFT,
+            anchor="w",
+        )
+        tip.pack(fill=tk.X, padx=10, pady=(0, 8))
+        self._paint_song_slots()
+        self._paint_song_controls()
+        self._refresh_song_status()
+
+    def _song_bpm_label(self) -> str:
+        return f"{int(round(self._songs.bpm()))} BPM"
+
+    def _song_slot_label(self, slot: int) -> str:
+        path = self._song_path(slot)
+        if path.is_file():
+            try:
+                mid = mido.MidiFile(str(path))
+                bpm = _midifile_native_bpm(mid)
+                n = sum(1 for tr in mid.tracks for m in tr if m.type == "note_on" and m.velocity > 0)
+                return f"{slot + 1}\n{path.stem}\n{int(bpm)}bpm · {n}n"
+            except Exception:
+                return f"{slot + 1}\n{path.stem}\n(saved)"
+        return f"{slot + 1}\nEMPTY"
+
+    def _select_song_slot(self, slot: int) -> None:
+        self._song_slot = max(0, min(SONG_SLOTS - 1, slot))
+        path = self._song_path(self._song_slot)
+        if path.is_file():
+            if self._songs.load(path):
+                self._append_log(f"Song loaded: {path.name}")
+            else:
+                self._song_status_var.set(f"Failed to load {path.name}")
+                self._paint_song_slots()
+                return
+        else:
+            self._songs.clear()
+        self._mark_settings_dirty()
+        self._paint_song_slots()
+        self._paint_song_controls()
+        self._refresh_song_status()
+
+    def _paint_song_slots(self) -> None:
+        for i, btn in self._song_slot_btns.items():
+            exists = self._song_path(i).is_file()
+            selected = i == self._song_slot
+            if selected:
+                color = "#b16286"
+            elif exists:
+                color = "#458588"
+            else:
+                color = "#3c3836"
+            btn.configure(
+                text=self._song_slot_label(i),
+                bg=color,
+                activebackground=color,
+            )
+
+    def _paint_song_controls(self) -> None:
+        if self._song_bpm_lbl is not None:
+            self._song_bpm_lbl.configure(text=self._song_bpm_label())
+        if self._song_play_btn is not None:
+            if self._songs.is_playing():
+                self._song_play_btn.configure(
+                    text="■ STOP", bg="#d79921", activebackground="#d79921"
+                )
+            else:
+                self._song_play_btn.configure(
+                    text="PLAY", bg="#689d6a", activebackground="#689d6a"
+                )
+        if self._song_out_btn is not None:
+            mode = self._songs.out_mode().upper()
+            colors = {"LOCAL": "#3c3836", "USB": "#458588", "BOTH": "#689d6a"}
+            color = colors.get(mode, "#3c3836")
+            self._song_out_btn.configure(
+                text=f"OUT: {mode}", bg=color, activebackground=color
+            )
+        if self._song_loop_btn is not None:
+            if self._songs.loop_enabled():
+                self._song_loop_btn.configure(
+                    text="SONG LOOP: ON", bg="#689d6a", activebackground="#689d6a"
+                )
+            else:
+                self._song_loop_btn.configure(
+                    text="SONG LOOP: OFF", bg="#3c3836", activebackground="#3c3836"
+                )
+
+    def _refresh_song_status(self) -> None:
+        st = self._songs.status()
+        path = st.get("path")
+        name = pathlib.Path(str(path)).name if path else f"slot {self._song_slot + 1} (empty)"
+        out = str(st["out_mode"]).upper()
+        out_name = st.get("out_name") or "—"
+        if st["playing"]:
+            msg = (
+                f"▶ PLAYING {name}  @ {int(round(float(st['bpm'])))} BPM  "
+                f"(file {int(round(float(st['file_bpm'])))})  out={out} ({out_name})"
+            )
+        elif int(st["events"]) == 0:
+            msg = (
+                f"{name} empty — record in LOOPER, then SAVE LOOP → SLOT. "
+                f"Tempo {int(round(float(st['bpm'])))} BPM · out={out}"
+            )
+        else:
+            msg = (
+                f"Ready {name}  {float(st['duration']):.1f}s · {st['events']} ev  "
+                f"@ {int(round(float(st['bpm'])))} BPM (file {int(round(float(st['file_bpm'])))})  "
+                f"out={out}"
+            )
+        self._song_status_var.set(msg)
+        self._paint_song_controls()
+
+    def _song_nudge_bpm(self, delta: float) -> None:
+        self._songs.nudge_bpm(delta)
+        self._mark_settings_dirty()
+        self._refresh_song_status()
+
+    def _song_toggle_loop(self) -> None:
+        self._songs.set_loop(not self._songs.loop_enabled())
+        self._mark_settings_dirty()
+        self._refresh_song_status()
+
+    def _song_cycle_out_mode(self) -> None:
+        cur = self._songs.out_mode()
+        try:
+            idx = SONG_OUT_MODES.index(cur)
+        except ValueError:
+            idx = 0
+        nxt = SONG_OUT_MODES[(idx + 1) % len(SONG_OUT_MODES)]
+        self._songs.set_out_mode(nxt)
+        if nxt in ("usb", "both"):
+            name = self._songs.ensure_outport()
+            if name:
+                self._append_log(f"Song MIDI out: {name}")
+            else:
+                self._append_log("Song MIDI out: no output port found")
+                if nxt == "usb":
+                    self._song_status_var.set(
+                        "No USB MIDI out found — plug USB→DIN (or set OUT to LOCAL)."
+                    )
+                    self._paint_song_controls()
+                    self._mark_settings_dirty()
+                    return
+        self._mark_settings_dirty()
+        self._refresh_song_status()
+
+    def _song_toggle_play(self) -> None:
+        if self._songs.is_playing():
+            self._songs.stop()
+            self._q_put(("log", "Song PLAY stop", False))
+        else:
+            # Prefer loaded slot; reload from disk if needed
+            path = self._song_path(self._song_slot)
+            if self._songs.event_count() == 0 and path.is_file():
+                self._songs.load(path)
+            if not self._songs.start():
+                mode = self._songs.out_mode()
+                if mode == "usb":
+                    self._q_put(("log", "Song PLAY failed — no USB MIDI out", False))
+                else:
+                    self._q_put(("log", "Song empty — SAVE LOOP first", False))
+            else:
+                self._q_put(("log", "Song PLAY start", False))
+        self._q_put(("song",))
+        self._refresh_song_status()
+
+    def _song_stop(self) -> None:
+        if self._songs.is_playing():
+            self._songs.stop()
+            self._q_put(("log", "Song STOP", False))
+            self._q_put(("song",))
+        self._refresh_song_status()
+
+    def _song_save_from_looper(self) -> None:
+        events, loop_len = self._looper.snapshot()
+        if not events or loop_len <= 0.0:
+            self._song_status_var.set("Looper is empty — record something in LOOPER first.")
+            return
+        if self._songs.is_playing():
+            self._songs.stop()
+        path = self._song_path(self._song_slot)
+        bpm = self._songs.bpm()
+        try:
+            SONGS_DIR.mkdir(parents=True, exist_ok=True)
+            mid = looper_events_to_midifile(events, loop_len, bpm=bpm)
+            tmp = path.with_suffix(".mid.tmp")
+            mid.save(str(tmp))
+            tmp.replace(path)
+            self._songs.load(path)
+            self._songs.set_bpm(bpm)
+            self._mark_settings_dirty()
+            self._save_settings_file(SETTINGS_PATH, quiet=True)
+            self._paint_song_slots()
+            self._refresh_song_status()
+            self._append_log(f"Song saved: {path.name} ({len(events)} events @ {int(bpm)} BPM)")
+            self._song_status_var.set(f"Saved looper → {path.name}")
+        except Exception as exc:
+            self._song_status_var.set(f"Save failed: {exc}")
+            self._append_log(f"Song SAVE error: {exc}")
+
+    def _song_delete_selected(self) -> None:
+        path = self._song_path(self._song_slot)
+        if self._songs.is_playing():
+            self._songs.stop()
+        if not path.is_file():
+            self._song_status_var.set(f"Slot {self._song_slot + 1} already empty.")
+            return
+        try:
+            path.unlink()
+            self._songs.clear()
+            self._mark_settings_dirty()
+            self._paint_song_slots()
+            self._refresh_song_status()
+            self._append_log(f"Song deleted: {path.name}")
+            self._song_status_var.set(f"Deleted {path.name}")
+        except Exception as exc:
+            self._song_status_var.set(f"Delete failed: {exc}")
 
     def _build_presets_mode(self) -> None:
         shell = self._presets_shell
@@ -1512,7 +2272,7 @@ class MidiToneApp:
         self._paint_looper_buttons()
 
     def _switch_mode(self, mode: str) -> None:
-        mode = mode if mode in ("synth", "looper", "log", "presets") else "synth"
+        mode = mode if mode in ("synth", "looper", "songs", "log", "presets") else "synth"
         # Close synth-only overlays before swapping shells
         if self._grid_open:
             self._close_voice_grid(restore_main=False)
@@ -1522,6 +2282,7 @@ class MidiToneApp:
         self._mode = mode
         self._synth_shell.pack_forget()
         self._looper_shell.pack_forget()
+        self._songs_shell.pack_forget()
         self._presets_shell.pack_forget()
         self._log_shell.pack_forget()
         if self._grid_frame is not None:
@@ -1532,6 +2293,10 @@ class MidiToneApp:
         if mode == "looper":
             self._looper_shell.pack(fill=tk.BOTH, expand=True)
             self._refresh_loop_status()
+        elif mode == "songs":
+            self._songs_shell.pack(fill=tk.BOTH, expand=True)
+            self._paint_song_slots()
+            self._refresh_song_status()
         elif mode == "presets":
             self._presets_shell.pack(fill=tk.BOTH, expand=True)
             self._paint_preset_slots()
@@ -2207,6 +2972,8 @@ class MidiToneApp:
                     self._refresh_active()
                 elif kind == "loop":
                     self._refresh_loop_status()
+                elif kind == "song":
+                    self._refresh_song_status()
         except queue.Empty:
             pass
         pending = getattr(self, "_pending_cont_log", None)
@@ -2257,10 +3024,13 @@ class MidiToneApp:
     def _panic(self) -> None:
         if self._looper.is_playing():
             self._looper.stop_playback()
+        if self._songs.is_playing():
+            self._songs.stop()
         self.engine.all_notes_off()
         self._active_notes.clear()
         self._refresh_active()
         self._refresh_loop_status()
+        self._refresh_song_status()
         self._append_log("All Notes Off")
 
     def _on_close(self) -> None:
@@ -2268,6 +3038,11 @@ class MidiToneApp:
         try:
             self._looper.stop_playback()
             self._looper.stop_record()
+        except Exception:
+            pass
+        try:
+            self._songs.stop()
+            self._songs.close_outport()
         except Exception:
             pass
         try:
