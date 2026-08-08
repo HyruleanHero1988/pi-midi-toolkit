@@ -14,6 +14,7 @@ Open this folder as the Cursor workspace.
 
 - **Synth / Looper / Songs / Presets / Log** — live in `tools/midi-tone` (soft-synth, JSON presets, SMF songs)
 - **Map / Thru** — not in the kiosk yet; Rust `midi-engine` already does remap via CLI/JSON
+- **Phrases / Pads** *(later)* — clip-launch grid of recorded MIDI phrases; see PLAN.md Phase 3c
 
 **Songs mode:** save looper takes as `.mid`, set BPM, play to local synth and/or USB MIDI out (DIN adapter). Files in `tools/midi-tone/songs/`.
 

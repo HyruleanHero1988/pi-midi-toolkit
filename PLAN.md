@@ -29,6 +29,9 @@ todos:
   - id: songs-smf
     content: "Phase 3b: Songs mode — save/load .mid, tempo, play to soft-synth and/or USB→DIN"
     status: in_progress
+  - id: phrase-pads
+    content: "Phase 3c (later): Phrases/Pads — grid of cells each holding a recorded MIDI phrase; tap to launch"
+    status: pending
   - id: arp
     content: "Phase 4 (optional distinct mode): key-relative step pattern transposed by held root"
     status: pending
@@ -50,6 +53,7 @@ isProject: false
 | **Synth** | Local wavetable soft-synth (what `tools/midi-tone` is becoming) |
 | **Looper** | Record/play free-timing MIDI note loops into that synth |
 | **Songs** | Save/load Standard MIDI Files (`.mid`); tempo; play to soft-synth and/or **USB→DIN** |
+| **Phrases / Pads** *(later)* | Grid of cells; each holds a recorded MIDI phrase; tap a square to launch it |
 | **Presets** | Save/load synth settings (JSON slots); last session autosaved |
 | **Map / Thru** | Channel / CC / velocity remap; ports; learn — drives the Rust engine |
 | **Log** | Event history / commissioning |
@@ -200,11 +204,27 @@ Not a DAW: no piano roll, no multi-track edit. Just “keep songs, set tempo, se
 
 **Engine note:** live remap thru stays in Rust. Song playback can start in the kiosk; if DIN playback needs RT scheduling or “play through the remap chain,” move the SMF clock into `midi-engine` and keep the UI as transport/library only.
 
+## Phase 3c — Phrases / Pads (clip-launch grid; later)
+
+**Idea (parked):** a touch grid (e.g. 4×4) where each square holds a short recorded MIDI sequence. Tap a filled square to play that phrase into the soft-synth and/or USB→DIN. Empty square → arm record into that cell. Optional hold-to-stop / clear.
+
+| vs existing mode | Difference |
+|------------------|------------|
+| **Looper** | One free-timing loop on repeat |
+| **Songs** | Whole `.mid` files + tempo transport |
+| **Phrases / Pads** | Many one-shot (or gated) *phrases*; launch like an MPC / clip launcher |
+
+**Why it fits this box:** huge touch targets, works blind/SSH-friendly layouts, no piano roll. Content is *your* takes — assemble a performance from squares. Same capture buffer family as LOOPER; different launcher UI. Persist cells as small `.mid` or JSON event lists under e.g. `tools/midi-tone/phrases/`.
+
+**Not now:** ship after Songs feels solid. Don’t block Map/thru on this.
+
+**Related later (optional, not scheduled):** “Japanese game-ish” demo content = original/CC0 chip-style loops or just play existing phrases through chip-ish wavetables — not ripped game MIDIs.
+
 ## Phase 4 — Key-relative arpeggiator
 
 - Edit step sequence (intervals, gates, optional velocity steps)
 - Held/latched root transposes and runs from engine clock
-- Only after looper exists so the product doesn’t overload one “sequence” concept
+- Only after looper / phrases exist so the product doesn’t overload one “sequence” concept
 
 ## Repo / stack
 
