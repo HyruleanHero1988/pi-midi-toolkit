@@ -200,6 +200,212 @@ def midi_to_hz(note: int) -> float:
     return 440.0 * (2.0 ** ((note - 69) / 12.0))
 
 
+# MPK mini mk3 factory pad notes (Prog Select → Pad 1 / MPC): Bank A = 36–43, Bank B = 44–51.
+# Layout per bank: pads 1–4 bottom L→R, pads 5–8 top L→R.
+MPK_PAD_KIT: Dict[int, str] = {
+    # Bank A
+    36: "kick",
+    37: "snare",
+    38: "clap",
+    39: "hat_closed",
+    40: "hat_open",
+    41: "tom_lo",
+    42: "tom_mid",
+    43: "rim",
+    # Bank B
+    44: "kick_tight",
+    45: "rimshot",
+    46: "shaker",
+    47: "hat_pedal",
+    48: "tom_hi",
+    49: "cowbell",
+    50: "clave",
+    51: "ride",
+}
+
+# Extra GM-ish aliases so other pad programs still land somewhere useful
+_DRUM_ALIASES: Dict[int, str] = {
+    35: "kick",
+    52: "ride",
+    55: "hat_open",
+    57: "ride",
+    59: "ride",
+}
+
+
+def drum_model_for_note(note: int) -> str:
+    """Map MIDI note (ch10) → one of 16 procedural drum / one-shot models."""
+    n = note & 0x7F
+    if n in MPK_PAD_KIT:
+        return MPK_PAD_KIT[n]
+    if n in _DRUM_ALIASES:
+        return _DRUM_ALIASES[n]
+    # Unknown note: cycle through the kit so every pad still sounds distinct
+    models = list(dict.fromkeys(MPK_PAD_KIT.values()))
+    return models[n % len(models)]
+
+
+def synthesize_drum(
+    model: str,
+    *,
+    t: np.ndarray,
+    arange: np.ndarray,
+    white: np.ndarray,
+    noise: np.ndarray,
+    pitch: float,
+    decay: float,
+    noise_amt: float,
+    tone: float,
+    vel: float,
+    phase: float,
+    two_pi: float,
+    inv_sr: float,
+) -> Tuple[np.ndarray, float, float]:
+    """Render one block of a procedural drum. Returns (audio, dur_sec, new_phase)."""
+    # Pitch-envelope body (kick / toms / tight kick)
+    if model in ("kick", "kick_tight", "tom_lo", "tom_mid", "tom_hi"):
+        if model == "kick":
+            f0 = 50.0 * (2.0 ** ((pitch - 0.5) * 1.8))
+            f_end = 28.0 + 16.0 * pitch
+            drop_tau = 0.016 + 0.05 * (1.0 - decay)
+            body_tau = 0.07 + 0.40 * decay
+            amp = 0.38
+        elif model == "kick_tight":
+            f0 = 68.0 * (2.0 ** ((pitch - 0.5) * 1.6))
+            f_end = 40.0 + 20.0 * pitch
+            drop_tau = 0.010 + 0.03 * (1.0 - decay)
+            body_tau = 0.035 + 0.18 * decay
+            amp = 0.34
+        elif model == "tom_lo":
+            f0 = 85.0 * (2.0 ** ((pitch - 0.5) * 1.8))
+            f_end = 55.0 + 25.0 * pitch
+            drop_tau = 0.025 + 0.07 * (1.0 - decay)
+            body_tau = 0.08 + 0.38 * decay
+            amp = 0.32
+        elif model == "tom_mid":
+            f0 = 120.0 * (2.0 ** ((pitch - 0.5) * 1.8))
+            f_end = 75.0 + 30.0 * pitch
+            drop_tau = 0.022 + 0.06 * (1.0 - decay)
+            body_tau = 0.06 + 0.30 * decay
+            amp = 0.30
+        else:  # tom_hi
+            f0 = 170.0 * (2.0 ** ((pitch - 0.5) * 1.8))
+            f_end = 100.0 + 40.0 * pitch
+            drop_tau = 0.018 + 0.05 * (1.0 - decay)
+            body_tau = 0.045 + 0.22 * decay
+            amp = 0.28
+        freq = f_end + (f0 - f_end) * np.exp(-t / np.float32(drop_tau))
+        phase_inc = two_pi * freq * inv_sr
+        phases = phase + np.cumsum(phase_inc)
+        new_phase = float(phases[-1] % two_pi)
+        env = np.exp(-t / np.float32(body_tau))
+        click = np.exp(-t / np.float32(0.0035)) * np.float32(0.18 * vel)
+        body = np.sin(phases) * env * np.float32(amp * vel)
+        sig = body + click * white + noise * np.float32(0.05 * noise_amt * vel) * env
+        return sig.astype(np.float32, copy=False), body_tau * 4.5, new_phase
+
+    if model in ("snare", "rimshot"):
+        f0 = (200.0 if model == "rimshot" else 175.0) * (2.0 ** ((pitch - 0.5) * 1.4))
+        body_tau = 0.018 + 0.10 * decay if model == "rimshot" else 0.03 + 0.18 * decay
+        noise_tau = 0.025 + 0.14 * decay if model == "rimshot" else 0.04 + 0.28 * decay
+        phase_inc = two_pi * f0 * inv_sr
+        phases = phase + phase_inc * (arange + 1.0)
+        new_phase = float(phases[-1] % two_pi)
+        tone_env = np.exp(-t / np.float32(body_tau))
+        noise_env = np.exp(-t / np.float32(noise_tau))
+        body_amp = 0.10 if model == "rimshot" else 0.16
+        noise_amp = (0.28 + 0.45 * noise_amt) if model == "rimshot" else (0.18 + 0.40 * noise_amt)
+        click = np.exp(-t / np.float32(0.002)) * np.float32(0.25 * vel if model == "rimshot" else 0.12 * vel)
+        sig = np.sin(phases) * tone_env * np.float32(body_amp * vel)
+        sig += noise * noise_env * np.float32(noise_amp * vel)
+        sig += click * white
+        return sig.astype(np.float32, copy=False), max(body_tau, noise_tau) * 5.0, new_phase
+
+    if model == "clap":
+        noise_tau = 0.03 + 0.22 * decay
+        noise_env = np.exp(-t / np.float32(noise_tau))
+        bursts = (
+            np.exp(-((t - 0.000) ** 2) / 0.0000008)
+            + np.exp(-((t - 0.012) ** 2) / 0.0000010)
+            + np.exp(-((t - 0.024) ** 2) / 0.0000012)
+        )
+        sig = noise * (bursts * np.float32(0.45) + noise_env * np.float32(0.28))
+        sig *= np.float32((0.28 + 0.4 * noise_amt) * vel)
+        return sig.astype(np.float32, copy=False), noise_tau * 5.0, phase
+
+    if model in ("hat_closed", "hat_open", "hat_pedal", "ride", "shaker"):
+        if model == "hat_open":
+            noise_tau = 0.05 + 0.40 * decay
+            amp = 0.14 + 0.30 * noise_amt
+        elif model == "hat_pedal":
+            noise_tau = 0.008 + 0.04 * decay
+            amp = 0.12 + 0.22 * noise_amt
+        elif model == "ride":
+            noise_tau = 0.12 + 0.55 * decay
+            amp = 0.10 + 0.22 * noise_amt
+        elif model == "shaker":
+            noise_tau = 0.02 + 0.10 * decay
+            amp = 0.12 + 0.28 * noise_amt
+        else:  # hat_closed
+            noise_tau = 0.015 + 0.08 * decay
+            amp = 0.14 + 0.30 * noise_amt
+        bright = white - noise * np.float32(0.85)
+        noise_env = np.exp(-t / np.float32(noise_tau))
+        if model == "shaker":
+            # Grainy amplitude modulation
+            grain = 0.55 + 0.45 * np.sin(two_pi * (40.0 + 80.0 * pitch) * t)
+            sig = bright * noise_env * grain * np.float32(amp * vel)
+        else:
+            sig = bright * noise_env * np.float32(amp * vel)
+        sig = sig * np.float32(0.35 + 0.65 * tone) + noise * noise_env * np.float32(
+            0.10 * (1.0 - tone) * vel
+        )
+        return sig.astype(np.float32, copy=False), noise_tau * 5.5, phase
+
+    if model == "rim":
+        # Short woodblock / stick click
+        f0 = 520.0 * (2.0 ** ((pitch - 0.5) * 1.2))
+        body_tau = 0.012 + 0.05 * decay
+        phase_inc = two_pi * f0 * inv_sr
+        phases = phase + phase_inc * (arange + 1.0)
+        new_phase = float(phases[-1] % two_pi)
+        env = np.exp(-t / np.float32(body_tau))
+        sig = np.sin(phases) * env * np.float32(0.22 * vel)
+        sig += white * np.exp(-t / np.float32(0.004)) * np.float32(0.18 * vel)
+        return sig.astype(np.float32, copy=False), body_tau * 5.0, new_phase
+
+    if model == "cowbell":
+        # Two inharmonic partials (classic analog cowbell trick)
+        f1 = 540.0 * (2.0 ** ((pitch - 0.5) * 1.0))
+        f2 = 800.0 * (2.0 ** ((pitch - 0.5) * 1.0))
+        body_tau = 0.05 + 0.28 * decay
+        env = np.exp(-t / np.float32(body_tau))
+        phase_inc1 = two_pi * f1 * inv_sr
+        phase_inc2 = two_pi * f2 * inv_sr
+        p1 = phase + phase_inc1 * (arange + 1.0)
+        p2 = phase * 1.37 + phase_inc2 * (arange + 1.0)
+        new_phase = float(p1[-1] % two_pi)
+        sig = (np.sin(p1) + 0.7 * np.sin(p2)) * env * np.float32(0.18 * vel)
+        sig += noise * env * np.float32(0.04 * noise_amt * vel)
+        return sig.astype(np.float32, copy=False), body_tau * 5.0, new_phase
+
+    if model == "clave":
+        f0 = 1800.0 * (2.0 ** ((pitch - 0.5) * 0.8))
+        body_tau = 0.008 + 0.035 * decay
+        phase_inc = two_pi * f0 * inv_sr
+        phases = phase + phase_inc * (arange + 1.0)
+        new_phase = float(phases[-1] % two_pi)
+        env = np.exp(-t / np.float32(body_tau))
+        sig = np.sin(phases) * env * np.float32(0.20 * vel)
+        return sig.astype(np.float32, copy=False), body_tau * 6.0, new_phase
+
+    # Fallback: short closed hat
+    noise_tau = 0.02 + 0.08 * decay
+    noise_env = np.exp(-t / np.float32(noise_tau))
+    sig = (white - noise * 0.8) * noise_env * np.float32(0.15 * vel)
+    return sig.astype(np.float32, copy=False), noise_tau * 5.0, phase
+
+
 @dataclass
 class Voice:
     note: int
@@ -211,13 +417,34 @@ class Voice:
     age: int = 0  # bump on each note_on for steal ordering
 
 
+@dataclass
+class DrumHit:
+    """One-shot analog-style drum voice (Synsonics / TR-ish, not a pitched key)."""
+
+    note: int
+    model: str
+    velocity: float
+    age: int
+    # Params frozen at trigger so mid-hit knob twists don't glitch the tail
+    pitch: float  # 0..1 tune
+    decay: float  # 0..1 stretch / body length
+    noise: float  # 0..1 noise amount
+    tone: float  # 0..1 noise brightness
+    phase: float = 0.0
+    pos: int = 0  # samples since trigger
+    noise_state: float = 0.0  # cheap LP noise filter memory
+    amp_scale: float = 1.0  # live aftertouch trim
+
+
 class SineEngine:
-    """Wavetable synth — light enough for Pi 2."""
+    """Wavetable keys + procedural ch10 drum voices — light enough for Pi 2."""
 
     ATTACK_SEC_MIN = 0.002
     ATTACK_SEC_MAX = 0.400
     RELEASE_SEC_MIN = 0.010
     RELEASE_SEC_MAX = 0.800
+    MAX_DRUM_HITS = 16  # full MPK A+B pad bank polyphony
+    DRUM_FOCUS_SEC = 5.0
 
     def __init__(
         self,
@@ -231,6 +458,7 @@ class SineEngine:
         self.max_voices = max(1, int(max_voices))
         self._lock = threading.Lock()
         self._voices: Dict[Tuple[int, int], Voice] = {}
+        self._drums: Dict[int, DrumHit] = {}  # note → active one-shot
         self._stream: Optional[sd.OutputStream] = None
         self._bend_semitones = 0.0
         self._bend_range = 2.0
@@ -261,6 +489,13 @@ class SineEngine:
         self._note_serial = 0
         # Drum pad gate: aftertouch may only change volume while the pad note is held.
         self._drum_gate: Dict[int, bool] = {}
+        # Synsonics-ish drum macros (0..1)
+        self._drum_pitch = 0.45
+        self._drum_decay = 0.40  # "stretch"
+        self._drum_noise = 0.55
+        self._drum_tone = 0.60
+        self._drum_focus_until = 0.0
+        self._drum_lock = False  # if True, knobs always edit drums
         self._rebuild_morph_table_unlocked()
 
     @property
@@ -373,27 +608,21 @@ class SineEngine:
         if velocity <= 0:
             self.note_off(channel, note)
             return
-        key = (channel & 0x0F, note & 0x7F)
+        ch = channel & 0x0F
+        n = note & 0x7F
         vel = velocity / 127.0
-        # Drums a bit hotter so soft hits still speak; keys stay as before
-        scale = 0.16 if (channel & 0x0F) == DRUM_CHANNEL else 0.12
-        target = vel * scale
+        if ch == DRUM_CHANNEL:
+            self._drum_note_on(n, vel)
+            return
+        key = (ch, n)
+        target = vel * 0.12
         with self._lock:
             self._note_serial += 1
             serial = self._note_serial
-            if (channel & 0x0F) == DRUM_CHANNEL:
-                self._drum_gate[key[1]] = True
             existing = self._voices.get(key)
-            if existing is not None and (channel & 0x0F) == DRUM_CHANNEL:
-                # Same pad again: glide volume to new velocity (no hard restart click)
-                existing.releasing = False
-                existing.velocity = vel
-                existing.target_amp = target
-                existing.age = serial
-                return
             if existing is not None:
                 # Same key re-trigger: reuse slot, restart envelope/phase
-                existing.note = note & 0x7F
+                existing.note = n
                 existing.velocity = vel
                 existing.phase = 0.0
                 existing.releasing = False
@@ -406,7 +635,7 @@ class SineEngine:
                 if drop is not None:
                     del self._voices[drop]
             self._voices[key] = Voice(
-                note=note & 0x7F,
+                note=n,
                 velocity=vel,
                 amp=0.0,
                 target_amp=target,
@@ -414,11 +643,40 @@ class SineEngine:
                 age=serial,
             )
 
+    def _drum_note_on(self, note: int, velocity: float) -> None:
+        with self._lock:
+            self._note_serial += 1
+            serial = self._note_serial
+            self._drum_gate[note] = True
+            self._drum_focus_until = time.monotonic() + self.DRUM_FOCUS_SEC
+            if len(self._drums) >= self.MAX_DRUM_HITS and note not in self._drums:
+                oldest = min(self._drums.values(), key=lambda h: h.age)
+                self._drums.pop(oldest.note, None)
+            self._drums[note] = DrumHit(
+                note=note,
+                model=drum_model_for_note(note),
+                velocity=max(0.05, min(1.0, velocity)),
+                age=serial,
+                pitch=self._drum_pitch,
+                decay=self._drum_decay,
+                noise=self._drum_noise,
+                tone=self._drum_tone,
+                phase=0.0,
+                pos=0,
+                noise_state=0.0,
+                amp_scale=1.0,
+            )
+
     def note_off(self, channel: int, note: int) -> None:
         key = (channel & 0x0F, note & 0x7F)
         with self._lock:
             if (channel & 0x0F) == DRUM_CHANNEL:
                 self._drum_gate[key[1]] = False
+                # One-shots keep decaying; open hat shortens if pad released early
+                hit = self._drums.get(key[1])
+                if hit is not None and hit.model == "hat_open":
+                    hit.decay *= 0.35
+                return
             v = self._voices.get(key)
             if v is None:
                 return
@@ -428,6 +686,7 @@ class SineEngine:
     def all_notes_off(self) -> None:
         with self._lock:
             self._drum_gate.clear()
+            self._drums.clear()
             for v in self._voices.values():
                 v.releasing = True
                 v.target_amp = 0.0
@@ -528,40 +787,74 @@ class SineEngine:
             self._vib_hz = 1.0 + t * 8.0
 
     def set_pad_pressure(self, channel: int, note: Optional[int], value: int) -> None:
-        """Live volume for held drum pads (aftertouch / pressure)."""
+        """Live volume trim for held drum pads (aftertouch / pressure)."""
         if (channel & 0x0F) != DRUM_CHANNEL:
             return
-        vel = max(0, min(127, value)) / 127.0
-        target = vel * 0.16
+        scale = max(0.0, min(1.0, value / 127.0))
         with self._lock:
             if note is None:
-                keys = [
-                    (DRUM_CHANNEL, n)
-                    for n, held in self._drum_gate.items()
-                    if held
-                ]
-                for (ch, n), v in self._voices.items():
-                    if ch == DRUM_CHANNEL and self._drum_gate.get(n, False):
-                        if (ch, n) not in keys:
-                            keys.append((ch, n))
+                notes = [n for n, held in self._drum_gate.items() if held]
             else:
-                keys = [(DRUM_CHANNEL, note & 0x7F)]
-
-            for key in keys:
-                n = key[1]
-                v = self._voices.get(key)
+                notes = [note & 0x7F]
+            for n in notes:
+                hit = self._drums.get(n)
                 if value <= 0:
                     self._drum_gate[n] = False
-                    if v is not None:
-                        v.releasing = True
-                        v.target_amp = 0.0
+                    if hit is not None:
+                        hit.amp_scale = 0.0
                     continue
-                if not self._drum_gate.get(n, False):
-                    continue
-                if v is None or v.releasing:
-                    continue
-                v.velocity = vel
-                v.target_amp = target
+                if hit is not None:
+                    hit.amp_scale = 0.35 + 0.65 * scale
+
+    def drum_knob_focus(self) -> bool:
+        """True when knobs should edit drum macros (recent pad or locked)."""
+        with self._lock:
+            if self._drum_lock:
+                return True
+            return time.monotonic() < self._drum_focus_until
+
+    def set_drum_lock(self, locked: bool) -> None:
+        with self._lock:
+            self._drum_lock = bool(locked)
+            if self._drum_lock:
+                self._drum_focus_until = time.monotonic() + 3600.0
+
+    def drum_lock(self) -> bool:
+        with self._lock:
+            return self._drum_lock
+
+    def touch_drum_focus(self) -> None:
+        with self._lock:
+            self._drum_focus_until = time.monotonic() + self.DRUM_FOCUS_SEC
+
+    def set_drum_pitch(self, value: float) -> None:
+        if value > 1.0:
+            value = value / 127.0
+        with self._lock:
+            self._drum_pitch = max(0.0, min(1.0, float(value)))
+            self._drum_focus_until = time.monotonic() + self.DRUM_FOCUS_SEC
+
+    def set_drum_decay(self, value: float) -> None:
+        """Stretch / body length."""
+        if value > 1.0:
+            value = value / 127.0
+        with self._lock:
+            self._drum_decay = max(0.0, min(1.0, float(value)))
+            self._drum_focus_until = time.monotonic() + self.DRUM_FOCUS_SEC
+
+    def set_drum_noise(self, value: float) -> None:
+        if value > 1.0:
+            value = value / 127.0
+        with self._lock:
+            self._drum_noise = max(0.0, min(1.0, float(value)))
+            self._drum_focus_until = time.monotonic() + self.DRUM_FOCUS_SEC
+
+    def set_drum_tone(self, value: float) -> None:
+        if value > 1.0:
+            value = value / 127.0
+        with self._lock:
+            self._drum_tone = max(0.0, min(1.0, float(value)))
+            self._drum_focus_until = time.monotonic() + self.DRUM_FOCUS_SEC
 
     def set_waveform(self, name: str) -> bool:
         name = name.lower().strip()
@@ -594,6 +887,11 @@ class SineEngine:
                 "release": self._release_sec,
                 "vib_hz": self._vib_hz,
                 "vib_depth": self._vib_depth_semis,
+                "drum_pitch": self._drum_pitch,
+                "drum_decay": self._drum_decay,
+                "drum_noise": self._drum_noise,
+                "drum_tone": self._drum_tone,
+                "drum_lock": 1.0 if self._drum_lock else 0.0,
             }
 
     def snapshot_settings(self) -> Dict[str, Any]:
@@ -609,6 +907,11 @@ class SineEngine:
                 "release_sec": float(self._release_sec),
                 "vib_hz": float(self._vib_hz),
                 "vib_depth": float(self._vib_depth_semis),
+                "drum_pitch": float(self._drum_pitch),
+                "drum_decay": float(self._drum_decay),
+                "drum_noise": float(self._drum_noise),
+                "drum_tone": float(self._drum_tone),
+                "drum_lock": bool(self._drum_lock),
             }
 
     def apply_settings(self, data: Dict[str, Any]) -> None:
@@ -635,6 +938,16 @@ class SineEngine:
                 self._vib_hz = max(0.1, min(20.0, float(data["vib_hz"])))
             if "vib_depth" in data:
                 self._vib_depth_semis = max(0.0, min(4.0, float(data["vib_depth"])))
+            if "drum_pitch" in data:
+                self._drum_pitch = max(0.0, min(1.0, float(data["drum_pitch"])))
+            if "drum_decay" in data:
+                self._drum_decay = max(0.0, min(1.0, float(data["drum_decay"])))
+            if "drum_noise" in data:
+                self._drum_noise = max(0.0, min(1.0, float(data["drum_noise"])))
+            if "drum_tone" in data:
+                self._drum_tone = max(0.0, min(1.0, float(data["drum_tone"])))
+            if "drum_lock" in data:
+                self._drum_lock = bool(data["drum_lock"])
             self._morph_dirty = True
             self._rebuild_morph_table_unlocked()
 
@@ -658,6 +971,7 @@ class SineEngine:
             if self._morph_dirty:
                 self._rebuild_morph_table_unlocked()
             items = list(self._voices.items())
+            drum_hits = list(self._drums.values())
             bend = self._bend_semitones
             mod = self._mod
             vib_hz = self._vib_hz
@@ -713,6 +1027,9 @@ class SineEngine:
             if v.releasing and v.amp < 0.0005:
                 dead.append(key)
 
+        # Procedural ch10 drums (Synsonics-ish) — mixed before key bus tone filter
+        dead_drums = self._render_drums(buf, frames, sr, drum_hits, arange)
+
         # Cheap bus low-pass for "tone" knob (moving average). tone=1 → open.
         if tone < 0.999 and frames > 0:
             win = max(1, int(round((1.0 - tone) * 48.0)))
@@ -733,10 +1050,61 @@ class SineEngine:
             buf *= np.float32(level)
         np.clip(buf, -0.95, 0.95, out=buf)
         outdata[:, 0] = buf
-        if dead:
+        if dead or dead_drums:
             with self._lock:
                 for k in dead:
                     self._voices.pop(k, None)
+                for n in dead_drums:
+                    self._drums.pop(n, None)
+
+    def _render_drums(
+        self,
+        buf: np.ndarray,
+        frames: int,
+        sr: float,
+        hits: List[DrumHit],
+        arange: np.ndarray,
+    ) -> List[int]:
+        """Add analog-style drum hits into buf. Returns note keys that finished."""
+        dead: List[int] = []
+        if not hits:
+            return dead
+        two_pi = 2.0 * math.pi
+        inv_sr = 1.0 / sr
+        for hit in hits:
+            t = (hit.pos + arange) * np.float32(inv_sr)
+            white = (np.random.random(frames).astype(np.float32) * 2.0 - 1.0)
+            win = max(1, int(round((1.0 - hit.tone) * 16.0)))
+            if win <= 1:
+                noise = white
+                hit.noise_state = float(white[-1])
+            else:
+                kernel = np.ones(win, dtype=np.float32) / np.float32(win)
+                pad = np.full(win - 1, hit.noise_state, dtype=np.float32)
+                noise = np.convolve(np.concatenate([pad, white]), kernel, mode="valid")[:frames]
+                hit.noise_state = float(noise[-1])
+
+            audio, dur, new_phase = synthesize_drum(
+                hit.model,
+                t=t,
+                arange=arange,
+                white=white,
+                noise=noise,
+                pitch=hit.pitch,
+                decay=hit.decay,
+                noise_amt=hit.noise,
+                tone=hit.tone,
+                vel=hit.velocity * hit.amp_scale,
+                phase=hit.phase,
+                two_pi=two_pi,
+                inv_sr=inv_sr,
+            )
+            hit.phase = new_phase
+            buf += audio
+            hit.pos += frames
+            if hit.pos > int(dur * sr) or float(np.max(np.abs(audio))) < 0.0002:
+                dead.append(hit.note)
+        return dead
 
 
 @dataclass
@@ -1415,6 +1783,7 @@ class MidiToneApp:
         print("midi: poll thread started", flush=True)
 
         self._full_vel_btn: Optional[tk.Button] = None
+        self._drum_lock_btn: Optional[tk.Button] = None
         self._voice_lbl: Optional[tk.Label] = None
         self._grid_open = False
         self._grid_frame: Optional[tk.Frame] = None
@@ -1530,6 +1899,10 @@ class MidiToneApp:
             row3, "FULL VEL: ON", self._toggle_full_vel, bg="#689d6a"
         )
         self._full_vel_btn.pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=8)
+        self._drum_lock_btn = self._mk_touch_btn(
+            row3, "DRUM KNOBS", self._toggle_drum_lock, bg="#3c3836"
+        )
+        self._drum_lock_btn.pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=8)
 
         self._main = tk.Frame(self._synth_shell, bg="#111111")
         self._main.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
@@ -1596,6 +1969,7 @@ class MidiToneApp:
         # Restore last session (full vel, morph pair, knob-shaped tone, etc.)
         restored = self._load_settings_file(SETTINGS_PATH)
         self._paint_full_vel_btn()
+        self._paint_drum_lock_btn()
         self._sync_voice_index_from_morph()
         self._paint_song_slots()
         self._refresh_song_status()
@@ -1606,8 +1980,11 @@ class MidiToneApp:
         self._append_log(f"Listening on: {port_name}")
         self._append_log(f"Loaded {len(self._voice_names)} voices — VOICES grid / MORPH pair.")
         self._append_log(
-            "MPK knobs (CC70–77): morph / tone / attack / release / "
-            "vib depth / vib rate / — / level"
+            "MPK knobs (keys): morph / tone / attack / release / vib / — / level"
+        )
+        self._append_log(
+            "Pads = analog drum voices. After a pad (or DRUM LOCK): knobs → "
+            "pitch / stretch / noise / drum-tone / — / — / — / level"
         )
         self._append_log("Modes: SYNTH / LOOPER / SONGS / PRESETS / LOG (top right).")
         if seeded:
@@ -1631,6 +2008,16 @@ class MidiToneApp:
 
     def _format_mod_line(self) -> str:
         st = self.engine.modulation_state()
+        if self.engine.drum_knob_focus():
+            lock = "LOCK" if st.get("drum_lock", 0) else "auto"
+            return (
+                f"DRUMS[{lock}]  "
+                f"Pitch:{int(st['drum_pitch'] * 127):3d}  "
+                f"Stretch:{int(st['drum_decay'] * 127):3d}  "
+                f"Noise:{int(st['drum_noise'] * 127):3d}  "
+                f"Tone:{int(st['drum_tone'] * 127):3d}  "
+                f"Lvl:{int(st['level'] * 127):3d}"
+            )
         left, right, blend = self.engine.morph_neighbors()
         if left == right:
             morph_txt = left
@@ -2355,6 +2742,29 @@ class MidiToneApp:
                 text="FULL VEL: OFF", bg="#3c3836", activebackground="#3c3836"
             )
 
+    def _paint_drum_lock_btn(self) -> None:
+        if self._drum_lock_btn is None:
+            return
+        if self.engine.drum_lock():
+            self._drum_lock_btn.configure(
+                text="DRUM KNOBS: ON", bg="#d79921", activebackground="#d79921"
+            )
+        else:
+            self._drum_lock_btn.configure(
+                text="DRUM KNOBS", bg="#3c3836", activebackground="#3c3836"
+            )
+
+    def _toggle_drum_lock(self) -> None:
+        self.engine.set_drum_lock(not self.engine.drum_lock())
+        self._paint_drum_lock_btn()
+        self._mark_settings_dirty()
+        self.mod_var.set(self._format_mod_line())
+        self._append_log(
+            "Drum knobs LOCK on — pitch/stretch/noise/tone"
+            if self.engine.drum_lock()
+            else "Drum knobs auto — edit for a few seconds after each pad hit"
+        )
+
     def _build_log_mode(self) -> None:
         shell = self._log_shell
         for w in shell.winfo_children():
@@ -3010,6 +3420,32 @@ class MidiToneApp:
 
     def _handle_knob_cc(self, control: int, value: int) -> Optional[str]:
         """Map MPK factory knobs. Returns a short UI label or None if unmapped."""
+        # After a pad hit (or DRUM KNOBS lock), knobs edit drum macros
+        if self.engine.drum_knob_focus():
+            if control == CC_MORPH:
+                self.engine.set_drum_pitch(value)
+                self._mark_settings_dirty()
+                return f"DrumPitch {value}"
+            if control == CC_TONE:
+                self.engine.set_drum_tone(value)
+                self._mark_settings_dirty()
+                return f"DrumTone {value}"
+            if control == CC_ATTACK:
+                self.engine.set_drum_decay(value)
+                self._mark_settings_dirty()
+                return f"DrumStretch {value}"
+            if control == CC_RELEASE:
+                self.engine.set_drum_noise(value)
+                self._mark_settings_dirty()
+                return f"DrumNoise {value}"
+            if control == CC_LEVEL:
+                self.engine.set_level(value)
+                self._mark_settings_dirty()
+                return f"Level  {value}"
+            # Other knobs ignored while drum-focused (keep level usable)
+            if control in (CC_VIB_DEPTH, CC_VIB_RATE):
+                return None
+
         if control == CC_MORPH:
             self.engine.set_morph(value)
             self._mark_settings_dirty()
@@ -3062,10 +3498,12 @@ class MidiToneApp:
             if self._looper.is_recording():
                 self._q_put(("loop",))
             if is_drum:
+                model = drum_model_for_note(msg.note)
                 line = (
-                    f"Pad      ch{msg.channel + 1}  {midi_note_name(msg.note)} "
+                    f"Pad/{model:<10} ch{msg.channel + 1}  {midi_note_name(msg.note)} "
                     f"({msg.note})  vel {msg.velocity}"
                 )
+                self._q_put(("mod",))  # refresh DRUMS status line
             elif self._full_vel and msg.velocity != 127:
                 line = (
                     f"Note On   ch{msg.channel + 1}  {midi_note_name(msg.note)} "
@@ -3108,9 +3546,10 @@ class MidiToneApp:
                 self._q_put(("mod",))
                 self._put_continuous_log(format_message(msg))
             elif msg.control in KNOB_CCS:
+                drum_focus = self.engine.drum_knob_focus()
                 label = self._handle_knob_cc(msg.control, msg.value)
                 self._q_put(("mod",))
-                if msg.control == CC_MORPH:
+                if msg.control == CC_MORPH and not drum_focus:
                     self._q_put(("morph",))
                 if label:
                     self._put_continuous_log(label)
