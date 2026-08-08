@@ -29,6 +29,9 @@ todos:
   - id: songs-smf
     content: "Phase 3b: Songs mode — save/load .mid, tempo, play to soft-synth and/or USB→DIN"
     status: in_progress
+  - id: drum-voices
+    content: "Phase 0b (toy synth): ch10 pads use analog-style drum voices (pitch env, noise, decay/stretch) not pitched wavetable keys"
+    status: pending
   - id: phrase-pads
     content: "Phase 3c (later): Phrases/Pads — grid of recorded MIDI phrases; launch via touch squares and MPK drum pads"
     status: pending
