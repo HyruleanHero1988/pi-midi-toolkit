@@ -9,6 +9,7 @@ Keep lean for Raspberry Pi 2 (wavetable synth, capped polyphony).
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import pathlib
 import queue
@@ -19,7 +20,7 @@ import tkinter as tk
 import wave
 from dataclasses import dataclass
 from tkinter import ttk
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 try:
     import numpy as np
@@ -53,6 +54,10 @@ DRUM_CHANNEL = 9
 NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
 HERE = pathlib.Path(__file__).resolve().parent
 DEFAULT_WAVETABLE_DIR = HERE / "wavetables"
+SETTINGS_PATH = HERE / "settings.json"
+PRESETS_DIR = HERE / "user-presets"
+PRESET_SLOTS = 8
+SETTINGS_VERSION = 1
 
 # Akai MPK mini mk3 factory knobs (Prog Select → Pad 1 / MPC program): CC70–77
 CC_MORPH = 70          # Knob 1 — scan / blend through wavetable stack
@@ -538,6 +543,48 @@ class SineEngine:
                 "vib_depth": self._vib_depth_semis,
             }
 
+    def snapshot_settings(self) -> Dict[str, Any]:
+        """Serialize synth sound settings for JSON presets / session restore."""
+        with self._lock:
+            return {
+                "morph_a": self._voice_names[self._morph_a],
+                "morph_b": self._voice_names[self._morph_b],
+                "morph": float(self._morph),
+                "tone": float(self._tone),
+                "level": float(self._level),
+                "attack_sec": float(self._attack_sec),
+                "release_sec": float(self._release_sec),
+                "vib_hz": float(self._vib_hz),
+                "vib_depth": float(self._vib_depth_semis),
+            }
+
+    def apply_settings(self, data: Dict[str, Any]) -> None:
+        """Restore synth sound settings from snapshot_settings() / preset JSON."""
+        names = {n: i for i, n in enumerate(self._voice_names)}
+        with self._lock:
+            a_name = str(data.get("morph_a", self._voice_names[self._morph_a]))
+            b_name = str(data.get("morph_b", self._voice_names[self._morph_b]))
+            self._morph_a = names.get(a_name, self._morph_a)
+            self._morph_b = names.get(b_name, self._morph_b)
+            if "morph" in data:
+                self._morph = max(0.0, min(1.0, float(data["morph"])))
+            if "tone" in data:
+                self._tone = max(0.0, min(1.0, float(data["tone"])))
+            if "level" in data:
+                self._level = max(0.0, min(1.0, float(data["level"])))
+            if "attack_sec" in data:
+                self._attack_sec = max(self.ATTACK_SEC_MIN, min(self.ATTACK_SEC_MAX, float(data["attack_sec"])))
+            if "release_sec" in data:
+                self._release_sec = max(
+                    self.RELEASE_SEC_MIN, min(self.RELEASE_SEC_MAX, float(data["release_sec"]))
+                )
+            if "vib_hz" in data:
+                self._vib_hz = max(0.1, min(20.0, float(data["vib_hz"])))
+            if "vib_depth" in data:
+                self._vib_depth_semis = max(0.0, min(4.0, float(data["vib_depth"])))
+            self._morph_dirty = True
+            self._rebuild_morph_table_unlocked()
+
     def _callback(self, outdata, frames, time_info, status) -> None:  # noqa: ANN001
         del time_info, status
         if frames > self._scratch.shape[0]:
@@ -929,12 +976,18 @@ class MidiToneApp:
         self._morph_side_btns: Dict[str, tk.Button] = {}
         self._morph_grid_btns: Dict[str, tk.Button] = {}
         self._morph_status_lbl: Optional[tk.Label] = None
-        self._mode = "synth"  # synth | looper | log
+        self._mode = "synth"  # synth | looper | log | presets
         self._mode_btns: Dict[str, tk.Button] = {}
         self._looper = MidiLooper(self.engine, self._q_put)
         self._loop_status_var = tk.StringVar(value="Loop empty — tap RECORD, play notes, STOP, then PLAY.")
         self._loop_rec_btn: Optional[tk.Button] = None
         self._loop_play_btn: Optional[tk.Button] = None
+        self._preset_status_var = tk.StringVar(value="Tap a slot, then LOAD or SAVE.")
+        self._preset_slot = 0
+        self._preset_slot_btns: Dict[int, tk.Button] = {}
+        self._active_preset_name: Optional[str] = None
+        self._settings_dirty = False
+        self._suppress_autosave = False
 
         # Persistent mode navigation (always visible)
         self._nav = tk.Frame(self.root, bg="#1d2021")
@@ -945,12 +998,17 @@ class MidiToneApp:
         ).pack(side=tk.LEFT)
         nav_modes = tk.Frame(self._nav, bg="#1d2021")
         nav_modes.pack(side=tk.RIGHT, padx=4, pady=4)
-        for key, label in (("synth", "SYNTH"), ("looper", "LOOPER"), ("log", "LOG")):
+        for key, label in (
+            ("synth", "SYNTH"),
+            ("looper", "LOOPER"),
+            ("presets", "PRESETS"),
+            ("log", "LOG"),
+        ):
             btn = self._mk_touch_btn(
                 nav_modes, label, lambda m=key: self._switch_mode(m), bg="#3c3836"
             )
-            btn.configure(font=("DejaVu Sans", 13, "bold"), pady=8, padx=14)
-            btn.pack(side=tk.LEFT, padx=3)
+            btn.configure(font=("DejaVu Sans", 12, "bold"), pady=8, padx=10)
+            btn.pack(side=tk.LEFT, padx=2)
             self._mode_btns[key] = btn
 
         # Mode content host
@@ -959,6 +1017,7 @@ class MidiToneApp:
 
         self._synth_shell = tk.Frame(self._mode_host, bg="#111111")
         self._looper_shell = tk.Frame(self._mode_host, bg="#111111")
+        self._presets_shell = tk.Frame(self._mode_host, bg="#111111")
         self._log_shell = tk.Frame(self._mode_host, bg="#111111")
 
         # Bottom touch bar packed first so it never gets crushed / lost
@@ -1059,8 +1118,17 @@ class MidiToneApp:
             self.engine.set_morph_pair(0, 1, morph=0.0)
 
         self._build_looper_mode()
+        self._build_presets_mode()
         self._build_log_mode()
         self._switch_mode("synth")
+
+        # Restore last session (full vel, morph pair, knob-shaped tone, etc.)
+        restored = self._load_settings_file(SETTINGS_PATH)
+        self._paint_full_vel_btn()
+        self._sync_voice_index_from_morph()
+        if self._voice_lbl is not None:
+            self._voice_lbl.configure(text=self._voice_label_text())
+        self.mod_var.set(self._format_mod_line())
 
         self._append_log(f"Listening on: {port_name}")
         self._append_log(f"Loaded {len(self._voice_names)} voices — VOICES grid / MORPH pair.")
@@ -1068,9 +1136,15 @@ class MidiToneApp:
             "MPK knobs (CC70–77): morph / tone / attack / release / "
             "vib depth / vib rate / — / level"
         )
-        self._append_log("Modes: SYNTH / LOOPER / LOG (top right).")
+        self._append_log("Modes: SYNTH / LOOPER / PRESETS / LOG (top right).")
+        if restored:
+            self._append_log(f"Restored session from {SETTINGS_PATH.name}")
+        else:
+            self._append_log("No settings.json yet — changes will autosave.")
         self._append_log("If knobs do nothing: Prog Select + Pad 1 (MPC program).")
         print("ui: construction complete", flush=True)
+        PRESETS_DIR.mkdir(parents=True, exist_ok=True)
+        self.root.after(2000, self._autosave_tick)
 
     def _voice_label_text(self) -> str:
         left, right, blend = self.engine.morph_neighbors()
@@ -1096,6 +1170,242 @@ class MidiToneApp:
 
     def _overlay_busy(self) -> bool:
         return self._grid_open or self._morph_ui_open
+
+    def _session_dict(self) -> Dict[str, Any]:
+        return {
+            "version": SETTINGS_VERSION,
+            "full_velocity": bool(self._full_vel),
+            "active_preset": self._active_preset_name,
+            "synth": self.engine.snapshot_settings(),
+        }
+
+    def _apply_session_dict(self, data: Dict[str, Any]) -> None:
+        self._suppress_autosave = True
+        try:
+            if "full_velocity" in data:
+                self._full_vel = bool(data["full_velocity"])
+            if "active_preset" in data:
+                name = data["active_preset"]
+                self._active_preset_name = str(name) if name else None
+            synth = data.get("synth")
+            if isinstance(synth, dict):
+                self.engine.apply_settings(synth)
+            self._settings_dirty = False
+        finally:
+            self._suppress_autosave = False
+
+    def _load_settings_file(self, path: pathlib.Path) -> bool:
+        if not path.is_file():
+            return False
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            print(f"settings load failed ({path}): {exc}", flush=True)
+            return False
+        if not isinstance(data, dict):
+            return False
+        self._apply_session_dict(data)
+        return True
+
+    def _save_settings_file(self, path: pathlib.Path, *, quiet: bool = False) -> bool:
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(path.suffix + ".tmp")
+            tmp.write_text(
+                json.dumps(self._session_dict(), indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            tmp.replace(path)
+            self._settings_dirty = False
+            if not quiet:
+                print(f"settings saved → {path}", flush=True)
+            return True
+        except Exception as exc:
+            print(f"settings save failed ({path}): {exc}", flush=True)
+            return False
+
+    def _mark_settings_dirty(self) -> None:
+        if self._suppress_autosave:
+            return
+        self._settings_dirty = True
+
+    def _autosave_tick(self) -> None:
+        if self._stop.is_set():
+            return
+        if self._settings_dirty:
+            self._save_settings_file(SETTINGS_PATH, quiet=True)
+        if not self._stop.is_set():
+            self.root.after(2000, self._autosave_tick)
+
+    def _preset_path(self, slot: int) -> pathlib.Path:
+        return PRESETS_DIR / f"slot-{slot + 1:02d}.json"
+
+    def _build_presets_mode(self) -> None:
+        shell = self._presets_shell
+        for w in shell.winfo_children():
+            w.destroy()
+        PRESETS_DIR.mkdir(parents=True, exist_ok=True)
+
+        header = tk.Frame(shell, bg="#111111")
+        header.pack(fill=tk.X, padx=8, pady=(10, 4))
+        tk.Label(
+            header, text="Presets", font=("DejaVu Sans", 18, "bold"),
+            fg="#fbf1c7", bg="#111111",
+        ).pack(side=tk.LEFT)
+        tk.Label(
+            header, text="synth sound + full-vel",
+            font=("DejaVu Sans", 11), fg="#a89984", bg="#111111",
+        ).pack(side=tk.RIGHT)
+
+        status = tk.Label(
+            shell, textvariable=self._preset_status_var,
+            font=("DejaVu Sans", 13, "bold"),
+            fg="#fabd2f", bg="#111111",
+            wraplength=760, justify=tk.LEFT, anchor="w",
+        )
+        status.pack(fill=tk.X, padx=10, pady=(4, 8))
+
+        grid = tk.Frame(shell, bg="#111111")
+        grid.pack(fill=tk.BOTH, expand=True, padx=8, pady=4)
+        self._preset_slot_btns = {}
+        cols = 4
+        for i in range(PRESET_SLOTS):
+            r, c = divmod(i, cols)
+            btn = self._mk_touch_btn(
+                grid,
+                self._preset_slot_label(i),
+                lambda idx=i: self._select_preset_slot(idx),
+                bg="#3c3836",
+            )
+            btn.configure(font=("DejaVu Sans", 13, "bold"), pady=18)
+            btn.grid(row=r, column=c, sticky="nsew", padx=3, pady=3, ipady=6)
+            self._preset_slot_btns[i] = btn
+        for c in range(cols):
+            grid.grid_columnconfigure(c, weight=1)
+        for r in range((PRESET_SLOTS + cols - 1) // cols):
+            grid.grid_rowconfigure(r, weight=1)
+
+        footer = tk.Frame(shell, bg="#111111")
+        footer.pack(fill=tk.X, padx=8, pady=8)
+        self._mk_touch_btn(footer, "LOAD", self._preset_load_selected, bg="#458588").pack(
+            side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=16
+        )
+        self._mk_touch_btn(footer, "SAVE", self._preset_save_selected, bg="#689d6a").pack(
+            side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=16
+        )
+        self._mk_touch_btn(footer, "DELETE", self._preset_delete_selected, bg="#9d0006").pack(
+            side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=16
+        )
+        self._paint_preset_slots()
+
+    def _preset_slot_label(self, slot: int) -> str:
+        path = self._preset_path(slot)
+        if path.is_file():
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                name = data.get("name") or path.stem
+                a = (data.get("synth") or {}).get("morph_a", "?")
+                b = (data.get("synth") or {}).get("morph_b", "?")
+                return f"{slot + 1}\n{name}\n{a}→{b}"
+            except Exception:
+                return f"{slot + 1}\n{path.stem}\n(saved)"
+        return f"{slot + 1}\nEMPTY"
+
+    def _select_preset_slot(self, slot: int) -> None:
+        self._preset_slot = max(0, min(PRESET_SLOTS - 1, slot))
+        path = self._preset_path(self._preset_slot)
+        if path.is_file():
+            self._preset_status_var.set(
+                f"Slot {self._preset_slot + 1} selected — LOAD to use, SAVE to overwrite."
+            )
+        else:
+            self._preset_status_var.set(
+                f"Slot {self._preset_slot + 1} empty — SAVE stores the current sound here."
+            )
+        self._paint_preset_slots()
+
+    def _paint_preset_slots(self) -> None:
+        for i, btn in self._preset_slot_btns.items():
+            exists = self._preset_path(i).is_file()
+            selected = i == self._preset_slot
+            if selected:
+                color = "#b16286"
+            elif exists:
+                color = "#458588"
+            else:
+                color = "#3c3836"
+            btn.configure(
+                text=self._preset_slot_label(i),
+                bg=color,
+                activebackground=color,
+            )
+
+    def _preset_save_selected(self) -> None:
+        path = self._preset_path(self._preset_slot)
+        payload = self._session_dict()
+        payload["name"] = f"slot-{self._preset_slot + 1:02d}"
+        try:
+            PRESETS_DIR.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            tmp.replace(path)
+            self._active_preset_name = path.stem
+            self._mark_settings_dirty()
+            self._save_settings_file(SETTINGS_PATH, quiet=True)
+            self._preset_status_var.set(f"Saved → {path.name}")
+            self._append_log(f"Preset saved: {path.name}")
+            self._paint_preset_slots()
+        except Exception as exc:
+            self._preset_status_var.set(f"Save failed: {exc}")
+            self._append_log(f"Preset SAVE error: {exc}")
+
+    def _preset_load_selected(self) -> None:
+        path = self._preset_path(self._preset_slot)
+        if not path.is_file():
+            self._preset_status_var.set(f"Slot {self._preset_slot + 1} is empty.")
+            return
+        if self._load_settings_file(path):
+            self._active_preset_name = path.stem
+            self._paint_full_vel_btn()
+            self._sync_voice_index_from_morph()
+            if self._voice_lbl is not None:
+                self._voice_lbl.configure(text=self._voice_label_text())
+            self.mod_var.set(self._format_mod_line())
+            self._mark_settings_dirty()
+            self._save_settings_file(SETTINGS_PATH, quiet=True)
+            self._preset_status_var.set(f"Loaded {path.name}")
+            self._append_log(f"Preset loaded: {path.name}")
+            self._paint_preset_slots()
+        else:
+            self._preset_status_var.set(f"Load failed: {path.name}")
+
+    def _preset_delete_selected(self) -> None:
+        path = self._preset_path(self._preset_slot)
+        if not path.is_file():
+            self._preset_status_var.set(f"Slot {self._preset_slot + 1} already empty.")
+            return
+        try:
+            path.unlink()
+            if self._active_preset_name == path.stem:
+                self._active_preset_name = None
+                self._mark_settings_dirty()
+            self._preset_status_var.set(f"Deleted {path.name}")
+            self._append_log(f"Preset deleted: {path.name}")
+            self._paint_preset_slots()
+        except Exception as exc:
+            self._preset_status_var.set(f"Delete failed: {exc}")
+
+    def _paint_full_vel_btn(self) -> None:
+        if self._full_vel_btn is None:
+            return
+        if self._full_vel:
+            self._full_vel_btn.configure(
+                text="FULL VEL: ON", bg="#689d6a", activebackground="#689d6a"
+            )
+        else:
+            self._full_vel_btn.configure(
+                text="FULL VEL: OFF", bg="#3c3836", activebackground="#3c3836"
+            )
 
     def _build_log_mode(self) -> None:
         shell = self._log_shell
@@ -1202,7 +1512,7 @@ class MidiToneApp:
         self._paint_looper_buttons()
 
     def _switch_mode(self, mode: str) -> None:
-        mode = mode if mode in ("synth", "looper", "log") else "synth"
+        mode = mode if mode in ("synth", "looper", "log", "presets") else "synth"
         # Close synth-only overlays before swapping shells
         if self._grid_open:
             self._close_voice_grid(restore_main=False)
@@ -1212,6 +1522,7 @@ class MidiToneApp:
         self._mode = mode
         self._synth_shell.pack_forget()
         self._looper_shell.pack_forget()
+        self._presets_shell.pack_forget()
         self._log_shell.pack_forget()
         if self._grid_frame is not None:
             self._grid_frame.pack_forget()
@@ -1221,6 +1532,9 @@ class MidiToneApp:
         if mode == "looper":
             self._looper_shell.pack(fill=tk.BOTH, expand=True)
             self._refresh_loop_status()
+        elif mode == "presets":
+            self._presets_shell.pack(fill=tk.BOTH, expand=True)
+            self._paint_preset_slots()
         elif mode == "log":
             self._log_shell.pack(fill=tk.BOTH, expand=True)
             try:
@@ -1346,6 +1660,7 @@ class MidiToneApp:
         name = self._voice_names[self._voice_index]
         # VOICES / PREV / NEXT set morph-A and park at pure A (B stays as morph target)
         self.engine.set_morph_index(self._voice_index)
+        self._mark_settings_dirty()
         if self._voice_lbl is not None:
             self._voice_lbl.configure(text=self._voice_label_text())
         self.mod_var.set(self._format_mod_line())
@@ -1591,6 +1906,7 @@ class MidiToneApp:
     def _assign_morph_endpoint(self, idx: int) -> None:
         side = self._morph_pick_side
         self.engine.set_morph_endpoint(side, idx)
+        self._mark_settings_dirty()
         name = self._voice_names[idx]
         # After setting A, auto-arm B so picking a pair is two taps
         if side == "a":
@@ -1610,6 +1926,7 @@ class MidiToneApp:
         blend = self.engine.morph()
         # Swap endpoints and invert blend so the sound stays put
         self.engine.set_morph_pair(b, a, morph=1.0 - blend)
+        self._mark_settings_dirty()
         self._q_put(("log", "Morph pair swapped", False))
         self._paint_morph_menu()
         if self._voice_lbl is not None:
@@ -1667,15 +1984,8 @@ class MidiToneApp:
 
     def _toggle_full_vel(self) -> None:
         self._full_vel = not self._full_vel
-        if self._full_vel_btn is not None:
-            if self._full_vel:
-                self._full_vel_btn.configure(
-                    text="FULL VEL: ON", bg="#689d6a", activebackground="#689d6a"
-                )
-            else:
-                self._full_vel_btn.configure(
-                    text="FULL VEL: OFF", bg="#3c3836", activebackground="#3c3836"
-                )
+        self._paint_full_vel_btn()
+        self._mark_settings_dirty()
         self._append_log(f"Full velocity → {'ON' if self._full_vel else 'OFF'}")
 
     def _print_ports(self) -> None:
@@ -1748,31 +2058,38 @@ class MidiToneApp:
         """Map MPK factory knobs. Returns a short UI label or None if unmapped."""
         if control == CC_MORPH:
             self.engine.set_morph(value)
+            self._mark_settings_dirty()
             left, right, blend = self.engine.morph_neighbors()
             if left == right:
                 return f"Morph  {value}  ({left})"
             return f"Morph  {value}  ({left}→{right} {int(blend * 100)}%)"
         if control == CC_TONE:
             self.engine.set_tone(value)
+            self._mark_settings_dirty()
             return f"Tone   {value}"
         if control == CC_ATTACK:
             self.engine.set_attack(value)
+            self._mark_settings_dirty()
             st = self.engine.modulation_state()
             return f"Attack {value}  ({st['attack'] * 1000:.0f} ms)"
         if control == CC_RELEASE:
             self.engine.set_release(value)
+            self._mark_settings_dirty()
             st = self.engine.modulation_state()
             return f"Release {value}  ({st['release'] * 1000:.0f} ms)"
         if control == CC_VIB_DEPTH:
             self.engine.set_vib_depth(value)
+            self._mark_settings_dirty()
             st = self.engine.modulation_state()
             return f"VibDepth {value}  ({st['vib_depth']:.2f} st)"
         if control == CC_VIB_RATE:
             self.engine.set_vib_rate(value)
+            self._mark_settings_dirty()
             st = self.engine.modulation_state()
             return f"VibRate {value}  ({st['vib_hz']:.1f} Hz)"
         if control == CC_LEVEL:
             self.engine.set_level(value)
+            self._mark_settings_dirty()
             return f"Level  {value}"
         return None
 
@@ -1951,6 +2268,10 @@ class MidiToneApp:
         try:
             self._looper.stop_playback()
             self._looper.stop_record()
+        except Exception:
+            pass
+        try:
+            self._save_settings_file(SETTINGS_PATH, quiet=False)
         except Exception:
             pass
         if self._inport is not None:

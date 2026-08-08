@@ -46,6 +46,7 @@ isProject: false
 |-----------|-----|
 | **Synth** | Local wavetable soft-synth (what `tools/midi-tone` is becoming) |
 | **Looper** | Record/play MIDI note loops into that synth (and later into thru) |
+| **Presets** | Save/load synth settings (JSON slots); last session autosaved |
 | **Map / Thru** | Channel / CC / velocity remap; ports; learn — drives the Rust engine |
 | **Log** | Event history / commissioning |
 
@@ -115,6 +116,30 @@ You likely want **both** eventually; ship **phrase looper first** (matches “re
 
 Drum retrigger can share the engine’s RT timer infrastructure with looper/arp, but it’s a separate processor (per-note rate table, not a multi-step sequence).
 
+## Inspiration: CME UxMIDI / HxMIDI Tools
+
+Public guide: [Start Guide for UxMIDI Tools and HxMIDI Tools](https://www.cme-pro.com/start-guide-for-uxmidi-tools-software-by-cme/).
+
+CME’s PC/Mac app **configures their USB MIDI interfaces**. Filters, routes, and maps are stored **in the interface firmware**, so the box can run standalone without a computer.
+
+**Our model is different (and fine for this appliance):** the **Raspberry Pi is always the brain**. A dumb USB-MIDI-DIN adapter is enough; presets/maps live on the Pi. The Pi already provides **USB host** (a major CME H-series selling point).
+
+| CME feature | pi-midi-toolkit |
+|-------------|-----------------|
+| Channel remap | **Have** (`channel_map` in Rust presets) |
+| CC remap + learn | **Have** (`cc_map` + `learn` CLI) |
+| Velocity reshape | **Have** (full / clamp / curve) |
+| Presets save/load/recall | **Have** as JSON on disk; kiosk Map UI + midi-tone synth presets next |
+| MIDI filter (block ch / msg types) | **Natural next** on Rust hot path |
+| Rich mapper (msg-type transform, invert, min/max, compress/expand, keep original, note transpose, multi-rule banks) | **Doable**; bigger than current remap — good Map-mode target |
+| Thru / merge / multi-port matrix | **Partial:** 1→1 thru today; merge/split matrix = later multi-port work |
+| USB host for controllers | **Pi already is a USB host** |
+| Bluetooth MIDI | Optional later |
+| Settings stored *in the cable*, works without a computer | **Out of scope** — our box *is* the computer |
+
+**Near-term thru targets inspired by CME:** filters + richer mapper rules + Map mode in the kiosk.  
+**Not chasing:** emulating “config lives in the adapter” or BLE unless needed.
+
 ## Phase 0 — Local MIDI hear-test → Synth mode (active)
 
 Started as: prove **MPK → Pi** with a tiny soft synth (no DIN required).
@@ -122,6 +147,7 @@ Started as: prove **MPK → Pi** with a tiny soft synth (no DIN required).
 **Became the live product surface** in `tools/midi-tone`:
 - Wavetable voices, A/B morph, MPK knobs, modes (Synth / Looper / Log)
 - Kiosk session (`kiosk.sh` / Openbox) so the box boots into the UI
+- Persist last-session settings + named synth presets (JSON on disk)
 
 This is still **not** MIDI-out thru. It’s the playable local mode of the appliance.
 

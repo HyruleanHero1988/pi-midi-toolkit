@@ -4,9 +4,10 @@ Hear and see MIDI from the **Akai MPK mini** on the Pi **without** USB-DIN or a 
 
 - Opens a MIDI input (prefers a port name containing `MPK`)
 - Note-on → wavetable tone through the Pi audio jack / HDMI
-- **Modes** (top right): **SYNTH**, **LOOPER**, **LOG** — fully separate UIs
+- **Modes** (top right): **SYNTH**, **LOOPER**, **PRESETS**, **LOG** — fully separate UIs
 - Synth: voices, A/B morph, knobs, live status
 - Looper: record a MIDI note sequence, play it on repeat
+- Presets: 8 save slots + autosave last session (`settings.json`)
 - Log: full scrolling MIDI/event history
 - Bundled [Adventure Kid (AKWF)](https://github.com/KristofferKarlAxelEkstrand/AKWF-FREE) single-cycles (**CC0**) plus built-in sine/square/saw/triangle
 
@@ -62,7 +63,11 @@ Top-right tabs stay visible:
 
 - **SYNTH** — wavetable soft-synth, voice grid, morph pair
 - **LOOPER** — record MIDI notes, then play them back on a loop (free timing; notes only)
+- **PRESETS** — 8 touch slots: SAVE / LOAD / DELETE current sound + full-velocity
 - **LOG** — full event history (also has CLEAR / panic)
+
+Last session autosaves to `settings.json` (gitignored) every few seconds and on quit.
+Named slots live in `user-presets/slot-01.json` … `slot-08.json`.
 
 ### Looper
 

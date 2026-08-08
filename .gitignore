@@ -24,6 +24,8 @@ Thumbs.db
 # Python
 tools/midi-tone/.venv/
 tools/midi-tone/.pi-credentials
+tools/midi-tone/settings.json
+tools/midi-tone/user-presets/
 tools/midi-tone/_*.py
 tools/midi-tone/_*.txt
 __pycache__/
