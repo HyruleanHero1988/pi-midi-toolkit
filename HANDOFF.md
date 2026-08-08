@@ -12,7 +12,7 @@ Open this folder as the Cursor workspace.
 
 **One kiosk MIDI appliance.** Boot → Openbox kiosk → shared UI with modes:
 
-- **Synth / Looper / Log** — live in `tools/midi-tone` (playable soft-synth)
+- **Synth / Looper / Presets / Log** — live in `tools/midi-tone` (playable soft-synth + JSON session/presets)
 - **Map / Thru** — not in the kiosk yet; Rust `midi-engine` already does remap via CLI/JSON
 
 Playing notes is intentional, not a throwaway diagnostic. Mapper stays required for when USB-DIN → hardware synth is available; same box / same UI shell.
