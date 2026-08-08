@@ -26,9 +26,9 @@ Playing notes is intentional, not a throwaway diagnostic. Mapper stays required 
 
 ## What’s active now
 
-`tools/midi-tone` — Tk kiosk UI, wavetables, morph, looper, modes, `kiosk.sh` / `install-kiosk.sh`.
+`tools/midi-tone` — Tk kiosk UI, wavetables, morph, looper, modes, presets/session JSON, `kiosk.sh` / `install-kiosk.sh`.
 
-See `tools/midi-tone/README.md`.
+See `tools/midi-tone/README.md`. Session: `settings.json`; slots: `user-presets/`.
 
 ## Phase 1 engine (mapper) status
 
