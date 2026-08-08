@@ -135,12 +135,24 @@ CC_LEVEL = 77          # Knob 8 — output level
 KNOB_CCS = {CC_MORPH, CC_TONE, CC_ATTACK, CC_RELEASE, CC_VIB_DEPTH, CC_VIB_RATE, CC_LEVEL}
 
 
+# Peak scale for wavetable cycles (was 0.35 — far too quiet into the Pi jack)
+TABLE_PEAK = 0.90
+# Per-voice amp at velocity 127 (was 0.12 → ~-28 dBFS with old table scale)
+VOICE_AMP = 0.48
+# Extra mix bus makeup before soft-limit (Pi headphone/line outs are timid)
+OUTPUT_MAKEUP = 1.65
+DRUM_BUS_GAIN = 1.55
+
+
 def _builtin_tables() -> Dict[str, np.ndarray]:
     t = np.linspace(0.0, 1.0, TABLE_SIZE, endpoint=False, dtype=np.float64)
-    sine = np.sin(2.0 * np.pi * t).astype(np.float32)
-    square = np.where(t < 0.5, 0.35, -0.35).astype(np.float32)
-    saw = (2.0 * (t - np.floor(t + 0.5))).astype(np.float32) * 0.35
-    triangle = (2.0 * np.abs(2.0 * (t - np.floor(t + 0.5))) - 1.0).astype(np.float32) * 0.35
+    sine = (np.sin(2.0 * np.pi * t) * TABLE_PEAK).astype(np.float32)
+    square = np.where(t < 0.5, TABLE_PEAK, -TABLE_PEAK).astype(np.float32)
+    saw = (2.0 * (t - np.floor(t + 0.5))).astype(np.float32) * np.float32(TABLE_PEAK)
+    triangle = (
+        (2.0 * np.abs(2.0 * (t - np.floor(t + 0.5))) - 1.0).astype(np.float32)
+        * np.float32(TABLE_PEAK)
+    )
     return {
         "sine": sine,
         "square": square,
@@ -182,7 +194,7 @@ def _resample_cycle(x: np.ndarray, n: int = TABLE_SIZE) -> np.ndarray:
         frac = (idx - np.floor(idx)).astype(np.float32)
         y = (x[i0] * (1.0 - frac) + x[i1] * frac).astype(np.float32)
     peak = float(np.max(np.abs(y))) or 1.0
-    return (y / peak) * np.float32(0.35)
+    return (y / peak) * np.float32(TABLE_PEAK)
 
 
 def load_wavetables(directory: pathlib.Path) -> Dict[str, np.ndarray]:
@@ -624,7 +636,7 @@ class SineEngine:
             self._drum_note_on(n, vel)
             return
         key = (ch, n)
-        target = vel * 0.12
+        target = vel * VOICE_AMP
         with self._lock:
             self._note_serial += 1
             serial = self._note_serial
@@ -757,8 +769,11 @@ class SineEngine:
             self._tone = max(0.0, min(1.0, float(value)))
 
     def set_level(self, value: float) -> None:
+        """Master level. MIDI CC is 0–127; ease the bottom so mid-knob isn't tiny."""
         if value > 1.0:
-            value = value / 127.0
+            # Slightly loud-biased curve: mid CC still usable on a powered speaker
+            x = max(0.0, min(1.0, float(value) / 127.0))
+            value = x ** 0.65
         with self._lock:
             self._level = max(0.0, min(1.0, float(value)))
 
@@ -1051,7 +1066,11 @@ class SineEngine:
 
         if level < 0.999:
             buf *= np.float32(level)
-        np.clip(buf, -0.95, 0.95, out=buf)
+        # Makeup + soft limit: loud enough for powered speakers, tame chord pile-ups
+        if frames > 0:
+            buf *= np.float32(OUTPUT_MAKEUP)
+            np.tanh(buf, out=buf)
+            buf *= np.float32(0.97)
         outdata[:, 0] = buf
         if dead or dead_drums:
             with self._lock:
@@ -1103,7 +1122,7 @@ class SineEngine:
                 inv_sr=inv_sr,
             )
             hit.phase = new_phase
-            buf += audio
+            buf += audio * np.float32(DRUM_BUS_GAIN)
             hit.pos += frames
             if hit.pos > int(dur * sr) or float(np.max(np.abs(audio))) < 0.0002:
                 dead.append(hit.note)
