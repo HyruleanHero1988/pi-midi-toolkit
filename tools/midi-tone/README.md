@@ -118,12 +118,12 @@ Live playing still works while a loop runs. Voice/morph/knob settings from Synth
 
 1. Open **PADS**
 2. Tap an **empty** square (or hit the matching MPK pad) to arm record
-3. Play **keyboard** notes — they are captured into that cell
-4. Tap the same pad / **STOP REC** to finish (saved under `phrases/`)
+3. Play **keyboard and/or drum pads** — both are captured into that cell
+4. **STOP REC** or tap that square again to finish (saved under `phrases/`)
 5. Tap a **filled** square (or MPK pad) to **one-shot** launch into the soft-synth
-6. **CLEAR** wipes the last selected cell; **STOP ALL** stops playing phrases
+6. **CLEAR** then tap a pad to erase it (CLEAR again cancels); **STOP ALL** stops playing phrases
 
-In PADS mode, channel-10 drum pads launch phrases instead of drum voices. Synth mode still plays the 16-pad drum kit.
+While a phrase is **recording**, MPK pads play/record **drum voices** (not launch). When not recording, those pads launch/arm phrases. Synth mode still always plays the 16-pad drum kit.
 
 ### Songs
 

@@ -1426,23 +1426,28 @@ class PhrasePadBank:
             c = self._cells[idx]
             return PhraseCell(events=list(c.events), length=float(c.length))
 
-    def status_line(self) -> str:
+    def status_line(self, *, clear_armed: bool = False) -> str:
         with self._lock:
             filled = sum(1 for c in self._cells if not c.is_empty())
             rec = self._recording_cell
             playing = sorted(self._playing.keys())
+        if clear_armed:
+            return "CLEAR armed — tap a pad (touch or MPK) to erase it · CLEAR again to cancel"
         if rec is not None:
             return (
-                f"Recording {phrase_pad_label(rec)} — play keys, tap pad/STOP REC to finish "
-                f"({filled}/16 filled)"
+                f"Recording {phrase_pad_label(rec)} — keys + drum pads record; "
+                f"STOP REC or tap that square to finish ({filled}/16 filled)"
             )
         if playing:
             names = ",".join(phrase_pad_label(i) for i in playing[:6])
             more = f"+{len(playing) - 6}" if len(playing) > 6 else ""
-            return f"Playing {names}{more} · {filled}/16 filled · empty pad = record"
+            return f"Playing {names}{more} · {filled}/16 filled · CLEAR then tap a pad to erase"
         if filled == 0:
-            return "Empty pads — tap a square or hit an MPK pad to arm record, then play keys"
-        return f"{filled}/16 phrases · tap filled pad to launch · empty pad to record"
+            return "Empty pads — tap a square or MPK pad to arm record, then play keys / drums"
+        return (
+            f"{filled}/16 phrases · tap filled = launch · empty = record · "
+            "CLEAR then tap to erase"
+        )
 
     def _cell_path(self, idx: int) -> pathlib.Path:
         return self._dir / f"pad-{idx + 1:02d}.json"
@@ -1546,9 +1551,7 @@ class PhrasePadBank:
         return idx
 
     def record_note(self, on: bool, channel: int, note: int, velocity: int) -> None:
-        """Capture keyboard notes into the armed cell (skip drum channel)."""
-        if (channel & 0x0F) == DRUM_CHANNEL:
-            return
+        """Capture keyboard and drum-channel notes into the armed cell."""
         with self._lock:
             idx = self._recording_cell
             if idx is None:
@@ -1641,10 +1644,10 @@ class PhrasePadBank:
         self._emit(("log", f"Phrase ▶ {phrase_pad_label(idx)}", False))
         return True
 
-    def handle_pad(self, idx: int) -> str:
+    def handle_pad(self, idx: int, *, from_touch: bool = False) -> str:
         """
-        Touch square or MPK pad hit.
-        Empty → arm record; filled → launch; same pad while recording → stop record.
+        Touch square or MPK pad hit (when not recording drums).
+        Empty → arm record; filled → launch; touch on armed cell → stop record.
         Returns a short action tag for the UI/log.
         """
         if not (0 <= idx < PHRASE_PAD_COUNT):
@@ -1652,9 +1655,13 @@ class PhrasePadBank:
         with self._lock:
             rec = self._recording_cell
             empty = self._cells[idx].is_empty()
-        if rec is not None and rec == idx:
+        # Only the touch square ends record — MPK pads stay free for drum takes
+        if rec is not None and rec == idx and from_touch:
             self.stop_record()
             return "stop_rec"
+        if rec is not None and not from_touch:
+            # Hardware pad while recording is handled by MIDI path as drums
+            return "ignore"
         if empty:
             self.arm_record(idx)
             return "arm"
@@ -2222,6 +2229,8 @@ class MidiToneApp:
         self._songs = SongPlayer(self.engine, self._q_put)
         self._phrase_status_var = tk.StringVar(value=self._phrases.status_line())
         self._phrase_pad_btns: Dict[int, tk.Button] = {}
+        self._phrase_clear_btn: Optional[tk.Button] = None
+        self._phrase_clear_armed = False
         self._phrase_shell: Optional[tk.Frame] = None
         self._loop_status_var = tk.StringVar(value="Loop empty — tap RECORD, play notes, STOP, then PLAY.")
         self._loop_rec_btn: Optional[tk.Button] = None
@@ -3350,7 +3359,10 @@ class MidiToneApp:
         self._mk_touch_btn(row, "STOP ALL", self._phrase_stop_all, bg="#3c3836").pack(
             side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=10
         )
-        self._mk_touch_btn(row, "CLEAR", self._phrase_clear_selected, bg="#9d0006").pack(
+        self._phrase_clear_btn = self._mk_touch_btn(
+            row, "CLEAR", self._phrase_toggle_clear, bg="#9d0006"
+        )
+        self._phrase_clear_btn.pack(
             side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=10
         )
         self._mk_touch_btn(row, "ALL NOTES OFF", self._panic, bg="#9d0006").pack(
@@ -3359,33 +3371,46 @@ class MidiToneApp:
         self._paint_phrase_pads()
 
     def _phrase_pad_tap(self, idx: int) -> None:
-        self._phrases.handle_pad(idx)
+        if self._phrase_clear_armed:
+            self._phrases.clear_cell(idx)
+            self._phrase_clear_armed = False
+            self._paint_phrase_pads()
+            return
+        self._phrases.handle_pad(idx, from_touch=True)
         self._paint_phrase_pads()
 
     def _phrase_stop_rec(self) -> None:
+        self._phrase_clear_armed = False
         if self._phrases.is_recording():
             self._phrases.stop_record()
         self._paint_phrase_pads()
 
     def _phrase_stop_all(self) -> None:
+        self._phrase_clear_armed = False
         self._phrases.stop_all()
         self._paint_phrase_pads()
 
-    def _phrase_clear_selected(self) -> None:
-        if not self._phrases.clear_cell():
-            self._phrase_status_var.set("Tap a pad first, then CLEAR")
+    def _phrase_toggle_clear(self) -> None:
+        """Arm CLEAR: next pad tap erases that cell (cancel by tapping CLEAR again)."""
+        if self._phrases.is_recording():
+            self._phrase_status_var.set("Stop recording before CLEAR")
             return
+        self._phrase_clear_armed = not self._phrase_clear_armed
         self._paint_phrase_pads()
 
     def _paint_phrase_pads(self) -> None:
-        self._phrase_status_var.set(self._phrases.status_line())
+        clear_armed = bool(self._phrase_clear_armed)
+        self._phrase_status_var.set(self._phrases.status_line(clear_armed=clear_armed))
         rec = self._phrases.recording_cell()
         selected = self._phrases.selected()
         playing = set(self._phrases.playing_cells())
         for idx, btn in self._phrase_pad_btns.items():
             cell = self._phrases.cell(idx)
             label = phrase_pad_label(idx)
-            if rec == idx:
+            if clear_armed:
+                text = f"{label}\nCLR?" if not cell.is_empty() else f"{label}\n—"
+                color = "#cc241d" if not cell.is_empty() else "#504945"
+            elif rec == idx:
                 text = f"{label}\nREC"
                 color = "#9d0006"
             elif idx in playing:
@@ -3398,11 +3423,26 @@ class MidiToneApp:
             else:
                 text = f"{label}\n{cell.length:.1f}s"
                 color = "#458588"
-            if selected == idx and rec != idx and idx not in playing:
-                # Mild highlight for CLEAR target
-                color = "#504945" if cell.is_empty() else "#076678"
+            if (
+                not clear_armed
+                and selected == idx
+                and rec != idx
+                and idx not in playing
+                and not cell.is_empty()
+            ):
+                color = "#076678"
             try:
                 btn.configure(text=text, bg=color, activebackground=color)
+            except Exception:
+                pass
+        if self._phrase_clear_btn is not None:
+            cbg = "#fb4934" if clear_armed else "#9d0006"
+            try:
+                self._phrase_clear_btn.configure(
+                    text="CLEAR…" if clear_armed else "CLEAR",
+                    bg=cbg,
+                    activebackground=cbg,
+                )
             except Exception:
                 pass
 
@@ -3410,7 +3450,9 @@ class MidiToneApp:
         if self._mode == "pads":
             self._paint_phrase_pads()
         else:
-            self._phrase_status_var.set(self._phrases.status_line())
+            self._phrase_status_var.set(
+                self._phrases.status_line(clear_armed=self._phrase_clear_armed)
+            )
 
     def _switch_mode(self, mode: str) -> None:
         mode = mode if mode in ("synth", "looper", "pads", "songs", "log", "presets") else "synth"
@@ -3421,8 +3463,10 @@ class MidiToneApp:
             self._close_morph_menu(restore_main=False)
 
         # Leaving pads while recording: keep the take
-        if self._mode == "pads" and mode != "pads" and self._phrases.is_recording():
-            self._phrases.stop_record()
+        if self._mode == "pads" and mode != "pads":
+            if self._phrases.is_recording():
+                self._phrases.stop_record()
+            self._phrase_clear_armed = False
 
         self._mode = mode
         self._synth_shell.pack_forget()
@@ -4043,11 +4087,25 @@ class MidiToneApp:
 
         if msg.type == "note_on" and msg.velocity > 0:
             is_drum = msg.channel == DRUM_CHANNEL
-            # In PADS mode, MPK drum pads launch/arm phrase cells (not drum voices)
-            if pads_mode and is_drum:
+            phrase_recording = self._phrases.is_recording()
+            # PADS mode: MPK pads launch/arm phrases — unless recording (then drums)
+            # or CLEAR is armed (then erase that cell).
+            if pads_mode and is_drum and not phrase_recording:
                 cell = phrase_cell_for_note(msg.note)
                 if cell is not None:
-                    action = self._phrases.handle_pad(cell)
+                    if self._phrase_clear_armed:
+                        self._phrases.clear_cell(cell)
+                        self._phrase_clear_armed = False
+                        self._q_put(("phrase",))
+                        self._q_put(
+                            (
+                                "log",
+                                f"Pad→CLEAR {phrase_pad_label(cell)}  note {msg.note}",
+                                False,
+                            )
+                        )
+                        return
+                    action = self._phrases.handle_pad(cell, from_touch=False)
                     self._q_put(("phrase",))
                     self._q_put(
                         (
@@ -4061,18 +4119,21 @@ class MidiToneApp:
             vel = msg.velocity if is_drum or not self._full_vel else 127
             self.engine.note_on(msg.channel, msg.note, vel)
             self._looper.record_note(True, msg.channel, msg.note, vel)
-            if pads_mode or self._phrases.is_recording():
+            if pads_mode or phrase_recording:
                 self._phrases.record_note(True, msg.channel, msg.note, vel)
             self._q_put(("on", msg.channel, msg.note, vel))
             if self._looper.is_recording():
                 self._q_put(("loop",))
             if is_drum:
                 model = drum_model_for_note(msg.note)
+                rec_tag = " +rec" if phrase_recording else ""
                 line = (
                     f"Pad/{model:<10} ch{msg.channel + 1}  {midi_note_name(msg.note)} "
-                    f"({msg.note})  vel {msg.velocity}"
+                    f"({msg.note})  vel {msg.velocity}{rec_tag}"
                 )
                 self._q_put(("mod",))  # refresh DRUMS status line
+                if phrase_recording:
+                    self._q_put(("phrase",))
             elif self._full_vel and msg.velocity != 127:
                 line = (
                     f"Note On   ch{msg.channel + 1}  {midi_note_name(msg.note)} "
@@ -4082,8 +4143,12 @@ class MidiToneApp:
                 line = format_message(msg)
             self._q_put(("log", line, False))
         elif msg.type == "note_off" or (msg.type == "note_on" and msg.velocity == 0):
-            # Phrase-launch pads have no held note in the engine
-            if pads_mode and msg.channel == DRUM_CHANNEL:
+            # Phrase-launch pads have no held note — but drum takes while recording do
+            if (
+                pads_mode
+                and msg.channel == DRUM_CHANNEL
+                and not self._phrases.is_recording()
+            ):
                 if phrase_cell_for_note(msg.note) is not None:
                     return
             self.engine.note_off(msg.channel, msg.note)
@@ -4095,7 +4160,11 @@ class MidiToneApp:
                 self._q_put(("loop",))
             self._q_put(("log", format_message(msg), False))
         elif msg.type == "polytouch":
-            if pads_mode and msg.channel == DRUM_CHANNEL:
+            if (
+                pads_mode
+                and msg.channel == DRUM_CHANNEL
+                and not self._phrases.is_recording()
+            ):
                 return
             self.engine.set_pad_pressure(msg.channel, msg.note, msg.value)
             if msg.channel == DRUM_CHANNEL:
@@ -4106,7 +4175,11 @@ class MidiToneApp:
             else:
                 self._put_continuous_log(format_message(msg))
         elif msg.type == "aftertouch":
-            if pads_mode and msg.channel == DRUM_CHANNEL:
+            if (
+                pads_mode
+                and msg.channel == DRUM_CHANNEL
+                and not self._phrases.is_recording()
+            ):
                 return
             self.engine.set_pad_pressure(msg.channel, None, msg.value)
             if msg.channel == DRUM_CHANNEL:
