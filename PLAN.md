@@ -18,8 +18,8 @@ todos:
     content: "Phase 1: channel remap, CC remap + learn, always-full / velocity remap, stuck-note safety"
     status: pending
   - id: touch-ui
-    content: Thin touch UI for config/status only (never on MIDI hot path)
-    status: pending
+    content: "One kiosk UI: Synth/Looper/Log now; Map mode for remap thru (never on MIDI hot path)"
+    status: in_progress
   - id: drum-retrigger
     content: "Phase 2: per-pad/note auto-retrigger with configurable interval"
     status: pending
