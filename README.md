@@ -1,12 +1,13 @@
 # pi-midi-toolkit
 
-Standalone Raspberry Pi MIDI processor: low-latency thru with channel/CC/velocity remap.
-**Not** related to play-my-synth.
+Raspberry Pi **MIDI appliance**: one kiosk UI for local soft-synth play **and**
+low-latency MIDI thru/remap to a hardware synth. **Not** related to play-my-synth.
 
-Phase 1 is headless CLI + JSON presets (touch UI later). Target: Raspberry Pi 2 + USB MIDI
-(MPK mini mk3 in → Pi → USB-MIDI-to-DIN → synth).
+**North star:** power on → kiosk → modes (Synth / Looper / Log / Map). See [PLAN.md](PLAN.md).
 
-**Phase 0:** [`tools/midi-tone`](tools/midi-tone) — sine soft-synth + event UI to verify MPK → Pi with no DIN/synth.
+- **Kiosk UI (active):** [`tools/midi-tone`](tools/midi-tone) — wavetable synth, morph, looper, Openbox kiosk
+- **Thru engine:** Rust `midi-engine` — channel/CC/velocity remap via CLI + JSON presets (Map mode UI next)
+- **Target hardware:** Pi 2 + MPK mini mk3 (+ USB-MIDI-DIN → synth when available)
 
 ## Crates
 

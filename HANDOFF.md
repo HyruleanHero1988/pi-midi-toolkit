@@ -1,44 +1,50 @@
 ﻿# Handoff — pi-midi-toolkit
 
-Saved: 2026-07-12 (Phase 1 MVP software largely complete)
+Updated: 2026-08-08
 
-Open this folder as the Cursor workspace: `c:\Users\Raymond\Documents\Development\pi-midi-toolkit`
+Open this folder as the Cursor workspace.
 
 ## Plan
 
-[PLAN.md](PLAN.md) and [`.cursor/plans/pi_midi_toolkit_7f45b204.plan.md`](.cursor/plans/pi_midi_toolkit_7f45b204.plan.md).
+[PLAN.md](PLAN.md) — **read the “Product north star” section first.**
+
+## Product direction
+
+**One kiosk MIDI appliance.** Boot → Openbox kiosk → shared UI with modes:
+
+- **Synth / Looper / Log** — live in `tools/midi-tone` (playable soft-synth)
+- **Map / Thru** — not in the kiosk yet; Rust `midi-engine` already does remap via CLI/JSON
+
+Playing notes is intentional, not a throwaway diagnostic. Mapper stays required for when USB-DIN → hardware synth is available; same box / same UI shell.
 
 ## Hardware
 
-- **Pi 2 Model B** + touchscreen (UI later)
-- First I/O: **MPK mini mk3 USB** → Pi → **USB-MIDI-to-DIN** → synth
-- Use a powered hub if USB devices brown out
+- **Pi 2 Model B** + touchscreen
+- **In:** MPK mini mk3 USB
+- **Out (mapper path):** USB-MIDI-to-DIN → hardware synth (when you have it)
+- Powered hub if USB devices brown out
 
-## Phase 1 status (software)
+## What’s active now
 
-Done:
+`tools/midi-tone` — Tk kiosk UI, wavetables, morph, looper, modes, `kiosk.sh` / `install-kiosk.sh`.
 
-- `midi-core`: event / preset (validated) / process (fixed CC table + inline velocity curve) / stuck
-- `midi-engine`: `list` | `run` (--watch, --rt) | `learn` | `test` | `latency`
-- Atomic preset publish via `arc-swap`; stuck flush on reload/exit
-- Presets: `example.json`, `mpk-mini-ch3.json`
-- `deploy/setup-pi.sh`, `deploy.sh`, `deploy.ps1`, systemd unit with `--rt`
-- `.cargo/config.toml.example` for armv7 cross notes
-- `cargo test` / `latency` on Windows host
+See `tools/midi-tone/README.md`.
 
-Still needs your hardware / machine:
+## Phase 1 engine (mapper) status
 
-1. Plug MPK + USB-DIN → `list` / `test` / `run` (PC or Pi)
-2. Install armv7 linker or `cross`, then first `deploy` to the Pi
-3. On Pi: `setup-pi.sh`, confirm ALSA names, `systemctl status midi-engine`
+Done (CLI / headless):
 
-## Phase 0 status
+- `midi-core` + `midi-engine` remap thru, learn, presets, stuck-note flush, `--rt`, deploy scripts
 
-`tools/midi-tone` — Python sine + Tk event UI. Run on Pi desktop; see `tools/midi-tone/README.md`.
+Still needs hardware / machine:
+
+1. MPK + USB-DIN → `list` / `test` / `run`
+2. armv7 cross build + deploy to Pi
+3. Later: **Map mode in the kiosk** talking to `midi-engine` (don’t launch a second app)
 
 ## Host setup
 
-Rust **1.97.0** at `%USERPROFILE%\.cargo\bin` — add to PATH in new shells.
+Rust toolchain on PATH for engine work. midi-tone is Python venv on the Pi.
 
 ## Not related to play-my-synth
 

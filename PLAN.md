@@ -1,6 +1,6 @@
 ---
 name: Pi MIDI Toolkit
-overview: A standalone Raspberry Pi MIDI processor (unrelated to play-my-synth) built for extremely low added latency—Rust RT engine + separate touch UI—with channel/CC/velocity remap, per-pad drum retrigger, phrase record/loop, SMF export, and an optional key-relative arpeggiator.
+overview: A Raspberry Pi MIDI appliance that boots to one kiosk UI—soft-synth / looper for local play, plus remap/thru tools for hardware synths—backed by a Rust RT MIDI engine when thru is needed. Unrelated to play-my-synth.
 todos:
   - id: scaffold-repo
     content: Scaffold standalone Rust MIDI engine + separate touch UI + systemd (no play-my-synth dependency)
@@ -38,11 +38,35 @@ isProject: false
 
 **This is not part of play-my-synth.** No shared repo, relay, WebRTC, or bridge code. That project is only a **feature wishlist reference** (CC remap, full velocity, channel remap, etc.). This is a standalone Pi appliance.
 
+## Product north star (updated)
+
+**One box, one kiosk UI.** Power on → Openbox kiosk → a MIDI-focused shell with modes. Playing notes is a first-class mode, not a temporary diagnostic you throw away.
+
+| Mode (UI) | Job |
+|-----------|-----|
+| **Synth** | Local wavetable soft-synth (what `tools/midi-tone` is becoming) |
+| **Looper** | Record/play MIDI note loops into that synth (and later into thru) |
+| **Map / Thru** | Channel / CC / velocity remap; ports; learn — drives the Rust engine |
+| **Log** | Event history / commissioning |
+
+Boot path: `install-kiosk.sh` + X11 Openbox session (already started). No normal Pi desktop shell.
+
+### Architecture rule (still true)
+
+- **Rust `midi-engine`:** MIDI thru hot path only (ALSA in → transform → out). RT-friendly, no UI work.
+- **Kiosk UI (Tk today, still a separate process from the engine):** config + local soft-synth + transport. Talks to the engine over IPC/files when Map mode is active.
+- **UI never sits on the thru hot path.** Touching Map screens must not add jitter to DIN-out notes.
+- Soft-synth audio is allowed in Synth/Looper modes; that path is *not* the remap thru path.
+
+### Why both
+
+You don’t have the hardware-synth DIN reason at home every day, but you still want the mapper eventually. The kiosk is the appliance; synth-toy mode keeps the box useful until USB-DIN → synth is plugged in. Same UI shell either way.
+
 ## Opinion (short)
 
-Extremely low latency is the product constraint. Split architecture: **Rust MIDI engine** on a realtime path; **separate touch UI** for config only.
+Extremely low latency on **thru/remap** is still the hard constraint. Local soft-synth can be “good enough Pi 2 audio.” Split architecture: **Rust MIDI engine** on the realtime thru path; **one kiosk UI** for synth + map config.
 
-**Defaults:** new standalone repo; Phase 1 = remap tools; Rust + ALSA hot path; UI never sees MIDI bytes.
+**Defaults:** standalone repo; kiosk-first UX; Rust + ALSA hot path for thru; UI never processes thru MIDI bytes.
 
 ## Latency-first architecture
 
@@ -65,8 +89,8 @@ flowchart LR
 ```
 
 - **Engine (Rust):** ALSA → fixed processor chain → out. `SCHED_FIFO`, `mlockall`, zero alloc after start, atomic preset publish.
-- **UI (separate process):** touch screens for ports/maps/modes; IPC only.
-- **Not used:** Python/Node on the thru path, Chromium, Electron, anything from play-my-synth.
+- **Kiosk UI (separate process):** Synth / Looper / Log / Map; config IPC to engine; local audio only in Synth/Looper.
+- **Not used:** Python/Node on the *thru* path, Chromium, Electron, anything from play-my-synth.
 
 ## Feature map (what you asked for)
 
@@ -91,28 +115,27 @@ You likely want **both** eventually; ship **phrase looper first** (matches “re
 
 Drum retrigger can share the engine’s RT timer infrastructure with looper/arp, but it’s a separate processor (per-note rate table, not a multi-step sequence).
 
-## Phase 0 — Local MIDI hear-test (no DIN/synth required)
+## Phase 0 — Local MIDI hear-test → Synth mode (active)
 
-Before USB→DIN→hardware synth, prove **MPK → Pi** with a tiny diagnostic soft synth:
+Started as: prove **MPK → Pi** with a tiny soft synth (no DIN required).
 
-- Open MPK as MIDI input
-- Note-on → sine at MIDI note frequency; note-off → silence
-- Play through Pi headphone jack / HDMI audio
-- Optional: dump raw events (`aseqdump`-style) for channel/CC checks
+**Became the live product surface** in `tools/midi-tone`:
+- Wavetable voices, A/B morph, MPK knobs, modes (Synth / Looper / Log)
+- Kiosk session (`kiosk.sh` / Openbox) so the box boots into the UI
 
-This is **not** MIDI-out; it’s audible confirmation the USB host path works. Keep it lean (Pi 2): one oscillator, no SoundFont/sampler stack.
+This is still **not** MIDI-out thru. It’s the playable local mode of the appliance.
 
-## Phase 1 — Remap MVP (**no touchscreen required**)
+## Phase 1 — Remap MVP (engine CLI first; Map mode UI next)
 
+Engine side is largely built: JSON presets + SSH/CLI. Prove channel/CC/velocity remap on real MIDI hardware when DIN synth is available.
 
-Phase 1 is **headless / CLI-first**: engine + JSON presets + SSH. You prove channel/CC/velocity remap on real MIDI hardware before spending time on a touch UI. Touchscreen comes as a thin config UI **after** remaps feel solid (still Phase-1-adjacent, but not blocking the first useful binary).
-
-1. Port select (ALSA by name) + commissioning CLI (`midi-list`, `midi-test`, latency check)
+1. Port select (ALSA by name) + commissioning CLI (`list` / `test` / `latency`)
 2. Channel remap
-3. CC remap + Learn (Learn can be CLI/flag-driven until UI exists)
+3. CC remap + Learn
 4. Always-full velocity (+ simple remap table)
 5. Stuck-note / all-notes-off on preset change or disconnect
 6. JSON presets on disk → publish into engine
+7. **Next UX step:** add a **Map** mode to the same kiosk UI (edit preset / learn / start-stop thru) talking to `midi-engine` — not a second app the user has to launch
 
 ## Phase 2 — Drum retrigger
 
@@ -139,9 +162,9 @@ Phase 1 is **headless / CLI-first**: engine + JSON presets + SSH. You prove chan
 | Piece | Choice |
 |-------|--------|
 | MIDI engine | Rust, ALSA, RT thread |
-| UI | Separate light touch process later (not Chromium); Phase 1 is CLI/JSON |
-| IPC | Unix socket or shared-memory config + notify |
-| Deploy | `systemd`: `midi-engine` (RT) + `midi-ui` |
+| UI | One kiosk process (`midi-tone` today; grows Map mode). Not Chromium/Electron |
+| IPC | Preset file watch now; later Unix socket or shm notify for Map ↔ engine |
+| Deploy | `systemd`: `midi-engine` (RT, when thru needed) + kiosk session autostart |
 | Day-to-day install | Stock Raspberry Pi OS + setup script — **not** a custom image every change |
 
 ## Development & testing (no SD reflash loop)
@@ -220,16 +243,18 @@ flowchart LR
 | Dual USB MIDI | Explicit in/out port selection; never assume a single combined device |
 
 **Resource budget (design law):**
-- Engine idle footprint small; no allocations on the MIDI path after start
-- UI (when added) is a separate light process — never Chromium/Electron
-- One job on screen; no background dashboards, telemetry, or heavy frameworks
-- Prefer JSON + CLI for Phase 1 so the first useful box doesn’t pay for a GUI
+- Engine idle footprint small; no allocations on the MIDI thru path after start
+- One kiosk UI process — never Chromium/Electron
+- One job on screen per mode; no background dashboards or heavy frameworks
+- CLI/JSON remain valid for headless commissioning even after Map UI exists
 
 - Engine: `SCHED_FIFO` + `mlockall` via systemd where the kernel allows
-- Pi 4/5 = optional later upgrade, not required to ship Phase 1
+- Pi 4/5 = optional later upgrade, not required to ship the appliance
 
 ## Success criteria
 
+- Power on → kiosk MIDI UI, no desktop shell
+- Synth mode is fun/usable on Pi 2; Map mode configures thru without a second app
 - Remap feels like a direct cable under UI abuse
 - Drum pads can roll at set per-pad rates without timing flubs
 - Record a phrase, loop it live, optionally save `.mid`
@@ -239,7 +264,7 @@ flowchart LR
 ## Out of scope
 
 - play-my-synth integration
-- Audio / soft synths
-- Browser UI
+- Browser / Electron UI
+- Soft-synth replacing the hardware-synth thru path (local audio is a *mode*, not the mapper)
 - Custom kernel modules unless measurement forces it
 - Requiring a new SD image for every iteration
