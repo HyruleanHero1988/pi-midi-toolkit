@@ -33,8 +33,8 @@ todos:
     content: "Phase 0b (toy synth): ch10 pads use analog-style drum voices (pitch env, noise, decay/stretch) not pitched wavetable keys"
     status: in_progress
   - id: phrase-pads
-    content: "Phase 3c (later): Phrases/Pads — grid of recorded MIDI phrases; launch via touch squares and MPK drum pads"
-    status: pending
+    content: "Phase 3c: Phrases/Pads — grid of recorded MIDI phrases; launch via touch squares and MPK drum pads"
+    status: in_progress
   - id: arp
     content: "Phase 4 (optional distinct mode): key-relative step pattern transposed by held root"
     status: pending
@@ -56,7 +56,7 @@ isProject: false
 | **Synth** | Local wavetable soft-synth (what `tools/midi-tone` is becoming) |
 | **Looper** | Record/play free-timing MIDI note loops into that synth |
 | **Songs** | Save/load Standard MIDI Files (`.mid`); tempo; play to soft-synth and/or **USB→DIN** |
-| **Phrases / Pads** *(later)* | Grid of recorded MIDI phrases; launch from touch squares **and MPK mini drum pads** |
+| **Phrases / Pads** | Grid of recorded MIDI phrases; launch from touch squares **and MPK mini drum pads** |
 | **Presets** | Save/load synth settings (JSON slots); last session autosaved |
 | **Map / Thru** | Channel / CC / velocity remap; ports; learn — drives the Rust engine |
 | **Log** | Event history / commissioning |
@@ -228,11 +228,11 @@ Not a DAW: no piano roll, no multi-track edit. Just “keep songs, set tempo, se
 
 **Engine note:** live remap thru stays in Rust. Song playback can start in the kiosk; if DIN playback needs RT scheduling or “play through the remap chain,” move the SMF clock into `midi-engine` and keep the UI as transport/library only.
 
-## Phase 3c — Phrases / Pads (clip-launch grid; later)
+## Phase 3c — Phrases / Pads (clip-launch grid) — **implementing on `cursor/midi-tone-phrase-pads-1052`**
 
-**Idea (parked):** a touch grid (e.g. 4×4 or 2×4 to match the MPK) where each cell holds a short recorded MIDI sequence. Launch a filled cell into the soft-synth and/or USB→DIN. Empty cell → arm record into that cell. Optional hold-to-stop / clear.
+Touch **4×4** grid (MPK Bank A + Bank B) where each cell holds a short recorded MIDI sequence. Launch a filled cell into the soft-synth (one-shot). Empty cell → arm record into that cell. Persist under `tools/midi-tone/phrases/pad-NN.json`.
 
-### Launch inputs (both required)
+### Launch inputs (both)
 
 | Input | Behavior |
 |-------|----------|
@@ -240,23 +240,18 @@ Not a DAW: no piano roll, no multi-track edit. Just “keep songs, set tempo, se
 | **MPK mini drum pads** | Pad hit launches the mapped phrase cell (hardware performance path) |
 
 **MPK mapping notes:**
-- Pads arrive on **MIDI channel 10** (already special-cased as `DRUM_CHANNEL` in midi-tone).
-- In **Phrases mode**, ch10 note-ons should **launch phrase cells**, not play the soft-synth drum hit (or make that a toggle: *pads → phrases* vs *pads → drums*).
-- Default: pad bank order → cell 1…N (document factory MPK note numbers; allow remap later).
-- Velocity of the pad hit can scale phrase velocity or be ignored (fixed phrase dynamics) — pick a simple default first.
+- Pads arrive on **MIDI channel 10** (`DRUM_CHANNEL`).
+- In **PADS mode**, ch10 note-ons **launch/arm phrase cells**, not drum voices. Synth mode still plays drum kit.
+- Factory notes 36–51 → cells A1–A8 / B1–B8. Pad velocity ignored (fixed phrase dynamics) for now.
 - Keyboard keys stay available for live play / recording into an armed cell.
 
 | vs existing mode | Difference |
 |------------------|------------|
 | **Looper** | One free-timing loop on repeat |
 | **Songs** | Whole `.mid` files + tempo transport |
-| **Phrases / Pads** | Many one-shot (or gated) *phrases*; launch like an MPC / clip launcher from **screen or drum pads** |
+| **Phrases / Pads** | Many one-shot *phrases*; launch like an MPC / clip launcher from **screen or drum pads** |
 
-**Why it fits this box:** huge touch targets *and* the MPK pads you already have in hand; works when you’re not looking at the screen. Content is *your* takes. Same capture buffer family as LOOPER; different launcher UI. Persist cells as small `.mid` or JSON event lists under e.g. `tools/midi-tone/phrases/`.
-
-**Not now:** ship after Songs feels solid. Don’t block Map/thru on this.
-
-**Related later (optional, not scheduled):** “Japanese game-ish” demo content = original/CC0 chip-style loops or just play existing phrases through chip-ish wavetables — not ripped game MIDIs.
+**Related later (optional):** USB→DIN phrase out; gated hold-to-stop; pad-velocity scaling; “Japanese game-ish” demo content = original/CC0 chip-style loops — not ripped game MIDIs.
 
 ## Phase 4 — Key-relative arpeggiator
 

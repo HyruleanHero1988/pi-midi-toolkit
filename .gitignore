@@ -27,6 +27,7 @@ tools/midi-tone/.pi-credentials
 tools/midi-tone/settings.json
 tools/midi-tone/user-presets/
 tools/midi-tone/songs/
+tools/midi-tone/phrases/
 tools/midi-tone/_*.py
 tools/midi-tone/_*.txt
 __pycache__/

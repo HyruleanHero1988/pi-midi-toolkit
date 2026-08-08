@@ -4,9 +4,10 @@ Hear and see MIDI from the **Akai MPK mini** on the Pi **without** USB-DIN or a 
 
 - Opens a MIDI input (prefers a port name containing `MPK`)
 - Note-on → wavetable tone through the Pi audio jack / HDMI
-- **Modes** (top right): **SYNTH**, **LOOPER**, **SONGS**, **PRESETS**, **LOG** — fully separate UIs
+- **Modes** (top right): **SYNTH**, **LOOPER**, **PADS**, **SONGS**, **PRESETS**, **LOG** — fully separate UIs
 - Synth: voices, A/B morph, knobs, live status; **MPK pads (ch10) = analog drum voices** (kick/snare/tom/hat/clap)
 - Looper: record a MIDI note sequence, play it on repeat
+- Pads: 16 phrase clips (Bank A+B); record from keys, launch from touch squares **or** MPK pads
 - Songs: scrolling list of every `.mid` in `songs/`, tempo, play local and/or USB→DIN
 - Presets: 8 save slots + autosave last session (`settings.json`)
 - Log: full scrolling MIDI/event history
@@ -93,6 +94,7 @@ Top-right tabs stay visible:
 
 - **SYNTH** — wavetable soft-synth, voice grid, morph pair
 - **LOOPER** — record MIDI notes, then play them back on a loop (free timing; notes only)
+- **PADS** — 4×4 phrase clip launcher (MPK Bank A+B); touch or drum pads
 - **SONGS** — lists every `.mid` / `.midi` in `songs/`; big ▲ UP / ▼ DOWN to scroll; tempo; LOCAL/USB out
 - **PRESETS** — 8 touch slots: SAVE / LOAD / DELETE current sound + full-velocity
 - **LOG** — full event history (also has CLEAR / panic)
@@ -100,6 +102,7 @@ Top-right tabs stay visible:
 Last session autosaves to `settings.json` (gitignored) every few seconds and on quit.
 Named presets live in `user-presets/slot-01.json` … `slot-08.json`.
 Song files live as whatever you put in `songs/` (any `.mid` name).
+Phrase pads persist as `phrases/pad-01.json` … `pad-16.json` (gitignored).
 
 ### Looper
 
@@ -110,6 +113,17 @@ Song files live as whatever you put in `songs/` (any `.mid` name).
 5. **CLEAR** wipes the take
 
 Live playing still works while a loop runs. Voice/morph/knob settings from Synth apply to looped notes too.
+
+### Phrase Pads
+
+1. Open **PADS**
+2. Tap an **empty** square (or hit the matching MPK pad) to arm record
+3. Play **keyboard** notes — they are captured into that cell
+4. Tap the same pad / **STOP REC** to finish (saved under `phrases/`)
+5. Tap a **filled** square (or MPK pad) to **one-shot** launch into the soft-synth
+6. **CLEAR** wipes the last selected cell; **STOP ALL** stops playing phrases
+
+In PADS mode, channel-10 drum pads launch phrases instead of drum voices. Synth mode still plays the 16-pad drum kit.
 
 ### Songs
 
