@@ -76,7 +76,7 @@ Factory MPC program (`Prog Select` → Pad 1): **Bank A = notes 36–43**, **Ban
 | 42 | tom_mid | 50 | clave |
 | 43 | rim | 51 | ride |
 
-**Drum knobs** (after you hit a pad, for ~5s — or tap **DRUM KNOBS** to lock):
+**Drum knobs** — only when **DRUM MODE** is on (Synth toolbar toggle):
 
 | Knob | CC | Drum control |
 |------|----|----------------|
@@ -86,7 +86,7 @@ Factory MPC program (`Prog Select` → Pad 1): **Bank A = notes 36–43**, **Ban
 | 4 | 73 | Noise amount |
 | 8 | 77 | Master level (always) |
 
-While the status line shows `DRUMS[…]`, Knob 1 is **not** morph. Play a keyboard key (or wait ~5s, or turn **DRUM KNOBS** off) to get morph back. Opening **MORPH** also clears drum-knob capture. Phrase/looper/song playback does not steal knobs. `DRUM KNOBS` lock is session-only (not saved across restart).
+Hitting pads does **not** steal morph knobs. With DRUM MODE off, Knob 1 stays morph. Opening **MORPH** turns DRUM MODE off. Session-only (not saved across restart).
 
 Keyboard notes keep the wavetable morph synth. Pad aftertouch still trims the ringing hit. If a pad program uses other note numbers, unknown notes still cycle through the 16 voices.
 
