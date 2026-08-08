@@ -1390,7 +1390,7 @@ class MidiToneApp:
         self._preset_slot_btns: Dict[int, tk.Button] = {}
         self._active_preset_name: Optional[str] = None
         self._song_status_var = tk.StringVar(
-            value="Songs: save a looper take, set tempo, play local or USB→DIN."
+            value="Songs: tap a filled slot to load, set BPM, then PLAY (LOCAL or USB→DIN)."
         )
         self._song_slot = 0
         self._song_slot_btns: Dict[int, tk.Button] = {}
@@ -1779,7 +1779,11 @@ class MidiToneApp:
 
         tip = tk.Label(
             shell,
-            text="Record in LOOPER → SAVE LOOP here. USB/BOTH needs a USB→DIN adapter selected as MIDI out.",
+            text=(
+                "Load = tap a filled slot (highlights purple), then PLAY. "
+                "Or LOOPER → SAVE LOOP → SLOT. "
+                "Demo pack: ./venv/bin/python fetch_songs.py --starter"
+            ),
             font=("DejaVu Sans", 11),
             fg="#a89984",
             bg="#111111",
@@ -1795,17 +1799,40 @@ class MidiToneApp:
     def _song_bpm_label(self) -> str:
         return f"{int(round(self._songs.bpm()))} BPM"
 
+    def _song_title_from_file(self, path: pathlib.Path) -> str:
+        try:
+            mid = mido.MidiFile(str(path))
+            for tr in mid.tracks:
+                for msg in tr:
+                    if msg.is_meta and msg.type in ("track_name", "sequence_name"):
+                        name = (msg.name or "").strip()
+                        if name:
+                            return name[:22]
+                    if msg.is_meta and msg.type == "text":
+                        text = (msg.text or "").strip()
+                        if text:
+                            return text[:22]
+        except Exception:
+            pass
+        return path.stem
+
     def _song_slot_label(self, slot: int) -> str:
         path = self._song_path(slot)
         if path.is_file():
             try:
                 mid = mido.MidiFile(str(path))
                 bpm = _midifile_native_bpm(mid)
-                n = sum(1 for tr in mid.tracks for m in tr if m.type == "note_on" and m.velocity > 0)
-                return f"{slot + 1}\n{path.stem}\n{int(bpm)}bpm · {n}n"
+                n = sum(
+                    1
+                    for tr in mid.tracks
+                    for m in tr
+                    if m.type == "note_on" and getattr(m, "velocity", 0) > 0
+                )
+                title = self._song_title_from_file(path)
+                return f"{slot + 1}\n{title}\n{int(bpm)}bpm · {n}n"
             except Exception:
                 return f"{slot + 1}\n{path.stem}\n(saved)"
-        return f"{slot + 1}\nEMPTY"
+        return f"{slot + 1}\nEMPTY\n(tap after save)"
 
     def _select_song_slot(self, slot: int) -> None:
         self._song_slot = max(0, min(SONG_SLOTS - 1, slot))

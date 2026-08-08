@@ -188,7 +188,9 @@ In `midi-tone` today: free-timing note record → loop into the soft-synth. Late
 | Piece | Behavior |
 |-------|----------|
 | Library | `tools/midi-tone/songs/song-01.mid` … slots on disk (gitignored) |
-| Save | Export current **Looper** take → Type 0 `.mid` (also accept dropped-in files later) |
+| Load (UI) | Tap a filled slot in **SONGS** → loads that `.mid`, then **PLAY** |
+| Save | Export current **Looper** take → Type 0 `.mid`; or scp/copy into `songs/song-XX.mid` |
+| Demo pack | `fetch_songs.py --starter` pulls Mutopia Public Domain MIDIs into the 8 slots |
 | Play | Schedule note/CC events to **local soft-synth** and/or **USB MIDI out → DIN** |
 | Tempo | Touch BPM − / + (and show file’s native tempo); scales playback rate |
 | Transport | Play / Stop / optional song-loop; All Notes Off on stop |

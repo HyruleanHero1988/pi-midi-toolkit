@@ -84,13 +84,27 @@ Live playing still works while a loop runs. Voice/morph/knob settings from Synth
 
 ### Songs
 
-1. Record a take in **LOOPER**
-2. Open **SONGS**, pick a slot, tap **SAVE LOOP → SLOT**
-3. Set **BPM** (− / + / ±5); optional **SONG LOOP**
-4. **OUT:** cycle **LOCAL** (soft-synth) → **USB** (MIDI out / DIN adapter) → **BOTH**
-5. **PLAY** / **STOP**
+**How to load a song:** open **SONGS** and **tap a filled slot**. That loads `songs/song-XX.mid` (slot turns purple). Then **PLAY**.
 
-Song playback to USB is a file player path (not live thru remap). Plug the USB→DIN adapter when you want hardware out.
+Ways to get files into slots:
+
+1. **Record your own** — LOOPER → record → **SONGS** → select slot → **SAVE LOOP → SLOT**
+2. **Demo pack (Mutopia, mostly Public Domain)** — on the Pi with network:
+   ```bash
+   cd ~/midi-tone
+   ./venv/bin/python fetch_songs.py --list
+   ./venv/bin/python fetch_songs.py --starter
+   ```
+   Then restart midi-tone (or switch away from SONGS and back) and tap a slot.
+3. **Copy a `.mid` in by hand** — write/scp to `songs/song-01.mid` … `song-08.mid`, then tap that slot.
+
+Transport:
+
+- Set **BPM** (− / + / ±5); optional **SONG LOOP**
+- **OUT:** **LOCAL** (soft-synth) → **USB** (MIDI out / DIN) → **BOTH**
+- **PLAY** / **STOP** / **DELETE**
+
+Song USB out is a file-player path (not live thru remap).
 
 ### Voices / wavetables
 
