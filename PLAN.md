@@ -179,7 +179,7 @@ This is still **not** MIDI-out thru. It’s the playable local mode of the appli
 | Stretch / decay | Envelope times: body decay, noise decay; longer = flabbier / “stretched” hit (not time-stretch DSP) |
 | Noise | Amount + color (LP/HP) for snare/hat; shared or per-model |
 | Level / punch | Velocity → amplitude; optional click/transient gain |
-| UI / knobs | Pad-hit (~5s) or **DRUM KNOBS** lock → knobs 1–4 = pitch / drum-tone / stretch / noise; level always. Persist `drum_*` in `settings.json` / presets |
+| UI / knobs | Explicit **DRUM MODE** only → knobs 1–4 = pitch / drum-tone / stretch / noise; level always. Pad hits do not steal morph. Persist `drum_*` macros (not mode) in `settings.json` / presets |
 | Not required | Sample ROMs, full GM drum kit, convolution. Keep Pi 2 cheap (a few envelopes + noise + 1–2 oscillators per voice) |
 
 **Out of path:** Rust thru/remap does not synthesize audio. Phrases/Pads mode (3c) *launches MIDI clips* from pads — orthogonal; drum voices are “what a pad sounds like in Synth mode.”
