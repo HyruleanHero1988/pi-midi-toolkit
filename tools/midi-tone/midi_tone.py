@@ -66,6 +66,17 @@ DEFAULT_SONG_BPM = 120
 SONG_OUT_MODES = ("local", "usb", "both")
 # Prefer these substrings when auto-picking USB→DIN output
 SONG_OUT_PREFER = ("u2midi", "uxmidi", "hxmidi", "din", "usb midi", "midi out", "mio", "um-")
+PHRASES_DIR = HERE / "phrases"
+PHRASE_PAD_COUNT = 16  # MPK Bank A + Bank B
+PHRASE_PAD_BASE = 36   # factory MPC program: pads 36–51
+# Visual 4×4 (top→bottom): A top, A bottom, B top, B bottom — matches MPK pad layout
+PHRASE_GRID_CELLS = (
+    4, 5, 6, 7,      # Bank A pads 5–8 (top row)
+    0, 1, 2, 3,      # Bank A pads 1–4 (bottom row)
+    12, 13, 14, 15,  # Bank B pads 5–8
+    8, 9, 10, 11,    # Bank B pads 1–4
+)
+MAX_PHRASE_PLAYERS = 8
 SETTINGS_VERSION = 1
 
 
@@ -124,12 +135,24 @@ CC_LEVEL = 77          # Knob 8 — output level
 KNOB_CCS = {CC_MORPH, CC_TONE, CC_ATTACK, CC_RELEASE, CC_VIB_DEPTH, CC_VIB_RATE, CC_LEVEL}
 
 
+# Peak scale for wavetable cycles (was 0.35 — far too quiet into the Pi jack)
+TABLE_PEAK = 0.90
+# Per-voice amp at velocity 127 (was 0.12 → ~-28 dBFS with old table scale)
+VOICE_AMP = 0.48
+# Extra mix bus makeup before soft-limit (Pi headphone/line outs are timid)
+OUTPUT_MAKEUP = 1.65
+DRUM_BUS_GAIN = 1.55
+
+
 def _builtin_tables() -> Dict[str, np.ndarray]:
     t = np.linspace(0.0, 1.0, TABLE_SIZE, endpoint=False, dtype=np.float64)
-    sine = np.sin(2.0 * np.pi * t).astype(np.float32)
-    square = np.where(t < 0.5, 0.35, -0.35).astype(np.float32)
-    saw = (2.0 * (t - np.floor(t + 0.5))).astype(np.float32) * 0.35
-    triangle = (2.0 * np.abs(2.0 * (t - np.floor(t + 0.5))) - 1.0).astype(np.float32) * 0.35
+    sine = (np.sin(2.0 * np.pi * t) * TABLE_PEAK).astype(np.float32)
+    square = np.where(t < 0.5, TABLE_PEAK, -TABLE_PEAK).astype(np.float32)
+    saw = (2.0 * (t - np.floor(t + 0.5))).astype(np.float32) * np.float32(TABLE_PEAK)
+    triangle = (
+        (2.0 * np.abs(2.0 * (t - np.floor(t + 0.5))) - 1.0).astype(np.float32)
+        * np.float32(TABLE_PEAK)
+    )
     return {
         "sine": sine,
         "square": square,
@@ -171,7 +194,7 @@ def _resample_cycle(x: np.ndarray, n: int = TABLE_SIZE) -> np.ndarray:
         frac = (idx - np.floor(idx)).astype(np.float32)
         y = (x[i0] * (1.0 - frac) + x[i1] * frac).astype(np.float32)
     peak = float(np.max(np.abs(y))) or 1.0
-    return (y / peak) * np.float32(0.35)
+    return (y / peak) * np.float32(TABLE_PEAK)
 
 
 def load_wavetables(directory: pathlib.Path) -> Dict[str, np.ndarray]:
@@ -444,7 +467,6 @@ class SineEngine:
     RELEASE_SEC_MIN = 0.010
     RELEASE_SEC_MAX = 0.800
     MAX_DRUM_HITS = 16  # full MPK A+B pad bank polyphony
-    DRUM_FOCUS_SEC = 5.0
 
     def __init__(
         self,
@@ -494,8 +516,7 @@ class SineEngine:
         self._drum_decay = 0.40  # "stretch"
         self._drum_noise = 0.55
         self._drum_tone = 0.60
-        self._drum_focus_until = 0.0
-        self._drum_lock = False  # if True, knobs always edit drums
+        self._drum_mode = False  # if True, knobs 1–4 edit drums instead of morph/tone
         self._rebuild_morph_table_unlocked()
 
     @property
@@ -615,7 +636,7 @@ class SineEngine:
             self._drum_note_on(n, vel)
             return
         key = (ch, n)
-        target = vel * 0.12
+        target = vel * VOICE_AMP
         with self._lock:
             self._note_serial += 1
             serial = self._note_serial
@@ -648,7 +669,6 @@ class SineEngine:
             self._note_serial += 1
             serial = self._note_serial
             self._drum_gate[note] = True
-            self._drum_focus_until = time.monotonic() + self.DRUM_FOCUS_SEC
             if len(self._drums) >= self.MAX_DRUM_HITS and note not in self._drums:
                 oldest = min(self._drums.values(), key=lambda h: h.age)
                 self._drums.pop(oldest.note, None)
@@ -749,8 +769,11 @@ class SineEngine:
             self._tone = max(0.0, min(1.0, float(value)))
 
     def set_level(self, value: float) -> None:
+        """Master level. MIDI CC is 0–127; ease the bottom so mid-knob isn't tiny."""
         if value > 1.0:
-            value = value / 127.0
+            # Slightly loud-biased curve: mid CC still usable on a powered speaker
+            x = max(0.0, min(1.0, float(value) / 127.0))
+            value = x ** 0.65
         with self._lock:
             self._level = max(0.0, min(1.0, float(value)))
 
@@ -807,32 +830,30 @@ class SineEngine:
                     hit.amp_scale = 0.35 + 0.65 * scale
 
     def drum_knob_focus(self) -> bool:
-        """True when knobs should edit drum macros (recent pad or locked)."""
+        """True only in explicit drum mode (DRUM MODE button)."""
         with self._lock:
-            if self._drum_lock:
-                return True
-            return time.monotonic() < self._drum_focus_until
+            return self._drum_mode
 
-    def set_drum_lock(self, locked: bool) -> None:
+    def set_drum_mode(self, enabled: bool) -> None:
         with self._lock:
-            self._drum_lock = bool(locked)
-            if self._drum_lock:
-                self._drum_focus_until = time.monotonic() + 3600.0
+            self._drum_mode = bool(enabled)
+
+    def drum_mode(self) -> bool:
+        with self._lock:
+            return self._drum_mode
+
+    # Back-compat aliases used by older call sites / UI helpers
+    def set_drum_lock(self, locked: bool) -> None:
+        self.set_drum_mode(locked)
 
     def drum_lock(self) -> bool:
-        with self._lock:
-            return self._drum_lock
-
-    def touch_drum_focus(self) -> None:
-        with self._lock:
-            self._drum_focus_until = time.monotonic() + self.DRUM_FOCUS_SEC
+        return self.drum_mode()
 
     def set_drum_pitch(self, value: float) -> None:
         if value > 1.0:
             value = value / 127.0
         with self._lock:
             self._drum_pitch = max(0.0, min(1.0, float(value)))
-            self._drum_focus_until = time.monotonic() + self.DRUM_FOCUS_SEC
 
     def set_drum_decay(self, value: float) -> None:
         """Stretch / body length."""
@@ -840,21 +861,18 @@ class SineEngine:
             value = value / 127.0
         with self._lock:
             self._drum_decay = max(0.0, min(1.0, float(value)))
-            self._drum_focus_until = time.monotonic() + self.DRUM_FOCUS_SEC
 
     def set_drum_noise(self, value: float) -> None:
         if value > 1.0:
             value = value / 127.0
         with self._lock:
             self._drum_noise = max(0.0, min(1.0, float(value)))
-            self._drum_focus_until = time.monotonic() + self.DRUM_FOCUS_SEC
 
     def set_drum_tone(self, value: float) -> None:
         if value > 1.0:
             value = value / 127.0
         with self._lock:
             self._drum_tone = max(0.0, min(1.0, float(value)))
-            self._drum_focus_until = time.monotonic() + self.DRUM_FOCUS_SEC
 
     def set_waveform(self, name: str) -> bool:
         name = name.lower().strip()
@@ -891,7 +909,7 @@ class SineEngine:
                 "drum_decay": self._drum_decay,
                 "drum_noise": self._drum_noise,
                 "drum_tone": self._drum_tone,
-                "drum_lock": 1.0 if self._drum_lock else 0.0,
+                "drum_mode": 1.0 if self._drum_mode else 0.0,
             }
 
     def snapshot_settings(self) -> Dict[str, Any]:
@@ -911,7 +929,7 @@ class SineEngine:
                 "drum_decay": float(self._drum_decay),
                 "drum_noise": float(self._drum_noise),
                 "drum_tone": float(self._drum_tone),
-                "drum_lock": bool(self._drum_lock),
+                # drum_mode is a session UI toggle only — never persist
             }
 
     def apply_settings(self, data: Dict[str, Any]) -> None:
@@ -946,8 +964,8 @@ class SineEngine:
                 self._drum_noise = max(0.0, min(1.0, float(data["drum_noise"])))
             if "drum_tone" in data:
                 self._drum_tone = max(0.0, min(1.0, float(data["drum_tone"])))
-            if "drum_lock" in data:
-                self._drum_lock = bool(data["drum_lock"])
+            # Drum mode is session-only; always restore knobs to morph
+            self._drum_mode = False
             self._morph_dirty = True
             self._rebuild_morph_table_unlocked()
 
@@ -981,6 +999,11 @@ class SineEngine:
             level = self._level
             attack_sec = self._attack_sec
             release_sec = self._release_sec
+            # Live drum macros (knobs must affect ringing hits, not only the next one)
+            drum_pitch = self._drum_pitch
+            drum_decay = self._drum_decay
+            drum_noise = self._drum_noise
+            drum_tone = self._drum_tone
 
         attack_per_samp = 1.0 / max(1.0, attack_sec * sr)
         release_per_samp = 1.0 / max(1.0, release_sec * sr)
@@ -1028,7 +1051,17 @@ class SineEngine:
                 dead.append(key)
 
         # Procedural ch10 drums (Synsonics-ish) — mixed before key bus tone filter
-        dead_drums = self._render_drums(buf, frames, sr, drum_hits, arange)
+        dead_drums = self._render_drums(
+            buf,
+            frames,
+            sr,
+            drum_hits,
+            arange,
+            pitch=drum_pitch,
+            decay=drum_decay,
+            noise_amt=drum_noise,
+            tone=drum_tone,
+        )
 
         # Cheap bus low-pass for "tone" knob (moving average). tone=1 → open.
         if tone < 0.999 and frames > 0:
@@ -1048,7 +1081,11 @@ class SineEngine:
 
         if level < 0.999:
             buf *= np.float32(level)
-        np.clip(buf, -0.95, 0.95, out=buf)
+        # Makeup + soft limit: loud enough for powered speakers, tame chord pile-ups
+        if frames > 0:
+            buf *= np.float32(OUTPUT_MAKEUP)
+            np.tanh(buf, out=buf)
+            buf *= np.float32(0.97)
         outdata[:, 0] = buf
         if dead or dead_drums:
             with self._lock:
@@ -1064,6 +1101,11 @@ class SineEngine:
         sr: float,
         hits: List[DrumHit],
         arange: np.ndarray,
+        *,
+        pitch: float,
+        decay: float,
+        noise_amt: float,
+        tone: float,
     ) -> List[int]:
         """Add analog-style drum hits into buf. Returns note keys that finished."""
         dead: List[int] = []
@@ -1072,9 +1114,14 @@ class SineEngine:
         two_pi = 2.0 * math.pi
         inv_sr = 1.0 / sr
         for hit in hits:
+            # Keep hit snapshot in sync so UI/debug stay honest; audio uses live macros
+            hit.pitch = pitch
+            hit.decay = decay
+            hit.noise = noise_amt
+            hit.tone = tone
             t = (hit.pos + arange) * np.float32(inv_sr)
             white = (np.random.random(frames).astype(np.float32) * 2.0 - 1.0)
-            win = max(1, int(round((1.0 - hit.tone) * 16.0)))
+            win = max(1, int(round((1.0 - tone) * 16.0)))
             if win <= 1:
                 noise = white
                 hit.noise_state = float(white[-1])
@@ -1090,17 +1137,17 @@ class SineEngine:
                 arange=arange,
                 white=white,
                 noise=noise,
-                pitch=hit.pitch,
-                decay=hit.decay,
-                noise_amt=hit.noise,
-                tone=hit.tone,
+                pitch=pitch,
+                decay=decay,
+                noise_amt=noise_amt,
+                tone=tone,
                 vel=hit.velocity * hit.amp_scale,
                 phase=hit.phase,
                 two_pi=two_pi,
                 inv_sr=inv_sr,
             )
             hit.phase = new_phase
-            buf += audio
+            buf += audio * np.float32(DRUM_BUS_GAIN)
             hit.pos += frames
             if hit.pos > int(dur * sr) or float(np.max(np.abs(audio))) < 0.0002:
                 dead.append(hit.note)
@@ -1114,6 +1161,72 @@ class LoopEvent:
     channel: int
     note: int
     velocity: int
+
+
+def trim_loop_take(
+    events: List[LoopEvent],
+    *,
+    default_gap: float = 0.35,
+    min_gap: float = 0.05,
+    max_gap: float = 2.0,
+) -> Tuple[List[LoopEvent], float]:
+    """
+    Trim leading/trailing dead space from a free-timing take.
+
+    - Shift so the first note-on starts at t=0 (drop pre-roll before the groove).
+    - Trailing silence after the last note-on is capped to the largest gap
+      between consecutive note-ons (so STOP lag doesn't inflate the loop).
+    - Note-offs after the last hit are still kept; trail is measured from ons.
+    """
+    if not events:
+        return [], 0.0
+    ons = sorted(e.t for e in events if e.on)
+    if not ons:
+        # Degenerate: only note-offs — keep relative timing, short length
+        t0 = min(e.t for e in events)
+        shifted = [
+            LoopEvent(
+                t=max(0.0, e.t - t0),
+                on=e.on,
+                channel=e.channel,
+                note=e.note,
+                velocity=e.velocity,
+            )
+            for e in events
+        ]
+        length = max(e.t for e in shifted) + min_gap
+        return shifted, max(min_gap, length)
+
+    t0 = ons[0]
+    gaps = [ons[i + 1] - ons[i] for i in range(len(ons) - 1) if ons[i + 1] > ons[i]]
+    if gaps:
+        trail = max(min_gap, min(max_gap, max(gaps)))
+    else:
+        # Single hit: small default pad (not the whole time spent hitting STOP)
+        trail = max(min_gap, min(max_gap, default_gap))
+
+    last_on = ons[-1]
+    last_ev = max(e.t for e in events)
+    # Loop end from first hit: last onset + trail, but never cut off a later note-off
+    end_abs = max(last_on + trail, last_ev + 0.01)
+    length = max(min_gap, end_abs - t0)
+
+    shifted = [
+        LoopEvent(
+            t=max(0.0, e.t - t0),
+            on=e.on,
+            channel=e.channel,
+            note=e.note,
+            velocity=e.velocity,
+        )
+        for e in events
+        if e.t >= t0 - 1e-6
+    ]
+    # Drop events that fall past the trimmed end (shouldn't happen often)
+    shifted = [e for e in shifted if e.t <= length + 1e-6]
+    if not shifted:
+        return [], 0.0
+    return shifted, float(length)
 
 
 class MidiLooper:
@@ -1174,10 +1287,10 @@ class MidiLooper:
             if not self._recording:
                 return
             self._recording = False
-            elapsed = time.monotonic() - self._rec_t0
             if self._events:
-                last = max(e.t for e in self._events)
-                self._loop_len = max(elapsed, last + 0.05)
+                trimmed, length = trim_loop_take(list(self._events))
+                self._events = trimmed
+                self._loop_len = length
             else:
                 self._loop_len = 0.0
 
@@ -1303,6 +1416,505 @@ class MidiLooper:
             self._release_held()
         with self._lock:
             self._playing = False
+
+
+def phrase_pad_label(cell: int) -> str:
+    """Human label for phrase cell 0..15 → A1..A8 / B1..B8."""
+    c = max(0, min(PHRASE_PAD_COUNT - 1, int(cell)))
+    bank = "A" if c < 8 else "B"
+    return f"{bank}{(c % 8) + 1}"
+
+
+def phrase_cell_for_note(note: int) -> Optional[int]:
+    """Map factory MPK pad note (36–51) → phrase cell index, else None."""
+    n = note & 0x7F
+    if PHRASE_PAD_BASE <= n < PHRASE_PAD_BASE + PHRASE_PAD_COUNT:
+        return n - PHRASE_PAD_BASE
+    return None
+
+
+PHRASE_TRIG_ONESHOT = "oneshot"
+PHRASE_TRIG_LOOP = "loop"
+PHRASE_TRIG_MODES = (PHRASE_TRIG_ONESHOT, PHRASE_TRIG_LOOP)
+
+
+@dataclass
+class PhraseCell:
+    events: List[LoopEvent]
+    length: float = 0.0
+    trigger_mode: str = PHRASE_TRIG_ONESHOT  # oneshot | loop
+
+    def is_empty(self) -> bool:
+        return not self.events or self.length <= 0.0
+
+    def is_loop(self) -> bool:
+        return self.trigger_mode == PHRASE_TRIG_LOOP
+
+    def to_dict(self) -> Dict[str, Any]:
+        mode = self.trigger_mode if self.trigger_mode in PHRASE_TRIG_MODES else PHRASE_TRIG_ONESHOT
+        return {
+            "version": 1,
+            "length": float(self.length),
+            "trigger_mode": mode,
+            "events": [
+                {
+                    "t": float(e.t),
+                    "on": bool(e.on),
+                    "channel": int(e.channel),
+                    "note": int(e.note),
+                    "velocity": int(e.velocity),
+                }
+                for e in self.events
+            ],
+        }
+
+    @staticmethod
+    def from_dict(data: Dict[str, Any]) -> "PhraseCell":
+        events: List[LoopEvent] = []
+        for raw in data.get("events") or []:
+            if not isinstance(raw, dict):
+                continue
+            try:
+                events.append(
+                    LoopEvent(
+                        t=float(raw.get("t", 0.0)),
+                        on=bool(raw.get("on", True)),
+                        channel=int(raw.get("channel", 0)) & 0x0F,
+                        note=int(raw.get("note", 60)) & 0x7F,
+                        velocity=max(0, min(127, int(raw.get("velocity", 100)))),
+                    )
+                )
+            except (TypeError, ValueError):
+                continue
+        length = float(data.get("length", 0.0) or 0.0)
+        if events and length <= 0.0:
+            length = max(e.t for e in events) + 0.05
+        mode = str(data.get("trigger_mode", PHRASE_TRIG_ONESHOT) or PHRASE_TRIG_ONESHOT)
+        if mode not in PHRASE_TRIG_MODES:
+            mode = PHRASE_TRIG_ONESHOT
+        return PhraseCell(events=events, length=length, trigger_mode=mode)
+
+
+class PhrasePadBank:
+    """16 clip-launch cells: record keyboard phrases, fire from touch or MPK pads."""
+
+    def __init__(
+        self,
+        engine: "SineEngine",
+        emit,  # callable matching event_q tuples
+        directory: pathlib.Path = PHRASES_DIR,
+    ) -> None:
+        self._engine = engine
+        self._emit = emit
+        self._dir = directory
+        self._lock = threading.Lock()
+        self._cells: List[PhraseCell] = [PhraseCell(events=[]) for _ in range(PHRASE_PAD_COUNT)]
+        self._recording_cell: Optional[int] = None
+        self._rec_t0 = 0.0
+        self._selected: Optional[int] = None
+        self._playing: Dict[int, threading.Event] = {}
+        self._threads: Dict[int, threading.Thread] = {}
+        self._held: Dict[int, set[Tuple[int, int]]] = {}
+        self.load_all()
+
+    def selected(self) -> Optional[int]:
+        with self._lock:
+            return self._selected
+
+    def recording_cell(self) -> Optional[int]:
+        with self._lock:
+            return self._recording_cell
+
+    def is_recording(self) -> bool:
+        with self._lock:
+            return self._recording_cell is not None
+
+    def is_playing(self, cell: int) -> bool:
+        with self._lock:
+            return cell in self._playing
+
+    def playing_cells(self) -> List[int]:
+        with self._lock:
+            return sorted(self._playing.keys())
+
+    def cell(self, idx: int) -> PhraseCell:
+        with self._lock:
+            c = self._cells[idx]
+            return PhraseCell(
+                events=list(c.events),
+                length=float(c.length),
+                trigger_mode=c.trigger_mode,
+            )
+
+    def trigger_mode(self, idx: int) -> str:
+        with self._lock:
+            if not (0 <= idx < PHRASE_PAD_COUNT):
+                return PHRASE_TRIG_ONESHOT
+            return self._cells[idx].trigger_mode
+
+    def set_trigger_mode(self, idx: int, mode: str) -> bool:
+        if not (0 <= idx < PHRASE_PAD_COUNT):
+            return False
+        if mode not in PHRASE_TRIG_MODES:
+            return False
+        with self._lock:
+            self._cells[idx].trigger_mode = mode
+            self._selected = idx
+        self.save_cell(idx)
+        self._emit(("phrase",))
+        self._emit(
+            (
+                "log",
+                f"Phrase {phrase_pad_label(idx)} → "
+                f"{'LOOP' if mode == PHRASE_TRIG_LOOP else 'ONE-SHOT'}",
+                False,
+            )
+        )
+        return True
+
+    def toggle_trigger_mode(self, idx: int) -> Optional[str]:
+        if not (0 <= idx < PHRASE_PAD_COUNT):
+            return None
+        with self._lock:
+            cur = self._cells[idx].trigger_mode
+        nxt = PHRASE_TRIG_LOOP if cur != PHRASE_TRIG_LOOP else PHRASE_TRIG_ONESHOT
+        self.set_trigger_mode(idx, nxt)
+        return nxt
+
+    def status_line(self, *, clear_armed: bool = False, mode_armed: bool = False) -> str:
+        with self._lock:
+            filled = sum(1 for c in self._cells if not c.is_empty())
+            rec = self._recording_cell
+            playing = sorted(self._playing.keys())
+        if mode_armed:
+            return "MODE armed — tap a pad to toggle ONE-SHOT ↔ LOOP · MODE again to cancel"
+        if clear_armed:
+            return "CLEAR armed — tap a pad (touch or MPK) to erase it · CLEAR again to cancel"
+        if rec is not None:
+            return (
+                f"Recording {phrase_pad_label(rec)} — keys + drum pads record; "
+                f"STOP REC or tap that square to finish ({filled}/16 filled)"
+            )
+        if playing:
+            names = ",".join(phrase_pad_label(i) for i in playing[:6])
+            more = f"+{len(playing) - 6}" if len(playing) > 6 else ""
+            return f"Playing {names}{more} · {filled}/16 · MODE toggles 1-SHOT/LOOP per pad"
+        if filled == 0:
+            return "Empty pads — tap to arm record · MODE sets ONE-SHOT or LOOP per pad"
+        return (
+            f"{filled}/16 phrases · filled=launch · empty=record · "
+            "MODE=1-SHOT/LOOP · CLEAR=erase"
+        )
+
+    def _cell_path(self, idx: int) -> pathlib.Path:
+        return self._dir / f"pad-{idx + 1:02d}.json"
+
+    def load_all(self) -> int:
+        """Load pad-01.json … pad-16.json. Returns number of non-empty cells."""
+        self._dir.mkdir(parents=True, exist_ok=True)
+        loaded = 0
+        with self._lock:
+            for i in range(PHRASE_PAD_COUNT):
+                path = self._cell_path(i)
+                if not path.is_file():
+                    self._cells[i] = PhraseCell(events=[])
+                    continue
+                try:
+                    data = json.loads(path.read_text(encoding="utf-8"))
+                    cell = PhraseCell.from_dict(data if isinstance(data, dict) else {})
+                    self._cells[i] = cell
+                    if not cell.is_empty():
+                        loaded += 1
+                except Exception as exc:
+                    print(f"phrase load skip {path.name}: {exc}", flush=True)
+                    self._cells[i] = PhraseCell(events=[])
+        return loaded
+
+    def save_cell(self, idx: int) -> bool:
+        idx = int(idx)
+        if not (0 <= idx < PHRASE_PAD_COUNT):
+            return False
+        self._dir.mkdir(parents=True, exist_ok=True)
+        with self._lock:
+            cell = PhraseCell(
+                events=list(self._cells[idx].events),
+                length=float(self._cells[idx].length),
+                trigger_mode=self._cells[idx].trigger_mode,
+            )
+        path = self._cell_path(idx)
+        try:
+            # Drop file only for empty one-shot pads (default state)
+            if cell.is_empty() and cell.trigger_mode == PHRASE_TRIG_ONESHOT:
+                if path.is_file():
+                    path.unlink()
+                return True
+            tmp = path.with_suffix(path.suffix + ".tmp")
+            tmp.write_text(
+                json.dumps(cell.to_dict(), indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            tmp.replace(path)
+            return True
+        except Exception as exc:
+            print(f"phrase save failed ({path}): {exc}", flush=True)
+            return False
+
+    def select(self, idx: int) -> None:
+        if 0 <= idx < PHRASE_PAD_COUNT:
+            with self._lock:
+                self._selected = idx
+
+    def arm_record(self, idx: int) -> bool:
+        """Start recording into cell (clears prior contents). Stops that cell's playback."""
+        if not (0 <= idx < PHRASE_PAD_COUNT):
+            return False
+        if self.is_recording():
+            self.stop_record()
+        self.stop_cell(idx)
+        with self._lock:
+            mode = self._cells[idx].trigger_mode
+            self._cells[idx] = PhraseCell(events=[], trigger_mode=mode)
+            self._recording_cell = idx
+            self._rec_t0 = time.monotonic()
+            self._selected = idx
+        self._emit(("phrase",))
+        self._emit(("log", f"Phrase REC {phrase_pad_label(idx)} armed", False))
+        return True
+
+    def stop_record(self) -> Optional[int]:
+        """Finish recording. Returns cell index, or None if not recording."""
+        with self._lock:
+            idx = self._recording_cell
+            if idx is None:
+                return None
+            cell = self._cells[idx]
+            if cell.events:
+                trimmed, length = trim_loop_take(list(cell.events))
+                cell.events = trimmed
+                cell.length = length
+            else:
+                cell.length = 0.0
+            self._recording_cell = None
+        self.save_cell(idx)
+        self._emit(("phrase",))
+        with self._lock:
+            empty = self._cells[idx].is_empty()
+        if empty:
+            self._emit(("log", f"Phrase {phrase_pad_label(idx)} empty (nothing recorded)", False))
+        else:
+            with self._lock:
+                n = len(self._cells[idx].events)
+                length = self._cells[idx].length
+            self._emit(
+                ("log", f"Phrase {phrase_pad_label(idx)} saved ({n} ev, {length:.2f}s)", False)
+            )
+        return idx
+
+    def record_note(self, on: bool, channel: int, note: int, velocity: int) -> None:
+        """Capture keyboard and drum-channel notes into the armed cell."""
+        with self._lock:
+            idx = self._recording_cell
+            if idx is None:
+                return
+            t = time.monotonic() - self._rec_t0
+            self._cells[idx].events.append(
+                LoopEvent(
+                    t=t,
+                    on=on,
+                    channel=channel & 0x0F,
+                    note=note & 0x7F,
+                    velocity=max(1, min(127, int(velocity))) if on else 0,
+                )
+            )
+        self._emit(("phrase",))
+
+    def clear_cell(self, idx: Optional[int] = None) -> bool:
+        target = idx if idx is not None else self.selected()
+        if target is None or not (0 <= target < PHRASE_PAD_COUNT):
+            return False
+        if self.recording_cell() == target:
+            self.stop_record()
+        self.stop_cell(target)
+        with self._lock:
+            self._cells[target] = PhraseCell(events=[])
+            self._selected = target
+        self.save_cell(target)
+        self._emit(("phrase",))
+        self._emit(("log", f"Phrase {phrase_pad_label(target)} cleared", False))
+        return True
+
+    def stop_cell(self, idx: int) -> None:
+        with self._lock:
+            stop_ev = self._playing.get(idx)
+            thread = self._threads.get(idx)
+        if stop_ev is not None:
+            stop_ev.set()
+        if thread is not None and thread.is_alive() and thread is not threading.current_thread():
+            thread.join(timeout=1.0)
+        with self._lock:
+            self._playing.pop(idx, None)
+            self._threads.pop(idx, None)
+        self._release_held(idx)
+        self._emit(("phrase",))
+
+    def stop_all(self) -> None:
+        if self.is_recording():
+            self.stop_record()
+        with self._lock:
+            ids = list(self._playing.keys())
+        for idx in ids:
+            self.stop_cell(idx)
+
+    def launch(self, idx: int) -> str:
+        """
+        Launch a filled cell.
+        oneshot: play once (re-trigger restarts).
+        loop: toggle — start looping, or stop if already playing.
+        Returns action: launch | restart | stop | empty | stop_rec
+        """
+        if not (0 <= idx < PHRASE_PAD_COUNT):
+            return "ignore"
+        if self.recording_cell() == idx:
+            self.stop_record()
+            return "stop_rec"
+        with self._lock:
+            cell = self._cells[idx]
+            if cell.is_empty():
+                return "empty"
+            events = list(cell.events)
+            length = float(cell.length)
+            loop = cell.trigger_mode == PHRASE_TRIG_LOOP
+            already = idx in self._playing
+            self._selected = idx
+            if idx not in self._playing and len(self._playing) >= MAX_PHRASE_PLAYERS:
+                oldest = next(iter(self._playing))
+            else:
+                oldest = None
+        # Loop pad while playing → toggle off
+        if loop and already:
+            self.stop_cell(idx)
+            self._emit(("log", f"Phrase ■ {phrase_pad_label(idx)} (loop stop)", False))
+            return "stop"
+        if oldest is not None:
+            self.stop_cell(oldest)
+        # Oneshot re-trigger (or loop start): restart cleanly
+        was_playing = already
+        self.stop_cell(idx)
+        stop_ev = threading.Event()
+        with self._lock:
+            self._playing[idx] = stop_ev
+            self._held[idx] = set()
+        thread = threading.Thread(
+            target=self._play_cell,
+            args=(idx, events, length, stop_ev, loop),
+            daemon=True,
+        )
+        with self._lock:
+            self._threads[idx] = thread
+        thread.start()
+        self._emit(("phrase",))
+        if loop:
+            self._emit(("log", f"Phrase ↻ {phrase_pad_label(idx)} (loop)", False))
+            return "loop"
+        tag = "restart" if was_playing else "launch"
+        self._emit(("log", f"Phrase ▶ {phrase_pad_label(idx)}", False))
+        return tag
+
+    def handle_pad(self, idx: int, *, from_touch: bool = False) -> str:
+        """
+        Touch square or MPK pad hit (when not recording drums).
+        Empty → arm record; filled → launch/toggle; touch on armed cell → stop record.
+        Returns a short action tag for the UI/log.
+        """
+        if not (0 <= idx < PHRASE_PAD_COUNT):
+            return "ignore"
+        with self._lock:
+            rec = self._recording_cell
+            empty = self._cells[idx].is_empty()
+        # Only the touch square ends record — MPK pads stay free for drum takes
+        if rec is not None and rec == idx and from_touch:
+            self.stop_record()
+            return "stop_rec"
+        if rec is not None and not from_touch:
+            # Hardware pad while recording is handled by MIDI path as drums
+            return "ignore"
+        if empty:
+            self.arm_record(idx)
+            return "arm"
+        return self.launch(idx)
+
+    def _release_held(self, idx: int) -> None:
+        with self._lock:
+            held = list(self._held.pop(idx, set()))
+        for ch, note in held:
+            try:
+                self._engine.note_off(ch, note)
+            except Exception:
+                pass
+            try:
+                self._emit(("off", ch, note))
+            except Exception:
+                pass
+
+    def _play_cell(
+        self,
+        idx: int,
+        events: List[LoopEvent],
+        length: float,
+        stop_ev: threading.Event,
+        loop: bool,
+    ) -> None:
+        try:
+            if not events or length <= 0.0:
+                return
+            while not stop_ev.is_set():
+                t0 = time.monotonic()
+                self._release_held(idx)
+                with self._lock:
+                    self._held[idx] = set()
+                for ev in events:
+                    if stop_ev.is_set():
+                        break
+                    target = t0 + ev.t
+                    while True:
+                        remain = target - time.monotonic()
+                        if remain <= 0:
+                            break
+                        if stop_ev.wait(min(0.003, remain)):
+                            break
+                    if stop_ev.is_set():
+                        break
+                    if ev.on:
+                        self._engine.note_on(ev.channel, ev.note, ev.velocity)
+                        with self._lock:
+                            self._held.setdefault(idx, set()).add((ev.channel, ev.note))
+                        self._emit(("on", ev.channel, ev.note, ev.velocity))
+                    else:
+                        self._engine.note_off(ev.channel, ev.note)
+                        with self._lock:
+                            self._held.setdefault(idx, set()).discard((ev.channel, ev.note))
+                        self._emit(("off", ev.channel, ev.note))
+                end = t0 + length
+                while not stop_ev.is_set():
+                    remain = end - time.monotonic()
+                    if remain <= 0:
+                        break
+                    if stop_ev.wait(min(0.003, remain)):
+                        break
+                if not loop:
+                    break
+                # Loop: release before next cycle so notes don't stick across seams
+                self._release_held(idx)
+        finally:
+            self._release_held(idx)
+            with self._lock:
+                if self._playing.get(idx) is stop_ev:
+                    self._playing.pop(idx, None)
+                    self._threads.pop(idx, None)
+            try:
+                self._emit(("phrase",))
+            except Exception:
+                pass
 
 
 def _sec_to_ticks(seconds: float, bpm: float, ticks_per_beat: int) -> int:
@@ -1794,10 +2406,18 @@ class MidiToneApp:
         self._morph_side_btns: Dict[str, tk.Button] = {}
         self._morph_grid_btns: Dict[str, tk.Button] = {}
         self._morph_status_lbl: Optional[tk.Label] = None
-        self._mode = "synth"  # synth | looper | songs | log | presets
+        self._mode = "synth"  # synth | looper | pads | songs | log | presets
         self._mode_btns: Dict[str, tk.Button] = {}
         self._looper = MidiLooper(self.engine, self._q_put)
+        self._phrases = PhrasePadBank(self.engine, self._q_put, PHRASES_DIR)
         self._songs = SongPlayer(self.engine, self._q_put)
+        self._phrase_status_var = tk.StringVar(value=self._phrases.status_line())
+        self._phrase_pad_btns: Dict[int, tk.Button] = {}
+        self._phrase_clear_btn: Optional[tk.Button] = None
+        self._phrase_mode_btn: Optional[tk.Button] = None
+        self._phrase_clear_armed = False
+        self._phrase_mode_armed = False
+        self._phrase_shell: Optional[tk.Frame] = None
         self._loop_status_var = tk.StringVar(value="Loop empty — tap RECORD, play notes, STOP, then PLAY.")
         self._loop_rec_btn: Optional[tk.Button] = None
         self._loop_play_btn: Optional[tk.Button] = None
@@ -1834,6 +2454,7 @@ class MidiToneApp:
         for key, label in (
             ("synth", "SYNTH"),
             ("looper", "LOOPER"),
+            ("pads", "PADS"),
             ("songs", "SONGS"),
             ("presets", "PRESETS"),
             ("log", "LOG"),
@@ -1841,7 +2462,7 @@ class MidiToneApp:
             btn = self._mk_touch_btn(
                 nav_modes, label, lambda m=key: self._switch_mode(m), bg="#3c3836"
             )
-            btn.configure(font=("DejaVu Sans", 11, "bold"), pady=8, padx=6)
+            btn.configure(font=("DejaVu Sans", 10, "bold"), pady=8, padx=4)
             btn.pack(side=tk.LEFT, padx=1)
             self._mode_btns[key] = btn
 
@@ -1851,6 +2472,8 @@ class MidiToneApp:
 
         self._synth_shell = tk.Frame(self._mode_host, bg="#111111")
         self._looper_shell = tk.Frame(self._mode_host, bg="#111111")
+        self._pads_shell = tk.Frame(self._mode_host, bg="#111111")
+        self._phrase_shell = self._pads_shell
         self._songs_shell = tk.Frame(self._mode_host, bg="#111111")
         self._presets_shell = tk.Frame(self._mode_host, bg="#111111")
         self._log_shell = tk.Frame(self._mode_host, bg="#111111")
@@ -1900,7 +2523,7 @@ class MidiToneApp:
         )
         self._full_vel_btn.pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=8)
         self._drum_lock_btn = self._mk_touch_btn(
-            row3, "DRUM KNOBS", self._toggle_drum_lock, bg="#3c3836"
+            row3, "DRUM MODE", self._toggle_drum_lock, bg="#3c3836"
         )
         self._drum_lock_btn.pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=8)
 
@@ -1958,9 +2581,11 @@ class MidiToneApp:
 
         PRESETS_DIR.mkdir(parents=True, exist_ok=True)
         SONGS_DIR.mkdir(parents=True, exist_ok=True)
+        PHRASES_DIR.mkdir(parents=True, exist_ok=True)
         seeded = seed_demo_songs()
 
         self._build_looper_mode()
+        self._build_pads_mode()
         self._build_songs_mode()
         self._build_presets_mode()
         self._build_log_mode()
@@ -1986,7 +2611,7 @@ class MidiToneApp:
             "Pads = analog drum voices. After a pad (or DRUM LOCK): knobs → "
             "pitch / stretch / noise / drum-tone / — / — / — / level"
         )
-        self._append_log("Modes: SYNTH / LOOPER / SONGS / PRESETS / LOG (top right).")
+        self._append_log("Modes: SYNTH / LOOPER / PADS / SONGS / PRESETS / LOG (top right).")
         if seeded:
             self._append_log(
                 f"Added {seeded} demo song(s) from demo-songs/ (offline classical pack)."
@@ -2009,9 +2634,8 @@ class MidiToneApp:
     def _format_mod_line(self) -> str:
         st = self.engine.modulation_state()
         if self.engine.drum_knob_focus():
-            lock = "LOCK" if st.get("drum_lock", 0) else "auto"
             return (
-                f"DRUMS[{lock}]  "
+                "DRUM MODE  "
                 f"Pitch:{int(st['drum_pitch'] * 127):3d}  "
                 f"Stretch:{int(st['drum_decay'] * 127):3d}  "
                 f"Noise:{int(st['drum_noise'] * 127):3d}  "
@@ -2745,24 +3369,23 @@ class MidiToneApp:
     def _paint_drum_lock_btn(self) -> None:
         if self._drum_lock_btn is None:
             return
-        if self.engine.drum_lock():
+        if self.engine.drum_mode():
             self._drum_lock_btn.configure(
-                text="DRUM KNOBS: ON", bg="#d79921", activebackground="#d79921"
+                text="DRUM MODE: ON", bg="#d79921", activebackground="#d79921"
             )
         else:
             self._drum_lock_btn.configure(
-                text="DRUM KNOBS", bg="#3c3836", activebackground="#3c3836"
+                text="DRUM MODE", bg="#3c3836", activebackground="#3c3836"
             )
 
     def _toggle_drum_lock(self) -> None:
-        self.engine.set_drum_lock(not self.engine.drum_lock())
+        self.engine.set_drum_mode(not self.engine.drum_mode())
         self._paint_drum_lock_btn()
-        self._mark_settings_dirty()
         self.mod_var.set(self._format_mod_line())
         self._append_log(
-            "Drum knobs LOCK on — pitch/stretch/noise/tone"
-            if self.engine.drum_lock()
-            else "Drum knobs auto — edit for a few seconds after each pad hit"
+            "DRUM MODE ON — Knob 1–4 edit drums"
+            if self.engine.drum_mode()
+            else "DRUM MODE OFF — Knob 1 is morph again"
         )
 
     def _build_log_mode(self) -> None:
@@ -2869,17 +3492,213 @@ class MidiToneApp:
         tip.pack(fill=tk.X, padx=10, pady=(0, 10))
         self._paint_looper_buttons()
 
+    def _build_pads_mode(self) -> None:
+        shell = self._pads_shell
+        for w in shell.winfo_children():
+            w.destroy()
+        self._phrase_pad_btns.clear()
+
+        header = tk.Frame(shell, bg="#111111")
+        header.pack(fill=tk.X, padx=8, pady=(6, 2))
+        tk.Label(
+            header, text="Phrase Pads", font=("DejaVu Sans", 16, "bold"),
+            fg="#fbf1c7", bg="#111111",
+        ).pack(side=tk.LEFT)
+        tk.Label(
+            header, text="touch or MPK pads · one-shot",
+            font=("DejaVu Sans", 10), fg="#a89984", bg="#111111",
+        ).pack(side=tk.RIGHT)
+
+        status = tk.Label(
+            shell, textvariable=self._phrase_status_var,
+            font=("DejaVu Sans", 12, "bold"),
+            fg="#fabd2f", bg="#111111",
+            wraplength=760, justify=tk.LEFT, anchor="w",
+        )
+        status.pack(fill=tk.X, padx=10, pady=(2, 4))
+
+        grid = tk.Frame(shell, bg="#111111")
+        grid.pack(fill=tk.BOTH, expand=True, padx=6, pady=2)
+        for row in range(4):
+            grid.rowconfigure(row, weight=1)
+        for col in range(4):
+            grid.columnconfigure(col, weight=1)
+        for i, cell in enumerate(PHRASE_GRID_CELLS):
+            r, c = divmod(i, 4)
+            btn = self._mk_touch_btn(
+                grid,
+                phrase_pad_label(cell),
+                lambda idx=cell: self._phrase_pad_tap(idx),
+                bg="#3c3836",
+            )
+            btn.configure(font=("DejaVu Sans", 13, "bold"), pady=10)
+            btn.grid(row=r, column=c, sticky="nsew", padx=3, pady=3)
+            self._phrase_pad_btns[cell] = btn
+
+        row = tk.Frame(shell, bg="#111111")
+        row.pack(fill=tk.X, padx=6, pady=(4, 6))
+        self._mk_touch_btn(row, "STOP REC", self._phrase_stop_rec, bg="#504945").pack(
+            side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=10
+        )
+        self._phrase_mode_btn = self._mk_touch_btn(
+            row, "MODE", self._phrase_toggle_mode_arm, bg="#458588"
+        )
+        self._phrase_mode_btn.pack(
+            side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=10
+        )
+        self._phrase_clear_btn = self._mk_touch_btn(
+            row, "CLEAR", self._phrase_toggle_clear, bg="#9d0006"
+        )
+        self._phrase_clear_btn.pack(
+            side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=10
+        )
+        self._mk_touch_btn(row, "STOP ALL", self._phrase_stop_all, bg="#3c3836").pack(
+            side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=10
+        )
+        self._paint_phrase_pads()
+
+    def _phrase_pad_tap(self, idx: int) -> None:
+        if self._phrase_mode_armed:
+            self._phrases.toggle_trigger_mode(idx)
+            self._phrase_mode_armed = False
+            self._paint_phrase_pads()
+            return
+        if self._phrase_clear_armed:
+            self._phrases.clear_cell(idx)
+            self._phrase_clear_armed = False
+            self._paint_phrase_pads()
+            return
+        self._phrases.handle_pad(idx, from_touch=True)
+        self._paint_phrase_pads()
+
+    def _phrase_stop_rec(self) -> None:
+        self._phrase_clear_armed = False
+        self._phrase_mode_armed = False
+        if self._phrases.is_recording():
+            self._phrases.stop_record()
+        self._paint_phrase_pads()
+
+    def _phrase_stop_all(self) -> None:
+        self._phrase_clear_armed = False
+        self._phrase_mode_armed = False
+        self._phrases.stop_all()
+        self._paint_phrase_pads()
+
+    def _phrase_toggle_clear(self) -> None:
+        """Arm CLEAR: next pad tap erases that cell (cancel by tapping CLEAR again)."""
+        if self._phrases.is_recording():
+            self._phrase_status_var.set("Stop recording before CLEAR")
+            return
+        self._phrase_mode_armed = False
+        self._phrase_clear_armed = not self._phrase_clear_armed
+        self._paint_phrase_pads()
+
+    def _phrase_toggle_mode_arm(self) -> None:
+        """Arm MODE: next pad tap toggles ONE-SHOT ↔ LOOP."""
+        if self._phrases.is_recording():
+            self._phrase_status_var.set("Stop recording before MODE")
+            return
+        self._phrase_clear_armed = False
+        self._phrase_mode_armed = not self._phrase_mode_armed
+        self._paint_phrase_pads()
+
+    def _paint_phrase_pads(self) -> None:
+        clear_armed = bool(self._phrase_clear_armed)
+        mode_armed = bool(self._phrase_mode_armed)
+        self._phrase_status_var.set(
+            self._phrases.status_line(clear_armed=clear_armed, mode_armed=mode_armed)
+        )
+        rec = self._phrases.recording_cell()
+        selected = self._phrases.selected()
+        playing = set(self._phrases.playing_cells())
+        for idx, btn in self._phrase_pad_btns.items():
+            cell = self._phrases.cell(idx)
+            label = phrase_pad_label(idx)
+            loop = cell.is_loop()
+            mode_mark = "↻" if loop else "▶"
+            if mode_armed:
+                text = f"{label}\n{mode_mark}?"
+                color = "#b16286"
+            elif clear_armed:
+                text = f"{label}\nCLR?" if not cell.is_empty() else f"{label}\n—"
+                color = "#cc241d" if not cell.is_empty() else "#504945"
+            elif rec == idx:
+                text = f"{label}\nREC"
+                color = "#9d0006"
+            elif idx in playing:
+                secs = cell.length
+                text = f"{label}\n{mode_mark} {secs:.1f}s"
+                color = "#689d6a"
+            elif cell.is_empty():
+                text = f"{label}\n{mode_mark} —" if loop else f"{label}\n—"
+                color = "#504945" if loop else "#3c3836"
+            else:
+                text = f"{label}\n{mode_mark} {cell.length:.1f}s"
+                color = "#689d6a" if loop else "#458588"
+            if (
+                not clear_armed
+                and not mode_armed
+                and selected == idx
+                and rec != idx
+                and idx not in playing
+                and not cell.is_empty()
+            ):
+                color = "#076678"
+            try:
+                btn.configure(text=text, bg=color, activebackground=color)
+            except Exception:
+                pass
+        if self._phrase_clear_btn is not None:
+            cbg = "#fb4934" if clear_armed else "#9d0006"
+            try:
+                self._phrase_clear_btn.configure(
+                    text="CLEAR…" if clear_armed else "CLEAR",
+                    bg=cbg,
+                    activebackground=cbg,
+                )
+            except Exception:
+                pass
+        if self._phrase_mode_btn is not None:
+            mbg = "#d3869b" if mode_armed else "#458588"
+            try:
+                self._phrase_mode_btn.configure(
+                    text="MODE…" if mode_armed else "MODE",
+                    bg=mbg,
+                    activebackground=mbg,
+                )
+            except Exception:
+                pass
+
+    def _refresh_phrase_status(self) -> None:
+        if self._mode == "pads":
+            self._paint_phrase_pads()
+        else:
+            self._phrase_status_var.set(
+                self._phrases.status_line(
+                    clear_armed=self._phrase_clear_armed,
+                    mode_armed=self._phrase_mode_armed,
+                )
+            )
+
     def _switch_mode(self, mode: str) -> None:
-        mode = mode if mode in ("synth", "looper", "songs", "log", "presets") else "synth"
+        mode = mode if mode in ("synth", "looper", "pads", "songs", "log", "presets") else "synth"
         # Close synth-only overlays before swapping shells
         if self._grid_open:
             self._close_voice_grid(restore_main=False)
         if self._morph_ui_open:
             self._close_morph_menu(restore_main=False)
 
+        # Leaving pads while recording: keep the take
+        if self._mode == "pads" and mode != "pads":
+            if self._phrases.is_recording():
+                self._phrases.stop_record()
+            self._phrase_clear_armed = False
+            self._phrase_mode_armed = False
+
         self._mode = mode
         self._synth_shell.pack_forget()
         self._looper_shell.pack_forget()
+        self._pads_shell.pack_forget()
         self._songs_shell.pack_forget()
         self._presets_shell.pack_forget()
         self._log_shell.pack_forget()
@@ -2891,6 +3710,9 @@ class MidiToneApp:
         if mode == "looper":
             self._looper_shell.pack(fill=tk.BOTH, expand=True)
             self._refresh_loop_status()
+        elif mode == "pads":
+            self._pads_shell.pack(fill=tk.BOTH, expand=True)
+            self._paint_phrase_pads()
         elif mode == "songs":
             self._songs_shell.pack(fill=tk.BOTH, expand=True)
             # Rescan directory each visit so dropped-in .mid files appear
@@ -2961,7 +3783,18 @@ class MidiToneApp:
 
     def _loop_toggle_record(self) -> None:
         recording = self._looper.toggle_record()
-        self._q_put(("log", "Loop RECORD start" if recording else "Loop RECORD stop", False))
+        if recording:
+            self._q_put(("log", "Loop RECORD start", False))
+        else:
+            st = self._looper.status()
+            self._q_put(
+                (
+                    "log",
+                    f"Loop RECORD stop — trimmed to {float(st['length']):.2f}s "
+                    f"({int(st['events'])} events)",
+                    False,
+                )
+            )
         self._q_put(("loop",))
         self._refresh_loop_status()
 
@@ -3169,6 +4002,11 @@ class MidiToneApp:
             self._switch_mode("synth")
         if self._grid_open:
             self._close_voice_grid(restore_main=False)
+        # Hand knobs back to morph while editing the pair
+        if self.engine.drum_mode():
+            self.engine.set_drum_mode(False)
+            self._paint_drum_lock_btn()
+            self.mod_var.set(self._format_mod_line())
 
         self._morph_ui_open = True
         self._morph_pick_side = "a"
@@ -3418,9 +4256,18 @@ class MidiToneApp:
         self._pending_cont_log = None
         self._q_put(("log", line, True))
 
+    def _knob_ui_feedback(self, label: Optional[str], *, morph: bool = False) -> None:
+        """Coalesce high-rate knob UI updates — don't flood the event queue."""
+        self._mod_dirty = True
+        if morph:
+            self._morph_dirty_ui = True
+        if label:
+            # Status line only; skip log spam (was making knobs feel laggy on Pi)
+            self._pending_cont_log = label
+
     def _handle_knob_cc(self, control: int, value: int) -> Optional[str]:
         """Map MPK factory knobs. Returns a short UI label or None if unmapped."""
-        # After a pad hit (or DRUM KNOBS lock), knobs edit drum macros
+        # Only in explicit DRUM MODE do knobs edit drum macros
         if self.engine.drum_knob_focus():
             if control == CC_MORPH:
                 self.engine.set_drum_pitch(value)
@@ -3488,22 +4335,71 @@ class MidiToneApp:
             msg.type == "control_change"
             and (msg.control == 1 or msg.control in KNOB_CCS)
         )
+        pads_mode = self._mode == "pads"
 
         if msg.type == "note_on" and msg.velocity > 0:
             is_drum = msg.channel == DRUM_CHANNEL
+            phrase_recording = self._phrases.is_recording()
+            # PADS mode: MPK pads launch/arm phrases — unless recording (then drums)
+            # or CLEAR/MODE is armed.
+            if pads_mode and is_drum and not phrase_recording:
+                cell = phrase_cell_for_note(msg.note)
+                if cell is not None:
+                    if self._phrase_mode_armed:
+                        mode = self._phrases.toggle_trigger_mode(cell)
+                        self._phrase_mode_armed = False
+                        self._q_put(("phrase",))
+                        self._q_put(
+                            (
+                                "log",
+                                f"Pad→MODE {phrase_pad_label(cell)} → "
+                                f"{'LOOP' if mode == PHRASE_TRIG_LOOP else 'ONE-SHOT'}",
+                                False,
+                            )
+                        )
+                        return
+                    if self._phrase_clear_armed:
+                        self._phrases.clear_cell(cell)
+                        self._phrase_clear_armed = False
+                        self._q_put(("phrase",))
+                        self._q_put(
+                            (
+                                "log",
+                                f"Pad→CLEAR {phrase_pad_label(cell)}  note {msg.note}",
+                                False,
+                            )
+                        )
+                        return
+                    action = self._phrases.handle_pad(cell, from_touch=False)
+                    self._q_put(("phrase",))
+                    self._q_put(
+                        (
+                            "log",
+                            f"Pad→Phrase {phrase_pad_label(cell)} ({action})  "
+                            f"note {msg.note}  vel {msg.velocity}",
+                            False,
+                        )
+                    )
+                    return
             vel = msg.velocity if is_drum or not self._full_vel else 127
             self.engine.note_on(msg.channel, msg.note, vel)
             self._looper.record_note(True, msg.channel, msg.note, vel)
+            if pads_mode or phrase_recording:
+                self._phrases.record_note(True, msg.channel, msg.note, vel)
             self._q_put(("on", msg.channel, msg.note, vel))
             if self._looper.is_recording():
                 self._q_put(("loop",))
             if is_drum:
                 model = drum_model_for_note(msg.note)
+                rec_tag = " +rec" if phrase_recording else ""
                 line = (
                     f"Pad/{model:<10} ch{msg.channel + 1}  {midi_note_name(msg.note)} "
-                    f"({msg.note})  vel {msg.velocity}"
+                    f"({msg.note})  vel {msg.velocity}{rec_tag}"
                 )
-                self._q_put(("mod",))  # refresh DRUMS status line
+                if self.engine.drum_mode():
+                    self._q_put(("mod",))
+                if phrase_recording:
+                    self._q_put(("phrase",))
             elif self._full_vel and msg.velocity != 127:
                 line = (
                     f"Note On   ch{msg.channel + 1}  {midi_note_name(msg.note)} "
@@ -3513,13 +4409,29 @@ class MidiToneApp:
                 line = format_message(msg)
             self._q_put(("log", line, False))
         elif msg.type == "note_off" or (msg.type == "note_on" and msg.velocity == 0):
+            # Phrase-launch pads have no held note — but drum takes while recording do
+            if (
+                pads_mode
+                and msg.channel == DRUM_CHANNEL
+                and not self._phrases.is_recording()
+            ):
+                if phrase_cell_for_note(msg.note) is not None:
+                    return
             self.engine.note_off(msg.channel, msg.note)
             self._looper.record_note(False, msg.channel, msg.note, 0)
+            if pads_mode or self._phrases.is_recording():
+                self._phrases.record_note(False, msg.channel, msg.note, 0)
             self._q_put(("off", msg.channel, msg.note))
             if self._looper.is_recording():
                 self._q_put(("loop",))
             self._q_put(("log", format_message(msg), False))
         elif msg.type == "polytouch":
+            if (
+                pads_mode
+                and msg.channel == DRUM_CHANNEL
+                and not self._phrases.is_recording()
+            ):
+                return
             self.engine.set_pad_pressure(msg.channel, msg.note, msg.value)
             if msg.channel == DRUM_CHANNEL:
                 self._put_continuous_log(
@@ -3529,6 +4441,12 @@ class MidiToneApp:
             else:
                 self._put_continuous_log(format_message(msg))
         elif msg.type == "aftertouch":
+            if (
+                pads_mode
+                and msg.channel == DRUM_CHANNEL
+                and not self._phrases.is_recording()
+            ):
+                return
             self.engine.set_pad_pressure(msg.channel, None, msg.value)
             if msg.channel == DRUM_CHANNEL:
                 self._put_continuous_log(
@@ -3548,11 +4466,10 @@ class MidiToneApp:
             elif msg.control in KNOB_CCS:
                 drum_focus = self.engine.drum_knob_focus()
                 label = self._handle_knob_cc(msg.control, msg.value)
-                self._q_put(("mod",))
-                if msg.control == CC_MORPH and not drum_focus:
-                    self._q_put(("morph",))
-                if label:
-                    self._put_continuous_log(label)
+                self._knob_ui_feedback(
+                    label,
+                    morph=(msg.control == CC_MORPH and not drum_focus),
+                )
             elif msg.control == 123:
                 self.engine.all_notes_off()
                 self._q_put(("panic",))
@@ -3591,15 +4508,17 @@ class MidiToneApp:
                     self._active_notes.pop((ch, note), None)
                     self._refresh_active()
                 elif kind == "mod":
-                    self.mod_var.set(self._format_mod_line())
+                    self._mod_dirty = True
                 elif kind == "morph":
-                    self._sync_voice_index_from_morph()
-                    self.mod_var.set(self._format_mod_line())
+                    self._morph_dirty_ui = True
+                    self._mod_dirty = True
                 elif kind == "panic":
                     self._active_notes.clear()
                     self._refresh_active()
                 elif kind == "loop":
                     self._refresh_loop_status()
+                elif kind == "phrase":
+                    self._refresh_phrase_status()
                 elif kind == "song":
                     self._refresh_song_status()
         except queue.Empty:
@@ -3608,6 +4527,14 @@ class MidiToneApp:
         if pending is not None:
             self.last_var.set(pending)
             self._pending_cont_log = None
+        # Apply coalesced knob/mod UI once per tick (keeps drum knobs snappy)
+        if getattr(self, "_morph_dirty_ui", False):
+            self._morph_dirty_ui = False
+            self._sync_voice_index_from_morph()
+            self._mod_dirty = True
+        if getattr(self, "_mod_dirty", False):
+            self._mod_dirty = False
+            self.mod_var.set(self._format_mod_line())
         # Keep touch bar stacked above log chrome if packing ever races
         if self._mode == "synth" and not self._overlay_busy():
             try:
@@ -3652,12 +4579,17 @@ class MidiToneApp:
     def _panic(self) -> None:
         if self._looper.is_playing():
             self._looper.stop_playback()
+        try:
+            self._phrases.stop_all()
+        except Exception:
+            pass
         if self._songs.is_playing():
             self._songs.stop()
         self.engine.all_notes_off()
         self._active_notes.clear()
         self._refresh_active()
         self._refresh_loop_status()
+        self._refresh_phrase_status()
         self._refresh_song_status()
         self._append_log("All Notes Off")
 
@@ -3666,6 +4598,10 @@ class MidiToneApp:
         try:
             self._looper.stop_playback()
             self._looper.stop_record()
+        except Exception:
+            pass
+        try:
+            self._phrases.stop_all()
         except Exception:
             pass
         try:

@@ -33,8 +33,8 @@ todos:
     content: "Phase 0b (toy synth): ch10 pads use analog-style drum voices (pitch env, noise, decay/stretch) not pitched wavetable keys"
     status: in_progress
   - id: phrase-pads
-    content: "Phase 3c (later): Phrases/Pads — grid of recorded MIDI phrases; launch via touch squares and MPK drum pads"
-    status: pending
+    content: "Phase 3c: Phrases/Pads — grid of recorded MIDI phrases; launch via touch squares and MPK drum pads"
+    status: in_progress
   - id: arp
     content: "Phase 4 (optional distinct mode): key-relative step pattern transposed by held root"
     status: pending
@@ -56,7 +56,7 @@ isProject: false
 | **Synth** | Local wavetable soft-synth (what `tools/midi-tone` is becoming) |
 | **Looper** | Record/play free-timing MIDI note loops into that synth |
 | **Songs** | Save/load Standard MIDI Files (`.mid`); tempo; play to soft-synth and/or **USB→DIN** |
-| **Phrases / Pads** *(later)* | Grid of recorded MIDI phrases; launch from touch squares **and MPK mini drum pads** |
+| **Phrases / Pads** | Grid of recorded MIDI phrases; launch from touch squares **and MPK mini drum pads** |
 | **Presets** | Save/load synth settings (JSON slots); last session autosaved |
 | **Map / Thru** | Channel / CC / velocity remap; ports; learn — drives the Rust engine |
 | **Log** | Event history / commissioning |
@@ -179,7 +179,7 @@ This is still **not** MIDI-out thru. It’s the playable local mode of the appli
 | Stretch / decay | Envelope times: body decay, noise decay; longer = flabbier / “stretched” hit (not time-stretch DSP) |
 | Noise | Amount + color (LP/HP) for snare/hat; shared or per-model |
 | Level / punch | Velocity → amplitude; optional click/transient gain |
-| UI / knobs | Pad-hit (~5s) or **DRUM KNOBS** lock → knobs 1–4 = pitch / drum-tone / stretch / noise; level always. Persist `drum_*` in `settings.json` / presets |
+| UI / knobs | Explicit **DRUM MODE** only → knobs 1–4 = pitch / drum-tone / stretch / noise; level always. Pad hits do not steal morph. Persist `drum_*` macros (not mode) in `settings.json` / presets |
 | Not required | Sample ROMs, full GM drum kit, convolution. Keep Pi 2 cheap (a few envelopes + noise + 1–2 oscillators per voice) |
 
 **Out of path:** Rust thru/remap does not synthesize audio. Phrases/Pads mode (3c) *launches MIDI clips* from pads — orthogonal; drum voices are “what a pad sounds like in Synth mode.”
@@ -228,11 +228,11 @@ Not a DAW: no piano roll, no multi-track edit. Just “keep songs, set tempo, se
 
 **Engine note:** live remap thru stays in Rust. Song playback can start in the kiosk; if DIN playback needs RT scheduling or “play through the remap chain,” move the SMF clock into `midi-engine` and keep the UI as transport/library only.
 
-## Phase 3c — Phrases / Pads (clip-launch grid; later)
+## Phase 3c — Phrases / Pads (clip-launch grid) — **implementing on `cursor/midi-tone-phrase-pads-1052`**
 
-**Idea (parked):** a touch grid (e.g. 4×4 or 2×4 to match the MPK) where each cell holds a short recorded MIDI sequence. Launch a filled cell into the soft-synth and/or USB→DIN. Empty cell → arm record into that cell. Optional hold-to-stop / clear.
+Touch **4×4** grid (MPK Bank A + Bank B) where each cell holds a short recorded MIDI sequence. Launch a filled cell into the soft-synth — per-pad **ONE-SHOT** or **LOOP** (toggle). Empty cell → arm record into that cell. Persist under `tools/midi-tone/phrases/pad-NN.json`.
 
-### Launch inputs (both required)
+### Launch inputs (both)
 
 | Input | Behavior |
 |-------|----------|
@@ -240,23 +240,69 @@ Not a DAW: no piano roll, no multi-track edit. Just “keep songs, set tempo, se
 | **MPK mini drum pads** | Pad hit launches the mapped phrase cell (hardware performance path) |
 
 **MPK mapping notes:**
-- Pads arrive on **MIDI channel 10** (already special-cased as `DRUM_CHANNEL` in midi-tone).
-- In **Phrases mode**, ch10 note-ons should **launch phrase cells**, not play the soft-synth drum hit (or make that a toggle: *pads → phrases* vs *pads → drums*).
-- Default: pad bank order → cell 1…N (document factory MPK note numbers; allow remap later).
-- Velocity of the pad hit can scale phrase velocity or be ignored (fixed phrase dynamics) — pick a simple default first.
+- Pads arrive on **MIDI channel 10** (`DRUM_CHANNEL`).
+- In **PADS mode**, ch10 note-ons **launch/arm phrase cells**, not drum voices. Synth mode still plays drum kit.
+- Factory notes 36–51 → cells A1–A8 / B1–B8. Pad velocity ignored (fixed phrase dynamics) for now.
 - Keyboard keys stay available for live play / recording into an armed cell.
 
 | vs existing mode | Difference |
 |------------------|------------|
 | **Looper** | One free-timing loop on repeat |
 | **Songs** | Whole `.mid` files + tempo transport |
-| **Phrases / Pads** | Many one-shot (or gated) *phrases*; launch like an MPC / clip launcher from **screen or drum pads** |
+| **Phrases / Pads** | Many one-shot / loop *phrases*; launch like an MPC / clip launcher from **screen or drum pads** |
 
-**Why it fits this box:** huge touch targets *and* the MPK pads you already have in hand; works when you’re not looking at the screen. Content is *your* takes. Same capture buffer family as LOOPER; different launcher UI. Persist cells as small `.mid` or JSON event lists under e.g. `tools/midi-tone/phrases/`.
+**Related later (optional):** gated hold-to-stop; pad-velocity scaling; “Japanese game-ish” demo content = original/CC0 chip-style loops — not ripped game MIDIs.
 
-**Not now:** ship after Songs feels solid. Don’t block Map/thru on this.
+### Later option — Per-pad MIDI out + local synth mute (parked)
 
-**Related later (optional, not scheduled):** “Japanese game-ish” demo content = original/CC0 chip-style loops or just play existing phrases through chip-ish wavetables — not ripped game MIDIs.
+When phrases can feed **USB→DIN** (same family as Songs `LOCAL` / `USB` / `BOTH`), each pad needs its own routing, not one global channel.
+
+| Per-pad setting | Purpose |
+|-----------------|--------|
+| **Out channel** (1–16) | Force/rewrite note channel on emit so bass→ch2, lead→ch3, drums→ch10 on the hardware synth |
+| **Local synth** ON/OFF | OFF = sequence is MIDI-only (DIN/USB); no soft-synth voice for that pad |
+| **Out target** (optional later) | Inherit session `LOCAL`/`USB`/`BOTH`, or override per pad |
+
+**Why:** lock a bassline out ch2 to a real synth with local voice off, keep a melody pad local (or another DIN channel), keep drum pads on ch10 — without everything colliding on ch1 into the toy synth.
+
+**UI:** belongs in pad drill-down / EDIT view with voice lock — not more grid chrome. Persist in `phrases/pad-NN.json` (`out_channel`, `local_synth`, …).
+
+**Note:** recorded events already store a channel; playback should **remap to the pad’s out channel** (or keep recorded channel if pad set to “as recorded”). Prefer explicit per-pad out channel as the default mental model.
+
+### Later option — Play view vs Edit view (parked)
+
+Grid chrome is growing (MODE / CLEAR / REC / 1-SHOT·LOOP). If it gets crowded, split PADS into:
+
+| View | Job |
+|------|-----|
+| **PLAY** | Big launch grid only — trigger / stop loops; minimal chrome |
+| **EDIT** | Record, clear, trigger-mode, (later) per-pad voice / drill-down |
+
+Same 16 cells; different toolbars. Don’t build until PLAY feels cramped.
+
+### Later option — Per-pad voice lock vs live morph (parked)
+
+**Problem today:** one global wavetable morph. Every key voice (live + all phrase playback) shares it. You can’t lock a bass loop on “dbass” while auditioning a melody voice on top.
+
+**Desired performance flow:**
+1. Loop a pad (e.g. bassline) with knobs/morph **following** the global synth (sound-design in context).
+2. **Lock** that pad’s voice (A/B pair + morph + maybe tone macros) so further knob/morph changes don’t touch it.
+3. Live-play or launch another pad in a different voice on top.
+4. Optional: unlock again to re-sculpt.
+
+**UI sketch (not now):** pad drill-down or EDIT view — `FOLLOW` / `LOCKED` per cell; show locked voice name on the pad. Persist with `phrases/pad-NN.json`.
+
+**Engine implication (the real work):** soft-synth must support **multi-timbre** — not one morph table for all voices. Practical v1 on Pi 2:
+
+| Layer | Timbre |
+|-------|--------|
+| Ch10 drums | Already separate procedural engine |
+| Locked phrase pads | Each playing pad uses its **stored** table/morph (or a small pool of morph slots) |
+| Live keyboard + FOLLOW pads | Share the **global** morph (current behavior) |
+
+Polyphony budget (~12 key voices + ~16 drum hits) is enough for drums + bass loop + melody if we’re not stacking huge chords. Cost is **N wavetable oscillators with different tables**, not N full synth engines — doable if we keep morph-slot count small (e.g. global + up to 4 locked pads).
+
+**Order:** ship stable PLAY/EDIT chrome first if needed; multi-timbre lock only after phrases feel solid. Don’t block Map/thru on this.
 
 ## Phase 4 — Key-relative arpeggiator
 
@@ -320,6 +366,28 @@ Optional comfort: **Cursor/VS Code Remote SSH** into the Pi so the editor runs a
 ### When a finished install image *might* show up later
 Only when you want “flash SD → boots straight into the MIDI box” without SSH setup — e.g. cloning the same device for yourself or others. Until then, stock Pi OS + a setup script is enough. “Golden image” just means that frozen, ready-to-clone install; it is **not** part of the daily edit loop.
 
+### Multi-unit / OTA (parked — only one unit today)
+
+Not building this yet. Capture the ladder so we don’t overbuild or forget it when a second box (e.g. brother’s clone) appears.
+
+**Reality check:** daily SSH push (`tools/midi-tone/deploy_pi.py`, `deploy/deploy.sh`) already *is* the update path for a LAN appliance. True “finds the Pi anywhere” OTA is a different product tier. The instrument can stay offline forever; network is only needed **when you choose to update**.
+
+| Approach | When | Notes |
+|----------|------|-------|
+| **SSH push (now)** | 1 unit, home LAN | Keep. Highest leverage. |
+| **Multi-host deploy list** | 2+ units on LAN | Same script, host list / `.pi-credentials` variants. Small change. |
+| **Golden SD image** | Cloning a box for someone else | Flash once → boots kiosk. Best “gift a unit” path. Not the daily loop. |
+| **Pull-on-boot / timer from Releases** | Hands-off updates when online | Tag release → Pi checks version → download tarball → swap app dir → restart kiosk. Preserve user data. |
+| **Fleet OTA (Mender / RAUC / balena)** | Many units / field unattended | Overkill for 1–2 MIDI boxes. Skip until fleet exists. |
+
+**If/when multi-unit lands, remember:**
+- Per-device identity (hostname / `device-id`)
+- Deploy must **never wipe** user content: `settings.json`, `songs/`, `phrases/`, `user-presets/`
+- Optional version stamp in the UI so you know what’s running
+- Updates are opt-in / occasional; offline play stays first-class
+
+**High-leverage slice later (still small):** host list in deploy + a version file + “update from release” script that won’t touch user data. Full fleet OTA waits until there are more than two units.
+
 ## OS / hardware
 
 **Current target: Raspberry Pi 2 Model B v1.1 + touchscreen already on the desk.** MIDI itself is tiny (1980s-era bandwidth); the Pi 2 is enough **if we stay disciplined**. If the board becomes a real ceiling later, move the same software to a Pi 4/5 — architecture should not assume Pi 2 forever, just run well on it now.
@@ -365,7 +433,7 @@ flowchart LR
 - Remap feels like a direct cable under UI abuse
 - Drum pads can roll at set per-pad rates without timing flubs
 - Record a phrase, loop it live, save/load `.mid` songs with tempo, play to soft-synth or USB→DIN
-- Later: launch multiple recorded phrases from a touch grid **and MPK drum pads** (Phase 3c)
+- Phrases / Pads: launch recorded clips from a touch grid **and MPK drum pads** (Phase 3c; implementing)
 - Dev loop is SSH/deploy-based; imaging is exceptional
 - No coupling to play-my-synth
 

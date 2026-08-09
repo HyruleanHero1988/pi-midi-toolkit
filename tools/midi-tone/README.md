@@ -4,9 +4,10 @@ Hear and see MIDI from the **Akai MPK mini** on the Pi **without** USB-DIN or a 
 
 - Opens a MIDI input (prefers a port name containing `MPK`)
 - Note-on → wavetable tone through the Pi audio jack / HDMI
-- **Modes** (top right): **SYNTH**, **LOOPER**, **SONGS**, **PRESETS**, **LOG** — fully separate UIs
+- **Modes** (top right): **SYNTH**, **LOOPER**, **PADS**, **SONGS**, **PRESETS**, **LOG** — fully separate UIs
 - Synth: voices, A/B morph, knobs, live status; **MPK pads (ch10) = analog drum voices** (kick/snare/tom/hat/clap)
 - Looper: record a MIDI note sequence, play it on repeat
+- Pads: 16 phrase clips (Bank A+B); record from keys, launch from touch squares **or** MPK pads
 - Songs: scrolling list of every `.mid` in `songs/`, tempo, play local and/or USB→DIN
 - Presets: 8 save slots + autosave last session (`settings.json`)
 - Log: full scrolling MIDI/event history
@@ -75,7 +76,7 @@ Factory MPC program (`Prog Select` → Pad 1): **Bank A = notes 36–43**, **Ban
 | 42 | tom_mid | 50 | clave |
 | 43 | rim | 51 | ride |
 
-**Drum knobs** (after you hit a pad, for ~5s — or tap **DRUM KNOBS** to lock):
+**Drum knobs** — only when **DRUM MODE** is on (Synth toolbar toggle):
 
 | Knob | CC | Drum control |
 |------|----|----------------|
@@ -85,6 +86,8 @@ Factory MPC program (`Prog Select` → Pad 1): **Bank A = notes 36–43**, **Ban
 | 4 | 73 | Noise amount |
 | 8 | 77 | Master level (always) |
 
+Hitting pads does **not** steal morph knobs. With DRUM MODE off, Knob 1 stays morph. Opening **MORPH** turns DRUM MODE off. Session-only (not saved across restart).
+
 Keyboard notes keep the wavetable morph synth. Pad aftertouch still trims the ringing hit. If a pad program uses other note numbers, unknown notes still cycle through the 16 voices.
 
 ### Modes
@@ -93,6 +96,7 @@ Top-right tabs stay visible:
 
 - **SYNTH** — wavetable soft-synth, voice grid, morph pair
 - **LOOPER** — record MIDI notes, then play them back on a loop (free timing; notes only)
+- **PADS** — 4×4 phrase clip launcher (MPK Bank A+B); touch or drum pads
 - **SONGS** — lists every `.mid` / `.midi` in `songs/`; big ▲ UP / ▼ DOWN to scroll; tempo; LOCAL/USB out
 - **PRESETS** — 8 touch slots: SAVE / LOAD / DELETE current sound + full-velocity
 - **LOG** — full event history (also has CLEAR / panic)
@@ -100,6 +104,7 @@ Top-right tabs stay visible:
 Last session autosaves to `settings.json` (gitignored) every few seconds and on quit.
 Named presets live in `user-presets/slot-01.json` … `slot-08.json`.
 Song files live as whatever you put in `songs/` (any `.mid` name).
+Phrase pads persist as `phrases/pad-01.json` … `pad-16.json` (gitignored).
 
 ### Looper
 
@@ -109,7 +114,23 @@ Song files live as whatever you put in `songs/` (any `.mid` name).
 4. Tap **PLAY** to loop; tap **PLAY**/**STOP** to halt
 5. **CLEAR** wipes the take
 
+On stop, the take is **auto-trimmed**: leading silence before the first hit is removed, and trailing silence after the last hit is capped to the largest gap between note-ons (so lag hitting STOP doesn’t leave a dead bar at the loop point). Same trim applies to phrase-pad recordings.
+
 Live playing still works while a loop runs. Voice/morph/knob settings from Synth apply to looped notes too.
+
+### Phrase Pads
+
+1. Open **PADS**
+2. Tap an **empty** square (or hit the matching MPK pad) to arm record
+3. Play **keyboard and/or drum pads** — both are captured into that cell
+4. **STOP REC** or tap that square again to finish (saved under `phrases/`)
+5. Tap a **filled** square (or MPK pad) to launch:
+   - **ONE-SHOT** (`▶`) — plays once; re-trigger restarts
+   - **LOOP** (`↻`) — loops until you hit that pad again
+6. **MODE** then tap a pad to toggle ONE-SHOT ↔ LOOP (per pad; saved in `phrases/`)
+7. **CLEAR** then tap a pad to erase it; **STOP ALL** stops playing phrases
+
+While a phrase is **recording**, MPK pads play/record **drum voices** (not launch). When not recording, those pads launch/arm phrases. Synth mode still always plays the 16-pad drum kit.
 
 ### Songs
 
