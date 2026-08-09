@@ -230,7 +230,7 @@ Not a DAW: no piano roll, no multi-track edit. Just “keep songs, set tempo, se
 
 ## Phase 3c — Phrases / Pads (clip-launch grid) — **implementing on `cursor/midi-tone-phrase-pads-1052`**
 
-Touch **4×4** grid (MPK Bank A + Bank B) where each cell holds a short recorded MIDI sequence. Launch a filled cell into the soft-synth (one-shot). Empty cell → arm record into that cell. Persist under `tools/midi-tone/phrases/pad-NN.json`.
+Touch **4×4** grid (MPK Bank A + Bank B) where each cell holds a short recorded MIDI sequence. Launch a filled cell into the soft-synth — per-pad **ONE-SHOT** or **LOOP** (toggle). Empty cell → arm record into that cell. Persist under `tools/midi-tone/phrases/pad-NN.json`.
 
 ### Launch inputs (both)
 
