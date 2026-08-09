@@ -249,9 +249,44 @@ Touch **4×4** grid (MPK Bank A + Bank B) where each cell holds a short recorded
 |------------------|------------|
 | **Looper** | One free-timing loop on repeat |
 | **Songs** | Whole `.mid` files + tempo transport |
-| **Phrases / Pads** | Many one-shot *phrases*; launch like an MPC / clip launcher from **screen or drum pads** |
+| **Phrases / Pads** | Many one-shot / loop *phrases*; launch like an MPC / clip launcher from **screen or drum pads** |
 
 **Related later (optional):** USB→DIN phrase out; gated hold-to-stop; pad-velocity scaling; “Japanese game-ish” demo content = original/CC0 chip-style loops — not ripped game MIDIs.
+
+### Later option — Play view vs Edit view (parked)
+
+Grid chrome is growing (MODE / CLEAR / REC / 1-SHOT·LOOP). If it gets crowded, split PADS into:
+
+| View | Job |
+|------|-----|
+| **PLAY** | Big launch grid only — trigger / stop loops; minimal chrome |
+| **EDIT** | Record, clear, trigger-mode, (later) per-pad voice / drill-down |
+
+Same 16 cells; different toolbars. Don’t build until PLAY feels cramped.
+
+### Later option — Per-pad voice lock vs live morph (parked)
+
+**Problem today:** one global wavetable morph. Every key voice (live + all phrase playback) shares it. You can’t lock a bass loop on “dbass” while auditioning a melody voice on top.
+
+**Desired performance flow:**
+1. Loop a pad (e.g. bassline) with knobs/morph **following** the global synth (sound-design in context).
+2. **Lock** that pad’s voice (A/B pair + morph + maybe tone macros) so further knob/morph changes don’t touch it.
+3. Live-play or launch another pad in a different voice on top.
+4. Optional: unlock again to re-sculpt.
+
+**UI sketch (not now):** pad drill-down or EDIT view — `FOLLOW` / `LOCKED` per cell; show locked voice name on the pad. Persist with `phrases/pad-NN.json`.
+
+**Engine implication (the real work):** soft-synth must support **multi-timbre** — not one morph table for all voices. Practical v1 on Pi 2:
+
+| Layer | Timbre |
+|-------|--------|
+| Ch10 drums | Already separate procedural engine |
+| Locked phrase pads | Each playing pad uses its **stored** table/morph (or a small pool of morph slots) |
+| Live keyboard + FOLLOW pads | Share the **global** morph (current behavior) |
+
+Polyphony budget (~12 key voices + ~16 drum hits) is enough for drums + bass loop + melody if we’re not stacking huge chords. Cost is **N wavetable oscillators with different tables**, not N full synth engines — doable if we keep morph-slot count small (e.g. global + up to 4 locked pads).
+
+**Order:** ship stable PLAY/EDIT chrome first if needed; multi-timbre lock only after phrases feel solid. Don’t block Map/thru on this.
 
 ## Phase 4 — Key-relative arpeggiator
 
