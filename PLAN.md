@@ -34,6 +34,9 @@ todos:
     status: in_progress
   - id: phrase-pads
     content: "Phase 3c: Phrases/Pads — grid of recorded MIDI phrases; launch via touch squares and MPK drum pads"
+    status: completed
+  - id: pad-enhance
+    content: "Pad enhance: PLAY/EDIT views, FOLLOW/LOCKED multi-timbre, per-pad out channel + local synth mute + USB OUT"
     status: in_progress
   - id: arp
     content: "Phase 4 (optional distinct mode): key-relative step pattern transposed by held root"
@@ -228,9 +231,21 @@ Not a DAW: no piano roll, no multi-track edit. Just “keep songs, set tempo, se
 
 **Engine note:** live remap thru stays in Rust. Song playback can start in the kiosk; if DIN playback needs RT scheduling or “play through the remap chain,” move the SMF clock into `midi-engine` and keep the UI as transport/library only.
 
-## Phase 3c — Phrases / Pads (clip-launch grid) — **implementing on `cursor/midi-tone-phrase-pads-1052`**
+## Phase 3c — Phrases / Pads (clip-launch grid) — **done on `cursor/midi-tone-phrase-pads-1052`**
 
 Touch **4×4** grid (MPK Bank A + Bank B) where each cell holds a short recorded MIDI sequence. Launch a filled cell into the soft-synth — per-pad **ONE-SHOT** or **LOOP** (toggle). Empty cell → arm record into that cell. Persist under `tools/midi-tone/phrases/pad-NN.json`.
+
+### Pad enhancements — **implementing on `cursor/midi-tone-pad-enhance-1052`**
+
+| Feature | Behavior |
+|---------|----------|
+| **PLAY / EDIT views** | PLAY = launch grid + STOP ALL + OUT; EDIT = record/clear/mode + per-pad drill-down |
+| **FOLLOW / LOCKED voice** | FOLLOW uses global morph; LOCKED bakes A/B+morph onto that pad (max 4 concurrent locked tables) |
+| **Out channel** | Per pad: as-recorded or force ch1–16 on emit |
+| **Local synth** | Per pad ON/OFF — OFF = MIDI-only (DIN/USB via session OUT) |
+| **Pads OUT** | Session `LOCAL` / `USB` / `BOTH` (shares Songs USB outport) |
+
+Persist per-pad fields in `phrases/pad-NN.json` (version 2); session stores pads `view` + `out_mode` in `settings.json`.
 
 ### Launch inputs (both)
 
@@ -253,56 +268,13 @@ Touch **4×4** grid (MPK Bank A + Bank B) where each cell holds a short recorded
 
 **Related later (optional):** gated hold-to-stop; pad-velocity scaling; “Japanese game-ish” demo content = original/CC0 chip-style loops — not ripped game MIDIs.
 
-### Later option — Per-pad MIDI out + local synth mute (parked)
+### Pad enhancements — design notes (shipped on pad-enhance branch)
 
-When phrases can feed **USB→DIN** (same family as Songs `LOCAL` / `USB` / `BOTH`), each pad needs its own routing, not one global channel.
+**MIDI out + local mute:** session OUT (`LOCAL`/`USB`/`BOTH`) gates routing; per-pad **CH** remaps emit channel (or as-recorded); **SYNTH** OFF skips soft-synth for that pad (DIN-only when USB/BOTH).
 
-| Per-pad setting | Purpose |
-|-----------------|--------|
-| **Out channel** (1–16) | Force/rewrite note channel on emit so bass→ch2, lead→ch3, drums→ch10 on the hardware synth |
-| **Local synth** ON/OFF | OFF = sequence is MIDI-only (DIN/USB); no soft-synth voice for that pad |
-| **Out target** (optional later) | Inherit session `LOCAL`/`USB`/`BOTH`, or override per pad |
+**PLAY vs EDIT:** same 16 cells; PLAY is performance (no arm-record); EDIT is record/clear/mode + TRIG / FOLLOW·LOCK / CH / SYNTH / OUT.
 
-**Why:** lock a bassline out ch2 to a real synth with local voice off, keep a melody pad local (or another DIN channel), keep drum pads on ch10 — without everything colliding on ch1 into the toy synth.
-
-**UI:** belongs in pad drill-down / EDIT view with voice lock — not more grid chrome. Persist in `phrases/pad-NN.json` (`out_channel`, `local_synth`, …).
-
-**Note:** recorded events already store a channel; playback should **remap to the pad’s out channel** (or keep recorded channel if pad set to “as recorded”). Prefer explicit per-pad out channel as the default mental model.
-
-### Later option — Play view vs Edit view (parked)
-
-Grid chrome is growing (MODE / CLEAR / REC / 1-SHOT·LOOP). If it gets crowded, split PADS into:
-
-| View | Job |
-|------|-----|
-| **PLAY** | Big launch grid only — trigger / stop loops; minimal chrome |
-| **EDIT** | Record, clear, trigger-mode, (later) per-pad voice / drill-down |
-
-Same 16 cells; different toolbars. Don’t build until PLAY feels cramped.
-
-### Later option — Per-pad voice lock vs live morph (parked)
-
-**Problem today:** one global wavetable morph. Every key voice (live + all phrase playback) shares it. You can’t lock a bass loop on “dbass” while auditioning a melody voice on top.
-
-**Desired performance flow:**
-1. Loop a pad (e.g. bassline) with knobs/morph **following** the global synth (sound-design in context).
-2. **Lock** that pad’s voice (A/B pair + morph + maybe tone macros) so further knob/morph changes don’t touch it.
-3. Live-play or launch another pad in a different voice on top.
-4. Optional: unlock again to re-sculpt.
-
-**UI sketch (not now):** pad drill-down or EDIT view — `FOLLOW` / `LOCKED` per cell; show locked voice name on the pad. Persist with `phrases/pad-NN.json`.
-
-**Engine implication (the real work):** soft-synth must support **multi-timbre** — not one morph table for all voices. Practical v1 on Pi 2:
-
-| Layer | Timbre |
-|-------|--------|
-| Ch10 drums | Already separate procedural engine |
-| Locked phrase pads | Each playing pad uses its **stored** table/morph (or a small pool of morph slots) |
-| Live keyboard + FOLLOW pads | Share the **global** morph (current behavior) |
-
-Polyphony budget (~12 key voices + ~16 drum hits) is enough for drums + bass loop + melody if we’re not stacking huge chords. Cost is **N wavetable oscillators with different tables**, not N full synth engines — doable if we keep morph-slot count small (e.g. global + up to 4 locked pads).
-
-**Order:** ship stable PLAY/EDIT chrome first if needed; multi-timbre lock only after phrases feel solid. Don’t block Map/thru on this.
+**Voice lock:** soft-synth multi-timbre — locked pads bake a wavetable; FOLLOW + live keys share global morph; drums stay procedural on ch10. Cap concurrent locked tables at 4 (Pi 2).
 
 ## Phase 4 — Key-relative arpeggiator
 
@@ -433,7 +405,7 @@ flowchart LR
 - Remap feels like a direct cable under UI abuse
 - Drum pads can roll at set per-pad rates without timing flubs
 - Record a phrase, loop it live, save/load `.mid` songs with tempo, play to soft-synth or USB→DIN
-- Phrases / Pads: launch recorded clips from a touch grid **and MPK drum pads** (Phase 3c; implementing)
+- Phrases / Pads: launch recorded clips from a touch grid **and MPK drum pads** (Phase 3c); PLAY/EDIT, voice lock, per-pad MIDI out (pad-enhance)
 - Dev loop is SSH/deploy-based; imaging is exceptional
 - No coupling to play-my-synth
 

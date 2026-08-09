@@ -438,6 +438,8 @@ class Voice:
     amp: float = 0.0
     target_amp: float = 0.0
     age: int = 0  # bump on each note_on for steal ordering
+    # None → live global morph table; ndarray → locked pad timbre (multi-timbre)
+    timbre: Optional[np.ndarray] = None
 
 
 @dataclass
@@ -467,6 +469,7 @@ class SineEngine:
     RELEASE_SEC_MIN = 0.010
     RELEASE_SEC_MAX = 0.800
     MAX_DRUM_HITS = 16  # full MPK A+B pad bank polyphony
+    MAX_LOCKED_TIMBRES = 4  # concurrent locked pad tables (Pi 2 budget)
 
     def __init__(
         self,
@@ -625,7 +628,14 @@ class SineEngine:
                 best = key
         return best
 
-    def note_on(self, channel: int, note: int, velocity: int) -> None:
+    def note_on(
+        self,
+        channel: int,
+        note: int,
+        velocity: int,
+        *,
+        timbre: Optional[np.ndarray] = None,
+    ) -> None:
         if velocity <= 0:
             self.note_off(channel, note)
             return
@@ -650,6 +660,7 @@ class SineEngine:
                 existing.amp = 0.0
                 existing.target_amp = target
                 existing.age = serial
+                existing.timbre = timbre
                 return
             if len(self._voices) >= self.max_voices:
                 drop = self._steal_key()
@@ -662,6 +673,7 @@ class SineEngine:
                 target_amp=target,
                 releasing=False,
                 age=serial,
+                timbre=timbre,
             )
 
     def _drum_note_on(self, note: int, velocity: float) -> None:
@@ -893,6 +905,34 @@ class SineEngine:
         with self._lock:
             return self._morph
 
+    def snapshot_morph(self) -> Tuple[str, str, float]:
+        """Current morph pair names + blend — for locking onto a phrase pad."""
+        with self._lock:
+            if self._morph_dirty:
+                self._rebuild_morph_table_unlocked()
+            a = self._voice_names[self._morph_a]
+            b = self._voice_names[self._morph_b]
+            return a, b, float(self._morph)
+
+    def bake_morph_table(
+        self, name_a: str, name_b: str, morph: float
+    ) -> Optional[np.ndarray]:
+        """Build a frozen wavetable blend for a locked pad timbre."""
+        names = {n: i for i, n in enumerate(self._voice_names)}
+        ia = names.get(str(name_a).lower().strip())
+        ib = names.get(str(name_b).lower().strip())
+        if ia is None and ib is None:
+            return None
+        if ia is None:
+            ia = ib if ib is not None else 0
+        if ib is None:
+            ib = ia
+        frac = max(0.0, min(1.0, float(morph)))
+        a = self._table_list[ia]
+        b = self._table_list[ib]
+        out = (a * np.float32(1.0 - frac) + b * np.float32(frac)).astype(np.float32)
+        return out
+
     def modulation_state(self) -> Dict[str, float]:
         with self._lock:
             return {
@@ -1025,7 +1065,8 @@ class SineEngine:
             np.subtract(ph, np.floor(ph), out=frac)
             i0 = np.bitwise_and(ph.astype(np.int32), TABLE_MASK)
             i1 = np.bitwise_and(i0 + 1, TABLE_MASK)
-            wave = table[i0] * (1.0 - frac) + table[i1] * frac
+            src = v.timbre if v.timbre is not None else table
+            wave = src[i0] * (1.0 - frac) + src[i1] * frac
 
             start_amp = v.amp
             if v.releasing:
@@ -1436,6 +1477,11 @@ def phrase_cell_for_note(note: int) -> Optional[int]:
 PHRASE_TRIG_ONESHOT = "oneshot"
 PHRASE_TRIG_LOOP = "loop"
 PHRASE_TRIG_MODES = (PHRASE_TRIG_ONESHOT, PHRASE_TRIG_LOOP)
+PHRASE_VOICE_FOLLOW = "follow"
+PHRASE_VOICE_LOCKED = "locked"
+PHRASE_VOICE_MODES = (PHRASE_VOICE_FOLLOW, PHRASE_VOICE_LOCKED)
+# out_channel -1 = use each event's recorded channel; 0..15 = force MIDI ch 1..16
+PHRASE_OUT_AS_RECORDED = -1
 
 
 @dataclass
@@ -1443,6 +1489,12 @@ class PhraseCell:
     events: List[LoopEvent]
     length: float = 0.0
     trigger_mode: str = PHRASE_TRIG_ONESHOT  # oneshot | loop
+    voice_mode: str = PHRASE_VOICE_FOLLOW  # follow global morph | locked snapshot
+    morph_a: str = ""
+    morph_b: str = ""
+    morph: float = 0.0
+    out_channel: int = PHRASE_OUT_AS_RECORDED  # -1 or 0..15
+    local_synth: bool = True  # False = MIDI-only (no soft-synth for this pad)
 
     def is_empty(self) -> bool:
         return not self.events or self.length <= 0.0
@@ -1450,12 +1502,25 @@ class PhraseCell:
     def is_loop(self) -> bool:
         return self.trigger_mode == PHRASE_TRIG_LOOP
 
+    def is_voice_locked(self) -> bool:
+        return self.voice_mode == PHRASE_VOICE_LOCKED
+
     def to_dict(self) -> Dict[str, Any]:
         mode = self.trigger_mode if self.trigger_mode in PHRASE_TRIG_MODES else PHRASE_TRIG_ONESHOT
+        vmode = self.voice_mode if self.voice_mode in PHRASE_VOICE_MODES else PHRASE_VOICE_FOLLOW
+        och = int(self.out_channel)
+        if och < -1 or och > 15:
+            och = PHRASE_OUT_AS_RECORDED
         return {
-            "version": 1,
+            "version": 2,
             "length": float(self.length),
             "trigger_mode": mode,
+            "voice_mode": vmode,
+            "morph_a": str(self.morph_a or ""),
+            "morph_b": str(self.morph_b or ""),
+            "morph": float(self.morph),
+            "out_channel": och,
+            "local_synth": bool(self.local_synth),
             "events": [
                 {
                     "t": float(e.t),
@@ -1492,7 +1557,30 @@ class PhraseCell:
         mode = str(data.get("trigger_mode", PHRASE_TRIG_ONESHOT) or PHRASE_TRIG_ONESHOT)
         if mode not in PHRASE_TRIG_MODES:
             mode = PHRASE_TRIG_ONESHOT
-        return PhraseCell(events=events, length=length, trigger_mode=mode)
+        vmode = str(data.get("voice_mode", PHRASE_VOICE_FOLLOW) or PHRASE_VOICE_FOLLOW)
+        if vmode not in PHRASE_VOICE_MODES:
+            vmode = PHRASE_VOICE_FOLLOW
+        try:
+            och = int(data.get("out_channel", PHRASE_OUT_AS_RECORDED))
+        except (TypeError, ValueError):
+            och = PHRASE_OUT_AS_RECORDED
+        if och < -1 or och > 15:
+            och = PHRASE_OUT_AS_RECORDED
+        try:
+            morph = float(data.get("morph", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            morph = 0.0
+        return PhraseCell(
+            events=events,
+            length=length,
+            trigger_mode=mode,
+            voice_mode=vmode,
+            morph_a=str(data.get("morph_a", "") or ""),
+            morph_b=str(data.get("morph_b", "") or ""),
+            morph=max(0.0, min(1.0, morph)),
+            out_channel=och,
+            local_synth=bool(data.get("local_synth", True)),
+        )
 
 
 class PhrasePadBank:
@@ -1515,7 +1603,17 @@ class PhrasePadBank:
         self._playing: Dict[int, threading.Event] = {}
         self._threads: Dict[int, threading.Thread] = {}
         self._held: Dict[int, set[Tuple[int, int]]] = {}
+        self._active_timbres: Dict[int, np.ndarray] = {}
+        # Output hooks (wired by MidiToneApp — share Songs USB port)
+        self._get_out_mode = lambda: "local"
+        self._ensure_outport = lambda: None
+        self._get_outport = lambda: None
         self.load_all()
+
+    def set_output_hooks(self, *, get_out_mode, ensure_outport, get_outport) -> None:
+        self._get_out_mode = get_out_mode
+        self._ensure_outport = ensure_outport
+        self._get_outport = get_outport
 
     def selected(self) -> Optional[int]:
         with self._lock:
@@ -1537,14 +1635,22 @@ class PhrasePadBank:
         with self._lock:
             return sorted(self._playing.keys())
 
+    def _copy_cell(self, c: PhraseCell) -> PhraseCell:
+        return PhraseCell(
+            events=list(c.events),
+            length=float(c.length),
+            trigger_mode=c.trigger_mode,
+            voice_mode=c.voice_mode,
+            morph_a=c.morph_a,
+            morph_b=c.morph_b,
+            morph=float(c.morph),
+            out_channel=int(c.out_channel),
+            local_synth=bool(c.local_synth),
+        )
+
     def cell(self, idx: int) -> PhraseCell:
         with self._lock:
-            c = self._cells[idx]
-            return PhraseCell(
-                events=list(c.events),
-                length=float(c.length),
-                trigger_mode=c.trigger_mode,
-            )
+            return self._copy_cell(self._cells[idx])
 
     def trigger_mode(self, idx: int) -> str:
         with self._lock:
@@ -1581,11 +1687,107 @@ class PhrasePadBank:
         self.set_trigger_mode(idx, nxt)
         return nxt
 
-    def status_line(self, *, clear_armed: bool = False, mode_armed: bool = False) -> str:
+    def set_voice_follow(self, idx: int) -> bool:
+        if not (0 <= idx < PHRASE_PAD_COUNT):
+            return False
+        with self._lock:
+            self._cells[idx].voice_mode = PHRASE_VOICE_FOLLOW
+            self._selected = idx
+        self.save_cell(idx)
+        self._emit(("phrase",))
+        self._emit(("log", f"Phrase {phrase_pad_label(idx)} voice FOLLOW", False))
+        return True
+
+    def lock_voice_from_engine(self, idx: int) -> bool:
+        """Snapshot current global morph onto this pad (LOCKED)."""
+        if not (0 <= idx < PHRASE_PAD_COUNT):
+            return False
+        a, b, morph = self._engine.snapshot_morph()
+        with self._lock:
+            c = self._cells[idx]
+            c.voice_mode = PHRASE_VOICE_LOCKED
+            c.morph_a = a
+            c.morph_b = b
+            c.morph = float(morph)
+            self._selected = idx
+        self.save_cell(idx)
+        self._emit(("phrase",))
+        self._emit(
+            ("log", f"Phrase {phrase_pad_label(idx)} voice LOCKED ({a}→{b} {int(morph*100)}%)", False)
+        )
+        return True
+
+    def toggle_voice_lock(self, idx: int) -> Optional[str]:
+        if not (0 <= idx < PHRASE_PAD_COUNT):
+            return None
+        with self._lock:
+            locked = self._cells[idx].voice_mode == PHRASE_VOICE_LOCKED
+        if locked:
+            self.set_voice_follow(idx)
+            return PHRASE_VOICE_FOLLOW
+        self.lock_voice_from_engine(idx)
+        return PHRASE_VOICE_LOCKED
+
+    def set_out_channel(self, idx: int, channel: int) -> bool:
+        """channel -1 = as recorded; 0..15 = force MIDI channel."""
+        if not (0 <= idx < PHRASE_PAD_COUNT):
+            return False
+        ch = int(channel)
+        if ch < -1 or ch > 15:
+            return False
+        with self._lock:
+            self._cells[idx].out_channel = ch
+            self._selected = idx
+        self.save_cell(idx)
+        self._emit(("phrase",))
+        label = "as-recorded" if ch < 0 else f"ch{ch + 1}"
+        self._emit(("log", f"Phrase {phrase_pad_label(idx)} out {label}", False))
+        return True
+
+    def cycle_out_channel(self, idx: int) -> int:
+        """Cycle: as-recorded → ch1 → … → ch16 → as-recorded."""
+        with self._lock:
+            cur = self._cells[idx].out_channel if 0 <= idx < PHRASE_PAD_COUNT else -1
+        nxt = -1 if cur >= 15 else cur + 1
+        self.set_out_channel(idx, nxt)
+        return nxt
+
+    def set_local_synth(self, idx: int, enabled: bool) -> bool:
+        if not (0 <= idx < PHRASE_PAD_COUNT):
+            return False
+        with self._lock:
+            self._cells[idx].local_synth = bool(enabled)
+            self._selected = idx
+        self.save_cell(idx)
+        self._emit(("phrase",))
+        self._emit(
+            (
+                "log",
+                f"Phrase {phrase_pad_label(idx)} local synth "
+                f"{'ON' if enabled else 'OFF'}",
+                False,
+            )
+        )
+        return True
+
+    def toggle_local_synth(self, idx: int) -> bool:
+        with self._lock:
+            cur = self._cells[idx].local_synth if 0 <= idx < PHRASE_PAD_COUNT else True
+        self.set_local_synth(idx, not cur)
+        return not cur
+
+    def status_line(
+        self,
+        *,
+        clear_armed: bool = False,
+        mode_armed: bool = False,
+        view: str = "edit",
+    ) -> str:
         with self._lock:
             filled = sum(1 for c in self._cells if not c.is_empty())
             rec = self._recording_cell
             playing = sorted(self._playing.keys())
+            sel = self._selected
         if mode_armed:
             return "MODE armed — tap a pad to toggle ONE-SHOT ↔ LOOP · MODE again to cancel"
         if clear_armed:
@@ -1595,16 +1797,28 @@ class PhrasePadBank:
                 f"Recording {phrase_pad_label(rec)} — keys + drum pads record; "
                 f"STOP REC or tap that square to finish ({filled}/16 filled)"
             )
+        if view == "play":
+            if playing:
+                names = ",".join(phrase_pad_label(i) for i in playing[:6])
+                return f"PLAY · {names} · tap pad to launch/stop · {filled}/16"
+            return f"PLAY · tap a pad to launch · {filled}/16 filled"
+        if sel is not None:
+            c = self.cell(sel)
+            v = "LOCK" if c.is_voice_locked() else "FOLLOW"
+            och = "rec" if c.out_channel < 0 else f"ch{c.out_channel + 1}"
+            syn = "SYN" if c.local_synth else "MIDI"
+            trig = "LOOP" if c.is_loop() else "1SHOT"
+            return (
+                f"EDIT {phrase_pad_label(sel)} · {trig} · {v} · {och} · {syn} · "
+                f"{filled}/16"
+            )
         if playing:
             names = ",".join(phrase_pad_label(i) for i in playing[:6])
             more = f"+{len(playing) - 6}" if len(playing) > 6 else ""
-            return f"Playing {names}{more} · {filled}/16 · MODE toggles 1-SHOT/LOOP per pad"
+            return f"EDIT · playing {names}{more} · select a pad to fine-tune"
         if filled == 0:
-            return "Empty pads — tap to arm record · MODE sets ONE-SHOT or LOOP per pad"
-        return (
-            f"{filled}/16 phrases · filled=launch · empty=record · "
-            "MODE=1-SHOT/LOOP · CLEAR=erase"
-        )
+            return "EDIT · tap empty pad to record · fill pads then use PLAY to perform"
+        return f"EDIT · {filled}/16 · tap pad to launch+select · use row below to fine-tune"
 
     def _cell_path(self, idx: int) -> pathlib.Path:
         return self._dir / f"pad-{idx + 1:02d}.json"
@@ -1636,15 +1850,18 @@ class PhrasePadBank:
             return False
         self._dir.mkdir(parents=True, exist_ok=True)
         with self._lock:
-            cell = PhraseCell(
-                events=list(self._cells[idx].events),
-                length=float(self._cells[idx].length),
-                trigger_mode=self._cells[idx].trigger_mode,
-            )
+            cell = self._copy_cell(self._cells[idx])
         path = self._cell_path(idx)
         try:
-            # Drop file only for empty one-shot pads (default state)
-            if cell.is_empty() and cell.trigger_mode == PHRASE_TRIG_ONESHOT:
+            # Drop file only for empty default pads
+            defaultish = (
+                cell.is_empty()
+                and cell.trigger_mode == PHRASE_TRIG_ONESHOT
+                and cell.voice_mode == PHRASE_VOICE_FOLLOW
+                and cell.out_channel == PHRASE_OUT_AS_RECORDED
+                and cell.local_synth
+            )
+            if defaultish:
                 if path.is_file():
                     path.unlink()
                 return True
@@ -1663,6 +1880,7 @@ class PhrasePadBank:
         if 0 <= idx < PHRASE_PAD_COUNT:
             with self._lock:
                 self._selected = idx
+            self._emit(("phrase",))
 
     def arm_record(self, idx: int) -> bool:
         """Start recording into cell (clears prior contents). Stops that cell's playback."""
@@ -1672,8 +1890,17 @@ class PhrasePadBank:
             self.stop_record()
         self.stop_cell(idx)
         with self._lock:
-            mode = self._cells[idx].trigger_mode
-            self._cells[idx] = PhraseCell(events=[], trigger_mode=mode)
+            prev = self._cells[idx]
+            self._cells[idx] = PhraseCell(
+                events=[],
+                trigger_mode=prev.trigger_mode,
+                voice_mode=prev.voice_mode,
+                morph_a=prev.morph_a,
+                morph_b=prev.morph_b,
+                morph=prev.morph,
+                out_channel=prev.out_channel,
+                local_synth=prev.local_synth,
+            )
             self._recording_cell = idx
             self._rec_t0 = time.monotonic()
             self._selected = idx
@@ -1778,7 +2005,7 @@ class PhrasePadBank:
             self.stop_record()
             return "stop_rec"
         with self._lock:
-            cell = self._cells[idx]
+            cell = self._copy_cell(self._cells[idx])
             if cell.is_empty():
                 return "empty"
             events = list(cell.events)
@@ -1786,6 +2013,11 @@ class PhrasePadBank:
             loop = cell.trigger_mode == PHRASE_TRIG_LOOP
             already = idx in self._playing
             self._selected = idx
+            locked_playing = sum(
+                1
+                for i, c in enumerate(self._cells)
+                if i in self._playing and c.voice_mode == PHRASE_VOICE_LOCKED
+            )
             if idx not in self._playing and len(self._playing) >= MAX_PHRASE_PLAYERS:
                 oldest = next(iter(self._playing))
             else:
@@ -1797,16 +2029,54 @@ class PhrasePadBank:
             return "stop"
         if oldest is not None:
             self.stop_cell(oldest)
-        # Oneshot re-trigger (or loop start): restart cleanly
+
+        # Bake locked timbre (cap concurrent locked tables)
+        timbre: Optional[np.ndarray] = None
+        if cell.is_voice_locked():
+            if not already and locked_playing >= self._engine.MAX_LOCKED_TIMBRES:
+                self._emit(
+                    (
+                        "log",
+                        f"Phrase {phrase_pad_label(idx)} — too many LOCKED pads "
+                        f"(max {self._engine.MAX_LOCKED_TIMBRES}); using FOLLOW",
+                        False,
+                    )
+                )
+            else:
+                timbre = self._engine.bake_morph_table(
+                    cell.morph_a or "sine",
+                    cell.morph_b or cell.morph_a or "sine",
+                    cell.morph,
+                )
+
+        out_mode = str(self._get_out_mode() or "local")
+        want_usb = out_mode in ("usb", "both")
+        if want_usb:
+            self._ensure_outport()
+
         was_playing = already
         self.stop_cell(idx)
         stop_ev = threading.Event()
         with self._lock:
             self._playing[idx] = stop_ev
             self._held[idx] = set()
+            if timbre is not None:
+                self._active_timbres[idx] = timbre
+            else:
+                self._active_timbres.pop(idx, None)
         thread = threading.Thread(
             target=self._play_cell,
-            args=(idx, events, length, stop_ev, loop),
+            args=(
+                idx,
+                events,
+                length,
+                stop_ev,
+                loop,
+                timbre,
+                cell.out_channel,
+                cell.local_synth,
+                out_mode,
+            ),
             daemon=True,
         )
         with self._lock:
@@ -1820,10 +2090,13 @@ class PhrasePadBank:
         self._emit(("log", f"Phrase ▶ {phrase_pad_label(idx)}", False))
         return tag
 
-    def handle_pad(self, idx: int, *, from_touch: bool = False) -> str:
+    def handle_pad(
+        self, idx: int, *, from_touch: bool = False, allow_record: bool = True
+    ) -> str:
         """
         Touch square or MPK pad hit (when not recording drums).
-        Empty → arm record; filled → launch/toggle; touch on armed cell → stop record.
+        Empty → arm record (EDIT); filled → launch/toggle; touch on armed cell → stop record.
+        PLAY view passes allow_record=False so empty pads only select.
         Returns a short action tag for the UI/log.
         """
         if not (0 <= idx < PHRASE_PAD_COUNT):
@@ -1839,13 +2112,17 @@ class PhrasePadBank:
             # Hardware pad while recording is handled by MIDI path as drums
             return "ignore"
         if empty:
+            if not allow_record:
+                self.select(idx)
+                return "empty"
             self.arm_record(idx)
             return "arm"
         return self.launch(idx)
 
-    def _release_held(self, idx: int) -> None:
+    def _release_held(self, idx: int, *, send_midi: bool = True) -> None:
         with self._lock:
             held = list(self._held.pop(idx, set()))
+        port = self._get_outport() if send_midi else None
         for ch, note in held:
             try:
                 self._engine.note_off(ch, note)
@@ -1855,6 +2132,68 @@ class PhrasePadBank:
                 self._emit(("off", ch, note))
             except Exception:
                 pass
+            if port is not None:
+                try:
+                    port.send(
+                        mido.Message("note_off", channel=ch & 0x0F, note=note & 0x7F, velocity=0)
+                    )
+                except Exception:
+                    pass
+
+    def _emit_phrase_note(
+        self,
+        *,
+        on: bool,
+        src_channel: int,
+        note: int,
+        velocity: int,
+        out_channel: int,
+        local_synth: bool,
+        out_mode: str,
+        timbre: Optional[np.ndarray],
+        idx: int,
+    ) -> None:
+        ch = (out_channel & 0x0F) if out_channel >= 0 else (src_channel & 0x0F)
+        n = note & 0x7F
+        want_usb = out_mode in ("usb", "both")
+        want_local = bool(local_synth) and out_mode in ("local", "both")
+        if want_usb:
+            port = self._get_outport()
+            if port is not None:
+                try:
+                    if on:
+                        port.send(
+                            mido.Message(
+                                "note_on",
+                                channel=ch,
+                                note=n,
+                                velocity=max(1, min(127, int(velocity))),
+                            )
+                        )
+                    else:
+                        port.send(
+                            mido.Message("note_off", channel=ch, note=n, velocity=0)
+                        )
+                except Exception:
+                    pass
+        if want_local:
+            if on:
+                self._engine.note_on(ch, n, velocity, timbre=timbre)
+                with self._lock:
+                    self._held.setdefault(idx, set()).add((ch, n))
+                self._emit(("on", ch, n, velocity))
+            else:
+                self._engine.note_off(ch, n)
+                with self._lock:
+                    self._held.setdefault(idx, set()).discard((ch, n))
+                self._emit(("off", ch, n))
+        elif on:
+            # Track for USB-only note-offs even without local synth
+            with self._lock:
+                self._held.setdefault(idx, set()).add((ch, n))
+        else:
+            with self._lock:
+                self._held.setdefault(idx, set()).discard((ch, n))
 
     def _play_cell(
         self,
@@ -1863,13 +2202,17 @@ class PhrasePadBank:
         length: float,
         stop_ev: threading.Event,
         loop: bool,
+        timbre: Optional[np.ndarray],
+        out_channel: int,
+        local_synth: bool,
+        out_mode: str,
     ) -> None:
         try:
             if not events or length <= 0.0:
                 return
             while not stop_ev.is_set():
                 t0 = time.monotonic()
-                self._release_held(idx)
+                self._release_held(idx, send_midi=True)
                 with self._lock:
                     self._held[idx] = set()
                 for ev in events:
@@ -1884,16 +2227,17 @@ class PhrasePadBank:
                             break
                     if stop_ev.is_set():
                         break
-                    if ev.on:
-                        self._engine.note_on(ev.channel, ev.note, ev.velocity)
-                        with self._lock:
-                            self._held.setdefault(idx, set()).add((ev.channel, ev.note))
-                        self._emit(("on", ev.channel, ev.note, ev.velocity))
-                    else:
-                        self._engine.note_off(ev.channel, ev.note)
-                        with self._lock:
-                            self._held.setdefault(idx, set()).discard((ev.channel, ev.note))
-                        self._emit(("off", ev.channel, ev.note))
+                    self._emit_phrase_note(
+                        on=bool(ev.on),
+                        src_channel=ev.channel,
+                        note=ev.note,
+                        velocity=ev.velocity,
+                        out_channel=out_channel,
+                        local_synth=local_synth,
+                        out_mode=out_mode,
+                        timbre=timbre if (ev.channel & 0x0F) != DRUM_CHANNEL else None,
+                        idx=idx,
+                    )
                 end = t0 + length
                 while not stop_ev.is_set():
                     remain = end - time.monotonic()
@@ -1903,14 +2247,14 @@ class PhrasePadBank:
                         break
                 if not loop:
                     break
-                # Loop: release before next cycle so notes don't stick across seams
-                self._release_held(idx)
+                self._release_held(idx, send_midi=True)
         finally:
-            self._release_held(idx)
+            self._release_held(idx, send_midi=True)
             with self._lock:
                 if self._playing.get(idx) is stop_ev:
                     self._playing.pop(idx, None)
                     self._threads.pop(idx, None)
+                self._active_timbres.pop(idx, None)
             try:
                 self._emit(("phrase",))
             except Exception:
@@ -2060,6 +2404,10 @@ class SongPlayer:
     def out_port_name(self) -> Optional[str]:
         with self._lock:
             return self._out_name
+
+    def outport(self) -> Optional[Any]:
+        with self._lock:
+            return self._outport
 
     def event_count(self) -> int:
         with self._lock:
@@ -2411,10 +2759,25 @@ class MidiToneApp:
         self._looper = MidiLooper(self.engine, self._q_put)
         self._phrases = PhrasePadBank(self.engine, self._q_put, PHRASES_DIR)
         self._songs = SongPlayer(self.engine, self._q_put)
-        self._phrase_status_var = tk.StringVar(value=self._phrases.status_line())
+        self._pads_view = "edit"  # play | edit
+        self._phrase_out_mode = "local"  # local | usb | both (shares Songs USB port)
+        self._phrases.set_output_hooks(
+            get_out_mode=lambda: self._phrase_out_mode,
+            ensure_outport=lambda: self._songs.ensure_outport(),
+            get_outport=lambda: self._songs.outport(),
+        )
+        self._phrase_status_var = tk.StringVar(
+            value=self._phrases.status_line(view=self._pads_view)
+        )
         self._phrase_pad_btns: Dict[int, tk.Button] = {}
         self._phrase_clear_btn: Optional[tk.Button] = None
         self._phrase_mode_btn: Optional[tk.Button] = None
+        self._phrase_out_btn: Optional[tk.Button] = None
+        self._phrase_view_btns: Dict[str, tk.Button] = {}
+        self._phrase_trig_btn: Optional[tk.Button] = None
+        self._phrase_voice_btn: Optional[tk.Button] = None
+        self._phrase_ch_btn: Optional[tk.Button] = None
+        self._phrase_synth_btn: Optional[tk.Button] = None
         self._phrase_clear_armed = False
         self._phrase_mode_armed = False
         self._phrase_shell: Optional[tk.Frame] = None
@@ -2596,6 +2959,8 @@ class MidiToneApp:
         self._paint_full_vel_btn()
         self._paint_drum_lock_btn()
         self._sync_voice_index_from_morph()
+        # Rebuild pads chrome so restored PLAY/EDIT + OUT mode paint correctly
+        self._build_pads_mode()
         self._paint_song_slots()
         self._refresh_song_status()
         if self._voice_lbl is not None:
@@ -2664,6 +3029,10 @@ class MidiToneApp:
             "full_velocity": bool(self._full_vel),
             "active_preset": self._active_preset_name,
             "synth": self.engine.snapshot_settings(),
+            "pads": {
+                "view": self._pads_view,
+                "out_mode": self._phrase_out_mode,
+            },
             "songs": {
                 "selected": self._song_selected,
                 "bpm": float(self._songs.bpm()),
@@ -2683,6 +3052,12 @@ class MidiToneApp:
             synth = data.get("synth")
             if isinstance(synth, dict):
                 self.engine.apply_settings(synth)
+            pads = data.get("pads")
+            if isinstance(pads, dict):
+                view = str(pads.get("view", self._pads_view) or "edit")
+                self._pads_view = "play" if view == "play" else "edit"
+                out = str(pads.get("out_mode", self._phrase_out_mode) or "local")
+                self._phrase_out_mode = out if out in SONG_OUT_MODES else "local"
             songs = data.get("songs")
             if isinstance(songs, dict):
                 if "bpm" in songs:
@@ -3497,6 +3872,16 @@ class MidiToneApp:
         for w in shell.winfo_children():
             w.destroy()
         self._phrase_pad_btns.clear()
+        self._phrase_view_btns.clear()
+        self._phrase_clear_btn = None
+        self._phrase_mode_btn = None
+        self._phrase_out_btn = None
+        self._phrase_trig_btn = None
+        self._phrase_voice_btn = None
+        self._phrase_ch_btn = None
+        self._phrase_synth_btn = None
+
+        play_view = self._pads_view == "play"
 
         header = tk.Frame(shell, bg="#111111")
         header.pack(fill=tk.X, padx=8, pady=(6, 2))
@@ -3504,10 +3889,15 @@ class MidiToneApp:
             header, text="Phrase Pads", font=("DejaVu Sans", 16, "bold"),
             fg="#fbf1c7", bg="#111111",
         ).pack(side=tk.LEFT)
-        tk.Label(
-            header, text="touch or MPK pads · one-shot",
-            font=("DejaVu Sans", 10), fg="#a89984", bg="#111111",
-        ).pack(side=tk.RIGHT)
+        view_row = tk.Frame(header, bg="#111111")
+        view_row.pack(side=tk.RIGHT)
+        for key, label in (("play", "PLAY"), ("edit", "EDIT")):
+            btn = self._mk_touch_btn(
+                view_row, label, lambda v=key: self._phrase_set_view(v), bg="#3c3836"
+            )
+            btn.configure(font=("DejaVu Sans", 11, "bold"), padx=10, pady=4)
+            btn.pack(side=tk.LEFT, padx=2)
+            self._phrase_view_btns[key] = btn
 
         status = tk.Label(
             shell, textvariable=self._phrase_status_var,
@@ -3535,40 +3925,101 @@ class MidiToneApp:
             btn.grid(row=r, column=c, sticky="nsew", padx=3, pady=3)
             self._phrase_pad_btns[cell] = btn
 
-        row = tk.Frame(shell, bg="#111111")
-        row.pack(fill=tk.X, padx=6, pady=(4, 6))
-        self._mk_touch_btn(row, "STOP REC", self._phrase_stop_rec, bg="#504945").pack(
-            side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=10
-        )
-        self._phrase_mode_btn = self._mk_touch_btn(
-            row, "MODE", self._phrase_toggle_mode_arm, bg="#458588"
-        )
-        self._phrase_mode_btn.pack(
-            side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=10
-        )
-        self._phrase_clear_btn = self._mk_touch_btn(
-            row, "CLEAR", self._phrase_toggle_clear, bg="#9d0006"
-        )
-        self._phrase_clear_btn.pack(
-            side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=10
-        )
-        self._mk_touch_btn(row, "STOP ALL", self._phrase_stop_all, bg="#3c3836").pack(
-            side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=10
-        )
+        if play_view:
+            row = tk.Frame(shell, bg="#111111")
+            row.pack(fill=tk.X, padx=6, pady=(4, 6))
+            self._mk_touch_btn(row, "STOP ALL", self._phrase_stop_all, bg="#3c3836").pack(
+                side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=10
+            )
+            self._phrase_out_btn = self._mk_touch_btn(
+                row, "OUT: LOCAL", self._phrase_cycle_out_mode, bg="#504945"
+            )
+            self._phrase_out_btn.pack(
+                side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=10
+            )
+        else:
+            row = tk.Frame(shell, bg="#111111")
+            row.pack(fill=tk.X, padx=6, pady=(4, 2))
+            self._mk_touch_btn(row, "STOP REC", self._phrase_stop_rec, bg="#504945").pack(
+                side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=8
+            )
+            self._phrase_mode_btn = self._mk_touch_btn(
+                row, "MODE", self._phrase_toggle_mode_arm, bg="#458588"
+            )
+            self._phrase_mode_btn.pack(
+                side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=8
+            )
+            self._phrase_clear_btn = self._mk_touch_btn(
+                row, "CLEAR", self._phrase_toggle_clear, bg="#9d0006"
+            )
+            self._phrase_clear_btn.pack(
+                side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=8
+            )
+            self._mk_touch_btn(row, "STOP ALL", self._phrase_stop_all, bg="#3c3836").pack(
+                side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=8
+            )
+
+            detail = tk.Frame(shell, bg="#111111")
+            detail.pack(fill=tk.X, padx=6, pady=(2, 6))
+            self._phrase_trig_btn = self._mk_touch_btn(
+                detail, "TRIG", self._phrase_edit_trig, bg="#458588"
+            )
+            self._phrase_trig_btn.pack(
+                side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=8
+            )
+            self._phrase_voice_btn = self._mk_touch_btn(
+                detail, "FOLLOW", self._phrase_edit_voice, bg="#689d6a"
+            )
+            self._phrase_voice_btn.pack(
+                side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=8
+            )
+            self._phrase_ch_btn = self._mk_touch_btn(
+                detail, "CH:rec", self._phrase_edit_channel, bg="#b16286"
+            )
+            self._phrase_ch_btn.pack(
+                side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=8
+            )
+            self._phrase_synth_btn = self._mk_touch_btn(
+                detail, "SYNTH", self._phrase_edit_synth, bg="#d65d0e"
+            )
+            self._phrase_synth_btn.pack(
+                side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=8
+            )
+            self._phrase_out_btn = self._mk_touch_btn(
+                detail, "OUT: LOCAL", self._phrase_cycle_out_mode, bg="#504945"
+            )
+            self._phrase_out_btn.pack(
+                side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=8
+            )
         self._paint_phrase_pads()
 
+    def _phrase_set_view(self, view: str) -> None:
+        nxt = "play" if view == "play" else "edit"
+        if nxt == self._pads_view and self._phrase_pad_btns:
+            return
+        if nxt == "play":
+            self._phrase_clear_armed = False
+            self._phrase_mode_armed = False
+            if self._phrases.is_recording():
+                self._phrases.stop_record()
+        self._pads_view = nxt
+        self._mark_settings_dirty()
+        self._build_pads_mode()
+
     def _phrase_pad_tap(self, idx: int) -> None:
-        if self._phrase_mode_armed:
+        if self._pads_view == "edit" and self._phrase_mode_armed:
             self._phrases.toggle_trigger_mode(idx)
             self._phrase_mode_armed = False
             self._paint_phrase_pads()
             return
-        if self._phrase_clear_armed:
+        if self._pads_view == "edit" and self._phrase_clear_armed:
             self._phrases.clear_cell(idx)
             self._phrase_clear_armed = False
             self._paint_phrase_pads()
             return
-        self._phrases.handle_pad(idx, from_touch=True)
+        self._phrases.handle_pad(
+            idx, from_touch=True, allow_record=(self._pads_view == "edit")
+        )
         self._paint_phrase_pads()
 
     def _phrase_stop_rec(self) -> None:
@@ -3586,6 +4037,8 @@ class MidiToneApp:
 
     def _phrase_toggle_clear(self) -> None:
         """Arm CLEAR: next pad tap erases that cell (cancel by tapping CLEAR again)."""
+        if self._pads_view != "edit":
+            return
         if self._phrases.is_recording():
             self._phrase_status_var.set("Stop recording before CLEAR")
             return
@@ -3595,6 +4048,8 @@ class MidiToneApp:
 
     def _phrase_toggle_mode_arm(self) -> None:
         """Arm MODE: next pad tap toggles ONE-SHOT ↔ LOOP."""
+        if self._pads_view != "edit":
+            return
         if self._phrases.is_recording():
             self._phrase_status_var.set("Stop recording before MODE")
             return
@@ -3602,11 +4057,67 @@ class MidiToneApp:
         self._phrase_mode_armed = not self._phrase_mode_armed
         self._paint_phrase_pads()
 
+    def _phrase_selected_or_status(self) -> Optional[int]:
+        sel = self._phrases.selected()
+        if sel is None:
+            self._phrase_status_var.set("Select a pad first (tap a square)")
+            return None
+        return sel
+
+    def _phrase_edit_trig(self) -> None:
+        sel = self._phrase_selected_or_status()
+        if sel is None:
+            return
+        self._phrases.toggle_trigger_mode(sel)
+        self._paint_phrase_pads()
+
+    def _phrase_edit_voice(self) -> None:
+        sel = self._phrase_selected_or_status()
+        if sel is None:
+            return
+        self._phrases.toggle_voice_lock(sel)
+        self._paint_phrase_pads()
+
+    def _phrase_edit_channel(self) -> None:
+        sel = self._phrase_selected_or_status()
+        if sel is None:
+            return
+        self._phrases.cycle_out_channel(sel)
+        self._paint_phrase_pads()
+
+    def _phrase_edit_synth(self) -> None:
+        sel = self._phrase_selected_or_status()
+        if sel is None:
+            return
+        self._phrases.toggle_local_synth(sel)
+        self._paint_phrase_pads()
+
+    def _phrase_cycle_out_mode(self) -> None:
+        cur = self._phrase_out_mode if self._phrase_out_mode in SONG_OUT_MODES else "local"
+        try:
+            idx = SONG_OUT_MODES.index(cur)
+        except ValueError:
+            idx = 0
+        nxt = SONG_OUT_MODES[(idx + 1) % len(SONG_OUT_MODES)]
+        self._phrase_out_mode = nxt
+        if nxt in ("usb", "both"):
+            name = self._songs.ensure_outport()
+            if name:
+                self._append_log(f"Pads MIDI out → {name}")
+            else:
+                self._append_log("Pads MIDI out: no USB port found")
+        self._mark_settings_dirty()
+        self._paint_phrase_pads()
+
     def _paint_phrase_pads(self) -> None:
-        clear_armed = bool(self._phrase_clear_armed)
-        mode_armed = bool(self._phrase_mode_armed)
+        clear_armed = bool(self._phrase_clear_armed) and self._pads_view == "edit"
+        mode_armed = bool(self._phrase_mode_armed) and self._pads_view == "edit"
         self._phrase_status_var.set(
-            self._phrases.status_line(clear_armed=clear_armed, mode_armed=mode_armed)
+            self._phrases.status_line(
+                clear_armed=clear_armed,
+                mode_armed=mode_armed,
+                view=self._pads_view,
+            )
         )
         rec = self._phrases.recording_cell()
         selected = self._phrases.selected()
@@ -3616,6 +4127,7 @@ class MidiToneApp:
             label = phrase_pad_label(idx)
             loop = cell.is_loop()
             mode_mark = "↻" if loop else "▶"
+            lock_mark = "·" if cell.is_voice_locked() else ""
             if mode_armed:
                 text = f"{label}\n{mode_mark}?"
                 color = "#b16286"
@@ -3627,13 +4139,13 @@ class MidiToneApp:
                 color = "#9d0006"
             elif idx in playing:
                 secs = cell.length
-                text = f"{label}\n{mode_mark} {secs:.1f}s"
+                text = f"{label}\n{mode_mark}{lock_mark} {secs:.1f}s"
                 color = "#689d6a"
             elif cell.is_empty():
                 text = f"{label}\n{mode_mark} —" if loop else f"{label}\n—"
                 color = "#504945" if loop else "#3c3836"
             else:
-                text = f"{label}\n{mode_mark} {cell.length:.1f}s"
+                text = f"{label}\n{mode_mark}{lock_mark} {cell.length:.1f}s"
                 color = "#689d6a" if loop else "#458588"
             if (
                 not clear_armed
@@ -3641,13 +4153,34 @@ class MidiToneApp:
                 and selected == idx
                 and rec != idx
                 and idx not in playing
-                and not cell.is_empty()
             ):
-                color = "#076678"
+                if not cell.is_empty() or self._pads_view == "edit":
+                    color = "#076678"
             try:
                 btn.configure(text=text, bg=color, activebackground=color)
             except Exception:
                 pass
+
+        for key, btn in self._phrase_view_btns.items():
+            on = key == self._pads_view
+            bg = "#458588" if on else "#3c3836"
+            try:
+                btn.configure(bg=bg, activebackground=bg)
+            except Exception:
+                pass
+
+        if self._phrase_out_btn is not None:
+            mode = str(self._phrase_out_mode or "local").upper()
+            obg = "#689d6a" if mode != "LOCAL" else "#504945"
+            try:
+                self._phrase_out_btn.configure(
+                    text=f"OUT: {mode}",
+                    bg=obg,
+                    activebackground=obg,
+                )
+            except Exception:
+                pass
+
         if self._phrase_clear_btn is not None:
             cbg = "#fb4934" if clear_armed else "#9d0006"
             try:
@@ -3669,6 +4202,39 @@ class MidiToneApp:
             except Exception:
                 pass
 
+        if selected is not None:
+            cell = self._phrases.cell(selected)
+            if self._phrase_trig_btn is not None:
+                t = "LOOP" if cell.is_loop() else "1SHOT"
+                try:
+                    self._phrase_trig_btn.configure(text=t)
+                except Exception:
+                    pass
+            if self._phrase_voice_btn is not None:
+                v = "LOCK" if cell.is_voice_locked() else "FOLLOW"
+                vbg = "#b16286" if cell.is_voice_locked() else "#689d6a"
+                try:
+                    self._phrase_voice_btn.configure(
+                        text=v, bg=vbg, activebackground=vbg
+                    )
+                except Exception:
+                    pass
+            if self._phrase_ch_btn is not None:
+                ch = "CH:rec" if cell.out_channel < 0 else f"CH:{cell.out_channel + 1}"
+                try:
+                    self._phrase_ch_btn.configure(text=ch)
+                except Exception:
+                    pass
+            if self._phrase_synth_btn is not None:
+                s = "SYNTH" if cell.local_synth else "MIDI"
+                sbg = "#d65d0e" if cell.local_synth else "#504945"
+                try:
+                    self._phrase_synth_btn.configure(
+                        text=s, bg=sbg, activebackground=sbg
+                    )
+                except Exception:
+                    pass
+
     def _refresh_phrase_status(self) -> None:
         if self._mode == "pads":
             self._paint_phrase_pads()
@@ -3677,6 +4243,7 @@ class MidiToneApp:
                 self._phrases.status_line(
                     clear_armed=self._phrase_clear_armed,
                     mode_armed=self._phrase_mode_armed,
+                    view=self._pads_view,
                 )
             )
 
@@ -4345,7 +4912,8 @@ class MidiToneApp:
             if pads_mode and is_drum and not phrase_recording:
                 cell = phrase_cell_for_note(msg.note)
                 if cell is not None:
-                    if self._phrase_mode_armed:
+                    edit_view = self._pads_view == "edit"
+                    if edit_view and self._phrase_mode_armed:
                         mode = self._phrases.toggle_trigger_mode(cell)
                         self._phrase_mode_armed = False
                         self._q_put(("phrase",))
@@ -4358,7 +4926,7 @@ class MidiToneApp:
                             )
                         )
                         return
-                    if self._phrase_clear_armed:
+                    if edit_view and self._phrase_clear_armed:
                         self._phrases.clear_cell(cell)
                         self._phrase_clear_armed = False
                         self._q_put(("phrase",))
@@ -4370,7 +4938,9 @@ class MidiToneApp:
                             )
                         )
                         return
-                    action = self._phrases.handle_pad(cell, from_touch=False)
+                    action = self._phrases.handle_pad(
+                        cell, from_touch=False, allow_record=edit_view
+                    )
                     self._q_put(("phrase",))
                     self._q_put(
                         (
