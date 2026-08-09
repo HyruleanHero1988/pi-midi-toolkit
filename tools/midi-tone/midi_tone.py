@@ -268,6 +268,113 @@ def drum_model_for_note(note: int) -> str:
     return models[n % len(models)]
 
 
+def mpk_note_for_phrase_cell(cell: int) -> int:
+    """Phrase/pad cell index 0..15 → factory MPK note 36..51."""
+    return PHRASE_PAD_BASE + (int(cell) & 0x0F)
+
+
+def downsample_waveform(samples: np.ndarray, points: int) -> np.ndarray:
+    """Reduce a sample buffer to `points` peaks for canvas drawing."""
+    if samples is None or len(samples) == 0 or points <= 0:
+        return np.zeros(max(1, points), dtype=np.float32)
+    x = np.asarray(samples, dtype=np.float32)
+    if len(x) <= points:
+        return x.copy()
+    # Min/max buckets keep spikes visible (better than plain stride for drums)
+    bucket = len(x) / float(points)
+    out = np.empty(points, dtype=np.float32)
+    for i in range(points):
+        a = int(i * bucket)
+        b = int((i + 1) * bucket)
+        if b <= a:
+            b = a + 1
+        chunk = x[a:b]
+        # Alternate extrema so the polyline fills the envelope
+        out[i] = float(np.max(chunk) if (i & 1) == 0 else np.min(chunk))
+    return out
+
+
+def render_drum_preview(
+    model: str,
+    *,
+    pitch: float,
+    decay: float,
+    noise_amt: float,
+    tone: float,
+    sample_rate: int = SAMPLE_RATE,
+    duration_sec: float = 0.32,
+    velocity: float = 0.95,
+    seed: int = 7,
+) -> np.ndarray:
+    """
+    Offline one-shot for the drum scope (seeded noise so redraws stay stable).
+
+    Uses a fixed time window so stretch/decay reads as how much of the scope
+    stays alive (short = early silence; long = fills the frame).
+    """
+    sr = max(8000, int(sample_rate))
+    n = max(32, int(duration_sec * sr))
+    t = np.arange(n, dtype=np.float32) * np.float32(1.0 / sr)
+    arange = np.arange(n, dtype=np.float32)
+    rng = np.random.RandomState(int(seed) & 0xFFFFFFFF)
+    white = (rng.random(n).astype(np.float32) * 2.0 - 1.0)
+    win = max(1, int(round((1.0 - max(0.0, min(1.0, tone))) * 16.0)))
+    if win <= 1:
+        noise = white
+    else:
+        kernel = np.ones(win, dtype=np.float32) / np.float32(win)
+        noise = np.convolve(white, kernel, mode="same").astype(np.float32)
+    audio, _dur, _phase = synthesize_drum(
+        model,
+        t=t,
+        arange=arange,
+        white=white,
+        noise=noise,
+        pitch=max(0.0, min(1.0, float(pitch))),
+        decay=max(0.0, min(1.0, float(decay))),
+        noise_amt=max(0.0, min(1.0, float(noise_amt))),
+        tone=max(0.0, min(1.0, float(tone))),
+        vel=max(0.05, min(1.0, float(velocity))),
+        phase=0.0,
+        two_pi=2.0 * math.pi,
+        inv_sr=1.0 / sr,
+    )
+    return audio.astype(np.float32, copy=False)
+
+
+def draw_waveform_on_canvas(
+    canvas: "tk.Canvas",
+    samples: np.ndarray,
+    *,
+    color: str = "#83a598",
+    grid_color: str = "#3c3836",
+) -> None:
+    """Paint a normalized polyline waveform into a Tk canvas."""
+    try:
+        canvas.delete("wave")
+        w = int(canvas.winfo_width())
+        h = int(canvas.winfo_height())
+    except Exception:
+        return
+    if w < 8 or h < 8:
+        return
+    # Midline
+    mid = h * 0.5
+    canvas.create_line(0, mid, w, mid, fill=grid_color, tags="wave")
+    if samples is None or len(samples) < 2:
+        return
+    pts = downsample_waveform(samples, max(32, w // 2))
+    peak = float(np.max(np.abs(pts))) or 1.0
+    y_scale = (h * 0.42) / peak
+    coords: List[float] = []
+    n = len(pts)
+    for i, v in enumerate(pts):
+        x = (i / max(1, n - 1)) * (w - 1)
+        y = mid - float(v) * y_scale
+        coords.extend((x, y))
+    canvas.create_line(*coords, fill=color, width=2, smooth=True, tags="wave")
+
+
 def synthesize_drum(
     model: str,
     *,
@@ -932,6 +1039,35 @@ class SineEngine:
         b = self._table_list[ib]
         out = (a * np.float32(1.0 - frac) + b * np.float32(frac)).astype(np.float32)
         return out
+
+    def morph_cycle_copy(self) -> np.ndarray:
+        """Snapshot of the live morph wavetable (one cycle) for the scope."""
+        with self._lock:
+            if self._morph_dirty:
+                self._rebuild_morph_table_unlocked()
+            return np.copy(self._morph_table)
+
+    def drum_macros(self) -> Tuple[float, float, float, float]:
+        """pitch, decay(stretch), noise, tone — current drum-edit macros."""
+        with self._lock:
+            return (
+                float(self._drum_pitch),
+                float(self._drum_decay),
+                float(self._drum_noise),
+                float(self._drum_tone),
+            )
+
+    def preview_drum_waveform(self, model: str) -> np.ndarray:
+        """Render a stable offline preview of a kit voice with live macros."""
+        pitch, decay, noise, tone = self.drum_macros()
+        return render_drum_preview(
+            model,
+            pitch=pitch,
+            decay=decay,
+            noise_amt=noise,
+            tone=tone,
+            sample_rate=self.sample_rate,
+        )
 
     def modulation_state(self) -> Dict[str, float]:
         with self._lock:
@@ -2745,6 +2881,8 @@ class MidiToneApp:
         self._full_vel_btn: Optional[tk.Button] = None
         self._drum_lock_btn: Optional[tk.Button] = None
         self._voice_lbl: Optional[tk.Label] = None
+        self._wave_canvas: Optional[tk.Canvas] = None
+        self._wave_caption: Optional[tk.Label] = None
         self._grid_open = False
         self._grid_frame: Optional[tk.Frame] = None
         self._grid_btns: Dict[str, tk.Button] = {}
@@ -2754,6 +2892,12 @@ class MidiToneApp:
         self._morph_side_btns: Dict[str, tk.Button] = {}
         self._morph_grid_btns: Dict[str, tk.Button] = {}
         self._morph_status_lbl: Optional[tk.Label] = None
+        self._kit_ui_open = False
+        self._kit_frame: Optional[tk.Frame] = None
+        self._kit_btns: Dict[int, tk.Button] = {}
+        self._kit_wave_canvas: Optional[tk.Canvas] = None
+        self._kit_status_var = tk.StringVar(value="")
+        self._kit_selected_note = 36  # factory kick
         self._mode = "synth"  # synth | looper | pads | songs | log | presets
         self._mode_btns: Dict[str, tk.Button] = {}
         self._looper = MidiLooper(self.engine, self._q_put)
@@ -2850,6 +2994,10 @@ class MidiToneApp:
         self._mk_touch_btn(row1, "ALL NOTES OFF", self._panic, bg="#9d0006").pack(
             side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3
         )
+        self._full_vel_btn = self._mk_touch_btn(
+            row1, "FULL VEL: ON", self._toggle_full_vel, bg="#689d6a"
+        )
+        self._full_vel_btn.pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3)
 
         # Voice picker — prev / name / next + full grid
         row2 = tk.Frame(self._touch, bg="#111111")
@@ -2881,10 +3029,9 @@ class MidiToneApp:
         self._mk_touch_btn(row3, "MORPH", self._open_morph_menu, bg="#b16286").pack(
             side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=8
         )
-        self._full_vel_btn = self._mk_touch_btn(
-            row3, "FULL VEL: ON", self._toggle_full_vel, bg="#689d6a"
+        self._mk_touch_btn(row3, "KIT", self._open_kit_explorer, bg="#d79921").pack(
+            side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=8
         )
-        self._full_vel_btn.pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=8)
         self._drum_lock_btn = self._mk_touch_btn(
             row3, "DRUM MODE", self._toggle_drum_lock, bg="#3c3836"
         )
@@ -2924,20 +3071,35 @@ class MidiToneApp:
             self._main, textvariable=self.mod_var,
             font=("DejaVu Sans Mono", 11), fg="#d3869b", bg="#111111", anchor="w",
         )
-        mod_lbl.pack(fill=tk.X, padx=8, pady=(2, 8))
+        mod_lbl.pack(fill=tk.X, padx=8, pady=(2, 4))
 
-        # Spacer so synth isn't empty under the status lines
-        tk.Label(
+        self._wave_caption = tk.Label(
             self._main,
-            text="Use VOICES / MORPH below · open LOG mode for the full event history",
-            font=("DejaVu Sans", 11), fg="#a89984", bg="#111111",
+            text="Morph cycle",
+            font=("DejaVu Sans", 11),
+            fg="#a89984",
+            bg="#111111",
             anchor="w",
-        ).pack(fill=tk.X, padx=8, pady=(12, 0))
+        )
+        self._wave_caption.pack(fill=tk.X, padx=8, pady=(4, 0))
+        self._wave_canvas = tk.Canvas(
+            self._main,
+            height=110,
+            bg="#1d2021",
+            highlightthickness=1,
+            highlightbackground="#3c3836",
+            bd=0,
+        )
+        self._wave_canvas.pack(fill=tk.BOTH, expand=True, padx=8, pady=(2, 8))
+        self._wave_canvas.bind(
+            "<Configure>", lambda _e: self._paint_synth_waveform(force=True)
+        )
 
         self._active_notes: Dict[Tuple[int, int], int] = {}
         # Select first voice explicitly
         self.engine.set_waveform(self._voice_names[self._voice_index])
         self.root.after(40, self._drain_queue)
+        self.root.after(80, lambda: self._paint_synth_waveform(force=True))
         # Default morph pair: first voice ↔ second (or same if only one)
         if len(self._voice_names) > 1:
             self.engine.set_morph_pair(0, 1, morph=0.0)
@@ -3021,7 +3183,7 @@ class MidiToneApp:
         )
 
     def _overlay_busy(self) -> bool:
-        return self._grid_open or self._morph_ui_open
+        return self._grid_open or self._morph_ui_open or self._kit_ui_open
 
     def _session_dict(self) -> Dict[str, Any]:
         return {
@@ -3762,6 +3924,188 @@ class MidiToneApp:
             if self.engine.drum_mode()
             else "DRUM MODE OFF — Knob 1 is morph again"
         )
+        if self._kit_ui_open:
+            self._paint_kit_waveform(force=True)
+        else:
+            self._paint_synth_waveform(force=True)
+
+    def _paint_synth_waveform(self, *, force: bool = False) -> None:
+        canvas = self._wave_canvas
+        if canvas is None:
+            return
+        if self._mode != "synth" or self._overlay_busy():
+            return
+        try:
+            samples = self.engine.morph_cycle_copy()
+            draw_waveform_on_canvas(canvas, samples, color="#83a598")
+            if self._wave_caption is not None:
+                a, b, blend = self.engine.morph_neighbors()
+                if a == b:
+                    cap = f"Morph cycle · {a}"
+                else:
+                    cap = f"Morph cycle · {a} → {b}  {int(blend * 100)}%"
+                self._wave_caption.configure(text=cap)
+        except Exception:
+            if force:
+                pass
+
+    def _kit_model_selected(self) -> str:
+        return drum_model_for_note(self._kit_selected_note)
+
+    def _paint_kit_waveform(self, *, force: bool = False) -> None:
+        canvas = self._kit_wave_canvas
+        if canvas is None or not self._kit_ui_open:
+            return
+        try:
+            model = self._kit_model_selected()
+            samples = self.engine.preview_drum_waveform(model)
+            draw_waveform_on_canvas(canvas, samples, color="#fabd2f")
+            pitch, decay, noise, tone = self.engine.drum_macros()
+            label = phrase_pad_label(
+                max(0, min(15, self._kit_selected_note - PHRASE_PAD_BASE))
+            )
+            self._kit_status_var.set(
+                f"{label} · {model} · pitch {int(pitch * 127)} · "
+                f"stretch {int(decay * 127)} · noise {int(noise * 127)} · "
+                f"tone {int(tone * 127)}"
+            )
+        except Exception:
+            if force:
+                pass
+
+    def _paint_kit_pad_btns(self) -> None:
+        for note, btn in self._kit_btns.items():
+            on = note == self._kit_selected_note
+            color = "#d79921" if on else "#3c3836"
+            try:
+                btn.configure(bg=color, activebackground=color)
+            except Exception:
+                pass
+
+    def _select_kit_note(self, note: int, *, audition: bool = False) -> None:
+        note = int(note) & 0x7F
+        if note < PHRASE_PAD_BASE or note >= PHRASE_PAD_BASE + 16:
+            return
+        self._kit_selected_note = note
+        self._paint_kit_pad_btns()
+        self._paint_kit_waveform(force=True)
+        if audition:
+            self.engine.note_on(DRUM_CHANNEL, note, 110)
+            self._q_put(("log", f"Kit audition {drum_model_for_note(note)}", False))
+
+    def _open_kit_explorer(self) -> None:
+        """Drill-down: pick a kit pad and watch its one-shot while knobs move."""
+        if self._kit_ui_open:
+            return
+        if self._mode != "synth":
+            self._switch_mode("synth")
+        if self._grid_open:
+            self._close_voice_grid(restore_main=False)
+        if self._morph_ui_open:
+            self._close_morph_menu(restore_main=False)
+
+        # Knobs should edit drums while shaping the preview
+        if not self.engine.drum_mode():
+            self.engine.set_drum_mode(True)
+            self._paint_drum_lock_btn()
+            self.mod_var.set(self._format_mod_line())
+
+        self._kit_ui_open = True
+        self._synth_shell.pack_forget()
+
+        self._kit_frame = tk.Frame(self._mode_host, bg="#111111")
+        self._kit_frame.pack(fill=tk.BOTH, expand=True)
+
+        header = tk.Frame(self._kit_frame, bg="#111111")
+        header.pack(fill=tk.X, padx=6, pady=(6, 2))
+        tk.Label(
+            header,
+            text="DRUM KIT",
+            font=("DejaVu Sans", 16, "bold"),
+            fg="#fbf1c7",
+            bg="#111111",
+        ).pack(side=tk.LEFT)
+        tk.Label(
+            header,
+            text="tap a pad · knobs reshape the wave",
+            font=("DejaVu Sans", 11),
+            fg="#a89984",
+            bg="#111111",
+        ).pack(side=tk.RIGHT)
+
+        status = tk.Label(
+            self._kit_frame,
+            textvariable=self._kit_status_var,
+            font=("DejaVu Sans Mono", 11),
+            fg="#fabd2f",
+            bg="#111111",
+            anchor="w",
+        )
+        status.pack(fill=tk.X, padx=8, pady=(0, 2))
+
+        self._kit_wave_canvas = tk.Canvas(
+            self._kit_frame,
+            height=100,
+            bg="#1d2021",
+            highlightthickness=1,
+            highlightbackground="#3c3836",
+            bd=0,
+        )
+        self._kit_wave_canvas.pack(fill=tk.X, padx=8, pady=(0, 4))
+        self._kit_wave_canvas.bind(
+            "<Configure>", lambda _e: self._paint_kit_waveform(force=True)
+        )
+
+        grid = tk.Frame(self._kit_frame, bg="#111111")
+        grid.pack(fill=tk.BOTH, expand=True, padx=4, pady=2)
+        for r in range(4):
+            grid.rowconfigure(r, weight=1)
+        for c in range(4):
+            grid.columnconfigure(c, weight=1)
+        self._kit_btns = {}
+        for i, cell in enumerate(PHRASE_GRID_CELLS):
+            note = mpk_note_for_phrase_cell(cell)
+            model = drum_model_for_note(note)
+            label = f"{phrase_pad_label(cell)}\n{model}"
+            r, c = divmod(i, 4)
+            btn = self._mk_touch_btn(
+                grid,
+                label,
+                lambda n=note: self._select_kit_note(n, audition=True),
+                bg="#3c3836",
+            )
+            btn.configure(font=("DejaVu Sans", 11, "bold"), pady=6)
+            btn.grid(row=r, column=c, sticky="nsew", padx=2, pady=2)
+            self._kit_btns[note] = btn
+
+        footer = tk.Frame(self._kit_frame, bg="#111111")
+        footer.pack(fill=tk.X, padx=6, pady=6)
+        self._mk_touch_btn(
+            footer, "AUDITION", lambda: self._select_kit_note(self._kit_selected_note, audition=True),
+            bg="#458588",
+        ).pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=12)
+        self._mk_touch_btn(footer, "CLOSE", self._close_kit_explorer, bg="#9d0006").pack(
+            side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=12
+        )
+        self._paint_kit_pad_btns()
+        self._paint_kit_waveform(force=True)
+        self._append_log("KIT — pick a drum; DRUM MODE knobs reshape its wave")
+
+    def _close_kit_explorer(self, restore_main: bool = True) -> None:
+        if not self._kit_ui_open:
+            return
+        if self._kit_frame is not None:
+            self._kit_frame.destroy()
+            self._kit_frame = None
+        self._kit_btns = {}
+        self._kit_wave_canvas = None
+        self._kit_ui_open = False
+        if restore_main and self._mode == "synth":
+            self._synth_shell.pack(fill=tk.BOTH, expand=True)
+            self._main.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+            self._touch.pack(side=tk.BOTTOM, fill=tk.X, padx=6, pady=6)
+            self.mod_var.set(self._format_mod_line())
+            self._paint_synth_waveform(force=True)
 
     def _build_log_mode(self) -> None:
         shell = self._log_shell
@@ -4254,6 +4598,8 @@ class MidiToneApp:
             self._close_voice_grid(restore_main=False)
         if self._morph_ui_open:
             self._close_morph_menu(restore_main=False)
+        if self._kit_ui_open:
+            self._close_kit_explorer(restore_main=False)
 
         # Leaving pads while recording: keep the take
         if self._mode == "pads" and mode != "pads":
@@ -4273,6 +4619,8 @@ class MidiToneApp:
             self._grid_frame.pack_forget()
         if self._morph_frame is not None:
             self._morph_frame.pack_forget()
+        if self._kit_frame is not None:
+            self._kit_frame.pack_forget()
 
         if mode == "looper":
             self._looper_shell.pack(fill=tk.BOTH, expand=True)
@@ -4305,6 +4653,7 @@ class MidiToneApp:
                 self._touch.pack(side=tk.BOTTOM, fill=tk.X, padx=6, pady=6)
             except Exception:
                 pass
+            self._paint_synth_waveform(force=True)
         self._paint_mode_btns()
 
     def _paint_mode_btns(self) -> None:
@@ -4436,6 +4785,8 @@ class MidiToneApp:
                 self._close_voice_grid()
         if self._morph_ui_open:
             self._paint_morph_menu()
+        if not self._overlay_busy():
+            self._paint_synth_waveform(force=True)
 
     def _sync_voice_index_from_morph(self) -> None:
         """Keep UI index on the nearer morph endpoint while Knob1 moves."""
@@ -4456,6 +4807,8 @@ class MidiToneApp:
             self._switch_mode("synth")
         if self._morph_ui_open:
             self._close_morph_menu(restore_main=False)
+        if self._kit_ui_open:
+            self._close_kit_explorer(restore_main=False)
         self._grid_open = True
         self._synth_shell.pack_forget()
 
@@ -4560,6 +4913,7 @@ class MidiToneApp:
             if self._voice_lbl is not None:
                 self._voice_lbl.configure(text=self._voice_label_text())
             self.mod_var.set(self._format_mod_line())
+            self._paint_synth_waveform(force=True)
 
     def _open_morph_menu(self) -> None:
         """Pick morph endpoints A and B; Knob 1 blends A→B."""
@@ -4569,6 +4923,8 @@ class MidiToneApp:
             self._switch_mode("synth")
         if self._grid_open:
             self._close_voice_grid(restore_main=False)
+        if self._kit_ui_open:
+            self._close_kit_explorer(restore_main=False)
         # Hand knobs back to morph while editing the pair
         if self.engine.drum_mode():
             self.engine.set_drum_mode(False)
@@ -4744,6 +5100,7 @@ class MidiToneApp:
             if self._voice_lbl is not None:
                 self._voice_lbl.configure(text=self._voice_label_text())
             self.mod_var.set(self._format_mod_line())
+            self._paint_synth_waveform(force=True)
 
     def _prev_voice(self) -> None:
         self._select_voice_index(self._voice_index - 1)
@@ -4951,6 +5308,9 @@ class MidiToneApp:
                         )
                     )
                     return
+            # KIT explorer: hitting an MPK pad selects that voice for the scope
+            if self._kit_ui_open and is_drum and phrase_cell_for_note(msg.note) is not None:
+                self._q_put(("kit_sel", msg.note))
             vel = msg.velocity if is_drum or not self._full_vel else 127
             self.engine.note_on(msg.channel, msg.note, vel)
             self._looper.record_note(True, msg.channel, msg.note, vel)
@@ -5091,6 +5451,8 @@ class MidiToneApp:
                     self._refresh_phrase_status()
                 elif kind == "song":
                     self._refresh_song_status()
+                elif kind == "kit_sel":
+                    self._select_kit_note(int(item[1]), audition=False)
         except queue.Empty:
             pass
         pending = getattr(self, "_pending_cont_log", None)
@@ -5105,6 +5467,10 @@ class MidiToneApp:
         if getattr(self, "_mod_dirty", False):
             self._mod_dirty = False
             self.mod_var.set(self._format_mod_line())
+            if self._kit_ui_open:
+                self._paint_kit_waveform()
+            elif self._mode == "synth" and not self._overlay_busy():
+                self._paint_synth_waveform()
         # Keep touch bar stacked above log chrome if packing ever races
         if self._mode == "synth" and not self._overlay_busy():
             try:
