@@ -114,6 +114,8 @@ Phrase pads persist as `phrases/pad-01.json` … `pad-16.json` (gitignored).
 4. Tap **PLAY** to loop; tap **PLAY**/**STOP** to halt
 5. **CLEAR** wipes the take
 
+On stop, the take is **auto-trimmed**: leading silence before the first hit is removed, and trailing silence after the last hit is capped to the largest gap between note-ons (so lag hitting STOP doesn’t leave a dead bar at the loop point). Same trim applies to phrase-pad recordings.
+
 Live playing still works while a loop runs. Voice/morph/knob settings from Synth apply to looped notes too.
 
 ### Phrase Pads

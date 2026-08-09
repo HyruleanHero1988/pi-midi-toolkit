@@ -1163,6 +1163,72 @@ class LoopEvent:
     velocity: int
 
 
+def trim_loop_take(
+    events: List[LoopEvent],
+    *,
+    default_gap: float = 0.35,
+    min_gap: float = 0.05,
+    max_gap: float = 2.0,
+) -> Tuple[List[LoopEvent], float]:
+    """
+    Trim leading/trailing dead space from a free-timing take.
+
+    - Shift so the first note-on starts at t=0 (drop pre-roll before the groove).
+    - Trailing silence after the last note-on is capped to the largest gap
+      between consecutive note-ons (so STOP lag doesn't inflate the loop).
+    - Note-offs after the last hit are still kept; trail is measured from ons.
+    """
+    if not events:
+        return [], 0.0
+    ons = sorted(e.t for e in events if e.on)
+    if not ons:
+        # Degenerate: only note-offs — keep relative timing, short length
+        t0 = min(e.t for e in events)
+        shifted = [
+            LoopEvent(
+                t=max(0.0, e.t - t0),
+                on=e.on,
+                channel=e.channel,
+                note=e.note,
+                velocity=e.velocity,
+            )
+            for e in events
+        ]
+        length = max(e.t for e in shifted) + min_gap
+        return shifted, max(min_gap, length)
+
+    t0 = ons[0]
+    gaps = [ons[i + 1] - ons[i] for i in range(len(ons) - 1) if ons[i + 1] > ons[i]]
+    if gaps:
+        trail = max(min_gap, min(max_gap, max(gaps)))
+    else:
+        # Single hit: small default pad (not the whole time spent hitting STOP)
+        trail = max(min_gap, min(max_gap, default_gap))
+
+    last_on = ons[-1]
+    last_ev = max(e.t for e in events)
+    # Loop end from first hit: last onset + trail, but never cut off a later note-off
+    end_abs = max(last_on + trail, last_ev + 0.01)
+    length = max(min_gap, end_abs - t0)
+
+    shifted = [
+        LoopEvent(
+            t=max(0.0, e.t - t0),
+            on=e.on,
+            channel=e.channel,
+            note=e.note,
+            velocity=e.velocity,
+        )
+        for e in events
+        if e.t >= t0 - 1e-6
+    ]
+    # Drop events that fall past the trimmed end (shouldn't happen often)
+    shifted = [e for e in shifted if e.t <= length + 1e-6]
+    if not shifted:
+        return [], 0.0
+    return shifted, float(length)
+
+
 class MidiLooper:
     """Simple free-timing MIDI note looper (record → play on repeat)."""
 
@@ -1221,10 +1287,10 @@ class MidiLooper:
             if not self._recording:
                 return
             self._recording = False
-            elapsed = time.monotonic() - self._rec_t0
             if self._events:
-                last = max(e.t for e in self._events)
-                self._loop_len = max(elapsed, last + 0.05)
+                trimmed, length = trim_loop_take(list(self._events))
+                self._events = trimmed
+                self._loop_len = length
             else:
                 self._loop_len = 0.0
 
@@ -1621,11 +1687,11 @@ class PhrasePadBank:
             idx = self._recording_cell
             if idx is None:
                 return None
-            elapsed = time.monotonic() - self._rec_t0
             cell = self._cells[idx]
             if cell.events:
-                last = max(e.t for e in cell.events)
-                cell.length = max(elapsed, last + 0.05)
+                trimmed, length = trim_loop_take(list(cell.events))
+                cell.events = trimmed
+                cell.length = length
             else:
                 cell.length = 0.0
             self._recording_cell = None
@@ -3717,7 +3783,18 @@ class MidiToneApp:
 
     def _loop_toggle_record(self) -> None:
         recording = self._looper.toggle_record()
-        self._q_put(("log", "Loop RECORD start" if recording else "Loop RECORD stop", False))
+        if recording:
+            self._q_put(("log", "Loop RECORD start", False))
+        else:
+            st = self._looper.status()
+            self._q_put(
+                (
+                    "log",
+                    f"Loop RECORD stop — trimmed to {float(st['length']):.2f}s "
+                    f"({int(st['events'])} events)",
+                    False,
+                )
+            )
         self._q_put(("loop",))
         self._refresh_loop_status()
 
