@@ -120,17 +120,28 @@ Live playing still works while a loop runs. Voice/morph/knob settings from Synth
 
 ### Phrase Pads
 
-1. Open **PADS**
-2. Tap an **empty** square (or hit the matching MPK pad) to arm record
+Two views (top-right of PADS): **EDIT** (record / fine-tune) and **PLAY** (perform).
+
+**EDIT**
+1. Open **PADS** (defaults to EDIT)
+2. Tap an **empty** square (or matching MPK pad) to arm record
 3. Play **keyboard and/or drum pads** — both are captured into that cell
 4. **STOP REC** or tap that square again to finish (saved under `phrases/`)
-5. Tap a **filled** square (or MPK pad) to launch:
-   - **ONE-SHOT** (`▶`) — plays once; re-trigger restarts
-   - **LOOP** (`↻`) — loops until you hit that pad again
-6. **MODE** then tap a pad to toggle ONE-SHOT ↔ LOOP (per pad; saved in `phrases/`)
-7. **CLEAR** then tap a pad to erase it; **STOP ALL** stops playing phrases
+5. Tap a **filled** square to launch + select it
+6. Bottom rows:
+   - **MODE** then tap a pad → ONE-SHOT ↔ LOOP (or use **TRIG** on the selected pad)
+   - **CLEAR** then tap a pad → erase
+   - **FOLLOW** / **LOCK** — FOLLOW uses the live morph; LOCK freezes the current morph onto that pad (multi-timbre; up to 4 locked pads at once)
+   - **CH:rec** / **CH:n** — emit on recorded channels or force MIDI ch 1–16
+   - **SYNTH** / **MIDI** — local soft-synth on/off (off = sequence only over USB/DIN)
+   - **OUT: LOCAL / USB / BOTH** — session routing (shares the Songs USB port)
+7. **STOP ALL** stops playing phrases
 
-While a phrase is **recording**, MPK pads play/record **drum voices** (not launch). When not recording, those pads launch/arm phrases. Synth mode still always plays the 16-pad drum kit.
+**PLAY**
+- Launch / stop filled pads only (empty pads do not arm record)
+- **STOP ALL** + **OUT** — minimal chrome for performance
+
+While a phrase is **recording**, MPK pads play/record **drum voices** (not launch). When not recording, those pads launch/arm phrases (EDIT) or launch only (PLAY). Synth mode still always plays the 16-pad drum kit. Locked pads show a `·` mark next to the trigger icon.
 
 ### Songs
 
