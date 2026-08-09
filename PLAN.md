@@ -251,7 +251,23 @@ Touch **4×4** grid (MPK Bank A + Bank B) where each cell holds a short recorded
 | **Songs** | Whole `.mid` files + tempo transport |
 | **Phrases / Pads** | Many one-shot / loop *phrases*; launch like an MPC / clip launcher from **screen or drum pads** |
 
-**Related later (optional):** USB→DIN phrase out; gated hold-to-stop; pad-velocity scaling; “Japanese game-ish” demo content = original/CC0 chip-style loops — not ripped game MIDIs.
+**Related later (optional):** gated hold-to-stop; pad-velocity scaling; “Japanese game-ish” demo content = original/CC0 chip-style loops — not ripped game MIDIs.
+
+### Later option — Per-pad MIDI out + local synth mute (parked)
+
+When phrases can feed **USB→DIN** (same family as Songs `LOCAL` / `USB` / `BOTH`), each pad needs its own routing, not one global channel.
+
+| Per-pad setting | Purpose |
+|-----------------|--------|
+| **Out channel** (1–16) | Force/rewrite note channel on emit so bass→ch2, lead→ch3, drums→ch10 on the hardware synth |
+| **Local synth** ON/OFF | OFF = sequence is MIDI-only (DIN/USB); no soft-synth voice for that pad |
+| **Out target** (optional later) | Inherit session `LOCAL`/`USB`/`BOTH`, or override per pad |
+
+**Why:** lock a bassline out ch2 to a real synth with local voice off, keep a melody pad local (or another DIN channel), keep drum pads on ch10 — without everything colliding on ch1 into the toy synth.
+
+**UI:** belongs in pad drill-down / EDIT view with voice lock — not more grid chrome. Persist in `phrases/pad-NN.json` (`out_channel`, `local_synth`, …).
+
+**Note:** recorded events already store a channel; playback should **remap to the pad’s out channel** (or keep recorded channel if pad set to “as recorded”). Prefer explicit per-pad out channel as the default mental model.
 
 ### Later option — Play view vs Edit view (parked)
 
