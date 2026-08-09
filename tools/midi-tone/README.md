@@ -122,8 +122,11 @@ Live playing still works while a loop runs. Voice/morph/knob settings from Synth
 2. Tap an **empty** square (or hit the matching MPK pad) to arm record
 3. Play **keyboard and/or drum pads** — both are captured into that cell
 4. **STOP REC** or tap that square again to finish (saved under `phrases/`)
-5. Tap a **filled** square (or MPK pad) to **one-shot** launch into the soft-synth
-6. **CLEAR** then tap a pad to erase it (CLEAR again cancels); **STOP ALL** stops playing phrases
+5. Tap a **filled** square (or MPK pad) to launch:
+   - **ONE-SHOT** (`▶`) — plays once; re-trigger restarts
+   - **LOOP** (`↻`) — loops until you hit that pad again
+6. **MODE** then tap a pad to toggle ONE-SHOT ↔ LOOP (per pad; saved in `phrases/`)
+7. **CLEAR** then tap a pad to erase it; **STOP ALL** stops playing phrases
 
 While a phrase is **recording**, MPK pads play/record **drum voices** (not launch). When not recording, those pads launch/arm phrases. Synth mode still always plays the 16-pad drum kit.
 
