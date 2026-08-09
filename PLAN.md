@@ -37,6 +37,9 @@ todos:
     status: completed
   - id: pad-enhance
     content: "Pad enhance: PLAY/EDIT views, FOLLOW/LOCKED multi-timbre, per-pad out channel + local synth mute + USB OUT"
+    status: completed
+  - id: wave-viz
+    content: "Wave viz: live morph-cycle scope on SYNTH + KIT drill-down for per-drum one-shot preview"
     status: in_progress
   - id: arp
     content: "Phase 4 (optional distinct mode): key-relative step pattern transposed by held root"
@@ -186,6 +189,13 @@ This is still **not** MIDI-out thru. It’s the playable local mode of the appli
 | Not required | Sample ROMs, full GM drum kit, convolution. Keep Pi 2 cheap (a few envelopes + noise + 1–2 oscillators per voice) |
 
 **Out of path:** Rust thru/remap does not synthesize audio. Phrases/Pads mode (3c) *launches MIDI clips* from pads — orthogonal; drum voices are “what a pad sounds like in Synth mode.”
+
+### Wave visualizations — **implementing on `cursor/midi-tone-wave-viz-1052`**
+
+| Scope | Where |
+|-------|--------|
+| **Morph cycle** | Always on SYNTH main — redraws with morph / voice changes (not a live mix oscilloscope) |
+| **Drum one-shot** | **KIT** drill-down: pick a pad, preview wave updates with pitch/stretch/noise/tone. Keeps DRUM MODE chrome uncluttered |
 
 **Inspiration note:** Synsonics = analog voice circuits per drum. We approximate that with simple DSP, not by modeling their schematic exactly.
 
