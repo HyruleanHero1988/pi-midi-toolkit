@@ -217,6 +217,8 @@ Then double-click **MIDI Tone** on the desktop. If needed: right-click → **All
 
 Boots a minimal **X11 + Openbox** session that only runs midi-tone fullscreen (restart loop if it crashes). No wallpaper / panel / file manager.
 
+**Display target:** BigTreeTech **Pi TFT70 V2.1** (7″ DSI, 800×480, capacitive GT911) is on order — same pixel budget the UI already uses, larger physical targets, reliable touch. Until it arrives, the existing resistive HDMI/ADS7846 panel still works; `enable-gpio-touch.sh` / `calibrate-touch-y.sh` are **legacy for that panel only**.
+
 ```bash
 cd ~/midi-tone
 sed -i 's/\r$//' *.sh kiosk/openbox/* kiosk/*.desktop
