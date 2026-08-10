@@ -88,11 +88,12 @@ Factory MPC program (`Prog Select` → Pad 1): **Bank A = notes 36–43**, **Ban
 
 Hitting pads does **not** steal morph knobs. With DRUM MODE off, Knob 1 stays morph. Opening **MORPH** turns DRUM MODE / FX MODE / BUS FX off. Session-only (not saved across restart).
 
-**FX MODE** (Synth toolbar) — **per-instrument inserts**. Knobs edit the current target:
+**FX MODE** (Synth toolbar) — **per-instrument inserts** + a shared kit bus. Knobs edit the current target:
 
-- Default target: the **nearer morph endpoint** wavetable (`voice:saw`, `voice:sine`, …). Melody FX stay on that wave pattern.
-- Open **KIT** and tap a drum while FX MODE is on → edit that **drum model** (`drum:kick`, `drum:snare`, …). Closing KIT returns to the morph voice.
-- Locked phrase pads keep their `morph_a` wavetable’s FX chain so a delayed pad doesn’t smear the dry kit.
+- Default target: the **nearer morph endpoint** wavetable (`voice:saw`, …).
+- Open **KIT** → **ALL DRUMS** → shared **kit-group** FX (`drums`) so one echo/drive hits the whole kit without wetting the melody.
+- Open **KIT** and tap a single pad → that **drum model** only (`drum:kick`, …). Closing KIT keeps `drums` if that was selected; otherwise returns to the morph voice.
+- Locked phrase pads keep their `morph_a` wavetable’s FX chain.
 
 **BUS FX** (separate toolbar button) — **master mix-bus** wet after keys + drums are summed. Same knob map as FX MODE, but the whole soft-synth output gets drive/delay/reverb. Insert FX still runs underneath; the two modes are mutually exclusive for knob focus (and with DRUM MODE).
 
@@ -106,7 +107,7 @@ Hitting pads does **not** steal morph knobs. With DRUM MODE off, Knob 1 stays mo
 | 6 | 75 | Reverb mix |
 | 8 | 77 | Master level (always) |
 
-Amounts persist in `settings.json` / presets (`voice_fx` / `drum_fx` / `bus_fx`); the mode toggles themselves do not.
+Amounts persist in `settings.json` / presets (`voice_fx` / `drum_fx` / `drum_group_fx` / `bus_fx`); the mode toggles themselves do not.
 
 **Waveforms:** SYNTH shows a live **morph-cycle** scope that redraws as Knob 1 / voice changes. Tap **KIT** for a drum drill-down — pick a pad (touch or MPK), watch its one-shot reshape with pitch / stretch / noise / tone knobs (DRUM MODE turns on while KIT is open). Keeps the main synth screen uncluttered.
 
