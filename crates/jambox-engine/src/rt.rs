@@ -34,10 +34,8 @@ mod linux {
         }
 
         // Slightly below the thru engine: a late note is worse than a late block.
-        let mut param = libc::sched_param {
-            sched_priority: 65,
-        };
-        let rc = unsafe { libc::sched_setscheduler(0, libc::SCHED_FIFO, &mut param) };
+        let param = libc::sched_param { sched_priority: 65 };
+        let rc = unsafe { libc::sched_setscheduler(0, libc::SCHED_FIFO, &param) };
         if rc != 0 {
             warn!(
                 "SCHED_FIFO failed ({}); run via systemd with LimitRTPRIO or as root",

@@ -208,11 +208,41 @@ impl DrumKit {
         match model {
             Kick | KickTight | TomLo | TomMid | TomHi => {
                 let (base, end_lo, end_span, drop, body) = match model {
-                    Kick => (50.0, 28.0, 16.0, 0.016 + 0.05 * (1.0 - m.decay), 0.07 + 0.40 * m.decay),
-                    KickTight => (68.0, 40.0, 20.0, 0.010 + 0.03 * (1.0 - m.decay), 0.035 + 0.18 * m.decay),
-                    TomLo => (85.0, 55.0, 25.0, 0.025 + 0.07 * (1.0 - m.decay), 0.08 + 0.38 * m.decay),
-                    TomMid => (120.0, 75.0, 30.0, 0.022 + 0.06 * (1.0 - m.decay), 0.06 + 0.30 * m.decay),
-                    _ => (170.0, 100.0, 40.0, 0.018 + 0.05 * (1.0 - m.decay), 0.045 + 0.22 * m.decay),
+                    Kick => (
+                        50.0,
+                        28.0,
+                        16.0,
+                        0.016 + 0.05 * (1.0 - m.decay),
+                        0.07 + 0.40 * m.decay,
+                    ),
+                    KickTight => (
+                        68.0,
+                        40.0,
+                        20.0,
+                        0.010 + 0.03 * (1.0 - m.decay),
+                        0.035 + 0.18 * m.decay,
+                    ),
+                    TomLo => (
+                        85.0,
+                        55.0,
+                        25.0,
+                        0.025 + 0.07 * (1.0 - m.decay),
+                        0.08 + 0.38 * m.decay,
+                    ),
+                    TomMid => (
+                        120.0,
+                        75.0,
+                        30.0,
+                        0.022 + 0.06 * (1.0 - m.decay),
+                        0.06 + 0.30 * m.decay,
+                    ),
+                    _ => (
+                        170.0,
+                        100.0,
+                        40.0,
+                        0.018 + 0.05 * (1.0 - m.decay),
+                        0.045 + 0.22 * m.decay,
+                    ),
                 };
                 hit.freq = base * 2f32.powf((m.pitch - 0.5) * 1.8);
                 hit.freq_end = end_lo + end_span * m.pitch;
@@ -252,8 +282,8 @@ impl DrumKit {
                 hit.freq = 40.0 + 80.0 * m.pitch; // shaker grain rate
             }
             Rim | Clave => {
-                hit.freq = if model == Clave { 640.0 } else { 520.0 }
-                    * 2f32.powf((m.pitch - 0.5) * 1.2);
+                hit.freq =
+                    if model == Clave { 640.0 } else { 520.0 } * 2f32.powf((m.pitch - 0.5) * 1.2);
                 hit.freq_end = hit.freq;
                 hit.freq_tau = 1.0;
                 hit.body_tau = 0.012 + 0.05 * m.decay;
@@ -334,18 +364,21 @@ impl DrumKit {
                     }
                     DrumModel::Snare | DrumModel::Rimshot => {
                         hit.phase += (hit.freq as f64 / sr as f64) * std::f64::consts::TAU;
-                        let body_amp = if hit.model == DrumModel::Rimshot { 0.10 } else { 0.16 };
+                        let body_amp = if hit.model == DrumModel::Rimshot {
+                            0.10
+                        } else {
+                            0.16
+                        };
                         let noise_amp = if hit.model == DrumModel::Rimshot {
                             0.28 + 0.45 * noise_amt
                         } else {
                             0.18 + 0.40 * noise_amt
                         };
                         let body = (hit.phase.sin() as f32) * hit.body_env * body_amp * vel;
-                        body + noise * hit.noise_env * noise_amp * vel + hit.click_env * 0.12 * vel * white
+                        body + noise * hit.noise_env * noise_amp * vel
+                            + hit.click_env * 0.12 * vel * white
                     }
-                    DrumModel::Clap => {
-                        noise * hit.noise_env * (0.28 + 0.4 * noise_amt) * vel
-                    }
+                    DrumModel::Clap => noise * hit.noise_env * (0.28 + 0.4 * noise_amt) * vel,
                     DrumModel::HatClosed
                     | DrumModel::HatOpen
                     | DrumModel::HatPedal
@@ -370,7 +403,11 @@ impl DrumKit {
                     }
                     DrumModel::Rim | DrumModel::Clave | DrumModel::Cowbell => {
                         hit.phase += (hit.freq as f64 / sr as f64) * std::f64::consts::TAU;
-                        let amp = if hit.model == DrumModel::Cowbell { 0.18 } else { 0.22 };
+                        let amp = if hit.model == DrumModel::Cowbell {
+                            0.18
+                        } else {
+                            0.22
+                        };
                         (hit.phase.sin() as f32) * hit.body_env * amp * vel
                             + hit.click_env * 0.18 * vel * white
                     }

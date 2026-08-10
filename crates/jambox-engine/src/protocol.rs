@@ -222,7 +222,8 @@ pub fn decode(request: Request) -> Result<Decoded, String> {
         Request::AllNotesOff => Decoded::Command(Command::AllNotesOff),
         Request::Panic => Decoded::Command(Command::Panic),
         Request::Synth { param, value } => {
-            let param = parse_synth_param(&param).ok_or_else(|| format!("unknown param {param}"))?;
+            let param =
+                parse_synth_param(&param).ok_or_else(|| format!("unknown param {param}"))?;
             Decoded::Command(Command::SetSynth { param, value })
         }
         Request::Fx {
@@ -230,7 +231,8 @@ pub fn decode(request: Request) -> Result<Decoded, String> {
             param,
             value,
         } => {
-            let param = parse_fx_param(&param).ok_or_else(|| format!("unknown fx param {param}"))?;
+            let param =
+                parse_fx_param(&param).ok_or_else(|| format!("unknown fx param {param}"))?;
             Decoded::Command(Command::SetFx {
                 target: target.into(),
                 param,

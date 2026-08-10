@@ -49,7 +49,7 @@ todos:
     status: completed
   - id: rust-jambox-engine
     content: "Rust jambox engine: audio + sample-accurate sequencer clock; Tk UI becomes thin client (timing integrity)"
-    status: pending
+    status: in_progress
   - id: tft70-display
     content: "Migrate kiosk to BigTreeTech Pi TFT70 V2.1 (7\" DSI, capacitive GT911); retire ADS7846 resistive path"
     status: pending
@@ -253,19 +253,39 @@ Knob focus is mutually exclusive across FX MODE / BUS FX / DRUM MODE. Amounts pe
 
 Play with these in the current `midi-tone` process **before** the Rust audio refactor so the feel is proven on hardware.
 
-### Next architecture: Rust jambox engine (planned)
+### Rust jambox engine — **scaffolded on `cursor/rust-jambox-engine-1052`**
 
 Dropped beats while looping (UI/GIL/wall-clock sequencer vs audio callback) are a real product risk. Same law as thru:
 
 > **UI is never on the audio / sequencer hot path.**
 
-| Step | Intent |
-|------|--------|
-| **Now** | Ship FX in Python; jam and measure |
-| **Next** | Dedicated **Rust jambox engine**: wavetable + drums + FX + **sample-accurate** loop/phrase clock |
-| **UI** | Tk becomes a thin client (mode switches, knobs, pad grid) over IPC — like Map ↔ `midi-engine` |
+| Step | Intent | Status |
+|------|--------|--------|
+| **Ship FX in Python** | Jam and measure so the rewrite targets a known sound | Done |
+| **`jambox-core`** | Wavetable + drums + FX + **sample-accurate** loop/phrase clock, no I/O | Done |
+| **`jambox-engine`** | Audio thread, MIDI in/out, control socket, RT hints | Done |
+| **UI cutover** | Tk becomes a thin client (mode switches, knobs, pad grid) over IPC | Client shipped; per-mode cutover next |
 
-Radical refactor is in scope. Do it after FX playtime so the rewrite targets a known sound, not a dry skeleton.
+#### Timing model (why this fixes dropped beats)
+
+The audio callback is the only clock. Clip events are stored in **ticks**, resolved to an **absolute frame** each block, and the block is **split at those frames** — a pad landing at frame 300 of a 512-frame buffer is heard at frame 300, not at the next boundary. Tests cover: exact frames under ragged block sizes, 32 loop cycles without drift, two pads launched apart still starting on the same bar, and a loop holding time while knob commands flood in every block.
+
+#### Threading contract
+
+| Thread | May do | Never does |
+|--------|--------|------------|
+| **Audio** | Arithmetic, ring pops, pointer swaps | Lock, allocate, free, log, syscall |
+| **Control (IPC)** | JSON parsing, clip allocation **and freeing**, disk | Touch DSP state directly |
+| **MIDI in** | Parse bytes → push command | Block on a full ring (drops instead) |
+| **MIDI out** | Send bytes to the port | Run inside the audio callback |
+
+Clips are built on the control thread, handed over as a `Box`, and the **old allocation is sent back** to be dropped off-thread — the callback only moves a pointer. Backpressure is reported to the UI (`command ring full`) rather than blocking anyone.
+
+#### Measuring
+
+`jambox-engine bench` renders a worst-case jam (held voices + drum loop + FX on every bus) offline and prints percent-of-one-core against the PLAN's <15% budget. No audio device required, so it runs in CI and over SSH on the Pi.
+
+Remaining before the Python synth can retire: wavetable upload at runtime, preset/settings bridge, and moving each kiosk mode onto the client one at a time (Pads first — it has the most to gain).
 
 ### Stress test (the limit detector)
 

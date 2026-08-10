@@ -53,21 +53,51 @@ pub enum SynthParam {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Command {
-    NoteOn { channel: u8, note: u8, velocity: u8 },
-    NoteOff { channel: u8, note: u8 },
+    NoteOn {
+        channel: u8,
+        note: u8,
+        velocity: u8,
+    },
+    NoteOff {
+        channel: u8,
+        note: u8,
+    },
     /// Release everything with its normal tail.
     AllNotesOff,
     /// Hard stop: kill voices, clips, and FX tails.
     Panic,
-    SetSynth { param: SynthParam, value: f32 },
-    SetFx { target: FxTarget, param: FxParam, value: f32 },
-    SetMorphPair { a: u16, b: u16 },
-    SetTempo { bpm: f32 },
-    SetBeatsPerBar { beats: u8 },
-    LaunchClip { slot: u8, quantize: Quantize },
-    StopClip { slot: u8, quantize: Quantize },
+    SetSynth {
+        param: SynthParam,
+        value: f32,
+    },
+    SetFx {
+        target: FxTarget,
+        param: FxParam,
+        value: f32,
+    },
+    SetMorphPair {
+        a: u16,
+        b: u16,
+    },
+    SetTempo {
+        bpm: f32,
+    },
+    SetBeatsPerBar {
+        beats: u8,
+    },
+    LaunchClip {
+        slot: u8,
+        quantize: Quantize,
+    },
+    StopClip {
+        slot: u8,
+        quantize: Quantize,
+    },
     StopAllClips,
-    SetClipMode { slot: u8, mode: LaunchMode },
+    SetClipMode {
+        slot: u8,
+        mode: LaunchMode,
+    },
 }
 
 /// A command plus the frame within the block where it takes effect.

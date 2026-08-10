@@ -30,7 +30,9 @@ Modes today in `tools/midi-tone`:
 
 **Save voice:** VOICES / MORPH → **SAVE AS…** bakes morph + drive + tone into `.wav`, and keeps delay/reverb in a tiny `.fx.json` beside it.
 
-**Next (architecture):** Rust jambox engine for audio + sample-accurate sequencing; Tk becomes a thin client. Jam on FX in Python first so the rewrite targets a known sound.
+**Jambox engine (Rust):** `jambox-core` (DSP + sample-accurate sequencer, no I/O) and `jambox-engine` (audio thread, MIDI, JSON control socket, RT hints) are scaffolded on `cursor/rust-jambox-engine-1052`. The kiosk talks to it via `tools/midi-tone/jambox_client.py`. Audio thread never locks, allocates, or does I/O; clips are freed on the control thread.
+
+**Next (architecture):** move kiosk modes onto the client one at a time (Pads first), add runtime wavetable upload, then retire the Python audio path.
 
 ## Hardware
 

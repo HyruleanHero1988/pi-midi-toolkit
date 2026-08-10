@@ -5,6 +5,7 @@
 
 mod audio;
 mod bus;
+mod headless;
 mod ipc;
 mod midi;
 mod protocol;
@@ -48,6 +49,9 @@ enum Cmd {
         /// Ask the kernel for realtime scheduling and locked memory.
         #[arg(long)]
         rt: bool,
+        /// Run without a sound card (host/CI testing of control + sequencing).
+        #[arg(long)]
+        null_audio: bool,
     },
     /// Offline render benchmark — the PLAN's CPU headroom check, no device needed.
     Bench {
@@ -69,8 +73,7 @@ enum Cmd {
 fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
 
@@ -84,7 +87,8 @@ fn main() {
             control,
             tcp,
             rt,
-        } => run(output, midi_in, midi_out, control, tcp, rt),
+            null_audio,
+        } => run(output, midi_in, midi_out, control, tcp, rt, null_audio),
         Cmd::Bench {
             sample_rate,
             block,
@@ -110,7 +114,16 @@ fn devices() {
     }
 }
 
-fn run(output: String, midi_in: String, midi_out: String, control: String, tcp: bool, rt: bool) {
+#[allow(clippy::too_many_arguments)]
+fn run(
+    output: String,
+    midi_in: String,
+    midi_out: String,
+    control: String,
+    tcp: bool,
+    rt: bool,
+    null_audio: bool,
+) {
     let running = Arc::new(AtomicBool::new(true));
     {
         let running = running.clone();
@@ -122,29 +135,39 @@ fn run(output: String, midi_in: String, midi_out: String, control: String, tcp: 
 
     let (control_side, midi_in_side, midi_out_side, audio_side) = bus::channel();
 
-    let device = match audio::pick_output(&output) {
-        Ok(d) => d,
-        Err(err) => {
-            error!(%err, "audio: no usable output");
-            return;
-        }
-    };
-
     // RT hints before the stream so the callback thread inherits the policy.
     rt::apply_rt_hints(rt);
 
-    let stream = match audio::start(&device, audio_side) {
-        Ok(s) => s,
-        Err(err) => {
-            error!(%err, "audio: stream failed");
-            return;
+    // Keep the stream alive for the life of `run`.
+    let _stream = if null_audio {
+        let running = running.clone();
+        std::thread::spawn(move || {
+            headless::run(48_000, audio::PREFERRED_BLOCK as usize, audio_side, running);
+        });
+        None
+    } else {
+        let device = match audio::pick_output(&output) {
+            Ok(d) => d,
+            Err(err) => {
+                error!(%err, "audio: no usable output (try --null-audio for host testing)");
+                return;
+            }
+        };
+        match audio::start(&device, audio_side) {
+            Ok(stream) => {
+                info!(
+                    sample_rate = stream.sample_rate,
+                    channels = stream.channels,
+                    "audio: running"
+                );
+                Some(stream)
+            }
+            Err(err) => {
+                error!(%err, "audio: stream failed (try --null-audio for host testing)");
+                return;
+            }
         }
     };
-    info!(
-        sample_rate = stream.sample_rate,
-        channels = stream.channels,
-        "audio: running"
-    );
 
     let _midi_conn = match midi::open_input(&midi_in, midi_in_side) {
         Ok(c) => Some(c),
@@ -224,10 +247,7 @@ fn bench(sample_rate: u32, block: usize, seconds: f64, voices: u8) {
             jambox_core::FxTarget::DrumGroup,
             jambox_core::FxParam::DelayMix,
         ),
-        (
-            jambox_core::FxTarget::Voice(0),
-            jambox_core::FxParam::Drive,
-        ),
+        (jambox_core::FxTarget::Voice(0), jambox_core::FxParam::Drive),
     ] {
         warmup.push(jambox_core::ScheduledCommand::now(Command::SetFx {
             target,

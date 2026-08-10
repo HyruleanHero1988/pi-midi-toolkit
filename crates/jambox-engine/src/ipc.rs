@@ -5,13 +5,19 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use jambox_core::EngineStatus;
 use tracing::{debug, info, warn};
 
 use crate::bus::{ClipUpdate, ControlSide};
 use crate::protocol::{decode, Decoded, Request, Response, StatusReply};
+
+/// Control-plane state shared by client connections.
+///
+/// A lock here is fine and deliberate: this is the *non*-realtime side. The audio
+/// thread never touches it — it only pops from the rings this feeds.
+type Shared = Arc<Mutex<(ControlSide, StatusCache)>>;
 
 /// Where the UI connects.
 pub enum Endpoint {
@@ -56,8 +62,7 @@ impl StatusCache {
 fn serve_client<R: BufRead, W: Write>(
     reader: R,
     mut writer: W,
-    control: &mut ControlSide,
-    cache: &mut StatusCache,
+    shared: &Shared,
     running: &AtomicBool,
 ) {
     for line in reader.lines() {
@@ -76,7 +81,14 @@ fn serve_client<R: BufRead, W: Write>(
             continue;
         }
 
-        let response = handle_line(trimmed, control, cache);
+        let response = {
+            let mut guard = match shared.lock() {
+                Ok(g) => g,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            let (control, cache) = &mut *guard;
+            handle_line(trimmed, control, cache)
+        };
         if let Ok(json) = serde_json::to_string(&response) {
             if writeln!(writer, "{json}").is_err() || writer.flush().is_err() {
                 break;
@@ -128,9 +140,12 @@ pub fn handle_line(line: &str, control: &mut ControlSide, cache: &mut StatusCach
     }
 }
 
-/// Accept connections until `running` clears. One client at a time (the kiosk).
-pub fn serve(endpoint: Endpoint, mut control: ControlSide, running: Arc<AtomicBool>) {
-    let mut cache = StatusCache::default();
+/// Accept connections until `running` clears.
+///
+/// Each client gets its own thread so the kiosk holding a long-lived command
+/// connection cannot starve a `status` poke from the CLI.
+pub fn serve(endpoint: Endpoint, control: ControlSide, running: Arc<AtomicBool>) {
+    let shared: Shared = Arc::new(Mutex::new((control, StatusCache::default())));
     info!(endpoint = %endpoint.describe(), "control: listening");
 
     match endpoint {
@@ -150,16 +165,7 @@ pub fn serve(endpoint: Endpoint, mut control: ControlSide, running: Arc<AtomicBo
                     break;
                 }
                 match stream {
-                    Ok(stream) => {
-                        let reader = BufReader::new(match stream.try_clone() {
-                            Ok(s) => s,
-                            Err(err) => {
-                                warn!(%err, "control: clone failed");
-                                continue;
-                            }
-                        });
-                        serve_client(reader, stream, &mut control, &mut cache, &running);
-                    }
+                    Ok(stream) => spawn_client(stream, &shared, &running),
                     Err(err) => warn!(%err, "control: accept failed"),
                 }
             }
@@ -179,21 +185,51 @@ pub fn serve(endpoint: Endpoint, mut control: ControlSide, running: Arc<AtomicBo
                     break;
                 }
                 match stream {
-                    Ok(stream) => {
-                        let reader = BufReader::new(match stream.try_clone() {
-                            Ok(s) => s,
-                            Err(err) => {
-                                warn!(%err, "control: clone failed");
-                                continue;
-                            }
-                        });
-                        serve_client(reader, stream, &mut control, &mut cache, &running);
-                    }
+                    Ok(stream) => spawn_client(stream, &shared, &running),
                     Err(err) => warn!(%err, "control: accept failed"),
                 }
             }
         }
     }
+}
+
+/// Trait alias for the two stream kinds we accept.
+trait ClientStream: std::io::Read + Write + Send + 'static {
+    fn duplicate(&self) -> std::io::Result<Box<dyn ClientStream>>;
+}
+
+#[cfg(unix)]
+impl ClientStream for std::os::unix::net::UnixStream {
+    fn duplicate(&self) -> std::io::Result<Box<dyn ClientStream>> {
+        Ok(Box::new(self.try_clone()?))
+    }
+}
+
+impl ClientStream for std::net::TcpStream {
+    fn duplicate(&self) -> std::io::Result<Box<dyn ClientStream>> {
+        Ok(Box::new(self.try_clone()?))
+    }
+}
+
+impl ClientStream for Box<dyn ClientStream> {
+    fn duplicate(&self) -> std::io::Result<Box<dyn ClientStream>> {
+        (**self).duplicate()
+    }
+}
+
+fn spawn_client<S: ClientStream>(stream: S, shared: &Shared, running: &Arc<AtomicBool>) {
+    let reader = match stream.duplicate() {
+        Ok(s) => s,
+        Err(err) => {
+            warn!(%err, "control: clone failed");
+            return;
+        }
+    };
+    let shared = Arc::clone(shared);
+    let running = Arc::clone(running);
+    std::thread::spawn(move || {
+        serve_client(BufReader::new(reader), stream, &shared, &running);
+    });
 }
 
 #[cfg(test)]

@@ -68,10 +68,19 @@ pub enum LaunchMode {
 enum SlotState {
     Idle,
     /// Waiting for a quantize boundary.
-    Queued { at: u64 },
-    Playing { origin: u64, next_index: usize },
+    Queued {
+        at: u64,
+    },
+    Playing {
+        origin: u64,
+        next_index: usize,
+    },
     /// Playing but will stop at a boundary.
-    Stopping { origin: u64, next_index: usize, at: u64 },
+    Stopping {
+        origin: u64,
+        next_index: usize,
+        at: u64,
+    },
 }
 
 /// A phrase pad: the clip plus its playback state.
@@ -621,7 +630,9 @@ mod tests {
     fn empty_clip_never_launches() {
         let t = transport();
         let mut seq = Sequencer::new();
-        seq.slot_mut(0).unwrap().set_clip(Some(Clip::new(vec![], 0)));
+        seq.slot_mut(0)
+            .unwrap()
+            .set_clip(Some(Clip::new(vec![], 0)));
         seq.launch(0, 0, Quantize::Off, &t);
         assert!(!seq.slot(0).unwrap().is_active());
     }

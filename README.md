@@ -15,6 +15,37 @@ low-latency MIDI thru/remap to a hardware synth. **Not** related to play-my-synt
 |-------|------|
 | `midi-core` | Event types, presets, transform chain, stuck-note tracking (no I/O) |
 | `midi-engine` | `midir` CLI: list / run / learn / test / latency |
+| `jambox-core` | Soft-synth DSP + **sample-accurate** sequencer (no I/O, no alloc in render) |
+| `jambox-engine` | Realtime audio + sequencer daemon; kiosk UI is a thin client over a socket |
+
+## Jambox engine (audio + sequencing)
+
+The jambox half of the box runs as its own realtime process so a busy UI cannot
+move the beat. See [PLAN.md](PLAN.md) "Rust jambox engine".
+
+```bash
+cargo test -p jambox-core                   # timing + DSP tests, no hardware
+cargo run -p jambox-engine -- devices       # audio outputs + MIDI ports
+cargo run -p jambox-engine --release -- bench   # CPU headroom, no device needed
+cargo run -p jambox-engine -- run --midi-in MPK --control /tmp/jambox.sock --rt
+```
+
+Control protocol is line-delimited JSON on a Unix socket (`--tcp` for host testing):
+
+```bash
+printf '{"cmd":"note_on","channel":0,"note":60,"velocity":100}\n' | nc -U /tmp/jambox.sock
+printf '{"cmd":"clip_launch","slot":0,"quantize":"bar"}\n'        | nc -U /tmp/jambox.sock
+printf '{"cmd":"status"}\n'                                        | nc -U /tmp/jambox.sock
+```
+
+From the kiosk, use [`tools/midi-tone/jambox_client.py`](tools/midi-tone/jambox_client.py):
+
+```bash
+python3 tools/midi-tone/jambox_client.py --status
+python3 -m unittest test_jambox_client      # from tools/midi-tone
+```
+
+systemd unit: [`deploy/jambox-engine.service`](deploy/jambox-engine.service).
 
 ## Build & test (Windows / host)
 
@@ -25,6 +56,8 @@ cargo test
 cargo build -p midi-engine
 cargo run -p midi-engine -- latency
 ```
+
+Linux hosts need ALSA headers for the audio engine: `sudo apt install libasound2-dev`.
 
 ## CLI
 
