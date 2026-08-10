@@ -102,6 +102,13 @@ impl ClipSlot {
         self.held_len = 0;
     }
 
+    /// Move the clip out so its allocation can be freed off the audio thread.
+    pub fn take_clip(&mut self) -> Option<Clip> {
+        self.state = SlotState::Idle;
+        self.held_len = 0;
+        self.clip.take()
+    }
+
     pub fn clip(&self) -> Option<&Clip> {
         self.clip.as_ref()
     }

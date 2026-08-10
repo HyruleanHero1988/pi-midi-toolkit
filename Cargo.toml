@@ -4,11 +4,13 @@ members = [
     "crates/midi-core",
     "crates/midi-engine",
     "crates/jambox-core",
+    "crates/jambox-engine",
 ]
 default-members = [
     "crates/midi-core",
     "crates/midi-engine",
     "crates/jambox-core",
+    "crates/jambox-engine",
 ]
 
 [workspace.package]
