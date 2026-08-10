@@ -45,7 +45,7 @@ todos:
     content: "Wave viz: live morph-cycle scope on SYNTH + KIT drill-down for per-drum one-shot preview"
     status: completed
   - id: jambox-fx
-    content: "Jambox FX: per-wavetable + per-drum-model drive/delay/reverb (not global mix bus); measure Pi 2 CPU/xruns"
+    content: "Jambox FX: per-voice/per-drum inserts (FX MODE) + optional master BUS FX; measure Pi 2 CPU/xruns"
     status: completed
   - id: rust-jambox-engine
     content: "Rust jambox engine: audio + sample-accurate sequencer clock; Tk UI becomes thin client (timing integrity)"
@@ -233,9 +233,16 @@ This is **not** MIDI-out thru. It is the creative local instrument. Real use alr
 
 The diagnostic framing did **not** paint a software dead-end. Limits will show up as **CPU, audio xruns, or latency feel** — measurable — not as “we called it Phase 0.”
 
-### Effects (per voice / per drum) — **shipped in Python; refined on `cursor/midi-tone-per-voice-fx-1052`**
+### Effects (insert + bus) — **shipped in Python on `cursor/midi-tone-per-voice-fx-1052`**
 
-Each **wavetable name** and each **drum model** has its own insert (drive → delay → light reverb). **FX MODE** knobs edit the selected slot — nearer morph endpoint by default, or a KIT drum when that overlay is open. Melody FX do not wet the whole kit bus.
+Two separate controls, same cheap DSP chain (drive → delay → light reverb):
+
+| Layer | UI | Routing |
+|-------|----|---------|
+| **Insert FX** | **FX MODE** | Per wavetable name + per drum model. Knobs edit nearer morph voice, or a KIT drum. Melody wet does not smear a dry kit. |
+| **Bus FX** | **BUS FX** | Optional master wet after keys + drums are summed. Global “room / tape” when you want everything in the same space. |
+
+Knob focus is mutually exclusive (also with DRUM MODE). Amounts persist as `voice_fx` / `drum_fx` / `bus_fx` in presets.
 
 | Effect | Status | Notes |
 |--------|--------|-------|

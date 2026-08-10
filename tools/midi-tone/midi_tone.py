@@ -760,11 +760,14 @@ class SineEngine:
         self._drum_noise = 0.55
         self._drum_tone = 0.60
         self._drum_mode = False  # if True, knobs 1–4 edit drums instead of morph/tone
-        self._fx_mode = False  # if True, knobs edit per-voice / per-drum FX
+        self._fx_mode = False  # if True, knobs edit per-voice / per-drum insert FX
+        self._bus_fx_mode = False  # if True, knobs edit the master mix-bus FX
         # Per wavetable name / per drum model — not a global master bus
         self._voice_fx: Dict[str, MixBusFx] = {}
         self._drum_fx: Dict[str, MixBusFx] = {}
-        self._fx_edit_kind = "voice"  # voice | drum
+        # Optional global wet after keys+drums are summed (separate from inserts)
+        self._bus_fx = MixBusFx(self.sample_rate)
+        self._fx_edit_kind = "voice"  # voice | drum | bus
         self._fx_edit_drum = "kick"
         self._key_bus = np.zeros(BLOCKSIZE * 2, dtype=np.float32)
         self._drum_bus = np.zeros(BLOCKSIZE * 2, dtype=np.float32)
@@ -834,9 +837,17 @@ class SineEngine:
         except Exception:
             pass
 
-        # Keep per-instrument FX buffers matched to the actual device rate
+        # Keep FX buffers matched to the actual device rate
         with self._lock:
-            if any(fx.sample_rate != self.sample_rate for fx in list(self._voice_fx.values()) + list(self._drum_fx.values())):
+            need = (
+                self._bus_fx.sample_rate != self.sample_rate
+                or any(
+                    fx.sample_rate != self.sample_rate
+                    for fx in list(self._voice_fx.values()) + list(self._drum_fx.values())
+                )
+            )
+            if need:
+                self._bus_fx = self._clone_fx(self._bus_fx, self.sample_rate)
                 self._voice_fx = {
                     k: self._clone_fx(v, self.sample_rate) for k, v in self._voice_fx.items()
                 }
@@ -1116,27 +1127,33 @@ class SineEngine:
     def drum_knob_focus(self) -> bool:
         """True only in explicit drum mode (DRUM MODE button)."""
         with self._lock:
-            return self._drum_mode and not self._fx_mode
+            return self._drum_mode and not self._fx_mode and not self._bus_fx_mode
 
     def set_drum_mode(self, enabled: bool) -> None:
         with self._lock:
             self._drum_mode = bool(enabled)
             if self._drum_mode:
                 self._fx_mode = False
+                self._bus_fx_mode = False
 
     def drum_mode(self) -> bool:
         with self._lock:
             return self._drum_mode
 
     def fx_knob_focus(self) -> bool:
+        """True when knobs edit insert FX or master bus FX."""
         with self._lock:
-            return self._fx_mode
+            return self._fx_mode or self._bus_fx_mode
 
     def set_fx_mode(self, enabled: bool) -> None:
+        """Per-voice / per-drum insert FX edit mode."""
         with self._lock:
             self._fx_mode = bool(enabled)
             if self._fx_mode:
                 self._drum_mode = False
+                self._bus_fx_mode = False
+                if self._fx_edit_kind == "bus":
+                    self._fx_edit_kind = "voice"
 
     def fx_mode(self) -> bool:
         with self._lock:
@@ -1146,6 +1163,25 @@ class SineEngine:
         with self._lock:
             nxt = not self._fx_mode
         self.set_fx_mode(nxt)
+        return nxt
+
+    def set_bus_fx_mode(self, enabled: bool) -> None:
+        """Master mix-bus FX edit mode (whole keys+drums sum)."""
+        with self._lock:
+            self._bus_fx_mode = bool(enabled)
+            if self._bus_fx_mode:
+                self._drum_mode = False
+                self._fx_mode = False
+                self._fx_edit_kind = "bus"
+
+    def bus_fx_mode(self) -> bool:
+        with self._lock:
+            return self._bus_fx_mode
+
+    def toggle_bus_fx_mode(self) -> bool:
+        with self._lock:
+            nxt = not self._bus_fx_mode
+        self.set_bus_fx_mode(nxt)
         return nxt
 
     # Back-compat aliases used by older call sites / UI helpers
@@ -1178,7 +1214,7 @@ class SineEngine:
         return fx
 
     def set_fx_edit_voice(self, name: Optional[str] = None) -> None:
-        """Point FX MODE knobs at a wavetable slot (default: nearer morph endpoint)."""
+        """Point insert-FX knobs at a wavetable slot (default: nearer morph endpoint)."""
         with self._lock:
             self._fx_edit_kind = "voice"
             if name:
@@ -1190,14 +1226,21 @@ class SineEngine:
                 self._ensure_voice_fx_unlocked(self._voice_names[near])
 
     def set_fx_edit_drum(self, model: str) -> None:
-        """Point FX MODE knobs at a drum model insert (kick, snare, …)."""
+        """Point insert-FX knobs at a drum model insert (kick, snare, …)."""
         with self._lock:
             self._fx_edit_kind = "drum"
             self._fx_edit_drum = str(model or "kick")
             self._ensure_drum_fx_unlocked(self._fx_edit_drum)
 
+    def set_fx_edit_bus(self) -> None:
+        """Point knobs at the master mix-bus FX."""
+        with self._lock:
+            self._fx_edit_kind = "bus"
+
     def fx_edit_label(self) -> str:
         with self._lock:
+            if self._fx_edit_kind == "bus" or self._bus_fx_mode:
+                return "bus"
             if self._fx_edit_kind == "drum":
                 return f"drum:{self._fx_edit_drum}"
             # Prefer nearer morph endpoint as the voice being sculpted
@@ -1207,6 +1250,8 @@ class SineEngine:
             return f"voice:{self._voice_names[near]}"
 
     def _fx_edit_slot_unlocked(self) -> MixBusFx:
+        if self._fx_edit_kind == "bus" or self._bus_fx_mode:
+            return self._bus_fx
         if self._fx_edit_kind == "drum":
             return self._ensure_drum_fx_unlocked(self._fx_edit_drum)
         if self._morph_dirty:
@@ -1364,6 +1409,7 @@ class SineEngine:
                 "drum_tone": self._drum_tone,
                 "drum_mode": 1.0 if self._drum_mode else 0.0,
                 "fx_mode": 1.0 if self._fx_mode else 0.0,
+                "bus_fx_mode": 1.0 if self._bus_fx_mode else 0.0,
                 **fx,
             }
 
@@ -1384,10 +1430,11 @@ class SineEngine:
                 "drum_decay": float(self._drum_decay),
                 "drum_noise": float(self._drum_noise),
                 "drum_tone": float(self._drum_tone),
-                # Per-instrument FX (not a global bus)
+                # Per-instrument inserts + optional master bus
                 "voice_fx": {k: v.snapshot() for k, v in self._voice_fx.items()},
                 "drum_fx": {k: v.snapshot() for k, v in self._drum_fx.items()},
-                # drum_mode / fx_mode are session UI toggles only — never persist
+                "bus_fx": self._bus_fx.snapshot(),
+                # drum_mode / fx_mode / bus_fx_mode are session UI toggles only
             }
             return out
 
@@ -1423,7 +1470,7 @@ class SineEngine:
                 self._drum_noise = max(0.0, min(1.0, float(data["drum_noise"])))
             if "drum_tone" in data:
                 self._drum_tone = max(0.0, min(1.0, float(data["drum_tone"])))
-            # New: per-instrument maps
+            # Per-instrument inserts
             vfx = data.get("voice_fx")
             if isinstance(vfx, dict):
                 for name, snap in vfx.items():
@@ -1434,13 +1481,17 @@ class SineEngine:
                 for model, snap in dfx.items():
                     if isinstance(snap, dict):
                         self._ensure_drum_fx_unlocked(str(model)).apply_snapshot(snap)
-            # Legacy flat fx_* from early mix-bus experiment → nearer morph voice
-            if any(k.startswith("fx_") for k in data.keys()) and not isinstance(vfx, dict):
-                near = self._voice_names[self._morph_a if self._morph < 0.5 else self._morph_b]
-                self._ensure_voice_fx_unlocked(near).apply_snapshot(data)
+            # Master bus FX (explicit map, or legacy flat fx_* when no maps existed)
+            bfx = data.get("bus_fx")
+            if isinstance(bfx, dict):
+                self._bus_fx.apply_snapshot(bfx)
+            elif any(k.startswith("fx_") for k in data.keys()) and not isinstance(vfx, dict):
+                # Early mix-bus experiment stored flat fx_* on the master
+                self._bus_fx.apply_snapshot(data)
             # Modes are session-only; always restore knobs to morph
             self._drum_mode = False
             self._fx_mode = False
+            self._bus_fx_mode = False
             self._fx_edit_kind = "voice"
             self._morph_dirty = True
             self._rebuild_morph_table_unlocked()
@@ -1588,6 +1639,12 @@ class SineEngine:
 
         buf[:] = key_bus
         buf += drum_bus
+
+        # Master mix-bus FX (optional global wet — separate from per-voice/per-drum inserts)
+        if frames > 0:
+            with self._lock:
+                bus_fx = self._bus_fx
+            bus_fx.process(buf)
 
         if level < 0.999:
             buf *= np.float32(level)
@@ -3255,6 +3312,7 @@ class MidiToneApp:
         self._full_vel_btn: Optional[tk.Button] = None
         self._drum_lock_btn: Optional[tk.Button] = None
         self._fx_mode_btn: Optional[tk.Button] = None
+        self._bus_fx_mode_btn: Optional[tk.Button] = None
         self._voice_lbl: Optional[tk.Label] = None
         self._wave_canvas: Optional[tk.Canvas] = None
         self._wave_caption: Optional[tk.Label] = None
@@ -3377,6 +3435,10 @@ class MidiToneApp:
             row1, "FX MODE", self._toggle_fx_mode, bg="#3c3836"
         )
         self._fx_mode_btn.pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3)
+        self._bus_fx_mode_btn = self._mk_touch_btn(
+            row1, "BUS FX", self._toggle_bus_fx_mode, bg="#3c3836"
+        )
+        self._bus_fx_mode_btn.pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3)
 
         # Voice picker — prev / name / next + full grid
         row2 = tk.Frame(self._touch, bg="#111111")
@@ -3500,6 +3562,7 @@ class MidiToneApp:
         self._paint_full_vel_btn()
         self._paint_drum_lock_btn()
         self._paint_fx_mode_btn()
+        self._paint_bus_fx_mode_btn()
         self._sync_voice_index_from_morph()
         # Rebuild pads chrome so restored PLAY/EDIT + OUT mode paint correctly
         self._build_pads_mode()
@@ -3543,8 +3606,9 @@ class MidiToneApp:
         if self.engine.fx_knob_focus():
             delay_ms = int((0.05 + st.get("fx_delay_time", 0.0) * 0.70) * 1000)
             target = self.engine.fx_edit_label()
+            prefix = "BUS FX" if self.engine.bus_fx_mode() else f"FX {target}"
             return (
-                f"FX {target}  "
+                f"{prefix}  "
                 f"Drive:{int(st.get('fx_drive', 0.0) * 127):3d}  "
                 f"Dly:{delay_ms:3d}ms  "
                 f"Fb:{int(st.get('fx_delay_fb', 0.0) * 127):3d}  "
@@ -4319,10 +4383,23 @@ class MidiToneApp:
                 text="FX MODE", bg="#3c3836", activebackground="#3c3836"
             )
 
+    def _paint_bus_fx_mode_btn(self) -> None:
+        if self._bus_fx_mode_btn is None:
+            return
+        if self.engine.bus_fx_mode():
+            self._bus_fx_mode_btn.configure(
+                text="BUS FX: ON", bg="#8f3f71", activebackground="#8f3f71"
+            )
+        else:
+            self._bus_fx_mode_btn.configure(
+                text="BUS FX", bg="#3c3836", activebackground="#3c3836"
+            )
+
     def _toggle_drum_lock(self) -> None:
         self.engine.set_drum_mode(not self.engine.drum_mode())
         self._paint_drum_lock_btn()
         self._paint_fx_mode_btn()
+        self._paint_bus_fx_mode_btn()
         self.mod_var.set(self._format_mod_line())
         self._append_log(
             "DRUM MODE ON — Knob 1–4 edit drums"
@@ -4343,15 +4420,31 @@ class MidiToneApp:
             else:
                 self.engine.set_fx_edit_voice(None)
         self._paint_fx_mode_btn()
+        self._paint_bus_fx_mode_btn()
         self._paint_drum_lock_btn()
         self.mod_var.set(self._format_mod_line())
         target = self.engine.fx_edit_label() if on else ""
         self._append_log(
-            f"FX MODE ON — editing {target} "
-            "(drive / delay / reverb). Open KIT + tap a drum to sculpt that drum; "
-            "close KIT to edit the nearer morph voice."
+            f"FX MODE ON — insert FX on {target} "
+            "(not the whole mix). Open KIT + tap a drum for that drum; "
+            "close KIT for nearer morph voice. Use BUS FX for global wet."
             if on
             else "FX MODE OFF — knobs back to morph / tone / …"
+        )
+
+    def _toggle_bus_fx_mode(self) -> None:
+        on = self.engine.toggle_bus_fx_mode()
+        if on:
+            self.engine.set_fx_edit_bus()
+        self._paint_bus_fx_mode_btn()
+        self._paint_fx_mode_btn()
+        self._paint_drum_lock_btn()
+        self.mod_var.set(self._format_mod_line())
+        self._append_log(
+            "BUS FX ON — knobs wet the whole soft-synth mix (keys + drums + phrases). "
+            "Per-voice/per-drum inserts still run underneath; use FX MODE to edit those."
+            if on
+            else "BUS FX OFF — knobs back to morph / tone / …"
         )
 
     def _paint_synth_waveform(self, *, force: bool = False) -> None:
@@ -4432,10 +4525,13 @@ class MidiToneApp:
         if self._morph_ui_open:
             self._close_morph_menu(restore_main=False)
 
-        # If FX MODE is already on, keep it and point knobs at the selected drum.
+        # If insert FX MODE is on, point knobs at the selected drum.
+        # If BUS FX is on, keep global edit (kit is audition/preview only).
         # Otherwise turn on DRUM MODE so knobs reshape the one-shot body.
         if self.engine.fx_mode():
             self.engine.set_fx_edit_drum(self._kit_model_selected())
+            self.mod_var.set(self._format_mod_line())
+        elif self.engine.bus_fx_mode():
             self.mod_var.set(self._format_mod_line())
         elif not self.engine.drum_mode():
             self.engine.set_drum_mode(True)
@@ -5366,11 +5462,13 @@ class MidiToneApp:
         if self._kit_ui_open:
             self._close_kit_explorer(restore_main=False)
         # Hand knobs back to morph while editing the pair
-        if self.engine.drum_mode() or self.engine.fx_mode():
+        if self.engine.drum_mode() or self.engine.fx_mode() or self.engine.bus_fx_mode():
             self.engine.set_drum_mode(False)
             self.engine.set_fx_mode(False)
+            self.engine.set_bus_fx_mode(False)
             self._paint_drum_lock_btn()
             self._paint_fx_mode_btn()
+            self._paint_bus_fx_mode_btn()
             self.mod_var.set(self._format_mod_line())
 
         self._morph_ui_open = True
