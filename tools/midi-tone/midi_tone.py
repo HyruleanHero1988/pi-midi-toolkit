@@ -401,6 +401,70 @@ def write_wavetable_wav(
         w.writeframes(pcm.tobytes())
 
 
+# Time-domain FX that cannot bake into a single cycle — stored beside the .wav
+VOICE_FX_SIDECAR_KEYS = (
+    "fx_delay_time",
+    "fx_delay_fb",
+    "fx_delay_mix",
+    "fx_reverb_size",
+    "fx_reverb_mix",
+)
+
+
+def voice_fx_sidecar_path(waves_dir: pathlib.Path, name: str) -> pathlib.Path:
+    return pathlib.Path(waves_dir) / f"{sanitize_voice_name(name)}.fx.json"
+
+
+def write_voice_fx_sidecar(path: pathlib.Path, fx: Dict[str, float]) -> None:
+    """Tiny JSON next to a user wavetable: delay/reverb mixes (+ time/fb/size)."""
+    out = {"version": 1}
+    for key in VOICE_FX_SIDECAR_KEYS:
+        try:
+            out[key] = max(0.0, min(1.0, float(fx.get(key, 0.0))))
+        except (TypeError, ValueError):
+            out[key] = 0.0
+    path = pathlib.Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(out, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def load_voice_fx_sidecar(path: pathlib.Path) -> Optional[Dict[str, float]]:
+    path = pathlib.Path(path)
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    out: Dict[str, float] = {}
+    for key in VOICE_FX_SIDECAR_KEYS:
+        if key not in data:
+            continue
+        try:
+            out[key] = max(0.0, min(1.0, float(data[key])))
+        except (TypeError, ValueError):
+            continue
+    return out or None
+
+
+def load_user_voice_fx_map(directory: pathlib.Path) -> Dict[str, Dict[str, float]]:
+    """voice name → delay/reverb sidecar for user-wavetables/."""
+    result: Dict[str, Dict[str, float]] = {}
+    directory = pathlib.Path(directory)
+    if not directory.is_dir():
+        return result
+    for path in sorted(directory.glob("*.fx.json")):
+        name = sanitize_voice_name(path.name[: -len(".fx.json")])
+        if not name or name in BUILTIN_VOICE_NAMES:
+            continue
+        snap = load_voice_fx_sidecar(path)
+        if snap:
+            result[name] = snap
+    return result
+
+
 def circular_moving_average(x: np.ndarray, win: int) -> np.ndarray:
     """Tone-bake helper: low-pass a periodic single cycle."""
     n = int(x.shape[0])
@@ -1503,26 +1567,35 @@ class SineEngine:
             near = self._morph_a if self._morph < 0.5 else self._morph_b
             return self._voice_names[near]
 
-    def save_current_voice(self, name: str) -> Tuple[str, np.ndarray]:
+    def save_current_voice(self, name: str) -> Tuple[str, np.ndarray, Dict[str, float]]:
         """
-        Bake morph + drive + tone into a new dry wavetable and select it (A=B).
+        Bake morph + drive + tone into a new wavetable and select it (A=B).
 
-        The new voice starts with a clean FX insert — the timbre is in the wave.
-        Delay/reverb (if any) stay performance FX you dial afterward.
+        Returns (key, cycle, delay/reverb sidecar). Drive stays 0 on the new
+        insert (already in the wave); delay/reverb ride along as numbers.
         """
+        source = self.current_voice_fx_source()
+        with self._lock:
+            src_fx = self._ensure_voice_fx_unlocked(source).snapshot()
+        sidecar = {k: float(src_fx.get(k, 0.0)) for k in VOICE_FX_SIDECAR_KEYS}
         cycle = self.bake_voice_cycle(apply_drive=True, apply_tone=True)
         key = self.add_wavetable(name, cycle)
-        # Ensure a dry insert slot exists under the new name (do not copy delay/reverb)
         with self._lock:
-            self._ensure_voice_fx_unlocked(key)  # defaults: drive/delay/reverb = off
-            # If we somehow had leftover params from an overwrite, clear them
-            fx = self._voice_fx[key]
-            fx.drive = 0.0
-            fx.delay_mix = 0.0
-            fx.delay_fb = 0.0
-            fx.reverb_mix = 0.0
+            fx = self._ensure_voice_fx_unlocked(key)
+            fx.drive = 0.0  # baked into wave
+            fx.apply_snapshot(sidecar)
             self._fx_edit_kind = "voice"
-        return key, cycle
+        return key, cycle, sidecar
+
+    def apply_voice_fx_sidecar(self, name: str, fx: Dict[str, float]) -> None:
+        """Restore delay/reverb for a user voice; keep drive at 0 (in the wave)."""
+        key = sanitize_voice_name(name)
+        if not key or key in BUILTIN_VOICE_NAMES:
+            return
+        with self._lock:
+            slot = self._ensure_voice_fx_unlocked(key)
+            slot.drive = 0.0
+            slot.apply_snapshot(fx)
 
     def add_wavetable(self, name: str, table: np.ndarray) -> str:
         """
@@ -3468,6 +3541,12 @@ class MidiToneApp:
             pass
         self._tables = load_wavetables(self._waves_dir, self._user_waves_dir)
         self.engine = SineEngine(self._tables, max_voices=max_voices)
+        # Delay/reverb numbers beside user wavetables (drive/tone already in the wave)
+        self._voice_fx_sidecars: Dict[str, Dict[str, float]] = load_user_voice_fx_map(
+            self._user_waves_dir
+        )
+        for vname, snap in self._voice_fx_sidecars.items():
+            self.engine.apply_voice_fx_sidecar(vname, snap)
         self._inport: Optional[mido.ports.BaseInput] = None
         self._poll_thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
@@ -5573,6 +5652,9 @@ class MidiToneApp:
         name = self._voice_names[self._voice_index]
         # VOICES / PREV / NEXT set morph-A and park at pure A (B stays as morph target)
         self.engine.set_morph_index(self._voice_index)
+        snap = self._voice_fx_sidecars.get(name)
+        if snap is not None:
+            self.engine.apply_voice_fx_sidecar(name, snap)
         self._mark_settings_dirty()
         if self._voice_lbl is not None:
             self._voice_lbl.configure(text=self._voice_label_text())
@@ -5643,9 +5725,9 @@ class MidiToneApp:
         tk.Label(
             self._save_voice_frame,
             text=(
-                "Writes a new single-cycle wavetable: morph + drive + tone become "
-                "the wave shape. Delay/reverb cannot fit in one cycle — dial those "
-                "live afterward. The new voice starts dry."
+                "Wave shape: morph + drive + tone → .wav. "
+                "Alongside: delay/reverb amounts in a tiny .fx.json "
+                "(drive stays in the wave, not double-applied)."
             ),
             font=("DejaVu Sans", 10),
             fg="#a89984",
@@ -5672,7 +5754,10 @@ class MidiToneApp:
 
         self._save_voice_status = tk.Label(
             self._save_voice_frame,
-            text=f"Will write {self._user_waves_dir.name}/{suggested}.wav",
+            text=(
+                f"Will write {self._user_waves_dir.name}/{suggested}.wav "
+                f"+ {suggested}.fx.json"
+            ),
             font=("DejaVu Sans Mono", 11),
             fg="#83a598",
             bg="#111111",
@@ -5705,7 +5790,7 @@ class MidiToneApp:
         self._mk_touch_btn(
             footer, "CANCEL", self._close_save_voice, bg="#9d0006"
         ).pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=14)
-        self._append_log("SAVE VOICE — bake morph/drive/tone into a new wave shape")
+        self._append_log("SAVE VOICE — bake wave shape + keep delay/reverb alongside")
 
     def _paint_save_voice_keyboard(self) -> None:
         keys = getattr(self, "_save_voice_keys", None)
@@ -5774,7 +5859,10 @@ class MidiToneApp:
         exists = name in self.engine.voice_names or path.is_file()
         tag = "overwrite" if exists else "new"
         self._save_voice_status.configure(
-            text=f"{tag}: {self._user_waves_dir.name}/{name}.wav (baked wave shape)",
+            text=(
+                f"{tag}: {self._user_waves_dir.name}/{name}.wav "
+                f"+ {name}.fx.json"
+            ),
             fg="#fabd2f" if exists else "#83a598",
         )
 
@@ -5794,9 +5882,12 @@ class MidiToneApp:
                 )
             return
         try:
-            key, cycle = self.engine.save_current_voice(name)
+            key, cycle, sidecar = self.engine.save_current_voice(name)
             wav_path = self._user_waves_dir / f"{key}.wav"
+            fx_path = voice_fx_sidecar_path(self._user_waves_dir, key)
             write_wavetable_wav(wav_path, cycle, sample_rate=44100)
+            write_voice_fx_sidecar(fx_path, sidecar)
+            self._voice_fx_sidecars[key] = dict(sidecar)
         except Exception as exc:
             if self._save_voice_status is not None:
                 self._save_voice_status.configure(text=f"Save failed: {exc}", fg="#fb4934")
@@ -5813,7 +5904,9 @@ class MidiToneApp:
         self.mod_var.set(self._format_mod_line())
         self._mark_settings_dirty()
         self._append_log(
-            f"Saved voice '{key}' → {wav_path.name} (morph+drive+tone baked into wave)"
+            f"Saved voice '{key}' → {wav_path.name} + {fx_path.name} "
+            f"(dly={int(sidecar.get('fx_delay_mix', 0) * 127)} "
+            f"rvb={int(sidecar.get('fx_reverb_mix', 0) * 127)})"
         )
         self._close_save_voice()
         self._paint_synth_waveform(force=True)

@@ -28,7 +28,7 @@ Modes today in `tools/midi-tone`:
 
 **Jambox FX:** layered in Python `midi-tone` — **FX MODE** (per-wavetable / per-drum inserts + shared **ALL DRUMS** kit bus) and **BUS FX** (optional master mix wet).
 
-**Save voice:** VOICES / MORPH → **SAVE AS…** bakes morph + drive + tone into a new dry wavetable shape (`user-wavetables/<name>.wav`). Delay/reverb stay live FX.
+**Save voice:** VOICES / MORPH → **SAVE AS…** bakes morph + drive + tone into `.wav`, and keeps delay/reverb in a tiny `.fx.json` beside it.
 
 **Next (architecture):** Rust jambox engine for audio + sample-accurate sequencing; Tk becomes a thin client. Jam on FX in Python first so the rewrite targets a known sound.
 
