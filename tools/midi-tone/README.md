@@ -230,31 +230,28 @@ Then double-click **MIDI Tone** on the desktop. If needed: right-click → **All
 
 ### Kiosk mode (no Pi desktop shell)
 
-Boots a minimal **X11 + Openbox** session that only runs midi-tone fullscreen (restart loop if it crashes). No wallpaper / panel / file manager.
+Boots a minimal **X11** session that only runs midi-tone fullscreen (restart
+loop if it crashes). No wallpaper / panel / file manager / labwc.
 
-**Display target:** BigTreeTech **Pi TFT70 V2.1** (7″ DSI, 800×480, capacitive GT911) is on order — same pixel budget the UI already uses, larger physical targets, reliable touch. Until it arrives, the existing resistive HDMI/ADS7846 panel still works; `enable-gpio-touch.sh` / `calibrate-touch-y.sh` are **legacy for that panel only**.
+**Full bring-up guide (new Pi → same state as the lab unit):** see
+[`KIOSK.md`](KIOSK.md).
 
 ```bash
 cd ~/midi-tone
-sed -i 's/\r$//' *.sh kiosk/openbox/* kiosk/*.desktop
-chmod +x install-kiosk.sh kiosk.sh
-./install-kiosk.sh
+sed -i 's/\r$//' *.sh kiosk/openbox/* kiosk/*.desktop kiosk/lightdm/* 2>/dev/null
+chmod +x install-kiosk.sh disable-kiosk.sh kiosk.sh
+./install-kiosk.sh          # packages + session + enable boot (needs sudo)
+sudo reboot
 ```
 
-Then:
-1. `sudo raspi-config` → **Advanced Options → Wayland → X11**
-2. `sudo raspi-config` → **System Options → Boot / Auto Login → Desktop Autologin**
-3. Choose session **MIDI Tone Kiosk** (install writes `~/.dmrc`)
-4. Reboot
+Restore the normal desktop later:
 
-Manual test: `./kiosk.sh`  
-Logs: `/tmp/midi-tone-kiosk.log`
+```bash
+./disable-kiosk.sh
+sudo reboot
+```
 
-Files:
-- `kiosk.sh` — session entry (Openbox + app restart loop + `--fullscreen`)
-- `kiosk/openbox/rc.xml` — undecorated maximized windows
-- `kiosk/midi-tone-kiosk.desktop` — X session definition
-- `install-kiosk.sh` — packages + session install
+Logs: `/tmp/midi-tone-kiosk.log` and `/tmp/midi-tone.log`.
 
 ## On Windows (optional host test)
 

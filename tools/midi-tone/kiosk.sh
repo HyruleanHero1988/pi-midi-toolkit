@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # midi-tone kiosk session entrypoint (Openbox + app only — no Pi desktop shell).
 #
-# Installed as an X session via install-kiosk.sh, or run manually under X:
+# Used as an X session (install-kiosk.sh) or manually under X:
 #   ./kiosk.sh
+#   ./kiosk.sh --input MPK
 set -euo pipefail
 DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$DIR"
@@ -20,7 +21,6 @@ export PIPEWIRE_LATENCY="${PIPEWIRE_LATENCY:-1024/44100}"
 # Point Openbox at our minimal config (no panel / desktop icons)
 export OPENBOX_CONFIG_DIR="${OPENBOX_CONFIG_DIR:-$DIR/kiosk/openbox}"
 mkdir -p "$HOME/.config/openbox"
-# Symlink once so openbox finds rc.xml/autostart under ~/.config/openbox
 for f in rc.xml autostart; do
   src="$OPENBOX_CONFIG_DIR/$f"
   dst="$HOME/.config/openbox/$f"
@@ -30,7 +30,7 @@ for f in rc.xml autostart; do
 done
 
 LOG=/tmp/midi-tone-kiosk.log
-echo "==== midi-tone kiosk $(date -Is) ====" >>"$LOG"
+echo "==== midi-tone kiosk $(date -Is) pid=$$ display=$DISPLAY ====" >>"$LOG"
 
 # Disable screen blanking / DPMS if xset exists
 if command -v xset >/dev/null 2>&1; then
@@ -39,10 +39,22 @@ if command -v xset >/dev/null 2>&1; then
   xset s noblank >/dev/null 2>&1 || true
 fi
 
+# ADS7846: make sure pen-down is Button1 for Tk <ButtonPress-1>
+if command -v xinput >/dev/null 2>&1; then
+  if xinput list --name-only 2>/dev/null | grep -qx "ADS7846 Touchscreen"; then
+    xinput set-button-map "ADS7846 Touchscreen" 1 0 0 0 0 0 0 >/dev/null 2>&1 || true
+    xinput enable "ADS7846 Touchscreen" >/dev/null 2>&1 || true
+    echo "ADS7846 button map -> 1 (left)" >>"$LOG"
+  else
+    echo "ADS7846 not in xinput yet" >>"$LOG"
+  fi
+fi
+
 # Keep analog jack unmuted (HDMI panels often mute PCM)
 amixer -c 1 set PCM 100% unmute >/dev/null 2>&1 || true
+amixer set Master 100% unmute >/dev/null 2>&1 || true
 
-# Prefer MPK when present
+# Prefer MPK when present; always fullscreen in kiosk
 ARGS=("$@")
 if [[ ${#ARGS[@]} -eq 0 ]]; then
   ARGS=(--fullscreen)
@@ -53,23 +65,32 @@ elif [[ " ${ARGS[*]} " != *" --fullscreen "* ]]; then
   ARGS=(--fullscreen "${ARGS[@]}")
 fi
 
-# Start Openbox if we are the session leader and no WM is running yet.
-# When used as an xsessions Exec, this script *is* the session.
-need_wm=1
-if ! command -v openbox >/dev/null 2>&1; then
-  echo "openbox not installed — run ./install-kiosk.sh" | tee -a "$LOG"
-  need_wm=0
-elif command -v xprop >/dev/null 2>&1 && xprop -root _NET_SUPPORTING_WM_CHECK >/dev/null 2>&1; then
-  # A window manager is already managing this display
-  need_wm=0
+# Tk --fullscreen fills the panel. Openbox is optional: enabling it *after*
+# a live Tk window has blanked the display before. Default off; set
+# MIDI_TONE_OPENBOX=1 only for a clean session start if you need EWMH.
+need_wm=0
+if [[ "${MIDI_TONE_OPENBOX:-0}" == "1" ]]; then
+  need_wm=1
+fi
+if [[ "$need_wm" -eq 1 ]]; then
+  if ! command -v openbox >/dev/null 2>&1; then
+    echo "openbox not installed — run ./install-kiosk.sh" | tee -a "$LOG"
+    need_wm=0
+  elif pgrep -x openbox >/dev/null 2>&1; then
+    need_wm=0
+    echo "openbox already running; not starting another" >>"$LOG"
+  fi
+else
+  echo "skipping openbox (Tk fullscreen); set MIDI_TONE_OPENBOX=1 to enable" >>"$LOG"
+  pkill -x openbox >/dev/null 2>&1 || true
 fi
 
+WM_PID=""
 if [[ "$need_wm" -eq 1 ]]; then
   openbox --config-file "$HOME/.config/openbox/rc.xml" >>"$LOG" 2>&1 &
   WM_PID=$!
-  sleep 0.4
-else
-  WM_PID=""
+  sleep 0.5
+  echo "openbox pid=$WM_PID" >>"$LOG"
 fi
 
 cleanup() {
