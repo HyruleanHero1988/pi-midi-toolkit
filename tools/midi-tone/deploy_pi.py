@@ -34,6 +34,8 @@ FILES = [
     "fix-audio-headphones.sh",
     "enable-gpio-touch.sh",
     "calibrate-touch-y.sh",
+    "fix-touch-x11.sh",
+    "set-touch-overlay.sh",
 ]
 
 # Extra trees copied recursively

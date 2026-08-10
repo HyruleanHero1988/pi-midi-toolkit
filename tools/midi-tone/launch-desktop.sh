@@ -13,12 +13,23 @@ export GDK_BACKEND="${GDK_BACKEND:-x11}"
 # Tk on labwc is happier on Xwayland without inheriting Wayland as primary
 unset WAYLAND_DISPLAY || true
 
-# Prefer MPK when present; still start if it isn't (UI + Midi Through fallback)
+# Prefer MPK when present; still start if it isn't (UI + Midi Through fallback).
+# Always fullscreen on the Pi panel so we never leave a gray desktop behind a
+# half-drawn / off-to-the-side Tk window (looks like a "dead gray screen").
 ARGS=("$@")
-if [[ ${#ARGS[@]} -eq 0 ]]; then
-  if aconnect -l 2>/dev/null | grep -qi mpk; then
-    ARGS=(--input MPK)
-  fi
+have_fs=0
+have_input=0
+for a in "${ARGS[@]+"${ARGS[@]}"}"; do
+  case "$a" in
+    --fullscreen) have_fs=1 ;;
+    --input) have_input=1 ;;
+  esac
+done
+if [[ $have_fs -eq 0 ]]; then
+  ARGS+=(--fullscreen)
+fi
+if [[ $have_input -eq 0 ]] && aconnect -l 2>/dev/null | grep -qi mpk; then
+  ARGS+=(--input MPK)
 fi
 
 pkill -f '[m]idi_tone.py' >/dev/null 2>&1 || true

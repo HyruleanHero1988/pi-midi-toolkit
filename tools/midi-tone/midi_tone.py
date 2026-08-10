@@ -15,6 +15,7 @@ import pathlib
 import queue
 import re
 import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -63,7 +64,12 @@ PRESET_SLOTS = 8
 SONGS_DIR = HERE / "songs"
 DEMO_SONGS_DIR = HERE / "demo-songs"
 SONG_SEED_MARKER = SONGS_DIR / ".seeded-from-demo"
-SONG_LIST_VISIBLE = 4  # chunky rows on screen at once
+TOUCH_SCROLL_THRESH_PX = 14  # press→drag before a list tap counts as scroll
+
+# Layout rule for short DSI panels:
+# Always pack bottom chrome (FOOTER) BEFORE any expanding BODY.
+# Tk shrinks later-packed expand widgets first — packing a fill=BOTH body
+# then a footer pushes the footer off-screen. Use _pack_screen_regions().
 DEFAULT_SONG_BPM = 120
 SONG_OUT_MODES = ("local", "usb", "both")
 # Prefer these substrings when auto-picking USB→DIN output
@@ -535,24 +541,32 @@ def mpk_note_for_phrase_cell(cell: int) -> int:
     return PHRASE_PAD_BASE + (int(cell) & 0x0F)
 
 
+SCOPE_CRT_BG = "#031a08"
+SCOPE_CRT_WAVE = "#39ff14"  # phosphor green
+SCOPE_CRT_GRID = "#14532d"
+SCOPE_CRT_AXIS = "#4ade80"
+DRUM_SCOPE_SEC = 0.40  # fixed time window so stretch reads as envelope length
+SCOPE_MORPH_CYCLES = 3  # show several periods — one cycle looks sparse on a wide CRT
+SCOPE_REDRAW_DEBOUNCE_S = 0.04  # wait after last change before heavy paint
+SCOPE_REDRAW_MAX_WAIT_S = 0.10  # never leave the scope blank longer than this
+
+
 def downsample_waveform(samples: np.ndarray, points: int) -> np.ndarray:
-    """Reduce a sample buffer to `points` peaks for canvas drawing."""
+    """Reduce a sample buffer to `points` peaks for canvas drawing (vectorized)."""
     if samples is None or len(samples) == 0 or points <= 0:
         return np.zeros(max(1, points), dtype=np.float32)
     x = np.asarray(samples, dtype=np.float32)
-    if len(x) <= points:
+    n = len(x)
+    if n <= points:
         return x.copy()
-    # Min/max buckets keep spikes visible (better than plain stride for drums)
-    bucket = len(x) / float(points)
+    # Equal buckets → min/max envelope without a Python per-bucket loop
+    chunk = max(1, n // points)
+    usable = chunk * points
+    block = x[:usable].reshape(points, chunk)
     out = np.empty(points, dtype=np.float32)
-    for i in range(points):
-        a = int(i * bucket)
-        b = int((i + 1) * bucket)
-        if b <= a:
-            b = a + 1
-        chunk = x[a:b]
-        # Alternate extrema so the polyline fills the envelope
-        out[i] = float(np.max(chunk) if (i & 1) == 0 else np.min(chunk))
+    # Alternate extrema so the polyline fills the envelope
+    out[0::2] = block[0::2].max(axis=1)
+    out[1::2] = block[1::2].min(axis=1)
     return out
 
 
@@ -564,7 +578,7 @@ def render_drum_preview(
     noise_amt: float,
     tone: float,
     sample_rate: int = SAMPLE_RATE,
-    duration_sec: float = 0.32,
+    duration_sec: float = DRUM_SCOPE_SEC,
     velocity: float = 0.95,
     seed: int = 7,
 ) -> np.ndarray:
@@ -604,14 +618,81 @@ def render_drum_preview(
     return audio.astype(np.float32, copy=False)
 
 
+def draw_scope_grid(
+    canvas: "tk.Canvas",
+    *,
+    grid_color: str = SCOPE_CRT_GRID,
+    axis_color: str = SCOPE_CRT_AXIS,
+    duration_sec: Optional[float] = None,
+    x_label: Optional[str] = None,
+) -> None:
+    """Static CRT grid + axis (drawn once; wave polyline updates separately)."""
+    try:
+        canvas.delete("grid")
+        w = int(canvas.winfo_width())
+        h = int(canvas.winfo_height())
+    except Exception:
+        return
+    if w < 8 or h < 8:
+        return
+    axis_h = 16 if duration_sec is not None or x_label else 0
+    plot_h = max(8, h - axis_h)
+    mid = plot_h * 0.5
+    for frac in (0.25, 0.5, 0.75):
+        y = plot_h * frac
+        canvas.create_line(0, y, w, y, fill=grid_color, tags="grid")
+        x = (w - 1) * frac
+        canvas.create_line(x, 0, x, plot_h, fill=grid_color, tags="grid")
+    canvas.create_line(0, mid, w, mid, fill=axis_color, tags="grid")
+    if duration_sec is not None and duration_sec > 0:
+        ticks_ms = [0]
+        step = 100 if duration_sec >= 0.35 else 50
+        t = step
+        while t < duration_sec * 1000 - 1:
+            ticks_ms.append(t)
+            t += step
+        end_ms = int(round(duration_sec * 1000))
+        if ticks_ms[-1] != end_ms:
+            ticks_ms.append(end_ms)
+        for ms in ticks_ms:
+            frac = ms / (duration_sec * 1000.0)
+            x = frac * (w - 1)
+            canvas.create_line(x, plot_h - 3, x, plot_h, fill=axis_color, tags="grid")
+            canvas.create_text(
+                x, h - 2, text=f"{ms}", anchor="s",
+                fill=axis_color, font=("DejaVu Sans Mono", 8), tags="grid",
+            )
+        canvas.create_text(
+            w - 2, h - 2, text="ms", anchor="se",
+            fill=axis_color, font=("DejaVu Sans Mono", 8), tags="grid",
+        )
+    elif x_label:
+        canvas.create_text(
+            w // 2, h - 2, text=x_label, anchor="s",
+            fill=axis_color, font=("DejaVu Sans Mono", 9), tags="grid",
+        )
+
+
+def blank_waveform_on_canvas(canvas: "tk.Canvas") -> None:
+    """Clear the trace immediately (leave the CRT grid) so stale waves don't linger."""
+    try:
+        canvas.delete("wave")
+    except Exception:
+        pass
+
+
 def draw_waveform_on_canvas(
     canvas: "tk.Canvas",
     samples: np.ndarray,
     *,
-    color: str = "#83a598",
-    grid_color: str = "#3c3836",
+    color: str = SCOPE_CRT_WAVE,
+    grid_color: str = SCOPE_CRT_GRID,
+    axis_color: str = SCOPE_CRT_AXIS,
+    duration_sec: Optional[float] = None,
+    x_label: Optional[str] = None,
+    redraw_grid: bool = False,
 ) -> None:
-    """Paint a normalized polyline waveform into a Tk canvas."""
+    """Paint a CRT-green scope. Grid is cached; only the trace is rewritten."""
     try:
         canvas.delete("wave")
         w = int(canvas.winfo_width())
@@ -620,21 +701,33 @@ def draw_waveform_on_canvas(
         return
     if w < 8 or h < 8:
         return
-    # Midline
-    mid = h * 0.5
-    canvas.create_line(0, mid, w, mid, fill=grid_color, tags="wave")
+
+    if redraw_grid or not canvas.find_withtag("grid"):
+        draw_scope_grid(
+            canvas,
+            grid_color=grid_color,
+            axis_color=axis_color,
+            duration_sec=duration_sec,
+            x_label=x_label,
+        )
+
+    axis_h = 16 if duration_sec is not None or x_label else 0
+    plot_h = max(8, h - axis_h)
+    mid = plot_h * 0.5
+
     if samples is None or len(samples) < 2:
         return
-    pts = downsample_waveform(samples, max(32, w // 2))
+    # Fewer points = much cheaper Tk polyline on Pi 2
+    pts = downsample_waveform(samples, max(48, w // 3))
     peak = float(np.max(np.abs(pts))) or 1.0
-    y_scale = (h * 0.42) / peak
+    y_scale = (plot_h * 0.40) / peak
     coords: List[float] = []
     n = len(pts)
     for i, v in enumerate(pts):
         x = (i / max(1, n - 1)) * (w - 1)
         y = mid - float(v) * y_scale
         coords.extend((x, y))
-    canvas.create_line(*coords, fill=color, width=2, smooth=True, tags="wave")
+    canvas.create_line(*coords, fill=color, width=2, smooth=False, tags="wave")
 
 
 def synthesize_drum(
@@ -1655,6 +1748,7 @@ class SineEngine:
             noise_amt=noise,
             tone=tone,
             sample_rate=self.sample_rate,
+            duration_sec=DRUM_SCOPE_SEC,
         )
 
     def modulation_state(self) -> Dict[str, float]:
@@ -2610,6 +2704,7 @@ class PhrasePadBank:
         *,
         clear_armed: bool = False,
         mode_armed: bool = False,
+        assign_armed: bool = False,
         view: str = "edit",
     ) -> str:
         with self._lock:
@@ -2617,6 +2712,11 @@ class PhrasePadBank:
             rec = self._recording_cell
             playing = sorted(self._playing.keys())
             sel = self._selected
+        if assign_armed:
+            return (
+                "LOOPER → PAD armed — tap a pad (touch or MPK) to drop the loop there · "
+                "switch modes to cancel"
+            )
         if mode_armed:
             return "MODE armed — tap a pad to toggle ONE-SHOT ↔ LOOP · MODE again to cancel"
         if clear_armed:
@@ -2797,6 +2897,63 @@ class PhrasePadBank:
         self.save_cell(target)
         self._emit(("phrase",))
         self._emit(("log", f"Phrase {phrase_pad_label(target)} cleared", False))
+        return True
+
+    def load_from_events(
+        self,
+        idx: int,
+        events: List[LoopEvent],
+        length: float,
+        *,
+        trigger_mode: str = PHRASE_TRIG_LOOP,
+    ) -> bool:
+        """Replace a pad's contents with a free-timing take (e.g. from the looper)."""
+        if not (0 <= idx < PHRASE_PAD_COUNT):
+            return False
+        if self.is_recording():
+            self.stop_record()
+        self.stop_cell(idx)
+        copied = [
+            LoopEvent(
+                t=float(e.t),
+                on=bool(e.on),
+                channel=int(e.channel) & 0x0F,
+                note=int(e.note) & 0x7F,
+                velocity=max(0, min(127, int(e.velocity))),
+            )
+            for e in events
+        ]
+        length = float(length)
+        if copied and length <= 0.0:
+            length = max(e.t for e in copied) + 0.05
+        if not copied or length <= 0.0:
+            return False
+        mode = trigger_mode if trigger_mode in PHRASE_TRIG_MODES else PHRASE_TRIG_LOOP
+        with self._lock:
+            prev = self._cells[idx]
+            self._cells[idx] = PhraseCell(
+                events=copied,
+                length=length,
+                trigger_mode=mode,
+                voice_mode=prev.voice_mode,
+                morph_a=prev.morph_a,
+                morph_b=prev.morph_b,
+                morph=prev.morph,
+                out_channel=prev.out_channel,
+                local_synth=prev.local_synth,
+            )
+            self._selected = idx
+        self.save_cell(idx)
+        self._emit(("phrase",))
+        self._emit(
+            (
+                "log",
+                f"Phrase {phrase_pad_label(idx)} ← looper "
+                f"({len(copied)} ev, {length:.2f}s, "
+                f"{'LOOP' if mode == PHRASE_TRIG_LOOP else 'ONE-SHOT'})",
+                False,
+            )
+        )
         return True
 
     def stop_cell(self, idx: int) -> None:
@@ -3573,11 +3730,11 @@ class MidiToneApp:
         self.root = tk.Tk()
         print("ui: Tk root ok", flush=True)
         self.root.title("midi-tone")
-        self.root.geometry("800x420")
+        self.root.geometry("800x480")
         self.root.configure(bg="#111111")
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         if self._fullscreen:
-            # Kiosk: fill the screen (Openbox also forces maximize/fullscreen)
+            # Kiosk / panel: fill the screen (Openbox also forces maximize/fullscreen)
             try:
                 self.root.attributes("-fullscreen", True)
             except Exception:
@@ -3586,7 +3743,22 @@ class MidiToneApp:
                 except Exception:
                     self.root.state("zoomed")
             print("ui: fullscreen", flush=True)
-        self.root.update_idletasks()
+        # Paint something immediately so a slow UI build never looks like a
+        # dead gray panel (desktop wallpaper + empty Tk root).
+        self._boot_splash = tk.Label(
+            self.root,
+            text="midi-tone starting…",
+            font=("DejaVu Sans", 22, "bold"),
+            fg="#fbf1c7",
+            bg="#111111",
+        )
+        self._boot_splash.pack(fill=tk.BOTH, expand=True)
+        try:
+            self.root.deiconify()
+            self.root.lift()
+            self.root.update()
+        except Exception:
+            self.root.update_idletasks()
 
         self.engine.start()
         print("midi: audio engine started", flush=True)
@@ -3620,6 +3792,13 @@ class MidiToneApp:
         self._kit_status_var = tk.StringVar(value="")
         self._kit_selected_note = 36  # factory kick
         self._kit_all_drums = False  # FX edit target = shared kit group bus
+        self._kit_view = "grid"  # grid | wave (scope is a drill-down)
+        self._mod_dirty = False
+        self._morph_dirty_ui = False
+        self._scope_blanked = False
+        self._scope_needs_paint = False
+        self._scope_paint_at = 0.0
+        self._scope_first_dirty = 0.0
         self._save_voice_open = False
         self._save_voice_frame: Optional[tk.Frame] = None
         self._save_voice_entry: Optional[tk.Entry] = None
@@ -3627,6 +3806,8 @@ class MidiToneApp:
         self._save_voice_drive_btn: Optional[tk.Button] = None
         self._save_voice_keys: Optional[tk.Frame] = None
         self._save_voice_keys_digits = False
+        self._power_ui_open = False
+        self._power_frame: Optional[tk.Frame] = None
         self._mode = "synth"  # synth | looper | pads | songs | log | presets
         self._mode_btns: Dict[str, tk.Button] = {}
         self._looper = MidiLooper(self.engine, self._q_put)
@@ -3653,10 +3834,12 @@ class MidiToneApp:
         self._phrase_synth_btn: Optional[tk.Button] = None
         self._phrase_clear_armed = False
         self._phrase_mode_armed = False
+        self._loop_to_pad_armed = False
         self._phrase_shell: Optional[tk.Frame] = None
         self._loop_status_var = tk.StringVar(value="Loop empty — tap RECORD, play notes, STOP, then PLAY.")
         self._loop_rec_btn: Optional[tk.Button] = None
         self._loop_play_btn: Optional[tk.Button] = None
+        self._loop_to_pad_btn: Optional[tk.Button] = None
         self._preset_status_var = tk.StringVar(value="Tap a slot, then LOAD or SAVE.")
         self._preset_slot = 0
         self._preset_slot_btns: Dict[int, tk.Button] = {}
@@ -3666,17 +3849,27 @@ class MidiToneApp:
         )
         self._song_files: List[pathlib.Path] = []
         self._song_selected: Optional[str] = None  # filename in songs/
-        self._song_scroll = 0
         self._song_row_btns: List[tk.Button] = []
+        self._song_row_names: List[str] = []
+        self._song_list_inner: Optional[tk.Frame] = None
+        self._song_list_canvas: Optional[tk.Canvas] = None
+        self._song_list_drag: Optional[Dict[str, object]] = None
         self._song_title_cache: Dict[str, str] = {}
         self._song_play_btn: Optional[tk.Button] = None
         self._song_out_btn: Optional[tk.Button] = None
         self._song_loop_btn: Optional[tk.Button] = None
         self._song_bpm_lbl: Optional[tk.Label] = None
-        self._song_up_btn: Optional[tk.Button] = None
-        self._song_down_btn: Optional[tk.Button] = None
         self._settings_dirty = False
         self._suppress_autosave = False
+
+        # Drop boot splash before packing real chrome
+        splash = getattr(self, "_boot_splash", None)
+        if splash is not None:
+            try:
+                splash.destroy()
+            except Exception:
+                pass
+            self._boot_splash = None
 
         # Persistent mode navigation (always visible)
         self._nav = tk.Frame(self.root, bg="#1d2021")
@@ -3685,6 +3878,12 @@ class MidiToneApp:
             self._nav, text="midi-tone", font=("DejaVu Sans", 14, "bold"),
             fg="#fbf1c7", bg="#1d2021", padx=10, pady=8,
         ).pack(side=tk.LEFT)
+        # Always-available power control (kiosk has no desktop shutdown UI)
+        power_btn = self._mk_touch_btn(
+            self._nav, "POWER", self._open_power_menu, bg="#9d0006"
+        )
+        power_btn.configure(font=("DejaVu Sans", 10, "bold"), pady=8, padx=8)
+        power_btn.pack(side=tk.LEFT, padx=(0, 4))
         nav_modes = tk.Frame(self._nav, bg="#1d2021")
         nav_modes.pack(side=tk.RIGHT, padx=4, pady=4)
         for key, label in (
@@ -3778,7 +3977,7 @@ class MidiToneApp:
         self._main.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
 
         header = tk.Frame(self._main, bg="#111111")
-        header.pack(fill=tk.X, padx=8, pady=(8, 2))
+        header.pack(fill=tk.X, padx=8, pady=(6, 2))
         tk.Label(
             header, text="Synth", font=("DejaVu Sans", 18, "bold"),
             fg="#fbf1c7", bg="#111111",
@@ -3788,49 +3987,52 @@ class MidiToneApp:
             fg="#8ec07c", bg="#111111",
         ).pack(side=tk.RIGHT)
 
+        # CRT morph-cycle scope — pack early with a reserved height so the
+        # chunky touch bar never collapses it to zero on 480p kiosk screens.
+        self._wave_caption = tk.Label(
+            self._main,
+            text="Morph cycle · 1 cycle",
+            font=("DejaVu Sans", 11),
+            fg="#4ade80",
+            bg="#111111",
+            anchor="w",
+        )
+        self._wave_caption.pack(fill=tk.X, padx=8, pady=(2, 0))
+        self._wave_canvas = tk.Canvas(
+            self._main,
+            height=150,
+            bg=SCOPE_CRT_BG,
+            highlightthickness=1,
+            highlightbackground="#14532d",
+            bd=0,
+        )
+        self._wave_canvas.pack(fill=tk.X, padx=8, pady=(2, 4))
+        self._wave_canvas.pack_propagate(False)
+        self._wave_canvas.bind(
+            "<Configure>", lambda _e: self._paint_synth_waveform(force=True)
+        )
+
         self.last_var = tk.StringVar(value="Waiting for MIDI…")
         last_lbl = tk.Label(
             self._main, textvariable=self.last_var,
-            font=("DejaVu Sans Mono", 15, "bold"), fg="#fabd2f", bg="#111111",
+            font=("DejaVu Sans Mono", 13, "bold"), fg="#fabd2f", bg="#111111",
             wraplength=780, justify=tk.LEFT, anchor="w",
         )
-        last_lbl.pack(fill=tk.X, padx=8, pady=4)
+        last_lbl.pack(fill=tk.X, padx=8, pady=(2, 0))
 
         self.active_var = tk.StringVar(value="Active notes: —")
         active_lbl = tk.Label(
             self._main, textvariable=self.active_var,
-            font=("DejaVu Sans", 12), fg="#83a598", bg="#111111", anchor="w",
+            font=("DejaVu Sans", 11), fg="#83a598", bg="#111111", anchor="w",
         )
         active_lbl.pack(fill=tk.X, padx=8)
 
         self.mod_var = tk.StringVar(value=self._format_mod_line())
         mod_lbl = tk.Label(
             self._main, textvariable=self.mod_var,
-            font=("DejaVu Sans Mono", 11), fg="#d3869b", bg="#111111", anchor="w",
+            font=("DejaVu Sans Mono", 10), fg="#d3869b", bg="#111111", anchor="w",
         )
-        mod_lbl.pack(fill=tk.X, padx=8, pady=(2, 4))
-
-        self._wave_caption = tk.Label(
-            self._main,
-            text="Morph cycle",
-            font=("DejaVu Sans", 11),
-            fg="#a89984",
-            bg="#111111",
-            anchor="w",
-        )
-        self._wave_caption.pack(fill=tk.X, padx=8, pady=(4, 0))
-        self._wave_canvas = tk.Canvas(
-            self._main,
-            height=110,
-            bg="#1d2021",
-            highlightthickness=1,
-            highlightbackground="#3c3836",
-            bd=0,
-        )
-        self._wave_canvas.pack(fill=tk.BOTH, expand=True, padx=8, pady=(2, 8))
-        self._wave_canvas.bind(
-            "<Configure>", lambda _e: self._paint_synth_waveform(force=True)
-        )
+        mod_lbl.pack(fill=tk.X, padx=8, pady=(0, 2))
 
         self._active_notes: Dict[Tuple[int, int], int] = {}
         # Select first voice explicitly
@@ -3888,6 +4090,18 @@ class MidiToneApp:
             self._append_log("No settings.json yet — changes will autosave.")
         self._append_log("If knobs do nothing: Prog Select + Pad 1 (MPC program).")
         print("ui: construction complete", flush=True)
+        try:
+            self.root.deiconify()
+            self.root.lift()
+            self.root.focus_force()
+            if self._fullscreen:
+                try:
+                    self.root.attributes("-fullscreen", True)
+                except Exception:
+                    pass
+            self.root.update_idletasks()
+        except Exception:
+            pass
         self.root.after(2000, self._autosave_tick)
 
     def _voice_label_text(self) -> str:
@@ -3940,6 +4154,7 @@ class MidiToneApp:
             or self._morph_ui_open
             or self._kit_ui_open
             or self._save_voice_open
+            or self._power_ui_open
         )
 
     def _session_dict(self) -> Dict[str, Any]:
@@ -4055,7 +4270,7 @@ class MidiToneApp:
         return path if path.is_file() else None
 
     def _refresh_song_file_list(self, prefer: Optional[str] = None) -> None:
-        """Rescan songs/ and keep selection/scroll coherent."""
+        """Rescan songs/ and keep selection coherent."""
         SONGS_DIR.mkdir(parents=True, exist_ok=True)
         self._song_files = list_song_files(SONGS_DIR)
         names = {p.name for p in self._song_files}
@@ -4065,22 +4280,6 @@ class MidiToneApp:
         if chosen is None and self._song_files:
             chosen = self._song_files[0].name
         self._song_selected = chosen
-        if not self._song_files:
-            self._song_scroll = 0
-            return
-        idx = 0
-        if chosen:
-            for i, p in enumerate(self._song_files):
-                if p.name == chosen:
-                    idx = i
-                    break
-        max_scroll = max(0, len(self._song_files) - SONG_LIST_VISIBLE)
-        # Keep selection visible
-        if idx < self._song_scroll:
-            self._song_scroll = idx
-        elif idx >= self._song_scroll + SONG_LIST_VISIBLE:
-            self._song_scroll = idx - SONG_LIST_VISIBLE + 1
-        self._song_scroll = max(0, min(max_scroll, self._song_scroll))
 
     def _next_take_path(self) -> pathlib.Path:
         SONGS_DIR.mkdir(parents=True, exist_ok=True)
@@ -4097,11 +4296,17 @@ class MidiToneApp:
         shell = self._songs_shell
         for w in shell.winfo_children():
             w.destroy()
+        self._song_list_inner = None
+        self._song_list_canvas = None
+        self._song_list_drag = None
+        self._song_row_btns = []
+        self._song_row_names = []
         SONGS_DIR.mkdir(parents=True, exist_ok=True)
         self._refresh_song_file_list(prefer=self._song_selected)
 
-        header = tk.Frame(shell, bg="#111111")
-        header.pack(fill=tk.X, padx=8, pady=(8, 2))
+        header, body, footer = self._pack_screen_regions(
+            shell, header_pady=(8, 2), body_padx=8, body_pady=2, footer_padx=8, footer_pady=6
+        )
         tk.Label(
             header, text="Songs", font=("DejaVu Sans", 18, "bold"),
             fg="#fbf1c7", bg="#111111",
@@ -4130,51 +4335,9 @@ class MidiToneApp:
             side=tk.LEFT, padx=2, ipady=4
         )
 
-        status = tk.Label(
-            shell, textvariable=self._song_status_var,
-            font=("DejaVu Sans", 12, "bold"),
-            fg="#fabd2f", bg="#111111",
-            wraplength=760, justify=tk.LEFT, anchor="w",
-        )
-        status.pack(fill=tk.X, padx=10, pady=(2, 4))
-
-        # Chunky list with dedicated scroll targets (no tiny scrollbar)
-        list_wrap = tk.Frame(shell, bg="#111111")
-        list_wrap.pack(fill=tk.BOTH, expand=True, padx=8, pady=2)
-
-        self._song_up_btn = self._mk_touch_btn(
-            list_wrap, "▲  UP", lambda: self._song_scroll_by(-SONG_LIST_VISIBLE), bg="#504945"
-        )
-        self._song_up_btn.configure(font=("DejaVu Sans", 16, "bold"), pady=10)
-        self._song_up_btn.pack(fill=tk.X, pady=(0, 4), ipady=6)
-
-        rows = tk.Frame(list_wrap, bg="#111111")
-        rows.pack(fill=tk.BOTH, expand=True)
-        self._song_row_btns = []
-        for i in range(SONG_LIST_VISIBLE):
-            btn = self._mk_touch_btn(
-                rows,
-                "",
-                lambda idx=i: self._select_song_row(idx),
-                bg="#3c3836",
-            )
-            btn.configure(
-                font=("DejaVu Sans", 14, "bold"),
-                anchor="w",
-                justify=tk.LEFT,
-                pady=12,
-            )
-            btn.pack(fill=tk.BOTH, expand=True, pady=2, ipady=8)
-            self._song_row_btns.append(btn)
-
-        self._song_down_btn = self._mk_touch_btn(
-            list_wrap, "▼  DOWN", lambda: self._song_scroll_by(SONG_LIST_VISIBLE), bg="#504945"
-        )
-        self._song_down_btn.configure(font=("DejaVu Sans", 16, "bold"), pady=10)
-        self._song_down_btn.pack(fill=tk.X, pady=(4, 0), ipady=6)
-
-        row_a = tk.Frame(shell, bg="#111111")
-        row_a.pack(fill=tk.X, padx=8, pady=(6, 3))
+        # Footer chrome reserved first — transport stays on-screen
+        row_a = tk.Frame(footer, bg="#111111")
+        row_a.pack(fill=tk.X, pady=(0, 3))
         self._song_play_btn = self._mk_touch_btn(
             row_a, "PLAY", self._song_toggle_play, bg="#689d6a"
         )
@@ -4183,8 +4346,8 @@ class MidiToneApp:
             side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=12
         )
 
-        row_b = tk.Frame(shell, bg="#111111")
-        row_b.pack(fill=tk.X, padx=8, pady=3)
+        row_b = tk.Frame(footer, bg="#111111")
+        row_b.pack(fill=tk.X, pady=3)
         self._mk_touch_btn(
             row_b, "SAVE LOOP", self._song_save_from_looper, bg="#458588"
         ).pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=10)
@@ -4192,8 +4355,8 @@ class MidiToneApp:
             side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=10
         )
 
-        row_c = tk.Frame(shell, bg="#111111")
-        row_c.pack(fill=tk.X, padx=8, pady=(3, 8))
+        row_c = tk.Frame(footer, bg="#111111")
+        row_c.pack(fill=tk.X, pady=(3, 0))
         self._song_out_btn = self._mk_touch_btn(
             row_c, "OUT: LOCAL", self._song_cycle_out_mode, bg="#3c3836"
         )
@@ -4203,7 +4366,22 @@ class MidiToneApp:
         )
         self._song_loop_btn.pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=8)
 
-        self._paint_song_list()
+        status = tk.Label(
+            body, textvariable=self._song_status_var,
+            font=("DejaVu Sans", 12, "bold"),
+            fg="#fabd2f", bg="#111111",
+            wraplength=760, justify=tk.LEFT, anchor="w",
+        )
+        status.pack(side=tk.TOP, fill=tk.X, padx=2, pady=(0, 4))
+
+        list_body = tk.Frame(body, bg="#111111")
+        list_body.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        _wrap, canvas, inner, drag = self._build_touch_scroll_area(list_body)
+        self._song_list_canvas = canvas
+        self._song_list_inner = inner
+        self._song_list_drag = drag
+
+        self._rebuild_song_list_rows()
         self._paint_song_controls()
         self._refresh_song_status()
 
@@ -4245,15 +4423,48 @@ class MidiToneApp:
             return f"  {path.name}"
         return f"  {title}\n  {path.name}"
 
-    def _song_scroll_by(self, delta: int) -> None:
-        if not self._song_files:
+    def _rebuild_song_list_rows(self) -> None:
+        """Rebuild song buttons inside the side-rail scroll area."""
+        inner = self._song_list_inner
+        drag = self._song_list_drag
+        if inner is None or drag is None:
             return
-        max_scroll = max(0, len(self._song_files) - SONG_LIST_VISIBLE)
-        self._song_scroll = max(0, min(max_scroll, self._song_scroll + int(delta)))
-        self._paint_song_list()
+        for w in inner.winfo_children():
+            w.destroy()
+        self._song_row_btns = []
+        self._song_row_names = []
+        if not self._song_files:
+            tk.Label(
+                inner,
+                text="No .mid files yet — SAVE LOOP or drop files into songs/",
+                font=("DejaVu Sans", 13),
+                fg="#a89984",
+                bg="#111111",
+                wraplength=520,
+                justify=tk.LEFT,
+                anchor="w",
+            ).pack(fill=tk.X, padx=8, pady=16)
+            return
+        for i, path in enumerate(self._song_files):
+            btn = self._mk_scroll_select_btn(
+                inner,
+                self._song_row_label(path),
+                lambda idx=i: self._select_song_index(idx),
+                drag,
+                bg="#458588",
+            )
+            btn.configure(
+                font=("DejaVu Sans", 14, "bold"),
+                anchor="w",
+                justify=tk.LEFT,
+                pady=12,
+            )
+            btn.pack(fill=tk.X, pady=2, ipady=8)
+            self._song_row_btns.append(btn)
+            self._song_row_names.append(path.name)
+        self._style_song_rows()
 
-    def _select_song_row(self, row: int) -> None:
-        idx = self._song_scroll + row
+    def _select_song_index(self, idx: int) -> None:
         if idx < 0 or idx >= len(self._song_files):
             return
         path = self._song_files[idx]
@@ -4269,47 +4480,30 @@ class MidiToneApp:
         self._paint_song_controls()
         self._refresh_song_status()
 
-    def _paint_song_list(self) -> None:
-        total = len(self._song_files)
-        max_scroll = max(0, total - SONG_LIST_VISIBLE)
-        self._song_scroll = max(0, min(max_scroll, self._song_scroll))
-        for row, btn in enumerate(self._song_row_btns):
-            idx = self._song_scroll + row
-            if idx >= total:
-                btn.configure(
-                    text="",
-                    state=tk.DISABLED,
-                    bg="#1d2021",
-                    activebackground="#1d2021",
-                    disabledforeground="#665c54",
-                )
-                continue
-            path = self._song_files[idx]
+    def _style_song_rows(self) -> None:
+        for i, btn in enumerate(self._song_row_btns):
+            if i >= len(self._song_files):
+                break
+            path = self._song_files[i]
             selected = path.name == self._song_selected
             color = "#b16286" if selected else "#458588"
             btn.configure(
                 text=self._song_row_label(path),
-                state=tk.NORMAL,
                 bg=color,
                 activebackground=color,
                 fg="#fbf1c7",
             )
-        if self._song_up_btn is not None:
-            can_up = self._song_scroll > 0
-            self._song_up_btn.configure(
-                state=tk.NORMAL if can_up else tk.DISABLED,
-                bg="#504945" if can_up else "#1d2021",
-                activebackground="#504945" if can_up else "#1d2021",
-                disabledforeground="#665c54",
-            )
-        if self._song_down_btn is not None:
-            can_down = self._song_scroll < max_scroll
-            self._song_down_btn.configure(
-                state=tk.NORMAL if can_down else tk.DISABLED,
-                bg="#504945" if can_down else "#1d2021",
-                activebackground="#504945" if can_down else "#1d2021",
-                disabledforeground="#665c54",
-            )
+
+    def _paint_song_list(self) -> None:
+        names = [p.name for p in self._song_files]
+        if (
+            self._song_list_inner is None
+            or self._song_row_names != names
+            or len(self._song_row_btns) != len(self._song_files)
+        ):
+            self._rebuild_song_list_rows()
+            return
+        self._style_song_rows()
 
     def _paint_song_slots(self) -> None:
         """Compat name used by mode switch / seed — refresh list from disk."""
@@ -4368,7 +4562,7 @@ class MidiToneApp:
             msg = (
                 f"Ready {name}  {float(st['duration']):.1f}s · {st['events']} ev  "
                 f"@ {int(round(float(st['bpm'])))} BPM (file {int(round(float(st['file_bpm'])))})  "
-                f"out={out}  [{self._song_scroll + 1}-{min(nfiles, self._song_scroll + SONG_LIST_VISIBLE)}/{nfiles}]"
+                f"out={out}  · {nfiles} file(s)"
             )
         self._song_status_var.set(msg)
         self._paint_song_controls()
@@ -4499,8 +4693,9 @@ class MidiToneApp:
             w.destroy()
         PRESETS_DIR.mkdir(parents=True, exist_ok=True)
 
-        header = tk.Frame(shell, bg="#111111")
-        header.pack(fill=tk.X, padx=8, pady=(10, 4))
+        header, body, footer = self._pack_screen_regions(
+            shell, header_pady=(10, 4), body_padx=8, body_pady=4, footer_padx=8, footer_pady=8
+        )
         tk.Label(
             header, text="Presets", font=("DejaVu Sans", 18, "bold"),
             fg="#fbf1c7", bg="#111111",
@@ -4510,16 +4705,26 @@ class MidiToneApp:
             font=("DejaVu Sans", 11), fg="#a89984", bg="#111111",
         ).pack(side=tk.RIGHT)
 
+        self._mk_touch_btn(footer, "LOAD", self._preset_load_selected, bg="#458588").pack(
+            side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=16
+        )
+        self._mk_touch_btn(footer, "SAVE", self._preset_save_selected, bg="#689d6a").pack(
+            side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=16
+        )
+        self._mk_touch_btn(footer, "DELETE", self._preset_delete_selected, bg="#9d0006").pack(
+            side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=16
+        )
+
         status = tk.Label(
-            shell, textvariable=self._preset_status_var,
+            body, textvariable=self._preset_status_var,
             font=("DejaVu Sans", 13, "bold"),
             fg="#fabd2f", bg="#111111",
             wraplength=760, justify=tk.LEFT, anchor="w",
         )
-        status.pack(fill=tk.X, padx=10, pady=(4, 8))
+        status.pack(side=tk.TOP, fill=tk.X, padx=2, pady=(0, 8))
 
-        grid = tk.Frame(shell, bg="#111111")
-        grid.pack(fill=tk.BOTH, expand=True, padx=8, pady=4)
+        grid = tk.Frame(body, bg="#111111")
+        grid.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
         self._preset_slot_btns = {}
         cols = 4
         for i in range(PRESET_SLOTS):
@@ -4537,18 +4742,6 @@ class MidiToneApp:
             grid.grid_columnconfigure(c, weight=1)
         for r in range((PRESET_SLOTS + cols - 1) // cols):
             grid.grid_rowconfigure(r, weight=1)
-
-        footer = tk.Frame(shell, bg="#111111")
-        footer.pack(fill=tk.X, padx=8, pady=8)
-        self._mk_touch_btn(footer, "LOAD", self._preset_load_selected, bg="#458588").pack(
-            side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=16
-        )
-        self._mk_touch_btn(footer, "SAVE", self._preset_save_selected, bg="#689d6a").pack(
-            side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=16
-        )
-        self._mk_touch_btn(footer, "DELETE", self._preset_delete_selected, bg="#9d0006").pack(
-            side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=16
-        )
         self._paint_preset_slots()
 
     def _preset_slot_label(self, slot: int) -> str:
@@ -4748,6 +4941,36 @@ class MidiToneApp:
             else "BUS FX OFF — knobs back to morph / tone / …"
         )
 
+    def _active_scope_canvas(self) -> Optional[tk.Canvas]:
+        if self._kit_ui_open and self._kit_wave_canvas is not None:
+            return self._kit_wave_canvas
+        if self._mode == "synth" and not self._overlay_busy():
+            return self._wave_canvas
+        return None
+
+    def _invalidate_scope(self) -> None:
+        """Blank the CRT immediately, then coalesce the expensive redraw."""
+        canvas = self._active_scope_canvas()
+        now = time.monotonic()
+        if canvas is not None and not self._scope_blanked:
+            blank_waveform_on_canvas(canvas)
+            self._scope_blanked = True
+            self._scope_first_dirty = now
+        self._scope_needs_paint = True
+        # Debounce while knobs spin, but cap how long we stay blank
+        self._scope_paint_at = min(
+            now + SCOPE_REDRAW_DEBOUNCE_S,
+            getattr(self, "_scope_first_dirty", now) + SCOPE_REDRAW_MAX_WAIT_S,
+        )
+
+    def _flush_scope_paint(self, *, force: bool = False) -> None:
+        self._scope_needs_paint = False
+        self._scope_blanked = False
+        if self._kit_ui_open:
+            self._paint_kit_waveform(force=force)
+        elif self._mode == "synth" and not self._overlay_busy():
+            self._paint_synth_waveform(force=force)
+
     def _paint_synth_waveform(self, *, force: bool = False) -> None:
         canvas = self._wave_canvas
         if canvas is None:
@@ -4756,13 +4979,26 @@ class MidiToneApp:
             return
         try:
             samples = self.engine.morph_cycle_copy()
-            draw_waveform_on_canvas(canvas, samples, color="#83a598")
+            if SCOPE_MORPH_CYCLES > 1 and samples is not None and len(samples) > 0:
+                samples = np.tile(samples, SCOPE_MORPH_CYCLES)
+            draw_waveform_on_canvas(
+                canvas,
+                samples,
+                color=SCOPE_CRT_WAVE,
+                x_label=f"{SCOPE_MORPH_CYCLES} cycles",
+                redraw_grid=force,
+            )
+            self._scope_blanked = False
+            self._scope_needs_paint = False
             if self._wave_caption is not None:
                 a, b, blend = self.engine.morph_neighbors()
                 if a == b:
-                    cap = f"Morph cycle · {a}"
+                    cap = f"Morph · {a} · {SCOPE_MORPH_CYCLES} cycles"
                 else:
-                    cap = f"Morph cycle · {a} → {b}  {int(blend * 100)}%"
+                    cap = (
+                        f"Morph · {a} → {b}  {int(blend * 100)}% · "
+                        f"{SCOPE_MORPH_CYCLES} cycles"
+                    )
                 self._wave_caption.configure(text=cap)
         except Exception:
             if force:
@@ -4771,23 +5007,54 @@ class MidiToneApp:
     def _kit_model_selected(self) -> str:
         return drum_model_for_note(self._kit_selected_note)
 
+    def _kit_pad_caption(self, cell: int, note: int) -> str:
+        """Short readable pad label for the full-height kit grid."""
+        model = drum_model_for_note(note).replace("_", " ")
+        return f"{phrase_pad_label(cell)}\n{model}"
+
+    def _refresh_kit_status(self) -> None:
+        pitch, decay, noise, tone = self.engine.drum_macros()
+        label = phrase_pad_label(
+            max(0, min(15, self._kit_selected_note - PHRASE_PAD_BASE))
+        )
+        model = self._kit_model_selected().replace("_", " ")
+        macros = (
+            f"pitch {int(pitch * 127)} · stretch {int(decay * 127)} · "
+            f"noise {int(noise * 127)} · tone {int(tone * 127)}"
+        )
+        if self._kit_all_drums:
+            self._kit_status_var.set(
+                f"ALL DRUMS · FX shared kit bus · knobs reshape body · {macros}"
+            )
+        elif getattr(self, "_kit_view", "grid") == "wave":
+            self._kit_status_var.set(
+                f"{label} · {model} · {macros} · scope {int(DRUM_SCOPE_SEC * 1000)} ms"
+            )
+        else:
+            self._kit_status_var.set(
+                f"{label} · {model} · {macros} · tap pad to play · WAVE for scope"
+            )
+
     def _paint_kit_waveform(self, *, force: bool = False) -> None:
         canvas = self._kit_wave_canvas
         if canvas is None or not self._kit_ui_open:
+            self._refresh_kit_status()
+            return
+        if getattr(self, "_kit_view", "grid") != "wave":
+            self._refresh_kit_status()
             return
         try:
-            model = self._kit_model_selected()
-            samples = self.engine.preview_drum_waveform(model)
-            draw_waveform_on_canvas(canvas, samples, color="#fabd2f")
-            pitch, decay, noise, tone = self.engine.drum_macros()
-            label = phrase_pad_label(
-                max(0, min(15, self._kit_selected_note - PHRASE_PAD_BASE))
+            samples = self.engine.preview_drum_waveform(self._kit_model_selected())
+            draw_waveform_on_canvas(
+                canvas,
+                samples,
+                color=SCOPE_CRT_WAVE,
+                duration_sec=DRUM_SCOPE_SEC,
+                redraw_grid=force,
             )
-            self._kit_status_var.set(
-                f"{label} · {model} · pitch {int(pitch * 127)} · "
-                f"stretch {int(decay * 127)} · noise {int(noise * 127)} · "
-                f"tone {int(tone * 127)}"
-            )
+            self._scope_blanked = False
+            self._scope_needs_paint = False
+            self._refresh_kit_status()
         except Exception:
             if force:
                 pass
@@ -4818,9 +5085,7 @@ class MidiToneApp:
         self.engine.set_fx_edit_drums()
         self._paint_kit_pad_btns()
         self.mod_var.set(self._format_mod_line())
-        self._kit_status_var.set(
-            "ALL DRUMS · FX MODE edits the shared kit bus (echo/drive on whole kit)"
-        )
+        self._refresh_kit_status()
         self._append_log("KIT — ALL DRUMS FX (shared kit bus)")
 
     def _select_kit_note(self, note: int, *, audition: bool = False) -> None:
@@ -4830,16 +5095,31 @@ class MidiToneApp:
         self._kit_selected_note = note
         self._kit_all_drums = False
         self._paint_kit_pad_btns()
-        self._paint_kit_waveform(force=True)
         if self.engine.fx_mode():
             self.engine.set_fx_edit_drum(drum_model_for_note(note))
             self.mod_var.set(self._format_mod_line())
+        if getattr(self, "_kit_view", "grid") == "wave":
+            self._paint_kit_waveform(force=True)
+        else:
+            self._refresh_kit_status()
         if audition:
             self.engine.note_on(DRUM_CHANNEL, note, 110)
-            self._q_put(("log", f"Kit audition {drum_model_for_note(note)}", False))
+            self._q_put(("log", f"Kit play {drum_model_for_note(note)}", False))
+
+    def _kit_audition_selected(self) -> None:
+        self._select_kit_note(self._kit_selected_note, audition=True)
+
+    def _set_kit_view(self, view: str) -> None:
+        nxt = "wave" if view == "wave" else "grid"
+        if nxt == getattr(self, "_kit_view", "grid"):
+            if nxt == "grid" or self._kit_wave_canvas is not None:
+                return
+        self._kit_view = nxt
+        if self._kit_ui_open:
+            self._rebuild_kit_ui()
 
     def _open_kit_explorer(self) -> None:
-        """Drill-down: pick a kit pad and watch its one-shot while knobs move."""
+        """Kit grid picker; WAVE drills into a CRT scope for the selected drum."""
         if self._kit_ui_open:
             return
         if self._mode != "synth":
@@ -4851,9 +5131,6 @@ class MidiToneApp:
         if self._save_voice_open:
             self._close_save_voice(restore_main=False)
 
-        # If insert FX MODE is on, keep drum-group target or point at selected drum.
-        # If BUS FX is on, keep global edit (kit is audition/preview only).
-        # Otherwise turn on DRUM MODE so knobs reshape the one-shot body.
         if self.engine.fx_mode():
             if self.engine.fx_edit_kind() == "drums":
                 self._kit_all_drums = True
@@ -4869,97 +5146,127 @@ class MidiToneApp:
             self.mod_var.set(self._format_mod_line())
 
         self._kit_ui_open = True
+        self._kit_view = "grid"
         self._synth_shell.pack_forget()
-
         self._kit_frame = tk.Frame(self._mode_host, bg="#111111")
         self._kit_frame.pack(fill=tk.BOTH, expand=True)
-
-        header = tk.Frame(self._kit_frame, bg="#111111")
-        header.pack(fill=tk.X, padx=6, pady=(6, 2))
-        tk.Label(
-            header,
-            text="DRUM KIT",
-            font=("DejaVu Sans", 16, "bold"),
-            fg="#fbf1c7",
-            bg="#111111",
-        ).pack(side=tk.LEFT)
-        tk.Label(
-            header,
-            text="tap a pad · knobs reshape the wave",
-            font=("DejaVu Sans", 11),
-            fg="#a89984",
-            bg="#111111",
-        ).pack(side=tk.RIGHT)
-
-        status = tk.Label(
-            self._kit_frame,
-            textvariable=self._kit_status_var,
-            font=("DejaVu Sans Mono", 11),
-            fg="#fabd2f",
-            bg="#111111",
-            anchor="w",
-        )
-        status.pack(fill=tk.X, padx=8, pady=(0, 2))
-
-        self._kit_wave_canvas = tk.Canvas(
-            self._kit_frame,
-            height=100,
-            bg="#1d2021",
-            highlightthickness=1,
-            highlightbackground="#3c3836",
-            bd=0,
-        )
-        self._kit_wave_canvas.pack(fill=tk.X, padx=8, pady=(0, 4))
-        self._kit_wave_canvas.bind(
-            "<Configure>", lambda _e: self._paint_kit_waveform(force=True)
-        )
-
-        grid = tk.Frame(self._kit_frame, bg="#111111")
-        grid.pack(fill=tk.BOTH, expand=True, padx=4, pady=2)
-        for r in range(4):
-            grid.rowconfigure(r, weight=1)
-        for c in range(4):
-            grid.columnconfigure(c, weight=1)
-        self._kit_btns = {}
-        for i, cell in enumerate(PHRASE_GRID_CELLS):
-            note = mpk_note_for_phrase_cell(cell)
-            model = drum_model_for_note(note)
-            label = f"{phrase_pad_label(cell)}\n{model}"
-            r, c = divmod(i, 4)
-            btn = self._mk_touch_btn(
-                grid,
-                label,
-                lambda n=note: self._select_kit_note(n, audition=True),
-                bg="#3c3836",
-            )
-            btn.configure(font=("DejaVu Sans", 11, "bold"), pady=6)
-            btn.grid(row=r, column=c, sticky="nsew", padx=2, pady=2)
-            self._kit_btns[note] = btn
-
-        footer = tk.Frame(self._kit_frame, bg="#111111")
-        footer.pack(fill=tk.X, padx=6, pady=6)
-        self._kit_all_btn = self._mk_touch_btn(
-            footer, "ALL DRUMS", self._select_kit_all_drums, bg="#504945"
-        )
-        self._kit_all_btn.pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=12)
-        self._mk_touch_btn(
-            footer, "AUDITION", lambda: self._select_kit_note(self._kit_selected_note, audition=True),
-            bg="#458588",
-        ).pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=12)
-        self._mk_touch_btn(footer, "CLOSE", self._close_kit_explorer, bg="#9d0006").pack(
-            side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=12
-        )
-        self._paint_kit_pad_btns()
-        self._paint_kit_waveform(force=True)
+        self._rebuild_kit_ui()
         if self.engine.fx_mode():
-            if self.engine.fx_edit_kind() == "drums":
-                self._kit_all_drums = True
-                self._paint_kit_pad_btns()
             self._append_log(
-                "KIT — ALL DRUMS = shared kit FX; tap a pad for that drum's insert"
+                "KIT — ALL DRUMS = shared kit FX; tap a pad · WAVE for scope"
             )
         else:
-            self._append_log("KIT — pick a drum; DRUM MODE knobs reshape its wave")
+            self._append_log("KIT — tap a drum to play; knobs reshape it · WAVE for scope")
+
+    def _rebuild_kit_ui(self) -> None:
+        """Build grid or wave drill-down inside the kit frame (footer-first)."""
+        frame = self._kit_frame
+        if frame is None:
+            return
+        for w in frame.winfo_children():
+            w.destroy()
+        self._kit_btns = {}
+        self._kit_all_btn = None
+        self._kit_wave_canvas = None
+
+        wave_view = getattr(self, "_kit_view", "grid") == "wave"
+        header, body, footer = self._pack_screen_regions(
+            frame,
+            header_padx=6,
+            header_pady=(6, 2),
+            body_padx=4,
+            body_pady=2,
+            footer_padx=6,
+            footer_pady=6,
+        )
+
+        title = "DRUM WAVE" if wave_view else "DRUM KIT"
+        hint = (
+            "knobs reshape · PLAY to hear"
+            if wave_view
+            else "tap pad to play · knobs reshape"
+        )
+        tk.Label(
+            header, text=title, font=("DejaVu Sans", 16, "bold"),
+            fg="#fbf1c7", bg="#111111",
+        ).pack(side=tk.LEFT)
+        tk.Label(
+            header, text=hint, font=("DejaVu Sans", 11),
+            fg="#a89984", bg="#111111",
+        ).pack(side=tk.RIGHT)
+
+        if wave_view:
+            self._mk_touch_btn(
+                footer, "PLAY", self._kit_audition_selected, bg="#458588"
+            ).pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=12)
+            self._mk_touch_btn(
+                footer, "BACK", lambda: self._set_kit_view("grid"), bg="#504945"
+            ).pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=12)
+            self._mk_touch_btn(
+                footer, "CLOSE", self._close_kit_explorer, bg="#9d0006"
+            ).pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=12)
+        else:
+            self._kit_all_btn = self._mk_touch_btn(
+                footer, "ALL DRUMS", self._select_kit_all_drums, bg="#504945"
+            )
+            self._kit_all_btn.pack(
+                side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=12
+            )
+            self._mk_touch_btn(
+                footer, "WAVE", lambda: self._set_kit_view("wave"), bg="#689d6a"
+            ).pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=12)
+            self._mk_touch_btn(
+                footer, "CLOSE", self._close_kit_explorer, bg="#9d0006"
+            ).pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=12)
+
+        status = tk.Label(
+            body,
+            textvariable=self._kit_status_var,
+            font=("DejaVu Sans", 12, "bold"),
+            fg="#fabd2f",
+            bg="#111111",
+            wraplength=760,
+            justify=tk.LEFT,
+            anchor="w",
+        )
+        status.pack(side=tk.TOP, fill=tk.X, padx=4, pady=(0, 4))
+
+        if wave_view:
+            self._kit_wave_canvas = tk.Canvas(
+                body,
+                bg=SCOPE_CRT_BG,
+                highlightthickness=1,
+                highlightbackground="#14532d",
+                bd=0,
+            )
+            self._kit_wave_canvas.pack(
+                side=tk.TOP, fill=tk.BOTH, expand=True, padx=4, pady=2
+            )
+            self._kit_wave_canvas.bind(
+                "<Configure>", lambda _e: self._paint_kit_waveform(force=True)
+            )
+            self._paint_kit_waveform(force=True)
+        else:
+            grid = tk.Frame(body, bg="#111111")
+            grid.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+            for r in range(4):
+                grid.rowconfigure(r, weight=1)
+            for c in range(4):
+                grid.columnconfigure(c, weight=1)
+            for i, cell in enumerate(PHRASE_GRID_CELLS):
+                note = mpk_note_for_phrase_cell(cell)
+                r, c = divmod(i, 4)
+                btn = self._mk_touch_btn(
+                    grid,
+                    self._kit_pad_caption(cell, note),
+                    lambda n=note: self._select_kit_note(n, audition=True),
+                    bg="#3c3836",
+                )
+                btn.configure(font=("DejaVu Sans", 14, "bold"), pady=4)
+                btn.grid(row=r, column=c, sticky="nsew", padx=3, pady=3)
+                self._kit_btns[note] = btn
+            self._paint_kit_pad_btns()
+            self._refresh_kit_status()
 
     def _close_kit_explorer(self, restore_main: bool = True) -> None:
         if not self._kit_ui_open:
@@ -4970,6 +5277,7 @@ class MidiToneApp:
         self._kit_btns = {}
         self._kit_all_btn = None
         self._kit_wave_canvas = None
+        self._kit_view = "grid"
         self._kit_ui_open = False
         # Leaving KIT: keep shared-kit FX edit; single-drum insert → nearer morph voice.
         if self.engine.fx_mode():
@@ -4989,8 +5297,9 @@ class MidiToneApp:
         for w in shell.winfo_children():
             w.destroy()
 
-        header = tk.Frame(shell, bg="#111111")
-        header.pack(fill=tk.X, padx=8, pady=(10, 4))
+        header, body, footer = self._pack_screen_regions(
+            shell, header_pady=(10, 4), body_padx=8, body_pady=2, footer_padx=8, footer_pady=8
+        )
         tk.Label(
             header, text="Event log", font=("DejaVu Sans", 18, "bold"),
             fg="#fbf1c7", bg="#111111",
@@ -5000,41 +5309,43 @@ class MidiToneApp:
             font=("DejaVu Sans", 11), fg="#a89984", bg="#111111",
         ).pack(side=tk.RIGHT)
 
-        self._log_last_lbl = tk.Label(
-            shell, textvariable=self.last_var,
-            font=("DejaVu Sans Mono", 14, "bold"), fg="#fabd2f", bg="#111111",
-            wraplength=760, justify=tk.LEFT, anchor="w",
-        )
-        self._log_last_lbl.pack(fill=tk.X, padx=10, pady=(4, 6))
-
-        body = tk.Frame(shell, bg="#111111")
-        body.pack(fill=tk.BOTH, expand=True, padx=8, pady=2)
-        self.log = tk.Text(
-            body, font=("DejaVu Sans Mono", 13),
-            bg="#1d2021", fg="#ebdbb2", insertbackground="#ebdbb2",
-            relief=tk.FLAT, state=tk.DISABLED,
-        )
-        scroll = ttk.Scrollbar(body, command=self.log.yview)
-        self.log.configure(yscrollcommand=scroll.set)
-        self.log.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        scroll.pack(side=tk.RIGHT, fill=tk.Y)
-
-        footer = tk.Frame(shell, bg="#111111")
-        footer.pack(fill=tk.X, padx=8, pady=8)
         self._mk_touch_btn(footer, "CLEAR LOG", self._clear_log, bg="#504945").pack(
             side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=16
         )
         self._mk_touch_btn(footer, "ALL NOTES OFF", self._panic, bg="#9d0006").pack(
             side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=16
         )
+        self._mk_touch_btn(footer, "POWER", self._open_power_menu, bg="#cc241d").pack(
+            side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=16
+        )
+
+        self._log_last_lbl = tk.Label(
+            body, textvariable=self.last_var,
+            font=("DejaVu Sans Mono", 14, "bold"), fg="#fabd2f", bg="#111111",
+            wraplength=760, justify=tk.LEFT, anchor="w",
+        )
+        self._log_last_lbl.pack(side=tk.TOP, fill=tk.X, padx=2, pady=(0, 6))
+
+        text_wrap = tk.Frame(body, bg="#111111")
+        text_wrap.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        self.log = tk.Text(
+            text_wrap, font=("DejaVu Sans Mono", 13),
+            bg="#1d2021", fg="#ebdbb2", insertbackground="#ebdbb2",
+            relief=tk.FLAT, state=tk.DISABLED,
+        )
+        scroll = ttk.Scrollbar(text_wrap, command=self.log.yview)
+        self.log.configure(yscrollcommand=scroll.set)
+        self.log.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scroll.pack(side=tk.RIGHT, fill=tk.Y)
 
     def _build_looper_mode(self) -> None:
         shell = self._looper_shell
         for w in shell.winfo_children():
             w.destroy()
 
-        header = tk.Frame(shell, bg="#111111")
-        header.pack(fill=tk.X, padx=8, pady=(10, 4))
+        header, body, footer = self._pack_screen_regions(
+            shell, header_pady=(10, 4), body_padx=8, body_pady=4, footer_padx=8, footer_pady=10
+        )
         tk.Label(
             header, text="Looper", font=("DejaVu Sans", 18, "bold"),
             fg="#fbf1c7", bg="#111111",
@@ -5044,17 +5355,31 @@ class MidiToneApp:
             font=("DejaVu Sans", 11), fg="#a89984", bg="#111111",
         ).pack(side=tk.RIGHT)
 
+        self._mk_touch_btn(footer, "STOP", self._loop_stop, bg="#504945").pack(
+            side=tk.LEFT, expand=True, fill=tk.BOTH, padx=4, ipady=18
+        )
+        self._loop_to_pad_btn = self._mk_touch_btn(
+            footer, "→ PAD", self._loop_assign_to_pad, bg="#458588"
+        )
+        self._loop_to_pad_btn.pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=4, ipady=18)
+        self._mk_touch_btn(footer, "CLEAR", self._loop_clear, bg="#3c3836").pack(
+            side=tk.LEFT, expand=True, fill=tk.BOTH, padx=4, ipady=18
+        )
+        self._mk_touch_btn(footer, "ALL NOTES OFF", self._panic, bg="#9d0006").pack(
+            side=tk.LEFT, expand=True, fill=tk.BOTH, padx=4, ipady=18
+        )
+
         status = tk.Label(
-            shell, textvariable=self._loop_status_var,
+            body, textvariable=self._loop_status_var,
             font=("DejaVu Sans", 14, "bold"),
             fg="#fabd2f", bg="#111111",
             wraplength=760, justify=tk.LEFT, anchor="w",
         )
-        status.pack(fill=tk.X, padx=10, pady=(8, 12))
+        status.pack(side=tk.TOP, fill=tk.X, padx=2, pady=(4, 12))
 
-        # Giant transport buttons
-        row1 = tk.Frame(shell, bg="#111111")
-        row1.pack(fill=tk.BOTH, expand=True, padx=8, pady=4)
+        # Giant transport buttons absorb leftover height
+        row1 = tk.Frame(body, bg="#111111")
+        row1.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
         self._loop_rec_btn = self._mk_touch_btn(
             row1, "RECORD", self._loop_toggle_record, bg="#9d0006"
         )
@@ -5067,25 +5392,13 @@ class MidiToneApp:
         self._loop_play_btn.configure(font=("DejaVu Sans", 20, "bold"), pady=28)
         self._loop_play_btn.pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=4)
 
-        row2 = tk.Frame(shell, bg="#111111")
-        row2.pack(fill=tk.X, padx=8, pady=(4, 10))
-        self._mk_touch_btn(row2, "STOP", self._loop_stop, bg="#504945").pack(
-            side=tk.LEFT, expand=True, fill=tk.BOTH, padx=4, ipady=18
-        )
-        self._mk_touch_btn(row2, "CLEAR", self._loop_clear, bg="#3c3836").pack(
-            side=tk.LEFT, expand=True, fill=tk.BOTH, padx=4, ipady=18
-        )
-        self._mk_touch_btn(row2, "ALL NOTES OFF", self._panic, bg="#9d0006").pack(
-            side=tk.LEFT, expand=True, fill=tk.BOTH, padx=4, ipady=18
-        )
-
         tip = tk.Label(
-            shell,
-            text="1) RECORD  2) play notes on the MPK  3) RECORD again to stop  4) PLAY loops it",
+            body,
+            text="RECORD → play MPK → RECORD to stop → PLAY · or → PAD to drop the take onto a phrase pad",
             font=("DejaVu Sans", 11), fg="#83a598", bg="#111111",
             wraplength=760, justify=tk.LEFT, anchor="w",
         )
-        tip.pack(fill=tk.X, padx=10, pady=(0, 10))
+        tip.pack(side=tk.BOTTOM, fill=tk.X, padx=2, pady=(8, 0))
         self._paint_looper_buttons()
 
     def _build_pads_mode(self) -> None:
@@ -5103,9 +5416,10 @@ class MidiToneApp:
         self._phrase_synth_btn = None
 
         play_view = self._pads_view == "play"
+        header, body, footer = self._pack_screen_regions(
+            shell, header_pady=(6, 2), body_padx=6, body_pady=2, footer_padx=6, footer_pady=4
+        )
 
-        header = tk.Frame(shell, bg="#111111")
-        header.pack(fill=tk.X, padx=8, pady=(6, 2))
         tk.Label(
             header, text="Phrase Pads", font=("DejaVu Sans", 16, "bold"),
             fg="#fbf1c7", bg="#111111",
@@ -5120,47 +5434,25 @@ class MidiToneApp:
             btn.pack(side=tk.LEFT, padx=2)
             self._phrase_view_btns[key] = btn
 
-        status = tk.Label(
-            shell, textvariable=self._phrase_status_var,
-            font=("DejaVu Sans", 12, "bold"),
-            fg="#fabd2f", bg="#111111",
-            wraplength=760, justify=tk.LEFT, anchor="w",
-        )
-        status.pack(fill=tk.X, padx=10, pady=(2, 4))
-
-        grid = tk.Frame(shell, bg="#111111")
-        grid.pack(fill=tk.BOTH, expand=True, padx=6, pady=2)
-        for row in range(4):
-            grid.rowconfigure(row, weight=1)
-        for col in range(4):
-            grid.columnconfigure(col, weight=1)
-        for i, cell in enumerate(PHRASE_GRID_CELLS):
-            r, c = divmod(i, 4)
-            btn = self._mk_touch_btn(
-                grid,
-                phrase_pad_label(cell),
-                lambda idx=cell: self._phrase_pad_tap(idx),
-                bg="#3c3836",
-            )
-            btn.configure(font=("DejaVu Sans", 13, "bold"), pady=10)
-            btn.grid(row=r, column=c, sticky="nsew", padx=3, pady=3)
-            self._phrase_pad_btns[cell] = btn
-
         if play_view:
-            row = tk.Frame(shell, bg="#111111")
-            row.pack(fill=tk.X, padx=6, pady=(4, 6))
-            self._mk_touch_btn(row, "STOP ALL", self._phrase_stop_all, bg="#3c3836").pack(
+            self._mk_touch_btn(footer, "STOP ALL", self._phrase_stop_all, bg="#3c3836").pack(
+                side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=10
+            )
+            self._phrase_clear_btn = self._mk_touch_btn(
+                footer, "CLEAR", self._phrase_toggle_clear, bg="#9d0006"
+            )
+            self._phrase_clear_btn.pack(
                 side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=10
             )
             self._phrase_out_btn = self._mk_touch_btn(
-                row, "OUT: LOCAL", self._phrase_cycle_out_mode, bg="#504945"
+                footer, "OUT: LOCAL", self._phrase_cycle_out_mode, bg="#504945"
             )
             self._phrase_out_btn.pack(
                 side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=10
             )
         else:
-            row = tk.Frame(shell, bg="#111111")
-            row.pack(fill=tk.X, padx=6, pady=(4, 2))
+            row = tk.Frame(footer, bg="#111111")
+            row.pack(fill=tk.X, pady=(0, 2))
             self._mk_touch_btn(row, "STOP REC", self._phrase_stop_rec, bg="#504945").pack(
                 side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=8
             )
@@ -5180,8 +5472,8 @@ class MidiToneApp:
                 side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=8
             )
 
-            detail = tk.Frame(shell, bg="#111111")
-            detail.pack(fill=tk.X, padx=6, pady=(2, 6))
+            detail = tk.Frame(footer, bg="#111111")
+            detail.pack(fill=tk.X)
             self._phrase_trig_btn = self._mk_touch_btn(
                 detail, "TRIG", self._phrase_edit_trig, bg="#458588"
             )
@@ -5212,6 +5504,33 @@ class MidiToneApp:
             self._phrase_out_btn.pack(
                 side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=8
             )
+
+        status = tk.Label(
+            body, textvariable=self._phrase_status_var,
+            font=("DejaVu Sans", 12, "bold"),
+            fg="#fabd2f", bg="#111111",
+            wraplength=760, justify=tk.LEFT, anchor="w",
+        )
+        status.pack(side=tk.TOP, fill=tk.X, padx=4, pady=(0, 4))
+
+        grid = tk.Frame(body, bg="#111111")
+        grid.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        for row_i in range(4):
+            grid.rowconfigure(row_i, weight=1)
+        for col in range(4):
+            grid.columnconfigure(col, weight=1)
+        for i, cell in enumerate(PHRASE_GRID_CELLS):
+            r, c = divmod(i, 4)
+            btn = self._mk_touch_btn(
+                grid,
+                phrase_pad_label(cell),
+                lambda idx=cell: self._phrase_pad_tap(idx),
+                bg="#3c3836",
+            )
+            btn.configure(font=("DejaVu Sans", 13, "bold"), pady=10)
+            btn.grid(row=r, column=c, sticky="nsew", padx=3, pady=3)
+            self._phrase_pad_btns[cell] = btn
+
         self._paint_phrase_pads()
 
     def _phrase_set_view(self, view: str) -> None:
@@ -5219,21 +5538,24 @@ class MidiToneApp:
         if nxt == self._pads_view and self._phrase_pad_btns:
             return
         if nxt == "play":
-            self._phrase_clear_armed = False
             self._phrase_mode_armed = False
             if self._phrases.is_recording():
                 self._phrases.stop_record()
+            # Keep CLEAR armed across view switch so erase still works
         self._pads_view = nxt
         self._mark_settings_dirty()
         self._build_pads_mode()
 
     def _phrase_pad_tap(self, idx: int) -> None:
+        if self._loop_to_pad_armed:
+            self._finish_loop_to_pad(idx)
+            return
         if self._pads_view == "edit" and self._phrase_mode_armed:
             self._phrases.toggle_trigger_mode(idx)
             self._phrase_mode_armed = False
             self._paint_phrase_pads()
             return
-        if self._pads_view == "edit" and self._phrase_clear_armed:
+        if self._phrase_clear_armed:
             self._phrases.clear_cell(idx)
             self._phrase_clear_armed = False
             self._paint_phrase_pads()
@@ -5258,8 +5580,6 @@ class MidiToneApp:
 
     def _phrase_toggle_clear(self) -> None:
         """Arm CLEAR: next pad tap erases that cell (cancel by tapping CLEAR again)."""
-        if self._pads_view != "edit":
-            return
         if self._phrases.is_recording():
             self._phrase_status_var.set("Stop recording before CLEAR")
             return
@@ -5331,12 +5651,14 @@ class MidiToneApp:
         self._paint_phrase_pads()
 
     def _paint_phrase_pads(self) -> None:
-        clear_armed = bool(self._phrase_clear_armed) and self._pads_view == "edit"
+        clear_armed = bool(self._phrase_clear_armed)
         mode_armed = bool(self._phrase_mode_armed) and self._pads_view == "edit"
+        assign_armed = bool(self._loop_to_pad_armed)
         self._phrase_status_var.set(
             self._phrases.status_line(
                 clear_armed=clear_armed,
                 mode_armed=mode_armed,
+                assign_armed=assign_armed,
                 view=self._pads_view,
             )
         )
@@ -5349,7 +5671,10 @@ class MidiToneApp:
             loop = cell.is_loop()
             mode_mark = "↻" if loop else "▶"
             lock_mark = "·" if cell.is_voice_locked() else ""
-            if mode_armed:
+            if assign_armed:
+                text = f"{label}\nDROP?"
+                color = "#458588"
+            elif mode_armed:
                 text = f"{label}\n{mode_mark}?"
                 color = "#b16286"
             elif clear_armed:
@@ -5371,6 +5696,7 @@ class MidiToneApp:
             if (
                 not clear_armed
                 and not mode_armed
+                and not assign_armed
                 and selected == idx
                 and rec != idx
                 and idx not in playing
@@ -5464,6 +5790,7 @@ class MidiToneApp:
                 self._phrases.status_line(
                     clear_armed=self._phrase_clear_armed,
                     mode_armed=self._phrase_mode_armed,
+                    assign_armed=self._loop_to_pad_armed,
                     view=self._pads_view,
                 )
             )
@@ -5479,6 +5806,8 @@ class MidiToneApp:
             self._close_kit_explorer(restore_main=False)
         if self._save_voice_open:
             self._close_save_voice(restore_main=False)
+        if self._power_ui_open:
+            self._close_power_menu(restore_main=False)
 
         # Leaving pads while recording: keep the take
         if self._mode == "pads" and mode != "pads":
@@ -5486,6 +5815,10 @@ class MidiToneApp:
                 self._phrases.stop_record()
             self._phrase_clear_armed = False
             self._phrase_mode_armed = False
+            if mode != "pads":
+                self._loop_to_pad_armed = False
+        if mode != "pads" and mode != "looper":
+            self._loop_to_pad_armed = False
 
         self._mode = mode
         self._synth_shell.pack_forget()
@@ -5500,6 +5833,8 @@ class MidiToneApp:
             self._morph_frame.pack_forget()
         if self._kit_frame is not None:
             self._kit_frame.pack_forget()
+        if self._power_frame is not None:
+            self._power_frame.pack_forget()
 
         if mode == "looper":
             self._looper_shell.pack(fill=tk.BOTH, expand=True)
@@ -5545,14 +5880,19 @@ class MidiToneApp:
         st = self._looper.status()
         n = int(st["events"])
         length = float(st["length"])
-        if st["recording"]:
+        if self._loop_to_pad_armed:
+            msg = (
+                f"→ PAD armed — open PADS and tap a square "
+                f"({length:.2f}s · {n} events) · → PAD again to cancel"
+            )
+        elif st["recording"]:
             msg = f"● RECORDING…  {n} events  (tap RECORD to stop)"
         elif st["playing"]:
             msg = f"▶ PLAYING loop  {length:.2f}s · {n} events  (tap PLAY to stop)"
         elif n == 0:
-            msg = "Loop empty — tap RECORD, play notes, RECORD again, then PLAY."
+            msg = "Loop empty — tap RECORD, play notes, RECORD again, then PLAY or → PAD."
         else:
-            msg = f"Ready  {length:.2f}s · {n} events — tap PLAY to loop."
+            msg = f"Ready  {length:.2f}s · {n} events — PLAY to loop, or → PAD onto a phrase pad."
         self._loop_status_var.set(msg)
         self._paint_looper_buttons()
 
@@ -5560,7 +5900,7 @@ class MidiToneApp:
         if self._loop_rec_btn is not None:
             if self._looper.is_recording():
                 self._loop_rec_btn.configure(
-                    text="● STOP REC", bg="#cc241d", activebackground="#cc241d"
+                    text="■ STOP REC", bg="#d79921", activebackground="#d79921"
                 )
             else:
                 self._loop_rec_btn.configure(
@@ -5575,37 +5915,36 @@ class MidiToneApp:
                 self._loop_play_btn.configure(
                     text="PLAY", bg="#689d6a", activebackground="#689d6a"
                 )
+        if self._loop_to_pad_btn is not None:
+            armed = bool(self._loop_to_pad_armed)
+            self._loop_to_pad_btn.configure(
+                text="→ PAD…" if armed else "→ PAD",
+                bg="#83a598" if armed else "#458588",
+                activebackground="#83a598" if armed else "#458588",
+            )
 
     def _loop_toggle_record(self) -> None:
-        recording = self._looper.toggle_record()
-        if recording:
+        self._loop_to_pad_armed = False
+        was = self._looper.is_recording()
+        now = self._looper.toggle_record()
+        if now:
             self._q_put(("log", "Loop RECORD start", False))
-        else:
-            st = self._looper.status()
-            self._q_put(
-                (
-                    "log",
-                    f"Loop RECORD stop — trimmed to {float(st['length']):.2f}s "
-                    f"({int(st['events'])} events)",
-                    False,
-                )
-            )
+        elif was:
+            self._q_put(("log", "Loop RECORD stop", False))
         self._q_put(("loop",))
         self._refresh_loop_status()
 
     def _loop_toggle_play(self) -> None:
-        if self._looper.is_playing():
-            self._looper.stop_playback()
-            self._q_put(("log", "Loop PLAY stop", False))
+        self._loop_to_pad_armed = False
+        if self._looper.toggle_playback():
+            self._q_put(("log", "Loop PLAY start", False))
         else:
-            if not self._looper.start_playback():
-                self._q_put(("log", "Loop empty — record something first", False))
-            else:
-                self._q_put(("log", "Loop PLAY start", False))
+            self._q_put(("log", "Loop PLAY stop", False))
         self._q_put(("loop",))
         self._refresh_loop_status()
 
     def _loop_stop(self) -> None:
+        self._loop_to_pad_armed = False
         if self._looper.is_recording():
             self._looper.stop_record()
         if self._looper.is_playing():
@@ -5615,10 +5954,57 @@ class MidiToneApp:
         self._refresh_loop_status()
 
     def _loop_clear(self) -> None:
+        self._loop_to_pad_armed = False
         self._looper.clear()
         self._q_put(("log", "Loop CLEAR", False))
         self._q_put(("loop",))
         self._refresh_loop_status()
+
+    def _loop_assign_to_pad(self) -> None:
+        """Arm LOOPER → PAD: next phrase-pad tap receives this take as a LOOP clip."""
+        if self._looper.is_recording():
+            self._looper.stop_record()
+        events, length = self._looper.snapshot()
+        if not events or length <= 0.0:
+            self._loop_status_var.set("Nothing to assign — record a loop first.")
+            self._loop_to_pad_armed = False
+            self._paint_looper_buttons()
+            return
+        self._phrase_clear_armed = False
+        self._phrase_mode_armed = False
+        self._loop_to_pad_armed = not self._loop_to_pad_armed
+        self._refresh_loop_status()
+        if self._loop_to_pad_armed:
+            self._pads_view = "edit"
+            self._switch_mode("pads")
+            self._build_pads_mode()
+            self._phrase_status_var.set(
+                "LOOPER → PAD — tap a pad to drop the loop (overwrites that pad)"
+            )
+            self._paint_phrase_pads()
+            self._append_log("Looper → PAD armed — tap a phrase pad")
+
+    def _finish_loop_to_pad(self, idx: int) -> None:
+        events, length = self._looper.snapshot()
+        self._loop_to_pad_armed = False
+        if not events or length <= 0.0:
+            self._phrase_status_var.set("Looper was empty — assignment cancelled")
+            self._paint_phrase_pads()
+            return
+        ok = self._phrases.load_from_events(
+            idx, events, length, trigger_mode=PHRASE_TRIG_LOOP
+        )
+        if ok:
+            self._append_log(
+                f"Looper → {phrase_pad_label(idx)} ({len(events)} ev, {length:.2f}s LOOP)"
+            )
+            self._phrase_status_var.set(
+                f"Loaded looper → {phrase_pad_label(idx)} as LOOP — launch it from PLAY"
+            )
+        else:
+            self._phrase_status_var.set("Could not assign looper to that pad")
+        self._paint_phrase_pads()
+        self._paint_looper_buttons()
 
     def _mk_touch_btn(self, parent: tk.Misc, text: str, command, bg: str = "#3c3836") -> tk.Button:
         """Touch-friendly button: fire on press (resistive panels often miss click)."""
@@ -5643,6 +6029,171 @@ class MidiToneApp:
 
         # No command= callback: resistive panels often never complete a click.
         btn.bind("<ButtonPress-1>", _fire)
+        return btn
+
+    def _pack_screen_regions(
+        self,
+        parent: tk.Misc,
+        *,
+        bg: str = "#111111",
+        header_padx: int = 8,
+        header_pady: Tuple[int, int] = (8, 2),
+        body_padx: int = 6,
+        body_pady: int = 2,
+        footer_padx: int = 8,
+        footer_pady: int = 8,
+    ) -> Tuple[tk.Frame, tk.Frame, tk.Frame]:
+        """Return (header, body, footer) packed so chrome never falls off-screen.
+
+        Pack order matters on short displays:
+          1) footer (BOTTOM) — reserved first, always visible
+          2) header (TOP)
+          3) body (TOP, expand) — absorbs leftover height only
+
+        Put all action buttons in ``footer`` (or nested frames inside it).
+        Put scrollable / expanding content only in ``body``.
+        """
+        footer = tk.Frame(parent, bg=bg)
+        footer.pack(side=tk.BOTTOM, fill=tk.X, padx=footer_padx, pady=footer_pady)
+
+        header = tk.Frame(parent, bg=bg)
+        header.pack(side=tk.TOP, fill=tk.X, padx=header_padx, pady=header_pady)
+
+        body = tk.Frame(parent, bg=bg)
+        body.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=body_padx, pady=body_pady)
+        return header, body, footer
+
+    def _build_touch_scroll_area(
+        self, parent: tk.Misc
+    ) -> Tuple[tk.Frame, tk.Canvas, tk.Frame, Dict[str, object]]:
+        """Scroll canvas with a side ▲/▼ rail (stays on-screen on short displays)."""
+        wrap = tk.Frame(parent, bg="#111111")
+        wrap.pack(fill=tk.BOTH, expand=True)
+
+        drag: Dict[str, object] = {
+            "start_y": 0,
+            "last_y": 0,
+            "dragging": False,
+        }
+
+        # Right rail packed first so it never loses height to the expanding grid
+        rail = tk.Frame(wrap, bg="#111111", width=88)
+        rail.pack(side=tk.RIGHT, fill=tk.Y, padx=(4, 0))
+        rail.pack_propagate(False)
+
+        def _scroll_step(direction: int) -> None:
+            """Move by ~one viewport (fraction), not opaque 'pages' units."""
+            canvas.update_idletasks()
+            top, bot = canvas.yview()
+            visible = max(0.12, bot - top)
+            step = visible * 0.9
+            canvas.yview_moveto(max(0.0, min(1.0, top + direction * step)))
+
+        up = self._mk_touch_btn(rail, "▲\nUP", lambda: _scroll_step(-1), bg="#504945")
+        up.configure(font=("DejaVu Sans", 14, "bold"), pady=6)
+        up.pack(side=tk.TOP, fill=tk.BOTH, expand=True, pady=(0, 3), ipady=10)
+
+        down = self._mk_touch_btn(rail, "▼\nDOWN", lambda: _scroll_step(1), bg="#504945")
+        down.configure(font=("DejaVu Sans", 14, "bold"), pady=6)
+        down.pack(side=tk.BOTTOM, fill=tk.BOTH, expand=True, pady=(3, 0), ipady=10)
+
+        mid = tk.Frame(wrap, bg="#111111")
+        mid.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        canvas = tk.Canvas(mid, bg="#111111", highlightthickness=0, bd=0)
+        canvas.pack(fill=tk.BOTH, expand=True)
+
+        inner = tk.Frame(canvas, bg="#111111")
+        window_id = canvas.create_window((0, 0), window=inner, anchor="nw")
+
+        def _on_inner_configure(_event: object = None) -> None:
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        def _on_canvas_configure(event: tk.Event) -> None:  # type: ignore[name-defined]
+            canvas.itemconfigure(window_id, width=event.width)
+
+        inner.bind("<Configure>", _on_inner_configure)
+        canvas.bind("<Configure>", _on_canvas_configure)
+
+        def _drag_start(event: tk.Event) -> str:  # type: ignore[name-defined]
+            drag["start_y"] = int(event.y_root)
+            drag["last_y"] = int(event.y_root)
+            drag["dragging"] = False
+            return "break"
+
+        def _drag_move(event: tk.Event) -> str:  # type: ignore[name-defined]
+            y = int(event.y_root)
+            start_y = int(drag["start_y"])  # type: ignore[arg-type]
+            last_y = int(drag["last_y"])  # type: ignore[arg-type]
+            if abs(y - start_y) >= TOUCH_SCROLL_THRESH_PX:
+                drag["dragging"] = True
+            if drag["dragging"]:
+                dy = y - last_y
+                if dy != 0:
+                    bbox = canvas.bbox("all")
+                    view_h = max(1, canvas.winfo_height())
+                    content_h = (bbox[3] - bbox[1]) if bbox else view_h
+                    if content_h > view_h:
+                        top, _bot = canvas.yview()
+                        canvas.yview_moveto(
+                            max(0.0, min(1.0, top - (dy / float(content_h))))
+                        )
+                    drag["last_y"] = y
+            return "break"
+
+        def _bind_empty_drag(widget: tk.Misc) -> None:
+            widget.bind("<ButtonPress-1>", _drag_start)
+            widget.bind("<B1-Motion>", _drag_move)
+
+        _bind_empty_drag(canvas)
+        _bind_empty_drag(inner)
+        drag["_move"] = _drag_move
+        drag["_start"] = _drag_start
+        return wrap, canvas, inner, drag
+
+    def _mk_scroll_select_btn(
+        self,
+        parent: tk.Misc,
+        text: str,
+        command,
+        drag: Dict[str, object],
+        bg: str = "#3c3836",
+    ) -> tk.Button:
+        """Grid button: short tap selects; finger drag scrolls the parent canvas."""
+        btn = tk.Button(
+            parent, text=text,
+            font=("DejaVu Sans", 14, "bold"), fg="#fbf1c7", bg=bg,
+            activeforeground="#fbf1c7", activebackground=bg,
+            relief=tk.FLAT, bd=0, padx=8, pady=12, cursor="hand2",
+            takefocus=0,
+        )
+
+        def _press(event: tk.Event) -> str:  # type: ignore[name-defined]
+            drag["start_y"] = int(event.y_root)
+            drag["last_y"] = int(event.y_root)
+            drag["dragging"] = False
+            return "break"
+
+        def _move(event: tk.Event) -> str:  # type: ignore[name-defined]
+            mover = drag.get("_move")
+            if callable(mover):
+                return mover(event)  # type: ignore[misc]
+            return "break"
+
+        def _release(_event: object = None) -> str:
+            if drag.get("dragging"):
+                return "break"
+            now = time.monotonic()
+            last = getattr(btn, "_last_fire", 0.0)
+            if now - last < 0.18:
+                return "break"
+            btn._last_fire = now  # type: ignore[attr-defined]
+            command()
+            return "break"
+
+        btn.bind("<ButtonPress-1>", _press)
+        btn.bind("<B1-Motion>", _move)
+        btn.bind("<ButtonRelease-1>", _release)
         return btn
 
     def _select_voice_index(self, idx: int, *, close_grid: bool = False) -> None:
@@ -5948,8 +6499,18 @@ class MidiToneApp:
         self._grid_frame = tk.Frame(self._mode_host, bg="#111111")
         self._grid_frame.pack(fill=tk.BOTH, expand=True)
 
+        # Pack footer first (bottom) so the scroll area never pushes it off-screen
+        footer = tk.Frame(self._grid_frame, bg="#111111")
+        footer.pack(side=tk.BOTTOM, fill=tk.X, padx=6, pady=6)
+        self._mk_touch_btn(
+            footer, "SAVE AS…", self._open_save_voice, bg="#689d6a"
+        ).pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=10)
+        self._mk_touch_btn(footer, "CLOSE", self._close_voice_grid, bg="#9d0006").pack(
+            side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=10
+        )
+
         header = tk.Frame(self._grid_frame, bg="#111111")
-        header.pack(fill=tk.X, padx=6, pady=(6, 4))
+        header.pack(side=tk.TOP, fill=tk.X, padx=6, pady=(6, 2))
         tk.Label(
             header,
             text="VOICES — tap one",
@@ -5965,64 +6526,28 @@ class MidiToneApp:
             bg="#111111",
         ).pack(side=tk.RIGHT)
 
-        # Scrollable canvas so many wavetables still fit on a 5" panel
+        # Scrollable canvas + side ▲/▼ rail (fits 5" touch)
         body = tk.Frame(self._grid_frame, bg="#111111")
-        body.pack(fill=tk.BOTH, expand=True, padx=4, pady=2)
-        canvas = tk.Canvas(body, bg="#111111", highlightthickness=0, bd=0)
-        scroll = ttk.Scrollbar(body, orient="vertical", command=canvas.yview)
-        canvas.configure(yscrollcommand=scroll.set)
-        scroll.pack(side=tk.RIGHT, fill=tk.Y)
-        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
-        inner = tk.Frame(canvas, bg="#111111")
-        window_id = canvas.create_window((0, 0), window=inner, anchor="nw")
-
-        def _on_inner_configure(_event: object = None) -> None:
-            canvas.configure(scrollregion=canvas.bbox("all"))
-
-        def _on_canvas_configure(event: tk.Event) -> None:  # type: ignore[name-defined]
-            canvas.itemconfigure(window_id, width=event.width)
-
-        inner.bind("<Configure>", _on_inner_configure)
-        canvas.bind("<Configure>", _on_canvas_configure)
-
-        # Drag-to-scroll helps when the resistive panel has no wheel
-        self._grid_drag_y = 0
-
-        def _drag_start(event: tk.Event) -> None:  # type: ignore[name-defined]
-            self._grid_drag_y = event.y
-            canvas.scan_mark(event.x, event.y)
-
-        def _drag_move(event: tk.Event) -> None:  # type: ignore[name-defined]
-            canvas.scan_dragto(event.x, event.y, gain=1)
-
-        canvas.bind("<ButtonPress-1>", _drag_start)
-        canvas.bind("<B1-Motion>", _drag_move)
+        body.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=4, pady=2)
+        _wrap, _canvas, inner, drag = self._build_touch_scroll_area(body)
 
         cols = 4 if len(self._voice_names) > 8 else 3
         self._grid_btns = {}
         for i, name in enumerate(self._voice_names):
             r, c = divmod(i, cols)
-            btn = self._mk_touch_btn(
+            btn = self._mk_scroll_select_btn(
                 inner,
                 name.upper(),
                 lambda idx=i: self._select_voice_index(idx, close_grid=True),
+                drag,
                 bg="#3c3836",
             )
-            btn.configure(font=("DejaVu Sans", 13, "bold"), pady=18)
-            btn.grid(row=r, column=c, sticky="nsew", padx=3, pady=3, ipadx=4, ipady=8)
+            btn.configure(font=("DejaVu Sans", 12, "bold"), pady=8)
+            btn.grid(row=r, column=c, sticky="nsew", padx=2, pady=2, ipadx=2, ipady=4)
             self._grid_btns[name] = btn
         for c in range(cols):
             inner.grid_columnconfigure(c, weight=1)
 
-        footer = tk.Frame(self._grid_frame, bg="#111111")
-        footer.pack(fill=tk.X, padx=6, pady=6)
-        self._mk_touch_btn(
-            footer, "SAVE AS…", self._open_save_voice, bg="#689d6a"
-        ).pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=14)
-        self._mk_touch_btn(footer, "CLOSE", self._close_voice_grid, bg="#9d0006").pack(
-            side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=14
-        )
         self._paint_voice_grid()
 
     def _paint_voice_grid(self) -> None:
@@ -6080,8 +6605,20 @@ class MidiToneApp:
         self._morph_frame = tk.Frame(self._mode_host, bg="#111111")
         self._morph_frame.pack(fill=tk.BOTH, expand=True)
 
+        footer = tk.Frame(self._morph_frame, bg="#111111")
+        footer.pack(side=tk.BOTTOM, fill=tk.X, padx=6, pady=6)
+        self._mk_touch_btn(
+            footer, "SAVE AS…", self._open_save_voice, bg="#689d6a"
+        ).pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=10)
+        self._mk_touch_btn(footer, "DONE", self._close_morph_menu, bg="#458588").pack(
+            side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=10
+        )
+        self._mk_touch_btn(footer, "CANCEL", self._close_morph_menu, bg="#9d0006").pack(
+            side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=10
+        )
+
         header = tk.Frame(self._morph_frame, bg="#111111")
-        header.pack(fill=tk.X, padx=6, pady=(6, 2))
+        header.pack(side=tk.TOP, fill=tk.X, padx=6, pady=(6, 2))
         tk.Label(
             header,
             text="MORPH PAIR",
@@ -6100,7 +6637,7 @@ class MidiToneApp:
 
         # A / B selector row
         pair_row = tk.Frame(self._morph_frame, bg="#111111")
-        pair_row.pack(fill=tk.X, padx=6, pady=(4, 6))
+        pair_row.pack(side=tk.TOP, fill=tk.X, padx=6, pady=(4, 4))
         self._morph_side_btns = {}
         for side, label in (("a", "A"), ("b", "B")):
             btn = self._mk_touch_btn(
@@ -6109,64 +6646,36 @@ class MidiToneApp:
                 lambda s=side: self._set_morph_pick_side(s),
                 bg="#3c3836",
             )
-            btn.configure(font=("DejaVu Sans", 14, "bold"), pady=14)
+            btn.configure(font=("DejaVu Sans", 13, "bold"), pady=8)
             btn.pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3)
             self._morph_side_btns[side] = btn
 
         swap_btn = self._mk_touch_btn(pair_row, "SWAP", self._swap_morph_pair, bg="#504945")
-        swap_btn.configure(font=("DejaVu Sans", 13, "bold"), pady=14)
+        swap_btn.configure(font=("DejaVu Sans", 12, "bold"), pady=8)
         swap_btn.pack(side=tk.LEFT, fill=tk.BOTH, padx=3)
 
         # Voice grid for assigning the armed side
         body = tk.Frame(self._morph_frame, bg="#111111")
-        body.pack(fill=tk.BOTH, expand=True, padx=4, pady=2)
-        canvas = tk.Canvas(body, bg="#111111", highlightthickness=0, bd=0)
-        scroll = ttk.Scrollbar(body, orient="vertical", command=canvas.yview)
-        canvas.configure(yscrollcommand=scroll.set)
-        scroll.pack(side=tk.RIGHT, fill=tk.Y)
-        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
-        inner = tk.Frame(canvas, bg="#111111")
-        window_id = canvas.create_window((0, 0), window=inner, anchor="nw")
-
-        def _on_inner_configure(_event: object = None) -> None:
-            canvas.configure(scrollregion=canvas.bbox("all"))
-
-        def _on_canvas_configure(event: tk.Event) -> None:  # type: ignore[name-defined]
-            canvas.itemconfigure(window_id, width=event.width)
-
-        inner.bind("<Configure>", _on_inner_configure)
-        canvas.bind("<Configure>", _on_canvas_configure)
-        canvas.bind("<ButtonPress-1>", lambda e: canvas.scan_mark(e.x, e.y))
-        canvas.bind("<B1-Motion>", lambda e: canvas.scan_dragto(e.x, e.y, gain=1))
+        body.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=4, pady=2)
+        _wrap, _canvas, inner, drag = self._build_touch_scroll_area(body)
 
         cols = 4 if len(self._voice_names) > 8 else 3
         self._morph_grid_btns = {}
         for i, name in enumerate(self._voice_names):
             r, c = divmod(i, cols)
-            btn = self._mk_touch_btn(
+            btn = self._mk_scroll_select_btn(
                 inner,
                 name.upper(),
                 lambda idx=i: self._assign_morph_endpoint(idx),
+                drag,
                 bg="#3c3836",
             )
-            btn.configure(font=("DejaVu Sans", 12, "bold"), pady=14)
-            btn.grid(row=r, column=c, sticky="nsew", padx=3, pady=3, ipadx=2, ipady=6)
+            btn.configure(font=("DejaVu Sans", 11, "bold"), pady=6)
+            btn.grid(row=r, column=c, sticky="nsew", padx=2, pady=2, ipadx=2, ipady=3)
             self._morph_grid_btns[name] = btn
         for c in range(cols):
             inner.grid_columnconfigure(c, weight=1)
 
-        footer = tk.Frame(self._morph_frame, bg="#111111")
-        footer.pack(fill=tk.X, padx=6, pady=6)
-        self._mk_touch_btn(
-            footer, "SAVE AS…", self._open_save_voice, bg="#689d6a"
-        ).pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=14)
-        self._mk_touch_btn(footer, "DONE", self._close_morph_menu, bg="#458588").pack(
-            side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=14
-        )
-        self._mk_touch_btn(footer, "CANCEL", self._close_morph_menu, bg="#9d0006").pack(
-            side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=14
-        )
         self._paint_morph_menu()
 
     def _set_morph_pick_side(self, side: str) -> None:
@@ -6446,6 +6955,22 @@ class MidiToneApp:
             if pads_mode and is_drum and not phrase_recording:
                 cell = phrase_cell_for_note(msg.note)
                 if cell is not None:
+                    if self._loop_to_pad_armed:
+                        self._finish_loop_to_pad(cell)
+                        self._q_put(("phrase",))
+                        return
+                    if self._phrase_clear_armed:
+                        self._phrases.clear_cell(cell)
+                        self._phrase_clear_armed = False
+                        self._q_put(("phrase",))
+                        self._q_put(
+                            (
+                                "log",
+                                f"Pad→CLEAR {phrase_pad_label(cell)}  note {msg.note}",
+                                False,
+                            )
+                        )
+                        return
                     edit_view = self._pads_view == "edit"
                     if edit_view and self._phrase_mode_armed:
                         mode = self._phrases.toggle_trigger_mode(cell)
@@ -6456,18 +6981,6 @@ class MidiToneApp:
                                 "log",
                                 f"Pad→MODE {phrase_pad_label(cell)} → "
                                 f"{'LOOP' if mode == PHRASE_TRIG_LOOP else 'ONE-SHOT'}",
-                                False,
-                            )
-                        )
-                        return
-                    if edit_view and self._phrase_clear_armed:
-                        self._phrases.clear_cell(cell)
-                        self._phrase_clear_armed = False
-                        self._q_put(("phrase",))
-                        self._q_put(
-                            (
-                                "log",
-                                f"Pad→CLEAR {phrase_pad_label(cell)}  note {msg.note}",
                                 False,
                             )
                         )
@@ -6645,10 +7158,11 @@ class MidiToneApp:
         if getattr(self, "_mod_dirty", False):
             self._mod_dirty = False
             self.mod_var.set(self._format_mod_line())
-            if self._kit_ui_open:
-                self._paint_kit_waveform()
-            elif self._mode == "synth" and not self._overlay_busy():
-                self._paint_synth_waveform()
+            # Blank CRT now; heavy paint runs after debounce (see below)
+            self._invalidate_scope()
+        if getattr(self, "_scope_needs_paint", False):
+            if time.monotonic() >= getattr(self, "_scope_paint_at", 0.0):
+                self._flush_scope_paint()
         # Keep touch bar stacked above log chrome if packing ever races
         if self._mode == "synth" and not self._overlay_busy():
             try:
@@ -6706,6 +7220,167 @@ class MidiToneApp:
         self._refresh_phrase_status()
         self._refresh_song_status()
         self._append_log("All Notes Off")
+
+    def _open_power_menu(self) -> None:
+        """Confirm screen for safe Pi shutdown / reboot (kiosk has no desktop power UI)."""
+        if self._power_ui_open:
+            return
+        # Close other overlays so POWER is always reachable
+        if self._grid_open:
+            self._close_voice_grid(restore_main=False)
+        if self._morph_ui_open:
+            self._close_morph_menu(restore_main=False)
+        if self._kit_ui_open:
+            self._close_kit_explorer(restore_main=False)
+        if self._save_voice_open:
+            self._close_save_voice(restore_main=False)
+
+        self._power_ui_open = True
+        prev = self._mode
+        for shell in (
+            self._synth_shell,
+            self._looper_shell,
+            self._pads_shell,
+            self._songs_shell,
+            self._presets_shell,
+            self._log_shell,
+        ):
+            try:
+                shell.pack_forget()
+            except Exception:
+                pass
+
+        self._power_frame = tk.Frame(self._mode_host, bg="#111111")
+        self._power_frame.pack(fill=tk.BOTH, expand=True)
+        self._power_frame._prev_mode = prev  # type: ignore[attr-defined]
+
+        header, body, footer = self._pack_screen_regions(
+            self._power_frame,
+            header_padx=10,
+            header_pady=(16, 8),
+            body_padx=10,
+            body_pady=6,
+            footer_padx=10,
+            footer_pady=12,
+        )
+        tk.Label(
+            header,
+            text="POWER",
+            font=("DejaVu Sans", 22, "bold"),
+            fg="#fbf1c7",
+            bg="#111111",
+        ).pack(side=tk.LEFT)
+        tk.Label(
+            header,
+            text="safe shutdown for kiosk",
+            font=("DejaVu Sans", 12),
+            fg="#a89984",
+            bg="#111111",
+        ).pack(side=tk.RIGHT)
+
+        self._mk_touch_btn(
+            footer, "CANCEL", self._close_power_menu, bg="#504945"
+        ).pack(fill=tk.X, ipady=18)
+
+        tk.Label(
+            body,
+            text="Shut down cleanly before unplugging. Reboot restarts into kiosk.",
+            font=("DejaVu Sans", 13),
+            fg="#ebdbb2",
+            bg="#111111",
+            wraplength=740,
+            justify=tk.LEFT,
+            anchor="w",
+        ).pack(side=tk.TOP, fill=tk.X, padx=2, pady=(4, 16))
+
+        # Equal-height actions — pack(expand) alone gives the first button the leftover
+        actions = tk.Frame(body, bg="#111111")
+        actions.pack(fill=tk.BOTH, expand=True)
+        actions.rowconfigure(0, weight=1, uniform="power")
+        actions.rowconfigure(1, weight=1, uniform="power")
+        actions.columnconfigure(0, weight=1)
+        shut = self._mk_touch_btn(
+            actions, "SHUT DOWN", lambda: self._pi_power("poweroff"), bg="#9d0006"
+        )
+        shut.configure(font=("DejaVu Sans", 18, "bold"))
+        shut.grid(row=0, column=0, sticky="nsew", pady=(0, 6), ipady=12)
+        reboot = self._mk_touch_btn(
+            actions, "REBOOT", lambda: self._pi_power("reboot"), bg="#d79921"
+        )
+        reboot.configure(font=("DejaVu Sans", 18, "bold"))
+        reboot.grid(row=1, column=0, sticky="nsew", pady=(6, 0), ipady=12)
+
+    def _close_power_menu(self, restore_main: bool = True) -> None:
+        if not self._power_ui_open:
+            return
+        prev = "synth"
+        if self._power_frame is not None:
+            prev = getattr(self._power_frame, "_prev_mode", "synth")
+            self._power_frame.destroy()
+            self._power_frame = None
+        self._power_ui_open = False
+        if restore_main:
+            self._switch_mode(prev if prev in ("synth", "looper", "pads", "songs", "log", "presets") else "synth")
+
+    def _pi_power(self, action: str) -> None:
+        """Run systemctl poweroff/reboot (passwordless via install-kiosk sudoers)."""
+        action = "reboot" if action == "reboot" else "poweroff"
+        self._append_log(f"Power → {action}…")
+        self.last_var.set(f"Powering {action}…")
+        try:
+            self._panic()
+        except Exception:
+            pass
+        try:
+            self._save_settings_file(SETTINGS_PATH, quiet=True)
+        except Exception:
+            pass
+        # Give the UI a moment to flush logs / audio stop
+        self.root.update_idletasks()
+
+        def _run() -> None:
+            cmds = [
+                ["sudo", "-n", "systemctl", action],
+                (
+                    ["sudo", "-n", "/sbin/shutdown", "-h", "now"]
+                    if action == "poweroff"
+                    else ["sudo", "-n", "/sbin/reboot"]
+                ),
+                ["systemctl", action],
+            ]
+            last_err = ""
+            for cmd in cmds:
+                try:
+                    r = subprocess.run(
+                        cmd,
+                        capture_output=True,
+                        text=True,
+                        timeout=15,
+                        check=False,
+                    )
+                    if r.returncode == 0:
+                        return
+                    last_err = (r.stderr or r.stdout or f"exit {r.returncode}").strip()
+                except Exception as exc:
+                    last_err = str(exc)
+            self._q_put(
+                (
+                    "log",
+                    f"Power {action} failed: {last_err or 'no permission'} — "
+                    f"run ./install-kiosk.sh (adds sudoers) or: sudo systemctl {action}",
+                    False,
+                )
+            )
+        threading.Thread(target=_run, daemon=True).start()
+        # Also show immediate feedback on the confirm screen
+        if self._power_frame is not None:
+            tk.Label(
+                self._power_frame,
+                text=f"Sending {action}… screen will go dark.",
+                font=("DejaVu Sans", 14, "bold"),
+                fg="#fabd2f",
+                bg="#111111",
+            ).pack(fill=tk.X, padx=12, pady=8)
 
     def _on_close(self) -> None:
         self._stop.set()
