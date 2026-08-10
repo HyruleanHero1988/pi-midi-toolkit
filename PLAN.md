@@ -45,7 +45,7 @@ todos:
     content: "Wave viz: live morph-cycle scope on SYNTH + KIT drill-down for per-drum one-shot preview"
     status: completed
   - id: jambox-fx
-    content: "Jambox FX track: mix-bus distortion → echo/delay → careful reverb; measure Pi 2 CPU/xruns"
+    content: "Jambox FX: per-wavetable + per-drum-model drive/delay/reverb (not global mix bus); measure Pi 2 CPU/xruns"
     status: completed
   - id: rust-jambox-engine
     content: "Rust jambox engine: audio + sample-accurate sequencer clock; Tk UI becomes thin client (timing integrity)"
@@ -233,9 +233,9 @@ This is **not** MIDI-out thru. It is the creative local instrument. Real use alr
 
 The diagnostic framing did **not** paint a software dead-end. Limits will show up as **CPU, audio xruns, or latency feel** — measurable — not as “we called it Phase 0.”
 
-### Effects (mix bus first) — **shipped in Python on `cursor/midi-tone-jambox-fx-1052`**
+### Effects (per voice / per drum) — **shipped in Python; refined on `cursor/midi-tone-per-voice-fx-1052`**
 
-Apply to the soft-synth output (keys + drums + launched phrases) via **FX MODE** knobs — not a DAW plugin host.
+Each **wavetable name** and each **drum model** has its own insert (drive → delay → light reverb). **FX MODE** knobs edit the selected slot — nearer morph endpoint by default, or a KIT drum when that overlay is open. Melody FX do not wet the whole kit bus.
 
 | Effect | Status | Notes |
 |--------|--------|-------|

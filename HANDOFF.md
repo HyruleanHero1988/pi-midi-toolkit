@@ -26,7 +26,7 @@ Modes today in `tools/midi-tone`:
 
 **Design law (jambox):** stay obvious under the hands. Winning vs gear you already own (picotracker, EP-class boxes) is *learning cost*, not feature count.
 
-**Jambox FX:** mix-bus drive / delay / light reverb via **FX MODE** (Python `midi-tone` now).
+**Jambox FX:** per-wavetable / per-drum-model drive → delay → light reverb via **FX MODE** (not a global mix bus). Open KIT to point knobs at a drum voice; otherwise they edit the nearer morph wave.
 
 **Next (architecture):** Rust jambox engine for audio + sample-accurate sequencing; Tk becomes a thin client. Jam on FX in Python first so the rewrite targets a known sound.
 
