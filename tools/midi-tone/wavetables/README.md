@@ -14,6 +14,10 @@ by Kristoffer Karl Axel Ekstrand — **CC0 1.0** (public domain). See `AKWF-LICE
 Drop any extra mono WAV single-cycle into this folder (any length); midi-tone resamples it
 to 2048 points on load. Name the file `myvoice.wav` → it appears as voice `myvoice`.
 
+User-saved morphs (VOICES / MORPH → **SAVE AS…**) land in `../user-wavetables/` as
+`<name>.wav` (morph + drive + tone baked into the shape) plus optional
+`<name>.fx.json` (delay/reverb amounts). Built-ins stay protected.
+
 To pull more from AKWF:
 
 ```bash

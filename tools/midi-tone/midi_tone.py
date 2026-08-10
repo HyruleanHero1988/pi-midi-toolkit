@@ -13,6 +13,7 @@ import json
 import math
 import pathlib
 import queue
+import re
 import shutil
 import sys
 import threading
@@ -55,6 +56,7 @@ DRUM_CHANNEL = 9
 NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
 HERE = pathlib.Path(__file__).resolve().parent
 DEFAULT_WAVETABLE_DIR = HERE / "wavetables"
+USER_WAVETABLES_DIR = HERE / "user-wavetables"
 SETTINGS_PATH = HERE / "settings.json"
 PRESETS_DIR = HERE / "user-presets"
 PRESET_SLOTS = 8
@@ -78,6 +80,8 @@ PHRASE_GRID_CELLS = (
 )
 MAX_PHRASE_PLAYERS = 8
 SETTINGS_VERSION = 1
+BUILTIN_VOICE_NAMES = ("sine", "square", "saw", "triangle")
+VOICE_NAME_MAX = 24
 
 
 def list_song_files(directory: pathlib.Path = SONGS_DIR) -> List[pathlib.Path]:
@@ -149,8 +153,9 @@ FX_REVERB_MAX_SEC = 0.55
 
 class MixBusFx:
     """
-    Cheap jambox mix-bus FX for Pi 2: drive → echo → short multi-tap tank.
-    All params 0..1; process() mutates `buf` in place.
+    Per-instrument FX insert (one instance per wavetable voice or drum model).
+    drive → echo → short multi-tap tank. Params 0..1; process() mutates buf.
+    Not a global master-bus effect — melody and drums keep separate slots.
     """
 
     def __init__(self, sample_rate: int) -> None:
@@ -327,22 +332,149 @@ def _resample_cycle(x: np.ndarray, n: int = TABLE_SIZE) -> np.ndarray:
     return (y / peak) * np.float32(TABLE_PEAK)
 
 
-def load_wavetables(directory: pathlib.Path) -> Dict[str, np.ndarray]:
-    """Built-ins first, then any *.wav in directory (stem = voice name)."""
+def load_wavetables(*directories: pathlib.Path) -> Dict[str, np.ndarray]:
+    """Built-ins first, then *.wav from each directory (later dirs override)."""
     tables = _builtin_tables()
-    if directory.is_dir():
-        for path in sorted(directory.glob("*.wav")):
+    for directory in directories:
+        if not directory or not pathlib.Path(directory).is_dir():
+            continue
+        for path in sorted(pathlib.Path(directory).glob("*.wav")):
             name = path.stem.lower().strip()
             if not name:
                 continue
             # Keep core procedural oscillators; files can add/replace everything else
-            if name in ("sine", "square", "saw", "triangle"):
+            if name in BUILTIN_VOICE_NAMES:
                 continue
             try:
                 tables[name] = _resample_cycle(_load_wav_mono(path))
             except Exception as exc:
                 print(f"wavetable skip {path.name}: {exc}", flush=True)
     return tables
+
+
+def sanitize_voice_name(raw: str) -> str:
+    """Lowercase [a-z0-9_], max VOICE_NAME_MAX — safe for filenames + UI."""
+    s = re.sub(r"[^a-z0-9_]+", "_", str(raw or "").lower().strip())
+    s = re.sub(r"_+", "_", s).strip("_")
+    if not s:
+        s = "voice"
+    return s[:VOICE_NAME_MAX]
+
+
+def suggest_voice_name(name_a: str, name_b: str, morph: float) -> str:
+    a = sanitize_voice_name(name_a) or "a"
+    b = sanitize_voice_name(name_b) or "b"
+    pct = int(round(max(0.0, min(1.0, float(morph))) * 100.0))
+    if a == b:
+        return sanitize_voice_name(f"{a}_saved")
+    return sanitize_voice_name(f"{a}_{b}_{pct}")
+
+
+def unique_voice_name(base: str, existing: List[str]) -> str:
+    key = sanitize_voice_name(base)
+    if key not in BUILTIN_VOICE_NAMES and key not in existing:
+        return key
+    for n in range(2, 1000):
+        suffix = f"_{n}"
+        stem = key[: max(1, VOICE_NAME_MAX - len(suffix))]
+        cand = f"{stem}{suffix}"
+        if cand not in BUILTIN_VOICE_NAMES and cand not in existing:
+            return cand
+    return sanitize_voice_name(f"voice_{int(time.time()) % 100000}")
+
+
+def write_wavetable_wav(
+    path: pathlib.Path, table: np.ndarray, *, sample_rate: int = 44100
+) -> None:
+    """Write a mono 16-bit single-cycle WAV (loadable by load_wavetables)."""
+    y = np.asarray(table, dtype=np.float32).reshape(-1)
+    if y.shape[0] != TABLE_SIZE:
+        y = _resample_cycle(y)
+    peak = float(np.max(np.abs(y))) or 1.0
+    pcm = np.clip(y / peak * 32767.0, -32768, 32767).astype("<i2")
+    path = pathlib.Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with wave.open(str(path), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(int(sample_rate))
+        w.writeframes(pcm.tobytes())
+
+
+# Time-domain FX that cannot bake into a single cycle — stored beside the .wav
+VOICE_FX_SIDECAR_KEYS = (
+    "fx_delay_time",
+    "fx_delay_fb",
+    "fx_delay_mix",
+    "fx_reverb_size",
+    "fx_reverb_mix",
+)
+
+
+def voice_fx_sidecar_path(waves_dir: pathlib.Path, name: str) -> pathlib.Path:
+    return pathlib.Path(waves_dir) / f"{sanitize_voice_name(name)}.fx.json"
+
+
+def write_voice_fx_sidecar(path: pathlib.Path, fx: Dict[str, float]) -> None:
+    """Tiny JSON next to a user wavetable: delay/reverb mixes (+ time/fb/size)."""
+    out = {"version": 1}
+    for key in VOICE_FX_SIDECAR_KEYS:
+        try:
+            out[key] = max(0.0, min(1.0, float(fx.get(key, 0.0))))
+        except (TypeError, ValueError):
+            out[key] = 0.0
+    path = pathlib.Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(out, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def load_voice_fx_sidecar(path: pathlib.Path) -> Optional[Dict[str, float]]:
+    path = pathlib.Path(path)
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    out: Dict[str, float] = {}
+    for key in VOICE_FX_SIDECAR_KEYS:
+        if key not in data:
+            continue
+        try:
+            out[key] = max(0.0, min(1.0, float(data[key])))
+        except (TypeError, ValueError):
+            continue
+    return out or None
+
+
+def load_user_voice_fx_map(directory: pathlib.Path) -> Dict[str, Dict[str, float]]:
+    """voice name → delay/reverb sidecar for user-wavetables/."""
+    result: Dict[str, Dict[str, float]] = {}
+    directory = pathlib.Path(directory)
+    if not directory.is_dir():
+        return result
+    for path in sorted(directory.glob("*.fx.json")):
+        name = sanitize_voice_name(path.name[: -len(".fx.json")])
+        if not name or name in BUILTIN_VOICE_NAMES:
+            continue
+        snap = load_voice_fx_sidecar(path)
+        if snap:
+            result[name] = snap
+    return result
+
+
+def circular_moving_average(x: np.ndarray, win: int) -> np.ndarray:
+    """Tone-bake helper: low-pass a periodic single cycle."""
+    n = int(x.shape[0])
+    win = max(1, int(win))
+    if win <= 1 or n == 0:
+        return np.asarray(x, dtype=np.float32)
+    k = np.ones(win, dtype=np.float32) / np.float32(win)
+    tiled = np.tile(np.asarray(x, dtype=np.float32), 3)
+    y = np.convolve(tiled, k, mode="same")
+    return y[n : 2 * n].astype(np.float32, copy=False)
 
 
 def midi_note_name(note: int) -> str:
@@ -677,6 +809,8 @@ class Voice:
     age: int = 0  # bump on each note_on for steal ordering
     # None → live global morph table; ndarray → locked pad timbre (multi-timbre)
     timbre: Optional[np.ndarray] = None
+    # FX slot key: wavetable name for live morph endpoint, or locked pad morph_a
+    fx_name: Optional[str] = None
 
 
 @dataclass
@@ -757,8 +891,22 @@ class SineEngine:
         self._drum_noise = 0.55
         self._drum_tone = 0.60
         self._drum_mode = False  # if True, knobs 1–4 edit drums instead of morph/tone
-        self._fx_mode = False  # if True, knobs edit mix-bus FX
-        self._fx = MixBusFx(self.sample_rate)
+        self._fx_mode = False  # if True, knobs edit per-voice / per-drum insert FX
+        self._bus_fx_mode = False  # if True, knobs edit the master mix-bus FX
+        # Per wavetable name / per drum model — not a global master bus
+        self._voice_fx: Dict[str, MixBusFx] = {}
+        self._drum_fx: Dict[str, MixBusFx] = {}
+        # Shared wet on the whole kit (after per-model inserts, before keys sum)
+        self._drum_group_fx = MixBusFx(self.sample_rate)
+        # Optional global wet after keys+drums are summed (separate from inserts)
+        self._bus_fx = MixBusFx(self.sample_rate)
+        self._fx_edit_kind = "voice"  # voice | drum | drums | bus
+        self._fx_edit_drum = "kick"
+        self._key_bus = np.zeros(BLOCKSIZE * 2, dtype=np.float32)
+        self._drum_bus = np.zeros(BLOCKSIZE * 2, dtype=np.float32)
+        self._fx_tmp = np.zeros(BLOCKSIZE * 2, dtype=np.float32)
+        # Reused per-callback accumulators keyed by wavetable / drum model name
+        self._voice_fx_buckets: Dict[str, np.ndarray] = {}
         self._rebuild_morph_table_unlocked()
 
     @property
@@ -824,10 +972,23 @@ class SineEngine:
 
         # Keep FX buffers matched to the actual device rate
         with self._lock:
-            if self._fx.sample_rate != self.sample_rate:
-                snap = self._fx.snapshot()
-                self._fx = MixBusFx(self.sample_rate)
-                self._fx.apply_snapshot(snap)
+            need = (
+                self._bus_fx.sample_rate != self.sample_rate
+                or self._drum_group_fx.sample_rate != self.sample_rate
+                or any(
+                    fx.sample_rate != self.sample_rate
+                    for fx in list(self._voice_fx.values()) + list(self._drum_fx.values())
+                )
+            )
+            if need:
+                self._bus_fx = self._clone_fx(self._bus_fx, self.sample_rate)
+                self._drum_group_fx = self._clone_fx(self._drum_group_fx, self.sample_rate)
+                self._voice_fx = {
+                    k: self._clone_fx(v, self.sample_rate) for k, v in self._voice_fx.items()
+                }
+                self._drum_fx = {
+                    k: self._clone_fx(v, self.sample_rate) for k, v in self._drum_fx.items()
+                }
 
         kwargs = dict(
             samplerate=self.sample_rate,
@@ -881,6 +1042,7 @@ class SineEngine:
         velocity: int,
         *,
         timbre: Optional[np.ndarray] = None,
+        fx_name: Optional[str] = None,
     ) -> None:
         if velocity <= 0:
             self.note_off(channel, note)
@@ -894,6 +1056,13 @@ class SineEngine:
         key = (ch, n)
         target = vel * VOICE_AMP
         with self._lock:
+            if fx_name is None:
+                # Live keys: FX follows the nearer morph endpoint voice name
+                if self._morph_dirty:
+                    self._rebuild_morph_table_unlocked()
+                ia, ib = self._morph_a, self._morph_b
+                near = ia if self._morph < 0.5 else ib
+                fx_name = self._voice_names[near]
             self._note_serial += 1
             serial = self._note_serial
             existing = self._voices.get(key)
@@ -907,6 +1076,7 @@ class SineEngine:
                 existing.target_amp = target
                 existing.age = serial
                 existing.timbre = timbre
+                existing.fx_name = fx_name
                 return
             if len(self._voices) >= self.max_voices:
                 drop = self._steal_key()
@@ -915,11 +1085,13 @@ class SineEngine:
             self._voices[key] = Voice(
                 note=n,
                 velocity=vel,
+                phase=0.0,
+                releasing=False,
                 amp=0.0,
                 target_amp=target,
-                releasing=False,
                 age=serial,
                 timbre=timbre,
+                fx_name=fx_name,
             )
 
     def _drum_note_on(self, note: int, velocity: float) -> None:
@@ -1090,27 +1262,33 @@ class SineEngine:
     def drum_knob_focus(self) -> bool:
         """True only in explicit drum mode (DRUM MODE button)."""
         with self._lock:
-            return self._drum_mode and not self._fx_mode
+            return self._drum_mode and not self._fx_mode and not self._bus_fx_mode
 
     def set_drum_mode(self, enabled: bool) -> None:
         with self._lock:
             self._drum_mode = bool(enabled)
             if self._drum_mode:
                 self._fx_mode = False
+                self._bus_fx_mode = False
 
     def drum_mode(self) -> bool:
         with self._lock:
             return self._drum_mode
 
     def fx_knob_focus(self) -> bool:
+        """True when knobs edit insert FX or master bus FX."""
         with self._lock:
-            return self._fx_mode
+            return self._fx_mode or self._bus_fx_mode
 
     def set_fx_mode(self, enabled: bool) -> None:
+        """Per-voice / per-drum insert FX edit mode."""
         with self._lock:
             self._fx_mode = bool(enabled)
             if self._fx_mode:
                 self._drum_mode = False
+                self._bus_fx_mode = False
+                if self._fx_edit_kind == "bus":
+                    self._fx_edit_kind = "voice"
 
     def fx_mode(self) -> bool:
         with self._lock:
@@ -1122,6 +1300,25 @@ class SineEngine:
         self.set_fx_mode(nxt)
         return nxt
 
+    def set_bus_fx_mode(self, enabled: bool) -> None:
+        """Master mix-bus FX edit mode (whole keys+drums sum)."""
+        with self._lock:
+            self._bus_fx_mode = bool(enabled)
+            if self._bus_fx_mode:
+                self._drum_mode = False
+                self._fx_mode = False
+                self._fx_edit_kind = "bus"
+
+    def bus_fx_mode(self) -> bool:
+        with self._lock:
+            return self._bus_fx_mode
+
+    def toggle_bus_fx_mode(self) -> bool:
+        with self._lock:
+            nxt = not self._bus_fx_mode
+        self.set_bus_fx_mode(nxt)
+        return nxt
+
     # Back-compat aliases used by older call sites / UI helpers
     def set_drum_lock(self, locked: bool) -> None:
         self.set_drum_mode(locked)
@@ -1129,41 +1326,118 @@ class SineEngine:
     def drum_lock(self) -> bool:
         return self.drum_mode()
 
-    def set_fx_drive(self, value: float) -> None:
+    @staticmethod
+    def _clone_fx(src: MixBusFx, sample_rate: int) -> MixBusFx:
+        out = MixBusFx(sample_rate)
+        out.apply_snapshot(src.snapshot())
+        return out
+
+    def _ensure_voice_fx_unlocked(self, name: str) -> MixBusFx:
+        key = str(name or "sine").lower().strip() or "sine"
+        fx = self._voice_fx.get(key)
+        if fx is None:
+            fx = MixBusFx(self.sample_rate)
+            self._voice_fx[key] = fx
+        return fx
+
+    def _ensure_drum_fx_unlocked(self, model: str) -> MixBusFx:
+        key = str(model or "kick").lower().strip() or "kick"
+        fx = self._drum_fx.get(key)
+        if fx is None:
+            fx = MixBusFx(self.sample_rate)
+            self._drum_fx[key] = fx
+        return fx
+
+    def set_fx_edit_voice(self, name: Optional[str] = None) -> None:
+        """Point insert-FX knobs at a wavetable slot (default: nearer morph endpoint)."""
+        with self._lock:
+            self._fx_edit_kind = "voice"
+            if name:
+                self._ensure_voice_fx_unlocked(str(name))
+            else:
+                if self._morph_dirty:
+                    self._rebuild_morph_table_unlocked()
+                near = self._morph_a if self._morph < 0.5 else self._morph_b
+                self._ensure_voice_fx_unlocked(self._voice_names[near])
+
+    def set_fx_edit_drum(self, model: str) -> None:
+        """Point insert-FX knobs at a drum model insert (kick, snare, …)."""
+        with self._lock:
+            self._fx_edit_kind = "drum"
+            self._fx_edit_drum = str(model or "kick")
+            self._ensure_drum_fx_unlocked(self._fx_edit_drum)
+
+    def set_fx_edit_drums(self) -> None:
+        """Point insert-FX knobs at the shared all-drums group bus."""
+        with self._lock:
+            self._fx_edit_kind = "drums"
+
+    def set_fx_edit_bus(self) -> None:
+        """Point knobs at the master mix-bus FX."""
+        with self._lock:
+            self._fx_edit_kind = "bus"
+
+    def fx_edit_kind(self) -> str:
+        with self._lock:
+            if self._bus_fx_mode:
+                return "bus"
+            return str(self._fx_edit_kind)
+
+    def fx_edit_label(self) -> str:
+        with self._lock:
+            if self._fx_edit_kind == "bus" or self._bus_fx_mode:
+                return "bus"
+            if self._fx_edit_kind == "drums":
+                return "drums"
+            if self._fx_edit_kind == "drum":
+                return f"drum:{self._fx_edit_drum}"
+            # Prefer nearer morph endpoint as the voice being sculpted
+            if self._morph_dirty:
+                self._rebuild_morph_table_unlocked()
+            near = self._morph_a if self._morph < 0.5 else self._morph_b
+            return f"voice:{self._voice_names[near]}"
+
+    def _fx_edit_slot_unlocked(self) -> MixBusFx:
+        if self._fx_edit_kind == "bus" or self._bus_fx_mode:
+            return self._bus_fx
+        if self._fx_edit_kind == "drums":
+            return self._drum_group_fx
+        if self._fx_edit_kind == "drum":
+            return self._ensure_drum_fx_unlocked(self._fx_edit_drum)
+        if self._morph_dirty:
+            self._rebuild_morph_table_unlocked()
+        near = self._morph_a if self._morph < 0.5 else self._morph_b
+        return self._ensure_voice_fx_unlocked(self._voice_names[near])
+
+    def _set_fx_param(self, attr: str, value: float) -> None:
         if value > 1.0:
             value = value / 127.0
+        value = max(0.0, min(1.0, float(value)))
         with self._lock:
-            self._fx.drive = max(0.0, min(1.0, float(value)))
+            slot = self._fx_edit_slot_unlocked()
+            setattr(slot, attr, value)
+
+    def set_fx_drive(self, value: float) -> None:
+        self._set_fx_param("drive", value)
 
     def set_fx_delay_time(self, value: float) -> None:
-        if value > 1.0:
-            value = value / 127.0
-        with self._lock:
-            self._fx.delay_time = max(0.0, min(1.0, float(value)))
+        self._set_fx_param("delay_time", value)
 
     def set_fx_delay_fb(self, value: float) -> None:
-        if value > 1.0:
-            value = value / 127.0
-        with self._lock:
-            self._fx.delay_fb = max(0.0, min(1.0, float(value)))
+        self._set_fx_param("delay_fb", value)
 
     def set_fx_delay_mix(self, value: float) -> None:
-        if value > 1.0:
-            value = value / 127.0
-        with self._lock:
-            self._fx.delay_mix = max(0.0, min(1.0, float(value)))
+        self._set_fx_param("delay_mix", value)
 
     def set_fx_reverb_size(self, value: float) -> None:
-        if value > 1.0:
-            value = value / 127.0
-        with self._lock:
-            self._fx.reverb_size = max(0.0, min(1.0, float(value)))
+        self._set_fx_param("reverb_size", value)
 
     def set_fx_reverb_mix(self, value: float) -> None:
-        if value > 1.0:
-            value = value / 127.0
+        self._set_fx_param("reverb_mix", value)
+
+    def fx_edit_snapshot(self) -> Dict[str, float]:
         with self._lock:
-            self._fx.reverb_mix = max(0.0, min(1.0, float(value)))
+            return self._fx_edit_slot_unlocked().snapshot()
 
     def set_drum_pitch(self, value: float) -> None:
         if value > 1.0:
@@ -1244,6 +1518,123 @@ class SineEngine:
                 self._rebuild_morph_table_unlocked()
             return np.copy(self._morph_table)
 
+    def bake_voice_cycle(
+        self, *, apply_drive: bool = True, apply_tone: bool = True
+    ) -> np.ndarray:
+        """
+        Freeze the live morph into a new single-cycle wavetable shape.
+
+        Bakes what can become wave shape:
+          - morph blend
+          - nearer voice's drive (waveshape)
+          - tone / brightness (static spectral shape on the cycle)
+
+        Delay and reverb are time-domain — they cannot live in one cycle and are
+        left as live FX (not written into the saved wave).
+        """
+        with self._lock:
+            if self._morph_dirty:
+                self._rebuild_morph_table_unlocked()
+            out = np.copy(self._morph_table)
+            near = self._morph_a if self._morph < 0.5 else self._morph_b
+            src_name = self._voice_names[near]
+
+            if apply_drive:
+                fx = self._voice_fx.get(src_name)
+                drive = float(fx.drive) if fx is not None else 0.0
+                if drive > 0.001:
+                    amount = 1.0 + drive * 12.0
+                    tmp = np.tanh(out * np.float32(amount))
+                    norm = math.tanh(amount) if amount > 1e-6 else 1.0
+                    out = (tmp * np.float32(1.0 / max(0.25, norm))).astype(np.float32)
+
+            if apply_tone:
+                tone = float(self._tone)
+                if tone < 0.999:
+                    win = max(1, int(round((1.0 - tone) * 48.0)))
+                    if win > 1:
+                        out = circular_moving_average(out, win)
+
+            peak = float(np.max(np.abs(out))) or 1.0
+            out = (out / np.float32(peak)) * np.float32(TABLE_PEAK)
+            return out
+
+    def current_voice_fx_source(self) -> str:
+        """Wavetable name whose insert FX is 'on' the current morph sound."""
+        with self._lock:
+            if self._morph_dirty:
+                self._rebuild_morph_table_unlocked()
+            near = self._morph_a if self._morph < 0.5 else self._morph_b
+            return self._voice_names[near]
+
+    def save_current_voice(self, name: str) -> Tuple[str, np.ndarray, Dict[str, float]]:
+        """
+        Bake morph + drive + tone into a new wavetable and select it (A=B).
+
+        Returns (key, cycle, delay/reverb sidecar). Drive stays 0 on the new
+        insert (already in the wave); delay/reverb ride along as numbers.
+        """
+        source = self.current_voice_fx_source()
+        with self._lock:
+            src_fx = self._ensure_voice_fx_unlocked(source).snapshot()
+        sidecar = {k: float(src_fx.get(k, 0.0)) for k in VOICE_FX_SIDECAR_KEYS}
+        cycle = self.bake_voice_cycle(apply_drive=True, apply_tone=True)
+        key = self.add_wavetable(name, cycle)
+        with self._lock:
+            fx = self._ensure_voice_fx_unlocked(key)
+            fx.drive = 0.0  # baked into wave
+            fx.apply_snapshot(sidecar)
+            self._fx_edit_kind = "voice"
+        return key, cycle, sidecar
+
+    def apply_voice_fx_sidecar(self, name: str, fx: Dict[str, float]) -> None:
+        """Restore delay/reverb for a user voice; keep drive at 0 (in the wave)."""
+        key = sanitize_voice_name(name)
+        if not key or key in BUILTIN_VOICE_NAMES:
+            return
+        with self._lock:
+            slot = self._ensure_voice_fx_unlocked(key)
+            slot.drive = 0.0
+            slot.apply_snapshot(fx)
+
+    def add_wavetable(self, name: str, table: np.ndarray) -> str:
+        """
+        Hot-register a single-cycle table under `name` and select it as the
+        current pure morph voice (A=B, morph=0).
+        """
+        key = sanitize_voice_name(name)
+        if key in BUILTIN_VOICE_NAMES:
+            raise ValueError(f"cannot replace built-in voice '{key}'")
+        arr = np.asarray(table, dtype=np.float32).reshape(-1)
+        if arr.shape[0] != TABLE_SIZE:
+            arr = _resample_cycle(arr)
+        else:
+            peak = float(np.max(np.abs(arr))) or 1.0
+            arr = (arr / np.float32(peak)) * np.float32(TABLE_PEAK)
+        with self._lock:
+            if key in self._tables:
+                idx = self._voice_names.index(key)
+                self._tables[key] = arr
+                self._table_list[idx] = arr
+            else:
+                self._tables[key] = arr
+                self._voice_names.append(key)
+                self._table_list.append(arr)
+            idx = self._voice_names.index(key)
+            self._morph_a = idx
+            self._morph_b = idx
+            self._morph = 0.0
+            self._waveform = key
+            self._morph_dirty = True
+            self._rebuild_morph_table_unlocked()
+        return key
+
+    def suggested_save_voice_name(self) -> str:
+        a, b, blend = self.morph_neighbors()
+        return unique_voice_name(
+            suggest_voice_name(a, b, blend), self.voice_names
+        )
+
     def drum_macros(self) -> Tuple[float, float, float, float]:
         """pitch, decay(stretch), noise, tone — current drum-edit macros."""
         with self._lock:
@@ -1268,7 +1659,7 @@ class SineEngine:
 
     def modulation_state(self) -> Dict[str, float]:
         with self._lock:
-            fx = self._fx.snapshot()
+            fx = self._fx_edit_slot_unlocked().snapshot()
             return {
                 "bend": self._bend_semitones,
                 "mod": self._mod,
@@ -1285,13 +1676,14 @@ class SineEngine:
                 "drum_tone": self._drum_tone,
                 "drum_mode": 1.0 if self._drum_mode else 0.0,
                 "fx_mode": 1.0 if self._fx_mode else 0.0,
+                "bus_fx_mode": 1.0 if self._bus_fx_mode else 0.0,
                 **fx,
             }
 
     def snapshot_settings(self) -> Dict[str, Any]:
         """Serialize synth sound settings for JSON presets / session restore."""
         with self._lock:
-            out = {
+            out: Dict[str, Any] = {
                 "morph_a": self._voice_names[self._morph_a],
                 "morph_b": self._voice_names[self._morph_b],
                 "morph": float(self._morph),
@@ -1305,9 +1697,13 @@ class SineEngine:
                 "drum_decay": float(self._drum_decay),
                 "drum_noise": float(self._drum_noise),
                 "drum_tone": float(self._drum_tone),
-                # drum_mode / fx_mode are session UI toggles only — never persist
+                # Per-instrument inserts + kit group + optional master bus
+                "voice_fx": {k: v.snapshot() for k, v in self._voice_fx.items()},
+                "drum_fx": {k: v.snapshot() for k, v in self._drum_fx.items()},
+                "drum_group_fx": self._drum_group_fx.snapshot(),
+                "bus_fx": self._bus_fx.snapshot(),
+                # drum_mode / fx_mode / bus_fx_mode are session UI toggles only
             }
-            out.update(self._fx.snapshot())
             return out
 
     def apply_settings(self, data: Dict[str, Any]) -> None:
@@ -1342,10 +1738,32 @@ class SineEngine:
                 self._drum_noise = max(0.0, min(1.0, float(data["drum_noise"])))
             if "drum_tone" in data:
                 self._drum_tone = max(0.0, min(1.0, float(data["drum_tone"])))
-            self._fx.apply_snapshot(data)
+            # Per-instrument inserts
+            vfx = data.get("voice_fx")
+            if isinstance(vfx, dict):
+                for name, snap in vfx.items():
+                    if isinstance(snap, dict):
+                        self._ensure_voice_fx_unlocked(str(name)).apply_snapshot(snap)
+            dfx = data.get("drum_fx")
+            if isinstance(dfx, dict):
+                for model, snap in dfx.items():
+                    if isinstance(snap, dict):
+                        self._ensure_drum_fx_unlocked(str(model)).apply_snapshot(snap)
+            dgfx = data.get("drum_group_fx")
+            if isinstance(dgfx, dict):
+                self._drum_group_fx.apply_snapshot(dgfx)
+            # Master bus FX (explicit map, or legacy flat fx_* when no maps existed)
+            bfx = data.get("bus_fx")
+            if isinstance(bfx, dict):
+                self._bus_fx.apply_snapshot(bfx)
+            elif any(k.startswith("fx_") for k in data.keys()) and not isinstance(vfx, dict):
+                # Early mix-bus experiment stored flat fx_* on the master
+                self._bus_fx.apply_snapshot(data)
             # Modes are session-only; always restore knobs to morph
             self._drum_mode = False
             self._fx_mode = False
+            self._bus_fx_mode = False
+            self._fx_edit_kind = "voice"
             self._morph_dirty = True
             self._rebuild_morph_table_unlocked()
 
@@ -1395,6 +1813,18 @@ class SineEngine:
                 self._vib_phase %= 2.0 * math.pi
             vib_semis = vib_depth * mod * math.sin(self._vib_phase)
 
+        if frames > self._key_bus.shape[0]:
+            self._key_bus = np.zeros(frames, dtype=np.float32)
+            self._drum_bus = np.zeros(frames, dtype=np.float32)
+            self._fx_tmp = np.zeros(frames, dtype=np.float32)
+        key_bus = self._key_bus[:frames]
+        drum_bus = self._drum_bus[:frames]
+        tmp = self._fx_tmp[:frames]
+        key_bus.fill(0.0)
+        drum_bus.fill(0.0)
+
+        # Group key voices by FX slot (wavetable / locked morph_a name)
+        groups: Dict[str, np.ndarray] = {}
         dead: List[Tuple[int, int]] = []
         denom = np.float32(max(frames - 1, 1))
         for key, v in items:
@@ -1425,15 +1855,33 @@ class SineEngine:
                 end_amp = start_amp
             np.multiply(arange, np.float32((end_amp - start_amp) / float(denom)), out=ramp)
             np.add(ramp, np.float32(start_amp), out=ramp)
-            buf += wave * ramp
+            np.multiply(wave, ramp, out=tmp)
+            fx_key = (v.fx_name or "sine").lower().strip() or "sine"
+            bucket = groups.get(fx_key)
+            if bucket is None:
+                pool = self._voice_fx_buckets.get(fx_key)
+                if pool is None or pool.shape[0] < frames:
+                    pool = np.zeros(frames, dtype=np.float32)
+                    self._voice_fx_buckets[fx_key] = pool
+                bucket = pool[:frames]
+                bucket.fill(0.0)
+                groups[fx_key] = bucket
+            bucket += tmp
             v.amp = float(end_amp)
             v.phase = float((v.phase + phase_inc * frames) % TABLE_SIZE)
             if v.releasing and v.amp < 0.0005:
                 dead.append(key)
 
-        # Procedural ch10 drums (Synsonics-ish) — mixed before key bus tone filter
+        # Apply per-wavetable FX, then sum onto key bus
+        with self._lock:
+            for fx_key, bucket in groups.items():
+                fx = self._ensure_voice_fx_unlocked(fx_key)
+                fx.process(bucket)
+                key_bus += bucket
+
+        # Procedural ch10 drums — per-model FX, then shared kit-group FX
         dead_drums = self._render_drums(
-            buf,
+            drum_bus,
             frames,
             sr,
             drum_hits,
@@ -1442,29 +1890,36 @@ class SineEngine:
             decay=drum_decay,
             noise_amt=drum_noise,
             tone=drum_tone,
+            apply_model_fx=True,
         )
+        if frames > 0:
+            with self._lock:
+                drum_group_fx = self._drum_group_fx
+            drum_group_fx.process(drum_bus)
 
-        # Cheap bus low-pass for "tone" knob (moving average). tone=1 → open.
+        # Tone filter on keys only (drums keep their own tone macro)
         if tone < 0.999 and frames > 0:
             win = max(1, int(round((1.0 - tone) * 48.0)))
             if win > 1:
                 kernel = np.ones(win, dtype=np.float32) / np.float32(win)
-                # Continue from last filter state so block edges don't click
                 pad_left = np.full(win - 1, self._filter_state, dtype=np.float32)
-                padded = np.concatenate([pad_left, buf])
+                padded = np.concatenate([pad_left, key_bus])
                 filtered = np.convolve(padded, kernel, mode="valid")
-                buf[:] = filtered[:frames]
-                self._filter_state = float(buf[-1])
+                key_bus[:] = filtered[:frames]
+                self._filter_state = float(key_bus[-1])
             else:
-                self._filter_state = float(buf[-1])
+                self._filter_state = float(key_bus[-1]) if frames else self._filter_state
         elif frames > 0:
-            self._filter_state = float(buf[-1])
+            self._filter_state = float(key_bus[-1])
 
-        # Mix-bus FX: drive → delay → reverb (before master level)
+        buf[:] = key_bus
+        buf += drum_bus
+
+        # Master mix-bus FX (optional global wet — separate from per-voice/per-drum inserts)
         if frames > 0:
             with self._lock:
-                fx = self._fx
-            fx.process(buf)
+                bus_fx = self._bus_fx
+            bus_fx.process(buf)
 
         if level < 0.999:
             buf *= np.float32(level)
@@ -1493,14 +1948,20 @@ class SineEngine:
         decay: float,
         noise_amt: float,
         tone: float,
+        apply_model_fx: bool = False,
     ) -> List[int]:
-        """Add analog-style drum hits into buf. Returns note keys that finished."""
+        """Add analog-style drum hits into buf. Returns note keys that finished.
+
+        When apply_model_fx is True, each drum *model* (kick, snare, …) runs
+        through its own MixBusFx insert before summing onto buf.
+        """
         dead: List[int] = []
         if not hits:
             return dead
         two_pi = 2.0 * math.pi
         inv_sr = 1.0 / sr
-        for hit in hits:
+
+        def _synth_hit(hit: DrumHit) -> Tuple[np.ndarray, float]:
             # Keep hit snapshot in sync so UI/debug stay honest; audio uses live macros
             hit.pitch = pitch
             hit.decay = decay
@@ -1534,10 +1995,32 @@ class SineEngine:
                 inv_sr=inv_sr,
             )
             hit.phase = new_phase
-            buf += audio * np.float32(DRUM_BUS_GAIN)
             hit.pos += frames
             if hit.pos > int(dur * sr) or float(np.max(np.abs(audio))) < 0.0002:
                 dead.append(hit.note)
+            return audio, dur
+
+        if not apply_model_fx:
+            for hit in hits:
+                audio, _dur = _synth_hit(hit)
+                buf += audio * np.float32(DRUM_BUS_GAIN)
+            return dead
+
+        # Per drum *model* insert FX (kick ≠ snare ≠ hat, …).
+        by_model: Dict[str, List[DrumHit]] = {}
+        for hit in hits:
+            by_model.setdefault(str(hit.model), []).append(hit)
+
+        scratch = self._fx_tmp[:frames]
+        for model, model_hits in by_model.items():
+            scratch.fill(0.0)
+            for hit in model_hits:
+                audio, _dur = _synth_hit(hit)
+                scratch += audio * np.float32(DRUM_BUS_GAIN)
+            with self._lock:
+                fx = self._ensure_drum_fx_unlocked(model)
+            fx.process(scratch)
+            buf += scratch
         return dead
 
 
@@ -2400,6 +2883,11 @@ class PhrasePadBank:
         if want_usb:
             self._ensure_outport()
 
+        # Locked pads keep morph_a's FX insert; FOLLOW pads use live nearer endpoint.
+        fx_name: Optional[str] = None
+        if cell.is_voice_locked():
+            fx_name = str(cell.morph_a or "sine")
+
         was_playing = already
         self.stop_cell(idx)
         stop_ev = threading.Event()
@@ -2419,6 +2907,7 @@ class PhrasePadBank:
                 stop_ev,
                 loop,
                 timbre,
+                fx_name,
                 cell.out_channel,
                 cell.local_synth,
                 out_mode,
@@ -2497,6 +2986,7 @@ class PhrasePadBank:
         local_synth: bool,
         out_mode: str,
         timbre: Optional[np.ndarray],
+        fx_name: Optional[str],
         idx: int,
     ) -> None:
         ch = (out_channel & 0x0F) if out_channel >= 0 else (src_channel & 0x0F)
@@ -2524,7 +3014,11 @@ class PhrasePadBank:
                     pass
         if want_local:
             if on:
-                self._engine.note_on(ch, n, velocity, timbre=timbre)
+                # Drums use per-model FX inside the engine; keys use fx_name slot.
+                use_fx = fx_name if (ch & 0x0F) != DRUM_CHANNEL else None
+                self._engine.note_on(
+                    ch, n, velocity, timbre=timbre, fx_name=use_fx
+                )
                 with self._lock:
                     self._held.setdefault(idx, set()).add((ch, n))
                 self._emit(("on", ch, n, velocity))
@@ -2549,6 +3043,7 @@ class PhrasePadBank:
         stop_ev: threading.Event,
         loop: bool,
         timbre: Optional[np.ndarray],
+        fx_name: Optional[str],
         out_channel: int,
         local_synth: bool,
         out_mode: str,
@@ -2582,6 +3077,7 @@ class PhrasePadBank:
                         local_synth=local_synth,
                         out_mode=out_mode,
                         timbre=timbre if (ev.channel & 0x0F) != DRUM_CHANNEL else None,
+                        fx_name=fx_name,
                         idx=idx,
                     )
                 end = t0 + length
@@ -3037,8 +3533,20 @@ class MidiToneApp:
     ) -> None:
         self.port_filter = port_filter.strip().lower()
         self.event_q: queue.Queue = queue.Queue(maxsize=EVENT_Q_MAX)
-        self._tables = load_wavetables(waves_dir)
+        self._waves_dir = pathlib.Path(waves_dir)
+        self._user_waves_dir = USER_WAVETABLES_DIR
+        try:
+            self._user_waves_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        self._tables = load_wavetables(self._waves_dir, self._user_waves_dir)
         self.engine = SineEngine(self._tables, max_voices=max_voices)
+        # Delay/reverb numbers beside user wavetables (drive/tone already in the wave)
+        self._voice_fx_sidecars: Dict[str, Dict[str, float]] = load_user_voice_fx_map(
+            self._user_waves_dir
+        )
+        for vname, snap in self._voice_fx_sidecars.items():
+            self.engine.apply_voice_fx_sidecar(vname, snap)
         self._inport: Optional[mido.ports.BaseInput] = None
         self._poll_thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
@@ -3091,6 +3599,7 @@ class MidiToneApp:
         self._full_vel_btn: Optional[tk.Button] = None
         self._drum_lock_btn: Optional[tk.Button] = None
         self._fx_mode_btn: Optional[tk.Button] = None
+        self._bus_fx_mode_btn: Optional[tk.Button] = None
         self._voice_lbl: Optional[tk.Label] = None
         self._wave_canvas: Optional[tk.Canvas] = None
         self._wave_caption: Optional[tk.Label] = None
@@ -3106,9 +3615,18 @@ class MidiToneApp:
         self._kit_ui_open = False
         self._kit_frame: Optional[tk.Frame] = None
         self._kit_btns: Dict[int, tk.Button] = {}
+        self._kit_all_btn: Optional[tk.Button] = None
         self._kit_wave_canvas: Optional[tk.Canvas] = None
         self._kit_status_var = tk.StringVar(value="")
         self._kit_selected_note = 36  # factory kick
+        self._kit_all_drums = False  # FX edit target = shared kit group bus
+        self._save_voice_open = False
+        self._save_voice_frame: Optional[tk.Frame] = None
+        self._save_voice_entry: Optional[tk.Entry] = None
+        self._save_voice_status: Optional[tk.Label] = None
+        self._save_voice_drive_btn: Optional[tk.Button] = None
+        self._save_voice_keys: Optional[tk.Frame] = None
+        self._save_voice_keys_digits = False
         self._mode = "synth"  # synth | looper | pads | songs | log | presets
         self._mode_btns: Dict[str, tk.Button] = {}
         self._looper = MidiLooper(self.engine, self._q_put)
@@ -3213,6 +3731,10 @@ class MidiToneApp:
             row1, "FX MODE", self._toggle_fx_mode, bg="#3c3836"
         )
         self._fx_mode_btn.pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3)
+        self._bus_fx_mode_btn = self._mk_touch_btn(
+            row1, "BUS FX", self._toggle_bus_fx_mode, bg="#3c3836"
+        )
+        self._bus_fx_mode_btn.pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3)
 
         # Voice picker — prev / name / next + full grid
         row2 = tk.Frame(self._touch, bg="#111111")
@@ -3336,6 +3858,7 @@ class MidiToneApp:
         self._paint_full_vel_btn()
         self._paint_drum_lock_btn()
         self._paint_fx_mode_btn()
+        self._paint_bus_fx_mode_btn()
         self._sync_voice_index_from_morph()
         # Rebuild pads chrome so restored PLAY/EDIT + OUT mode paint correctly
         self._build_pads_mode()
@@ -3378,8 +3901,10 @@ class MidiToneApp:
         st = self.engine.modulation_state()
         if self.engine.fx_knob_focus():
             delay_ms = int((0.05 + st.get("fx_delay_time", 0.0) * 0.70) * 1000)
+            target = self.engine.fx_edit_label()
+            prefix = "BUS FX" if self.engine.bus_fx_mode() else f"FX {target}"
             return (
-                "FX MODE  "
+                f"{prefix}  "
                 f"Drive:{int(st.get('fx_drive', 0.0) * 127):3d}  "
                 f"Dly:{delay_ms:3d}ms  "
                 f"Fb:{int(st.get('fx_delay_fb', 0.0) * 127):3d}  "
@@ -3410,7 +3935,12 @@ class MidiToneApp:
         )
 
     def _overlay_busy(self) -> bool:
-        return self._grid_open or self._morph_ui_open or self._kit_ui_open
+        return (
+            self._grid_open
+            or self._morph_ui_open
+            or self._kit_ui_open
+            or self._save_voice_open
+        )
 
     def _session_dict(self) -> Dict[str, Any]:
         return {
@@ -4154,10 +4684,23 @@ class MidiToneApp:
                 text="FX MODE", bg="#3c3836", activebackground="#3c3836"
             )
 
+    def _paint_bus_fx_mode_btn(self) -> None:
+        if self._bus_fx_mode_btn is None:
+            return
+        if self.engine.bus_fx_mode():
+            self._bus_fx_mode_btn.configure(
+                text="BUS FX: ON", bg="#8f3f71", activebackground="#8f3f71"
+            )
+        else:
+            self._bus_fx_mode_btn.configure(
+                text="BUS FX", bg="#3c3836", activebackground="#3c3836"
+            )
+
     def _toggle_drum_lock(self) -> None:
         self.engine.set_drum_mode(not self.engine.drum_mode())
         self._paint_drum_lock_btn()
         self._paint_fx_mode_btn()
+        self._paint_bus_fx_mode_btn()
         self.mod_var.set(self._format_mod_line())
         self._append_log(
             "DRUM MODE ON — Knob 1–4 edit drums"
@@ -4171,14 +4714,38 @@ class MidiToneApp:
 
     def _toggle_fx_mode(self) -> None:
         on = self.engine.toggle_fx_mode()
+        if on:
+            # KIT open → edit that drum's insert; else nearer morph wavetable.
+            if self._kit_ui_open:
+                self.engine.set_fx_edit_drum(self._kit_model_selected())
+            else:
+                self.engine.set_fx_edit_voice(None)
+        self._paint_fx_mode_btn()
+        self._paint_bus_fx_mode_btn()
+        self._paint_drum_lock_btn()
+        self.mod_var.set(self._format_mod_line())
+        target = self.engine.fx_edit_label() if on else ""
+        self._append_log(
+            f"FX MODE ON — insert FX on {target} "
+            "(not the whole mix). KIT → ALL DRUMS for kit echo; tap a pad for one drum; "
+            "close KIT for nearer morph voice. Use BUS FX for global wet."
+            if on
+            else "FX MODE OFF — knobs back to morph / tone / …"
+        )
+
+    def _toggle_bus_fx_mode(self) -> None:
+        on = self.engine.toggle_bus_fx_mode()
+        if on:
+            self.engine.set_fx_edit_bus()
+        self._paint_bus_fx_mode_btn()
         self._paint_fx_mode_btn()
         self._paint_drum_lock_btn()
         self.mod_var.set(self._format_mod_line())
         self._append_log(
-            "FX MODE ON — Knobs: drive / delay-time / delay-fb / delay-mix / "
-            "reverb-size / reverb-mix / — / level"
+            "BUS FX ON — knobs wet the whole soft-synth mix (keys + drums + phrases). "
+            "Per-voice/per-drum inserts still run underneath; use FX MODE to edit those."
             if on
-            else "FX MODE OFF — knobs back to morph / tone / …"
+            else "BUS FX OFF — knobs back to morph / tone / …"
         )
 
     def _paint_synth_waveform(self, *, force: bool = False) -> None:
@@ -4227,20 +4794,46 @@ class MidiToneApp:
 
     def _paint_kit_pad_btns(self) -> None:
         for note, btn in self._kit_btns.items():
-            on = note == self._kit_selected_note
+            on = (not self._kit_all_drums) and note == self._kit_selected_note
             color = "#d79921" if on else "#3c3836"
             try:
                 btn.configure(bg=color, activebackground=color)
             except Exception:
                 pass
+        if self._kit_all_btn is not None:
+            color = "#b16286" if self._kit_all_drums else "#504945"
+            try:
+                self._kit_all_btn.configure(bg=color, activebackground=color)
+            except Exception:
+                pass
+
+    def _select_kit_all_drums(self) -> None:
+        """Point FX MODE at the shared kit-group bus (echo on all drums)."""
+        self._kit_all_drums = True
+        if not self.engine.fx_mode():
+            self.engine.set_fx_mode(True)
+            self._paint_fx_mode_btn()
+            self._paint_bus_fx_mode_btn()
+            self._paint_drum_lock_btn()
+        self.engine.set_fx_edit_drums()
+        self._paint_kit_pad_btns()
+        self.mod_var.set(self._format_mod_line())
+        self._kit_status_var.set(
+            "ALL DRUMS · FX MODE edits the shared kit bus (echo/drive on whole kit)"
+        )
+        self._append_log("KIT — ALL DRUMS FX (shared kit bus)")
 
     def _select_kit_note(self, note: int, *, audition: bool = False) -> None:
         note = int(note) & 0x7F
         if note < PHRASE_PAD_BASE or note >= PHRASE_PAD_BASE + 16:
             return
         self._kit_selected_note = note
+        self._kit_all_drums = False
         self._paint_kit_pad_btns()
         self._paint_kit_waveform(force=True)
+        if self.engine.fx_mode():
+            self.engine.set_fx_edit_drum(drum_model_for_note(note))
+            self.mod_var.set(self._format_mod_line())
         if audition:
             self.engine.note_on(DRUM_CHANNEL, note, 110)
             self._q_put(("log", f"Kit audition {drum_model_for_note(note)}", False))
@@ -4255,9 +4848,22 @@ class MidiToneApp:
             self._close_voice_grid(restore_main=False)
         if self._morph_ui_open:
             self._close_morph_menu(restore_main=False)
+        if self._save_voice_open:
+            self._close_save_voice(restore_main=False)
 
-        # Knobs should edit drums while shaping the preview
-        if not self.engine.drum_mode():
+        # If insert FX MODE is on, keep drum-group target or point at selected drum.
+        # If BUS FX is on, keep global edit (kit is audition/preview only).
+        # Otherwise turn on DRUM MODE so knobs reshape the one-shot body.
+        if self.engine.fx_mode():
+            if self.engine.fx_edit_kind() == "drums":
+                self._kit_all_drums = True
+            else:
+                self._kit_all_drums = False
+                self.engine.set_fx_edit_drum(self._kit_model_selected())
+            self.mod_var.set(self._format_mod_line())
+        elif self.engine.bus_fx_mode():
+            self.mod_var.set(self._format_mod_line())
+        elif not self.engine.drum_mode():
             self.engine.set_drum_mode(True)
             self._paint_drum_lock_btn()
             self.mod_var.set(self._format_mod_line())
@@ -4332,6 +4938,10 @@ class MidiToneApp:
 
         footer = tk.Frame(self._kit_frame, bg="#111111")
         footer.pack(fill=tk.X, padx=6, pady=6)
+        self._kit_all_btn = self._mk_touch_btn(
+            footer, "ALL DRUMS", self._select_kit_all_drums, bg="#504945"
+        )
+        self._kit_all_btn.pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=12)
         self._mk_touch_btn(
             footer, "AUDITION", lambda: self._select_kit_note(self._kit_selected_note, audition=True),
             bg="#458588",
@@ -4341,7 +4951,15 @@ class MidiToneApp:
         )
         self._paint_kit_pad_btns()
         self._paint_kit_waveform(force=True)
-        self._append_log("KIT — pick a drum; DRUM MODE knobs reshape its wave")
+        if self.engine.fx_mode():
+            if self.engine.fx_edit_kind() == "drums":
+                self._kit_all_drums = True
+                self._paint_kit_pad_btns()
+            self._append_log(
+                "KIT — ALL DRUMS = shared kit FX; tap a pad for that drum's insert"
+            )
+        else:
+            self._append_log("KIT — pick a drum; DRUM MODE knobs reshape its wave")
 
     def _close_kit_explorer(self, restore_main: bool = True) -> None:
         if not self._kit_ui_open:
@@ -4350,8 +4968,15 @@ class MidiToneApp:
             self._kit_frame.destroy()
             self._kit_frame = None
         self._kit_btns = {}
+        self._kit_all_btn = None
         self._kit_wave_canvas = None
         self._kit_ui_open = False
+        # Leaving KIT: keep shared-kit FX edit; single-drum insert → nearer morph voice.
+        if self.engine.fx_mode():
+            if self.engine.fx_edit_kind() == "drum":
+                self._kit_all_drums = False
+                self.engine.set_fx_edit_voice(None)
+            # kind == "drums" stays so you can keep twisting kit echo after CLOSE
         if restore_main and self._mode == "synth":
             self._synth_shell.pack(fill=tk.BOTH, expand=True)
             self._main.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
@@ -4852,6 +5477,8 @@ class MidiToneApp:
             self._close_morph_menu(restore_main=False)
         if self._kit_ui_open:
             self._close_kit_explorer(restore_main=False)
+        if self._save_voice_open:
+            self._close_save_voice(restore_main=False)
 
         # Leaving pads while recording: keep the take
         if self._mode == "pads" and mode != "pads":
@@ -5025,6 +5652,9 @@ class MidiToneApp:
         name = self._voice_names[self._voice_index]
         # VOICES / PREV / NEXT set morph-A and park at pure A (B stays as morph target)
         self.engine.set_morph_index(self._voice_index)
+        snap = self._voice_fx_sidecars.get(name)
+        if snap is not None:
+            self.engine.apply_voice_fx_sidecar(name, snap)
         self._mark_settings_dirty()
         if self._voice_lbl is not None:
             self._voice_lbl.configure(text=self._voice_label_text())
@@ -5052,11 +5682,262 @@ class MidiToneApp:
         if self._morph_ui_open:
             self._paint_morph_menu()
 
+    def _open_save_voice(self) -> None:
+        """Bake morph + drive + tone into a new dry wavetable (shape only)."""
+        if self._save_voice_open:
+            return
+        if self._mode != "synth":
+            self._switch_mode("synth")
+        # Leave other overlays so the name pad is full-screen
+        if self._grid_open:
+            self._close_voice_grid(restore_main=False)
+        if self._morph_ui_open:
+            self._close_morph_menu(restore_main=False)
+        if self._kit_ui_open:
+            self._close_kit_explorer(restore_main=False)
+
+        self._save_voice_open = True
+        self._save_voice_keys_digits = False
+        self._synth_shell.pack_forget()
+
+        self._save_voice_frame = tk.Frame(self._mode_host, bg="#111111")
+        self._save_voice_frame.pack(fill=tk.BOTH, expand=True)
+
+        header = tk.Frame(self._save_voice_frame, bg="#111111")
+        header.pack(fill=tk.X, padx=6, pady=(6, 2))
+        tk.Label(
+            header,
+            text="SAVE VOICE",
+            font=("DejaVu Sans", 16, "bold"),
+            fg="#fbf1c7",
+            bg="#111111",
+        ).pack(side=tk.LEFT)
+        a, b, blend = self.engine.morph_neighbors()
+        hint = a if a == b else f"{a}→{b} {int(blend * 100)}%"
+        tk.Label(
+            header,
+            text=f"bake shape · {hint}",
+            font=("DejaVu Sans", 11),
+            fg="#a89984",
+            bg="#111111",
+        ).pack(side=tk.RIGHT)
+
+        tk.Label(
+            self._save_voice_frame,
+            text=(
+                "Wave shape: morph + drive + tone → .wav. "
+                "Alongside: delay/reverb amounts in a tiny .fx.json "
+                "(drive stays in the wave, not double-applied)."
+            ),
+            font=("DejaVu Sans", 10),
+            fg="#a89984",
+            bg="#111111",
+            wraplength=760,
+            justify=tk.LEFT,
+            anchor="w",
+        ).pack(fill=tk.X, padx=8, pady=(0, 4))
+
+        name_row = tk.Frame(self._save_voice_frame, bg="#111111")
+        name_row.pack(fill=tk.X, padx=8, pady=4)
+        suggested = self.engine.suggested_save_voice_name()
+        self._save_voice_entry = tk.Entry(
+            name_row,
+            font=("DejaVu Sans Mono", 18),
+            bg="#1d2021",
+            fg="#fbf1c7",
+            insertbackground="#fbf1c7",
+            relief=tk.FLAT,
+        )
+        self._save_voice_entry.pack(side=tk.LEFT, expand=True, fill=tk.BOTH, ipady=10)
+        self._save_voice_entry.insert(0, suggested)
+        self._save_voice_entry.focus_set()
+
+        self._save_voice_status = tk.Label(
+            self._save_voice_frame,
+            text=(
+                f"Will write {self._user_waves_dir.name}/{suggested}.wav "
+                f"+ {suggested}.fx.json"
+            ),
+            font=("DejaVu Sans Mono", 11),
+            fg="#83a598",
+            bg="#111111",
+            anchor="w",
+        )
+        self._save_voice_status.pack(fill=tk.X, padx=8, pady=(0, 4))
+
+        opt = tk.Frame(self._save_voice_frame, bg="#111111")
+        opt.pack(fill=tk.X, padx=6, pady=2)
+        self._mk_touch_btn(
+            opt, "SUGGEST", self._reset_save_voice_name, bg="#458588"
+        ).pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=8)
+        self._mk_touch_btn(
+            opt, "⌫", lambda: self._save_voice_type("\b"), bg="#504945"
+        ).pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=8)
+        self._mk_touch_btn(
+            opt, "CLR", lambda: self._save_voice_type("\x15"), bg="#504945"
+        ).pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=8)
+
+        keys = tk.Frame(self._save_voice_frame, bg="#111111")
+        keys.pack(fill=tk.BOTH, expand=True, padx=4, pady=2)
+        self._save_voice_keys = keys
+        self._paint_save_voice_keyboard()
+
+        footer = tk.Frame(self._save_voice_frame, bg="#111111")
+        footer.pack(fill=tk.X, padx=6, pady=6)
+        self._mk_touch_btn(
+            footer, "SAVE", self._confirm_save_voice, bg="#689d6a"
+        ).pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=14)
+        self._mk_touch_btn(
+            footer, "CANCEL", self._close_save_voice, bg="#9d0006"
+        ).pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=14)
+        self._append_log("SAVE VOICE — bake wave shape + keep delay/reverb alongside")
+
+    def _paint_save_voice_keyboard(self) -> None:
+        keys = getattr(self, "_save_voice_keys", None)
+        if keys is None:
+            return
+        for w in keys.winfo_children():
+            w.destroy()
+        if self._save_voice_keys_digits:
+            rows = ("1234567890", "-.")
+            toggle_label = "ABC"
+        else:
+            rows = ("qwertyuiop", "asdfghjkl", "zxcvbnm_")
+            toggle_label = "123"
+        for r, row in enumerate(rows):
+            fr = tk.Frame(keys, bg="#111111")
+            fr.pack(fill=tk.BOTH, expand=True, pady=1)
+            for ch in row:
+                self._mk_touch_btn(
+                    fr,
+                    ch.upper() if ch.isalpha() else ch,
+                    lambda c=ch: self._save_voice_type(c),
+                    bg="#3c3836",
+                ).pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=1, ipady=6)
+        fr = tk.Frame(keys, bg="#111111")
+        fr.pack(fill=tk.BOTH, expand=True, pady=1)
+        self._mk_touch_btn(
+            fr, toggle_label, self._toggle_save_voice_keys, bg="#504945"
+        ).pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=1, ipady=6)
+
+    def _toggle_save_voice_keys(self) -> None:
+        self._save_voice_keys_digits = not self._save_voice_keys_digits
+        self._paint_save_voice_keyboard()
+
+    def _reset_save_voice_name(self) -> None:
+        if self._save_voice_entry is None:
+            return
+        suggested = self.engine.suggested_save_voice_name()
+        self._save_voice_entry.delete(0, tk.END)
+        self._save_voice_entry.insert(0, suggested)
+        self._update_save_voice_status()
+
+    def _save_voice_type(self, ch: str) -> None:
+        entry = self._save_voice_entry
+        if entry is None:
+            return
+        if ch == "\b":
+            cur = entry.get()
+            entry.delete(0, tk.END)
+            entry.insert(0, cur[:-1])
+        elif ch == "\x15":
+            entry.delete(0, tk.END)
+        else:
+            entry.insert(tk.END, ch)
+        self._update_save_voice_status()
+
+    def _update_save_voice_status(self) -> None:
+        if self._save_voice_status is None or self._save_voice_entry is None:
+            return
+        name = sanitize_voice_name(self._save_voice_entry.get())
+        if name in BUILTIN_VOICE_NAMES:
+            self._save_voice_status.configure(
+                text=f"'{name}' is a built-in — pick another name", fg="#fb4934"
+            )
+            return
+        path = self._user_waves_dir / f"{name}.wav"
+        exists = name in self.engine.voice_names or path.is_file()
+        tag = "overwrite" if exists else "new"
+        self._save_voice_status.configure(
+            text=(
+                f"{tag}: {self._user_waves_dir.name}/{name}.wav "
+                f"+ {name}.fx.json"
+            ),
+            fg="#fabd2f" if exists else "#83a598",
+        )
+
+    def _confirm_save_voice(self) -> None:
+        if self._save_voice_entry is None:
+            return
+        raw = self._save_voice_entry.get()
+        name = sanitize_voice_name(raw)
+        if not name:
+            if self._save_voice_status is not None:
+                self._save_voice_status.configure(text="Need a name", fg="#fb4934")
+            return
+        if name in BUILTIN_VOICE_NAMES:
+            if self._save_voice_status is not None:
+                self._save_voice_status.configure(
+                    text=f"Cannot replace built-in '{name}'", fg="#fb4934"
+                )
+            return
+        try:
+            key, cycle, sidecar = self.engine.save_current_voice(name)
+            wav_path = self._user_waves_dir / f"{key}.wav"
+            fx_path = voice_fx_sidecar_path(self._user_waves_dir, key)
+            write_wavetable_wav(wav_path, cycle, sample_rate=44100)
+            write_voice_fx_sidecar(fx_path, sidecar)
+            self._voice_fx_sidecars[key] = dict(sidecar)
+        except Exception as exc:
+            if self._save_voice_status is not None:
+                self._save_voice_status.configure(text=f"Save failed: {exc}", fg="#fb4934")
+            self._append_log(f"SAVE VOICE failed: {exc}")
+            return
+
+        self._voice_names = self.engine.voice_names
+        try:
+            self._voice_index = self._voice_names.index(key)
+        except ValueError:
+            self._voice_index = 0
+        if self._voice_lbl is not None:
+            self._voice_lbl.configure(text=self._voice_label_text())
+        self.mod_var.set(self._format_mod_line())
+        self._mark_settings_dirty()
+        self._append_log(
+            f"Saved voice '{key}' → {wav_path.name} + {fx_path.name} "
+            f"(dly={int(sidecar.get('fx_delay_mix', 0) * 127)} "
+            f"rvb={int(sidecar.get('fx_reverb_mix', 0) * 127)})"
+        )
+        self._close_save_voice()
+        self._paint_synth_waveform(force=True)
+
+    def _close_save_voice(self, restore_main: bool = True) -> None:
+        if not self._save_voice_open:
+            return
+        if self._save_voice_frame is not None:
+            self._save_voice_frame.destroy()
+            self._save_voice_frame = None
+        self._save_voice_entry = None
+        self._save_voice_status = None
+        self._save_voice_drive_btn = None
+        self._save_voice_keys = None
+        self._save_voice_open = False
+        if restore_main and self._mode == "synth":
+            self._synth_shell.pack(fill=tk.BOTH, expand=True)
+            self._main.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+            self._touch.pack(side=tk.BOTTOM, fill=tk.X, padx=6, pady=6)
+            if self._voice_lbl is not None:
+                self._voice_lbl.configure(text=self._voice_label_text())
+            self.mod_var.set(self._format_mod_line())
+            self._paint_synth_waveform(force=True)
+
     def _open_voice_grid(self) -> None:
         if self._grid_open:
             return
         if self._mode != "synth":
             self._switch_mode("synth")
+        if self._save_voice_open:
+            self._close_save_voice(restore_main=False)
         if self._morph_ui_open:
             self._close_morph_menu(restore_main=False)
         if self._kit_ui_open:
@@ -5136,8 +6017,11 @@ class MidiToneApp:
 
         footer = tk.Frame(self._grid_frame, bg="#111111")
         footer.pack(fill=tk.X, padx=6, pady=6)
+        self._mk_touch_btn(
+            footer, "SAVE AS…", self._open_save_voice, bg="#689d6a"
+        ).pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=14)
         self._mk_touch_btn(footer, "CLOSE", self._close_voice_grid, bg="#9d0006").pack(
-            fill=tk.BOTH, ipady=14
+            side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=14
         )
         self._paint_voice_grid()
 
@@ -5175,14 +6059,18 @@ class MidiToneApp:
             self._switch_mode("synth")
         if self._grid_open:
             self._close_voice_grid(restore_main=False)
+        if self._save_voice_open:
+            self._close_save_voice(restore_main=False)
         if self._kit_ui_open:
             self._close_kit_explorer(restore_main=False)
         # Hand knobs back to morph while editing the pair
-        if self.engine.drum_mode() or self.engine.fx_mode():
+        if self.engine.drum_mode() or self.engine.fx_mode() or self.engine.bus_fx_mode():
             self.engine.set_drum_mode(False)
             self.engine.set_fx_mode(False)
+            self.engine.set_bus_fx_mode(False)
             self._paint_drum_lock_btn()
             self._paint_fx_mode_btn()
+            self._paint_bus_fx_mode_btn()
             self.mod_var.set(self._format_mod_line())
 
         self._morph_ui_open = True
@@ -5270,7 +6158,10 @@ class MidiToneApp:
 
         footer = tk.Frame(self._morph_frame, bg="#111111")
         footer.pack(fill=tk.X, padx=6, pady=6)
-        self._mk_touch_btn(footer, "DONE", self._close_morph_menu, bg="#689d6a").pack(
+        self._mk_touch_btn(
+            footer, "SAVE AS…", self._open_save_voice, bg="#689d6a"
+        ).pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=14)
+        self._mk_touch_btn(footer, "DONE", self._close_morph_menu, bg="#458588").pack(
             side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=14
         )
         self._mk_touch_btn(footer, "CANCEL", self._close_morph_menu, bg="#9d0006").pack(
