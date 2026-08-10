@@ -53,7 +53,7 @@ Factory **Prog Select → Pad 1** (MPC program) maps knobs to CC70–77:
 | 4 | 73 | Release |
 | 5 | 74 | Vibrato depth |
 | 6 | 75 | Vibrato rate |
-| 8 | 77 | Level |
+| 8 | 77 | **Synth** bus level |
 
 Joystick Y still sends **CC1** = vibrato amount. PREV/NEXT jumps morph to a voice; Knob 1 sweeps continuously between them.
 
@@ -84,9 +84,9 @@ Factory MPC program (`Prog Select` → Pad 1): **Bank A = notes 36–43**, **Ban
 | 2 | 71 | Noise brightness (tone) |
 | 3 | 72 | Stretch / decay length |
 | 4 | 73 | Noise amount |
-| 8 | 77 | Master level (always) |
+| 8 | 77 | **Drum** bus level |
 
-Hitting pads does **not** steal morph knobs. With DRUM MODE off, Knob 1 stays morph. Opening **MORPH** turns DRUM MODE / FX MODE / BUS FX off. Session-only (not saved across restart).
+Hitting pads does **not** steal morph knobs. With DRUM MODE off, Knob 1 stays morph. Opening **VOICES** turns DRUM MODE / FX MODE / BUS FX off so you can edit the pair. Session-only (not saved across restart).
 
 **FX MODE** (Synth toolbar) — **per-instrument inserts** + a shared kit bus. Knobs edit the current target:
 
@@ -105,13 +105,13 @@ Hitting pads does **not** steal morph knobs. With DRUM MODE off, Knob 1 stays mo
 | 4 | 73 | Delay mix |
 | 5 | 74 | Reverb size |
 | 6 | 75 | Reverb mix |
-| 8 | 77 | Master level (always) |
+| 8 | 77 | Synth level (drum level if DRUM MODE) |
 
 Amounts persist in `settings.json` / presets (`voice_fx` / `drum_fx` / `drum_group_fx` / `bus_fx`); the mode toggles themselves do not.
 
 **Waveforms:** SYNTH shows a live **morph-cycle** scope that redraws as Knob 1 / voice changes. Tap **KIT** for a drum drill-down — pick a pad (touch or MPK), watch its one-shot reshape with pitch / stretch / noise / tone knobs (DRUM MODE turns on while KIT is open). Keeps the main synth screen uncluttered.
 
-**SAVE AS…** (from **VOICES** or **MORPH**) writes a user voice under `user-wavetables/`:
+**SAVE AS…** (from **VOICES**) writes a user voice under `user-wavetables/`:
 
 - `<name>.wav` — morph + **drive** + **tone** baked into the single-cycle shape
 - `<name>.fx.json` — delay/reverb numbers alongside (mix + time/feedback/size). Drive is not stored here (already in the wave)
@@ -202,9 +202,7 @@ Song USB out is a file-player path (not live thru remap).
 
 ### Voices / wavetables
 
-Tap **VOICES** (or the current voice name) for a full-screen grid of large buttons — one per loaded wavetable. **PREV / NEXT** still step one at a time.
-
-Tap **MORPH** to pick a pair: arm **A** or **B**, tap two voices, **DONE**. Knob 1 then blends only **A → B** (not the whole library). **SWAP** flips the pair.
+Tap **VOICES** (or the current voice name) for the wavetable grid. Arm **A** or **B**, tap two voices — Knob 1 blends **A → B**. **SWAP** flips the pair. **PREV / NEXT** still step A and park at pure A.
 
 Drop any mono single-cycle `.wav` into `wavetables/` and restart — the stem becomes the voice name.
 

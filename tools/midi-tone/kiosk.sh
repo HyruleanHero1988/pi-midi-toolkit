@@ -15,8 +15,8 @@ if [[ -f "$HOME/.Xauthority" ]]; then
 fi
 export GDK_BACKEND=x11
 unset WAYLAND_DISPLAY || true
-export PULSE_LATENCY_MSEC="${PULSE_LATENCY_MSEC:-80}"
-export PIPEWIRE_LATENCY="${PIPEWIRE_LATENCY:-1024/44100}"
+export PULSE_LATENCY_MSEC="${PULSE_LATENCY_MSEC:-100}"
+export PIPEWIRE_LATENCY="${PIPEWIRE_LATENCY:-1536/44100}"
 
 # Point Openbox at our minimal config (no panel / desktop icons)
 export OPENBOX_CONFIG_DIR="${OPENBOX_CONFIG_DIR:-$DIR/kiosk/openbox}"
@@ -110,6 +110,6 @@ while true; do
     continue
   fi
   ./run.sh "${ARGS[@]}" >>"$LOG" 2>&1 || true
-  echo "midi-tone exited; restarting in 2s" >>"$LOG"
-  sleep 2
+  echo "midi-tone exited; restarting in 3s" >>"$LOG"
+  sleep 3
 done
