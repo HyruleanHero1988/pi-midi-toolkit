@@ -111,7 +111,13 @@ Amounts persist in `settings.json` / presets (`voice_fx` / `drum_fx` / `drum_gro
 
 **Waveforms:** SYNTH shows a live **morph-cycle** scope that redraws as Knob 1 / voice changes. Tap **KIT** for a drum drill-down — pick a pad (touch or MPK), watch its one-shot reshape with pitch / stretch / noise / tone knobs (DRUM MODE turns on while KIT is open). Keeps the main synth screen uncluttered.
 
-**SAVE AS…** (from **VOICES** or **MORPH**) freezes the current morph cycle into a new named wavetable under `user-wavetables/`. Optional **DRIVE: ON** bakes the nearer voice’s drive waveshape into the cycle. Delay / reverb / tone stay live FX (they aren’t single-cycle). Built-ins `sine` / `square` / `saw` / `triangle` can’t be overwritten. Saved voices load on next launch and appear in the VOICES grid immediately.
+**SAVE AS…** (from **VOICES** or **MORPH**) freezes the dialed-in voice as a named patch under `user-wavetables/`:
+
+- Morph cycle (+ current **tone** baked into the wave)
+- That voice’s FX insert (**drive / delay / reverb**)
+- Attack, release, vibrato, and level
+
+Selecting the voice later restores the patch. Built-ins `sine` / `square` / `saw` / `triangle` can’t be overwritten. Master **BUS FX** and drum FX are separate and not part of a voice patch.
 
 Keyboard notes keep the wavetable morph synth. Pad aftertouch still trims the ringing hit. If a pad program uses other note numbers, unknown notes still cycle through the 16 voices.
 
@@ -128,7 +134,7 @@ Top-right tabs stay visible:
 
 Last session autosaves to `settings.json` (gitignored) every few seconds and on quit.
 Named presets live in `user-presets/slot-01.json` … `slot-08.json`.
-User-saved morph wavetables live in `user-wavetables/*.wav` (gitignored).
+User-saved morph wavetables live in `user-wavetables/*.wav` + `*.json` patches (gitignored).
 Song files live as whatever you put in `songs/` (any `.mid` name).
 Phrase pads persist as `phrases/pad-01.json` … `pad-16.json` (gitignored).
 
