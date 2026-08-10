@@ -46,6 +46,9 @@ todos:
     status: completed
   - id: jambox-fx
     content: "Jambox FX track: mix-bus distortion → echo/delay → careful reverb; measure Pi 2 CPU/xruns"
+    status: completed
+  - id: rust-jambox-engine
+    content: "Rust jambox engine: audio + sample-accurate sequencer clock; Tk UI becomes thin client (timing integrity)"
     status: pending
   - id: arp
     content: "Phase 4 (optional distinct mode): key-relative step pattern transposed by held root"
@@ -227,17 +230,31 @@ This is **not** MIDI-out thru. It is the creative local instrument. Real use alr
 
 The diagnostic framing did **not** paint a software dead-end. Limits will show up as **CPU, audio xruns, or latency feel** — measurable — not as “we called it Phase 0.”
 
-### Effects (mix bus first)
+### Effects (mix bus first) — **shipped in Python on `cursor/midi-tone-jambox-fx-1052`**
 
-Apply to the soft-synth output (keys + drums + launched phrases). Knobs on the jambox, not a DAW plugin host.
+Apply to the soft-synth output (keys + drums + launched phrases) via **FX MODE** knobs — not a DAW plugin host.
 
-| Effect | Pi 2 outlook | Notes |
-|--------|--------------|-------|
-| **Distortion / drive** | Easy | Already soft-limit with `tanh`; expose drive/tone |
-| **Echo / delay** | Very doable | Fixed delay line + feedback + mix — classic jambox control |
-| **Reverb** | Possible, taxed | Small algorithmic / cheap tank OK; lush convolution is where Pi 2 usually dies |
+| Effect | Status | Notes |
+|--------|--------|-------|
+| **Distortion / drive** | Done | Waveshape before delay |
+| **Echo / delay** | Done | 50–750 ms, feedback + mix |
+| **Reverb** | Done (light) | Short multi-tap recirculating tank — not a lush hall |
 
-**Order of attack:** distortion → echo → careful reverb. Earn each with a stress jam before adding the next.
+Play with these in the current `midi-tone` process **before** the Rust audio refactor so the feel is proven on hardware.
+
+### Next architecture: Rust jambox engine (planned)
+
+Dropped beats while looping (UI/GIL/wall-clock sequencer vs audio callback) are a real product risk. Same law as thru:
+
+> **UI is never on the audio / sequencer hot path.**
+
+| Step | Intent |
+|------|--------|
+| **Now** | Ship FX in Python; jam and measure |
+| **Next** | Dedicated **Rust jambox engine**: wavetable + drums + FX + **sample-accurate** loop/phrase clock |
+| **UI** | Tk becomes a thin client (mode switches, knobs, pad grid) over IPC — like Map ↔ `midi-engine` |
+
+Radical refactor is in scope. Do it after FX playtime so the rewrite targets a known sound, not a dry skeleton.
 
 ### Stress test (the limit detector)
 
