@@ -86,7 +86,21 @@ Factory MPC program (`Prog Select` → Pad 1): **Bank A = notes 36–43**, **Ban
 | 4 | 73 | Noise amount |
 | 8 | 77 | Master level (always) |
 
-Hitting pads does **not** steal morph knobs. With DRUM MODE off, Knob 1 stays morph. Opening **MORPH** turns DRUM MODE off. Session-only (not saved across restart).
+Hitting pads does **not** steal morph knobs. With DRUM MODE off, Knob 1 stays morph. Opening **MORPH** turns DRUM MODE / FX MODE off. Session-only (not saved across restart).
+
+**FX MODE** (Synth toolbar) — mix-bus effects on the whole soft-synth output (keys + drums + launched phrases):
+
+| Knob | CC | FX control |
+|------|----|------------|
+| 1 | 70 | Drive / saturation |
+| 2 | 71 | Delay time (~50–750 ms) |
+| 3 | 72 | Delay feedback |
+| 4 | 73 | Delay mix |
+| 5 | 74 | Reverb size |
+| 6 | 75 | Reverb mix |
+| 8 | 77 | Master level (always) |
+
+FX amounts persist in `settings.json` / presets; the FX MODE toggle itself does not.
 
 **Waveforms:** SYNTH shows a live **morph-cycle** scope that redraws as Knob 1 / voice changes. Tap **KIT** for a drum drill-down — pick a pad (touch or MPK), watch its one-shot reshape with pitch / stretch / noise / tone knobs (DRUM MODE turns on while KIT is open). Keeps the main synth screen uncluttered.
 

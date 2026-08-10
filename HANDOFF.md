@@ -28,6 +28,8 @@ Modes today in `tools/midi-tone`:
 
 **Jambox FX track (planned):** mix-bus distortion → echo/delay → careful reverb; prove each with Pi 2 CPU/xrun stress tests (see PLAN).
 
+**Next (architecture):** Rust jambox engine for audio + sample-accurate sequencing; Tk becomes a thin client. FX land in Python first so you can play with the sound before the refactor.
+
 ## Hardware
 
 - **Pi 2 Model B** + touchscreen

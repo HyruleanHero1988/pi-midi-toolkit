@@ -142,6 +142,136 @@ VOICE_AMP = 0.48
 # Extra mix bus makeup before soft-limit (Pi headphone/line outs are timid)
 OUTPUT_MAKEUP = 1.65
 DRUM_BUS_GAIN = 1.55
+# Mix-bus FX delay line (~1s) and short reverb tank
+FX_DELAY_MAX_SEC = 1.0
+FX_REVERB_MAX_SEC = 0.55
+
+
+class MixBusFx:
+    """
+    Cheap jambox mix-bus FX for Pi 2: drive → echo → short multi-tap tank.
+    All params 0..1; process() mutates `buf` in place.
+    """
+
+    def __init__(self, sample_rate: int) -> None:
+        self.sample_rate = max(8000, int(sample_rate))
+        self.drive = 0.0
+        self.delay_time = 0.28  # mapped 50ms..750ms
+        self.delay_fb = 0.35
+        self.delay_mix = 0.0
+        self.reverb_size = 0.45
+        self.reverb_mix = 0.0
+        dlen = max(64, int(self.sample_rate * FX_DELAY_MAX_SEC))
+        rlen = max(64, int(self.sample_rate * FX_REVERB_MAX_SEC))
+        self._delay = np.zeros(dlen, dtype=np.float32)
+        self._dpos = 0
+        self._reverb = np.zeros(rlen, dtype=np.float32)
+        self._rpos = 0
+        self._rev_lp = 0.0
+        self._tmp = np.zeros(BLOCKSIZE * 2, dtype=np.float32)
+        self._wet = np.zeros(BLOCKSIZE * 2, dtype=np.float32)
+
+    def snapshot(self) -> Dict[str, float]:
+        return {
+            "fx_drive": float(self.drive),
+            "fx_delay_time": float(self.delay_time),
+            "fx_delay_fb": float(self.delay_fb),
+            "fx_delay_mix": float(self.delay_mix),
+            "fx_reverb_size": float(self.reverb_size),
+            "fx_reverb_mix": float(self.reverb_mix),
+        }
+
+    def apply_snapshot(self, data: Dict[str, Any]) -> None:
+        def _f(key: str, cur: float) -> float:
+            if key not in data:
+                return cur
+            try:
+                return max(0.0, min(1.0, float(data[key])))
+            except (TypeError, ValueError):
+                return cur
+
+        self.drive = _f("fx_drive", self.drive)
+        self.delay_time = _f("fx_delay_time", self.delay_time)
+        self.delay_fb = _f("fx_delay_fb", self.delay_fb)
+        self.delay_mix = _f("fx_delay_mix", self.delay_mix)
+        self.reverb_size = _f("fx_reverb_size", self.reverb_size)
+        self.reverb_mix = _f("fx_reverb_mix", self.reverb_mix)
+
+    def process(self, buf: np.ndarray) -> None:
+        n = len(buf)
+        if n == 0:
+            return
+        if n > self._tmp.shape[0]:
+            self._tmp = np.zeros(n, dtype=np.float32)
+            self._wet = np.zeros(n, dtype=np.float32)
+        # --- Drive (waveshape) ---
+        drive = float(self.drive)
+        if drive > 0.001:
+            # 0 → gentle; 1 → hot tanh
+            amount = 1.0 + drive * 12.0
+            np.multiply(buf, np.float32(amount), out=self._tmp[:n])
+            np.tanh(self._tmp[:n], out=self._tmp[:n])
+            # Compensate so drive=0-ish loudness stays similar at low drive
+            norm = math.tanh(amount) if amount > 1e-6 else 1.0
+            np.multiply(self._tmp[:n], np.float32(1.0 / max(0.25, norm)), out=buf)
+
+        # --- Echo / delay ---
+        dmix = float(self.delay_mix)
+        if dmix > 0.001 or float(self.delay_fb) > 0.001:
+            dbuf = self._delay
+            dlen = len(dbuf)
+            # 50ms .. 750ms
+            delay_sec = 0.05 + max(0.0, min(1.0, float(self.delay_time))) * 0.70
+            ds = max(1, min(dlen - 1, int(delay_sec * self.sample_rate)))
+            fb = max(0.0, min(0.92, float(self.delay_fb)))
+            pos = self._dpos
+            wet = self._wet[:n]
+            # Vectorized circular read
+            idx = (pos - ds + np.arange(n, dtype=np.int32)) % dlen
+            np.take(dbuf, idx, out=wet)
+            # Write input + feedback * delayed
+            write_idx = (pos + np.arange(n, dtype=np.int32)) % dlen
+            dbuf[write_idx] = buf + wet * np.float32(fb)
+            self._dpos = (pos + n) % dlen
+            if dmix > 0.001:
+                dry = 1.0 - dmix
+                buf *= np.float32(dry)
+                buf += wet * np.float32(dmix)
+
+        # --- Short recirculating multi-tap tank (reverb-ish) ---
+        rmix = float(self.reverb_mix)
+        if rmix > 0.001:
+            rbuf = self._reverb
+            rlen = len(rbuf)
+            size = max(0.0, min(1.0, float(self.reverb_size)))
+            # Tap spacings scale with size
+            base = int((0.018 + 0.040 * size) * self.sample_rate)
+            taps = (
+                max(1, base),
+                max(1, int(base * 1.7)),
+                max(1, int(base * 2.5)),
+                max(1, int(base * 3.4)),
+            )
+            gains = (0.55, 0.40, 0.30, 0.22)
+            pos = self._rpos
+            wet = self._wet[:n]
+            wet.fill(0.0)
+            for tap, g in zip(taps, gains):
+                tap = min(tap, rlen - 1)
+                idx = (pos - tap + np.arange(n, dtype=np.int32)) % rlen
+                wet += np.take(rbuf, idx) * np.float32(g)
+            # Soften highs with a short moving average (size → darker)
+            win = max(1, int(1 + size * 12))
+            if win > 1:
+                kernel = np.ones(win, dtype=np.float32) / np.float32(win)
+                wet[:] = np.convolve(wet, kernel, mode="same")
+            fb = 0.25 + 0.45 * size
+            write_idx = (pos + np.arange(n, dtype=np.int32)) % rlen
+            rbuf[write_idx] = buf * np.float32(0.7) + wet * np.float32(fb)
+            self._rpos = (pos + n) % rlen
+            dry = 1.0 - rmix
+            buf *= np.float32(dry)
+            buf += wet * np.float32(rmix)
 
 
 def _builtin_tables() -> Dict[str, np.ndarray]:
@@ -627,6 +757,8 @@ class SineEngine:
         self._drum_noise = 0.55
         self._drum_tone = 0.60
         self._drum_mode = False  # if True, knobs 1–4 edit drums instead of morph/tone
+        self._fx_mode = False  # if True, knobs edit mix-bus FX
+        self._fx = MixBusFx(self.sample_rate)
         self._rebuild_morph_table_unlocked()
 
     @property
@@ -689,6 +821,13 @@ class SineEngine:
                     self.sample_rate = native
         except Exception:
             pass
+
+        # Keep FX buffers matched to the actual device rate
+        with self._lock:
+            if self._fx.sample_rate != self.sample_rate:
+                snap = self._fx.snapshot()
+                self._fx = MixBusFx(self.sample_rate)
+                self._fx.apply_snapshot(snap)
 
         kwargs = dict(
             samplerate=self.sample_rate,
@@ -951,15 +1090,37 @@ class SineEngine:
     def drum_knob_focus(self) -> bool:
         """True only in explicit drum mode (DRUM MODE button)."""
         with self._lock:
-            return self._drum_mode
+            return self._drum_mode and not self._fx_mode
 
     def set_drum_mode(self, enabled: bool) -> None:
         with self._lock:
             self._drum_mode = bool(enabled)
+            if self._drum_mode:
+                self._fx_mode = False
 
     def drum_mode(self) -> bool:
         with self._lock:
             return self._drum_mode
+
+    def fx_knob_focus(self) -> bool:
+        with self._lock:
+            return self._fx_mode
+
+    def set_fx_mode(self, enabled: bool) -> None:
+        with self._lock:
+            self._fx_mode = bool(enabled)
+            if self._fx_mode:
+                self._drum_mode = False
+
+    def fx_mode(self) -> bool:
+        with self._lock:
+            return self._fx_mode
+
+    def toggle_fx_mode(self) -> bool:
+        with self._lock:
+            nxt = not self._fx_mode
+        self.set_fx_mode(nxt)
+        return nxt
 
     # Back-compat aliases used by older call sites / UI helpers
     def set_drum_lock(self, locked: bool) -> None:
@@ -967,6 +1128,42 @@ class SineEngine:
 
     def drum_lock(self) -> bool:
         return self.drum_mode()
+
+    def set_fx_drive(self, value: float) -> None:
+        if value > 1.0:
+            value = value / 127.0
+        with self._lock:
+            self._fx.drive = max(0.0, min(1.0, float(value)))
+
+    def set_fx_delay_time(self, value: float) -> None:
+        if value > 1.0:
+            value = value / 127.0
+        with self._lock:
+            self._fx.delay_time = max(0.0, min(1.0, float(value)))
+
+    def set_fx_delay_fb(self, value: float) -> None:
+        if value > 1.0:
+            value = value / 127.0
+        with self._lock:
+            self._fx.delay_fb = max(0.0, min(1.0, float(value)))
+
+    def set_fx_delay_mix(self, value: float) -> None:
+        if value > 1.0:
+            value = value / 127.0
+        with self._lock:
+            self._fx.delay_mix = max(0.0, min(1.0, float(value)))
+
+    def set_fx_reverb_size(self, value: float) -> None:
+        if value > 1.0:
+            value = value / 127.0
+        with self._lock:
+            self._fx.reverb_size = max(0.0, min(1.0, float(value)))
+
+    def set_fx_reverb_mix(self, value: float) -> None:
+        if value > 1.0:
+            value = value / 127.0
+        with self._lock:
+            self._fx.reverb_mix = max(0.0, min(1.0, float(value)))
 
     def set_drum_pitch(self, value: float) -> None:
         if value > 1.0:
@@ -1071,6 +1268,7 @@ class SineEngine:
 
     def modulation_state(self) -> Dict[str, float]:
         with self._lock:
+            fx = self._fx.snapshot()
             return {
                 "bend": self._bend_semitones,
                 "mod": self._mod,
@@ -1086,12 +1284,14 @@ class SineEngine:
                 "drum_noise": self._drum_noise,
                 "drum_tone": self._drum_tone,
                 "drum_mode": 1.0 if self._drum_mode else 0.0,
+                "fx_mode": 1.0 if self._fx_mode else 0.0,
+                **fx,
             }
 
     def snapshot_settings(self) -> Dict[str, Any]:
         """Serialize synth sound settings for JSON presets / session restore."""
         with self._lock:
-            return {
+            out = {
                 "morph_a": self._voice_names[self._morph_a],
                 "morph_b": self._voice_names[self._morph_b],
                 "morph": float(self._morph),
@@ -1105,8 +1305,10 @@ class SineEngine:
                 "drum_decay": float(self._drum_decay),
                 "drum_noise": float(self._drum_noise),
                 "drum_tone": float(self._drum_tone),
-                # drum_mode is a session UI toggle only — never persist
+                # drum_mode / fx_mode are session UI toggles only — never persist
             }
+            out.update(self._fx.snapshot())
+            return out
 
     def apply_settings(self, data: Dict[str, Any]) -> None:
         """Restore synth sound settings from snapshot_settings() / preset JSON."""
@@ -1140,8 +1342,10 @@ class SineEngine:
                 self._drum_noise = max(0.0, min(1.0, float(data["drum_noise"])))
             if "drum_tone" in data:
                 self._drum_tone = max(0.0, min(1.0, float(data["drum_tone"])))
-            # Drum mode is session-only; always restore knobs to morph
+            self._fx.apply_snapshot(data)
+            # Modes are session-only; always restore knobs to morph
             self._drum_mode = False
+            self._fx_mode = False
             self._morph_dirty = True
             self._rebuild_morph_table_unlocked()
 
@@ -1255,6 +1459,12 @@ class SineEngine:
                 self._filter_state = float(buf[-1])
         elif frames > 0:
             self._filter_state = float(buf[-1])
+
+        # Mix-bus FX: drive → delay → reverb (before master level)
+        if frames > 0:
+            with self._lock:
+                fx = self._fx
+            fx.process(buf)
 
         if level < 0.999:
             buf *= np.float32(level)
@@ -2880,6 +3090,7 @@ class MidiToneApp:
 
         self._full_vel_btn: Optional[tk.Button] = None
         self._drum_lock_btn: Optional[tk.Button] = None
+        self._fx_mode_btn: Optional[tk.Button] = None
         self._voice_lbl: Optional[tk.Label] = None
         self._wave_canvas: Optional[tk.Canvas] = None
         self._wave_caption: Optional[tk.Label] = None
@@ -2998,6 +3209,10 @@ class MidiToneApp:
             row1, "FULL VEL: ON", self._toggle_full_vel, bg="#689d6a"
         )
         self._full_vel_btn.pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3)
+        self._fx_mode_btn = self._mk_touch_btn(
+            row1, "FX MODE", self._toggle_fx_mode, bg="#3c3836"
+        )
+        self._fx_mode_btn.pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3)
 
         # Voice picker — prev / name / next + full grid
         row2 = tk.Frame(self._touch, bg="#111111")
@@ -3120,6 +3335,7 @@ class MidiToneApp:
         restored = self._load_settings_file(SETTINGS_PATH)
         self._paint_full_vel_btn()
         self._paint_drum_lock_btn()
+        self._paint_fx_mode_btn()
         self._sync_voice_index_from_morph()
         # Rebuild pads chrome so restored PLAY/EDIT + OUT mode paint correctly
         self._build_pads_mode()
@@ -3160,6 +3376,17 @@ class MidiToneApp:
 
     def _format_mod_line(self) -> str:
         st = self.engine.modulation_state()
+        if self.engine.fx_knob_focus():
+            delay_ms = int((0.05 + st.get("fx_delay_time", 0.0) * 0.70) * 1000)
+            return (
+                "FX MODE  "
+                f"Drive:{int(st.get('fx_drive', 0.0) * 127):3d}  "
+                f"Dly:{delay_ms:3d}ms  "
+                f"Fb:{int(st.get('fx_delay_fb', 0.0) * 127):3d}  "
+                f"Dmix:{int(st.get('fx_delay_mix', 0.0) * 127):3d}  "
+                f"Rvb:{int(st.get('fx_reverb_mix', 0.0) * 127):3d}  "
+                f"Lvl:{int(st['level'] * 127):3d}"
+            )
         if self.engine.drum_knob_focus():
             return (
                 "DRUM MODE  "
@@ -3915,9 +4142,22 @@ class MidiToneApp:
                 text="DRUM MODE", bg="#3c3836", activebackground="#3c3836"
             )
 
+    def _paint_fx_mode_btn(self) -> None:
+        if self._fx_mode_btn is None:
+            return
+        if self.engine.fx_mode():
+            self._fx_mode_btn.configure(
+                text="FX MODE: ON", bg="#b16286", activebackground="#b16286"
+            )
+        else:
+            self._fx_mode_btn.configure(
+                text="FX MODE", bg="#3c3836", activebackground="#3c3836"
+            )
+
     def _toggle_drum_lock(self) -> None:
         self.engine.set_drum_mode(not self.engine.drum_mode())
         self._paint_drum_lock_btn()
+        self._paint_fx_mode_btn()
         self.mod_var.set(self._format_mod_line())
         self._append_log(
             "DRUM MODE ON — Knob 1–4 edit drums"
@@ -3928,6 +4168,18 @@ class MidiToneApp:
             self._paint_kit_waveform(force=True)
         else:
             self._paint_synth_waveform(force=True)
+
+    def _toggle_fx_mode(self) -> None:
+        on = self.engine.toggle_fx_mode()
+        self._paint_fx_mode_btn()
+        self._paint_drum_lock_btn()
+        self.mod_var.set(self._format_mod_line())
+        self._append_log(
+            "FX MODE ON — Knobs: drive / delay-time / delay-fb / delay-mix / "
+            "reverb-size / reverb-mix / — / level"
+            if on
+            else "FX MODE OFF — knobs back to morph / tone / …"
+        )
 
     def _paint_synth_waveform(self, *, force: bool = False) -> None:
         canvas = self._wave_canvas
@@ -4926,9 +5178,11 @@ class MidiToneApp:
         if self._kit_ui_open:
             self._close_kit_explorer(restore_main=False)
         # Hand knobs back to morph while editing the pair
-        if self.engine.drum_mode():
+        if self.engine.drum_mode() or self.engine.fx_mode():
             self.engine.set_drum_mode(False)
+            self.engine.set_fx_mode(False)
             self._paint_drum_lock_btn()
+            self._paint_fx_mode_btn()
             self.mod_var.set(self._format_mod_line())
 
         self._morph_ui_open = True
@@ -5191,6 +5445,38 @@ class MidiToneApp:
 
     def _handle_knob_cc(self, control: int, value: int) -> Optional[str]:
         """Map MPK factory knobs. Returns a short UI label or None if unmapped."""
+        if self.engine.fx_knob_focus():
+            if control == CC_MORPH:
+                self.engine.set_fx_drive(value)
+                self._mark_settings_dirty()
+                return f"FxDrive {value}"
+            if control == CC_TONE:
+                self.engine.set_fx_delay_time(value)
+                self._mark_settings_dirty()
+                ms = int((0.05 + (value / 127.0) * 0.70) * 1000)
+                return f"FxDelay {ms}ms"
+            if control == CC_ATTACK:
+                self.engine.set_fx_delay_fb(value)
+                self._mark_settings_dirty()
+                return f"FxDlyFb {value}"
+            if control == CC_RELEASE:
+                self.engine.set_fx_delay_mix(value)
+                self._mark_settings_dirty()
+                return f"FxDlyMix {value}"
+            if control == CC_VIB_DEPTH:
+                self.engine.set_fx_reverb_size(value)
+                self._mark_settings_dirty()
+                return f"FxRvbSz {value}"
+            if control == CC_VIB_RATE:
+                self.engine.set_fx_reverb_mix(value)
+                self._mark_settings_dirty()
+                return f"FxRvbMix {value}"
+            if control == CC_LEVEL:
+                self.engine.set_level(value)
+                self._mark_settings_dirty()
+                return f"Level  {value}"
+            return None
+
         # Only in explicit DRUM MODE do knobs edit drum macros
         if self.engine.drum_knob_focus():
             if control == CC_MORPH:
@@ -5395,10 +5681,11 @@ class MidiToneApp:
                 self._put_continuous_log(format_message(msg))
             elif msg.control in KNOB_CCS:
                 drum_focus = self.engine.drum_knob_focus()
+                fx_focus = self.engine.fx_knob_focus()
                 label = self._handle_knob_cc(msg.control, msg.value)
                 self._knob_ui_feedback(
                     label,
-                    morph=(msg.control == CC_MORPH and not drum_focus),
+                    morph=(msg.control == CC_MORPH and not drum_focus and not fx_focus),
                 )
             elif msg.control == 123:
                 self.engine.all_notes_off()
