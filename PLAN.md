@@ -1,12 +1,15 @@
 ---
 name: Pi MIDI Toolkit
-overview: A Raspberry Pi MIDI appliance that boots to one kiosk UI—soft-synth / looper for local play, plus remap/thru tools for hardware synths—backed by a Rust RT MIDI engine when thru is needed. Unrelated to play-my-synth.
+overview: "Dual-purpose Raspberry Pi music box: (1) personal jambox / soft-synth you can actually create with, and (2) MIDI remap/thru appliance for hardware synths. One kiosk UI; Rust RT engine only on the thru path. Unrelated to play-my-synth."
 todos:
   - id: scaffold-repo
     content: Scaffold standalone Rust MIDI engine + separate touch UI + systemd (no play-my-synth dependency)
     status: in_progress
   - id: handoff
     content: "Saved PLAN.md + HANDOFF.md in pi-midi-toolkit for new workspace; resume Phase 1 there"
+    status: completed
+  - id: north-star-jambox
+    content: "Capture dual product: jambox soft-synth ≈ equal priority with MIDI remap appliance"
     status: completed
   - id: dev-loop
     content: Host-first tests + SSH deploy script (cross-build or build-on-Pi); no SD reflash in daily loop
@@ -18,7 +21,7 @@ todos:
     content: "Phase 1: channel remap, CC remap + learn, always-full / velocity remap, stuck-note safety"
     status: pending
   - id: touch-ui
-    content: "One kiosk UI: Synth/Looper/Log now; Map mode for remap thru (never on MIDI hot path)"
+    content: "One kiosk UI: Synth/Looper/Pads/Songs now; Map mode for remap thru (never on MIDI hot path)"
     status: in_progress
   - id: drum-retrigger
     content: "Phase 2: per-pad/note auto-retrigger with configurable interval"
@@ -30,8 +33,8 @@ todos:
     content: "Phase 3b: Songs mode — save/load .mid, tempo, play to soft-synth and/or USB→DIN"
     status: in_progress
   - id: drum-voices
-    content: "Phase 0b (toy synth): ch10 pads use analog-style drum voices (pitch env, noise, decay/stretch) not pitched wavetable keys"
-    status: in_progress
+    content: "Phase 0b: ch10 pads use analog-style drum voices (pitch env, noise, decay/stretch)"
+    status: completed
   - id: phrase-pads
     content: "Phase 3c: Phrases/Pads — grid of recorded MIDI phrases; launch via touch squares and MPK drum pads"
     status: completed
@@ -40,7 +43,10 @@ todos:
     status: completed
   - id: wave-viz
     content: "Wave viz: live morph-cycle scope on SYNTH + KIT drill-down for per-drum one-shot preview"
-    status: in_progress
+    status: completed
+  - id: jambox-fx
+    content: "Jambox FX track: mix-bus distortion → echo/delay → careful reverb; measure Pi 2 CPU/xruns"
+    status: pending
   - id: arp
     content: "Phase 4 (optional distinct mode): key-relative step pattern transposed by held root"
     status: pending
@@ -53,39 +59,54 @@ isProject: false
 
 **This is not part of play-my-synth.** No shared repo, relay, WebRTC, or bridge code. That project is only a **feature wishlist reference** (CC remap, full velocity, channel remap, etc.). This is a standalone Pi appliance.
 
-## Product north star (updated)
+## Product north star (honest, dual purpose)
 
-**One box, one kiosk UI.** Power on → Openbox kiosk → a MIDI-focused shell with modes. Playing notes is a first-class mode, not a temporary diagnostic you throw away.
+**One box, one kiosk UI — two equal jobs.**
 
-| Mode (UI) | Job |
-|-----------|-----|
-| **Synth** | Local wavetable soft-synth (what `tools/midi-tone` is becoming) |
-| **Looper** | Record/play free-timing MIDI note loops into that synth |
-| **Songs** | Save/load Standard MIDI Files (`.mid`); tempo; play to soft-synth and/or **USB→DIN** |
-| **Phrases / Pads** | Grid of recorded MIDI phrases; launch from touch squares **and MPK mini drum pads** |
-| **Presets** | Save/load synth settings (JSON slots); last session autosaved |
-| **Map / Thru** | Channel / CC / velocity remap; ports; learn — drives the Rust engine |
-| **Log** | Event history / commissioning |
+| Pillar | Weight | What it is |
+|--------|--------|------------|
+| **Jambox / soft-synth** | **~50%** | A music box that matches *your* intuition: pads, morph, loops, phrase clips, songs — create and perform without learning another tracker/DAW |
+| **MIDI remap appliance** | **~50%** | USB MIDI in → transform → USB/DIN out for hardware synths, when that path matters |
+
+Power on → Openbox kiosk → modes. The soft-synth path started as a Phase 0 hear-test. **That framing is obsolete.** It is already a creative instrument: record a beat, play melody over it, sing, give someone a performance. If the box only did remap and never made a sound, half the reason to build it would be missing. If it only made local sound and never remapped, the other half would be missing.
+
+**Design law for the jambox half:** prefer mental models you already use (hit pad → sound; record → loop; morph A→B; lock a voice) over dense menus. Hardware you already own (e.g. picotracker, EP-class grooveboxes) can be capable but costly in *learning time*. This project wins by staying obvious under your hands — not by cloning their feature lists.
+
+| Mode (UI) | Pillar | Job |
+|-----------|--------|-----|
+| **Synth** | Jambox | Wavetable morph synth + drum kit + scopes |
+| **Looper** | Jambox | Free-timing MIDI note loop into the soft-synth |
+| **Phrases / Pads** | Jambox (+ MIDI out) | 16 clip-launch cells; touch **and** MPK pads |
+| **Songs** | Both | `.mid` library; tempo; LOCAL and/or USB→DIN |
+| **Presets** | Jambox | Synth slots + session autosave |
+| **Map / Thru** | Remap | Channel / CC / velocity remap; ports; learn → Rust engine |
+| **Log** | Both | Event history / commissioning |
 
 Boot path: `install-kiosk.sh` + X11 Openbox session (already started). No normal Pi desktop shell.
 
-### Architecture rule (still true)
+### Architecture rule (still true — and it helps the jambox)
 
 - **Rust `midi-engine`:** MIDI **thru/remap** hot path only (ALSA in → transform → out). RT-friendly, no UI work.
-- **Kiosk UI (Tk today, still a separate process from the engine):** config + local soft-synth + transport + **song file player**. Talks to the engine over IPC/files when Map mode is active.
-- **UI never sits on the thru hot path.** Touching Map screens must not add jitter to live thru notes.
-- Soft-synth audio is allowed in Synth/Looper/Songs (local preview); that path is *not* the remap thru path.
-- **Songs → DIN** is a *player* path (schedule `.mid` events out a USB MIDI port), not live thru. v1 may open MIDI out from the kiosk; later the engine can own the scheduler if we want RT priority / remap-on-playback.
+- **Kiosk UI (`midi-tone` today):** the **jambox** — soft-synth, drums, looper, pads, songs, presets. Talks to the engine over IPC/files when Map mode is active.
+- **UI never sits on the thru hot path.** Touching Map (or Synth) must not add jitter to live thru notes.
+- Soft-synth audio is a first-class product path; it is *not* the remap thru path.
+- **Songs / Pads → DIN** is a *player/emit* path (schedule MIDI out a USB port), not live thru. v1 may open MIDI out from the kiosk; later the engine can own the scheduler if we want RT priority / remap-on-playback.
 
-### Why both
+Starting as a “diagnostic” did **not** trap the architecture. The split (Python/Tk jambox audio vs Rust thru) is exactly what lets the creative half grow without poisoning remap latency.
 
-You don’t have the hardware-synth DIN reason at home every day, but you still want the mapper eventually. The kiosk is the appliance; synth-toy mode keeps the box useful until USB-DIN → synth is plugged in. Same UI shell either way.
+### Why both (updated)
+
+- **Jambox:** the box is useful *tonight* — no DIN synth required. Beat + melody + voice is already a real outcome.
+- **Remap:** when USB→DIN → hardware synth is on the desk, the same kiosk grows a Map mode; Rust stays the cable.
+- Same power button, same UI shell, same deploy loop. Neither pillar is a temporary scaffold for the other.
 
 ## Opinion (short)
 
-Extremely low latency on **thru/remap** is still the hard constraint. Local soft-synth can be “good enough Pi 2 audio.” Split architecture: **Rust MIDI engine** on the realtime thru path; **one kiosk UI** for synth + map config.
+- **Thru/remap:** extremely low latency remains the hard constraint on the Rust path.
+- **Jambox:** “good enough Pi 2 audio” that you will *actually play* beats the theoretically perfect synth you never finish learning. Push FX and feel until measurement says stop — then decide software vs hardware.
+- Split architecture stays: **Rust** for thru; **one kiosk** for jambox + map config.
 
-**Defaults:** standalone repo; kiosk-first UX; Rust + ALSA hot path for thru; UI never processes thru MIDI bytes.
+**Defaults:** standalone repo; kiosk-first UX; Rust + ALSA hot path for thru; UI never processes thru MIDI bytes; jambox features earn their CPU with a stress test, not vibes alone.
 
 ## Latency-first architecture
 
@@ -108,7 +129,7 @@ flowchart LR
 ```
 
 - **Engine (Rust):** ALSA → fixed processor chain → out. `SCHED_FIFO`, `mlockall`, zero alloc after start, atomic preset publish.
-- **Kiosk UI (separate process):** Synth / Looper / Log / Map; config IPC to engine; local audio only in Synth/Looper.
+- **Kiosk UI (separate process):** jambox (Synth / Looper / Pads / Songs / …) + Map; config IPC to engine; local audio on the jambox path only.
 - **Not used:** Python/Node on the *thru* path, Chromium, Electron, anything from play-my-synth.
 
 ## Feature map (what you asked for)
@@ -158,18 +179,21 @@ CME’s PC/Mac app **configures their USB MIDI interfaces**. Filters, routes, an
 **Near-term thru targets inspired by CME:** filters + richer mapper rules + Map mode in the kiosk.  
 **Not chasing:** emulating “config lives in the adapter” or BLE unless needed.
 
-## Phase 0 — Local MIDI hear-test → Synth mode (active)
+## Phase 0 — Jambox surface (`midi-tone`) — active, first-class
 
-Started as: prove **MPK → Pi** with a tiny soft synth (no DIN required).
+**Origin story:** prove **MPK → Pi** with a tiny soft synth (no DIN required).  
+**Present tense:** this *is* half the product — the personal jambox.
 
-**Became the live product surface** in `tools/midi-tone`:
-- Wavetable voices, A/B morph, MPK knobs, modes (Synth / Looper / Songs / Presets / Log)
+Live surface in `tools/midi-tone`:
+- Wavetable voices, A/B morph, MPK knobs, drum kit, scopes
+- Modes: Synth / Looper / Pads / Songs / Presets / Log
 - Kiosk session (`kiosk.sh` / Openbox) so the box boots into the UI
-- **Session autosave** → `tools/midi-tone/settings.json` (full velocity, voice, morph A/B, tone/level/attack/release/vib, etc.) every ~2s when dirty and on quit
-- **Named presets** → `tools/midi-tone/user-presets/slot-01.json` … `slot-08.json` (SAVE / LOAD / DELETE in PRESETS mode)
-- **Songs** → `tools/midi-tone/songs/song-XX.mid` with tempo + LOCAL/USB/BOTH out (see Phase 3b)
+- **Session autosave** → `tools/midi-tone/settings.json` every ~2s when dirty and on quit
+- **Named presets** → `tools/midi-tone/user-presets/slot-01.json` … `slot-08.json`
+- **Songs** → `tools/midi-tone/songs/` with tempo + LOCAL/USB/BOTH out (Phase 3b)
+- **Phrases** → `tools/midi-tone/phrases/pad-NN.json` (Phase 3c + pad-enhance)
 
-This is still **not** MIDI-out thru. It’s the playable local mode of the appliance.
+This is **not** MIDI-out thru. It is the creative local instrument. Real use already includes recording a beat, playing synth melody over it, and performing for someone — that is the success bar for this pillar, not “notes appear in a log.”
 
 ### Phase 0b — Toy drum voices on MPK pads (soft-synth) — **done on `cursor/midi-tone-drum-voices-1052`**
 
@@ -190,7 +214,7 @@ This is still **not** MIDI-out thru. It’s the playable local mode of the appli
 
 **Out of path:** Rust thru/remap does not synthesize audio. Phrases/Pads mode (3c) *launches MIDI clips* from pads — orthogonal; drum voices are “what a pad sounds like in Synth mode.”
 
-### Wave visualizations — **implementing on `cursor/midi-tone-wave-viz-1052`**
+### Wave visualizations — **done on `cursor/midi-tone-wave-viz-1052`**
 
 | Scope | Where |
 |-------|--------|
@@ -198,6 +222,44 @@ This is still **not** MIDI-out thru. It’s the playable local mode of the appli
 | **Drum one-shot** | **KIT** drill-down: pick a pad, preview wave updates with pitch/stretch/noise/tone. Keeps DRUM MODE chrome uncluttered |
 
 **Inspiration note:** Synsonics = analog voice circuits per drum. We approximate that with simple DSP, not by modeling their schematic exactly.
+
+## Jambox track — how far can we push? (and how we know)
+
+The diagnostic framing did **not** paint a software dead-end. Limits will show up as **CPU, audio xruns, or latency feel** — measurable — not as “we called it Phase 0.”
+
+### Effects (mix bus first)
+
+Apply to the soft-synth output (keys + drums + launched phrases). Knobs on the jambox, not a DAW plugin host.
+
+| Effect | Pi 2 outlook | Notes |
+|--------|--------------|-------|
+| **Distortion / drive** | Easy | Already soft-limit with `tanh`; expose drive/tone |
+| **Echo / delay** | Very doable | Fixed delay line + feedback + mix — classic jambox control |
+| **Reverb** | Possible, taxed | Small algorithmic / cheap tank OK; lush convolution is where Pi 2 usually dies |
+
+**Order of attack:** distortion → echo → careful reverb. Earn each with a stress jam before adding the next.
+
+### Stress test (the limit detector)
+
+While playing hard (chords + rolling pads + looping phrase pads + FX on):
+
+| Signal | Meaning |
+|--------|---------|
+| PortAudio / callback late, crackles | Audio path overloaded or buffers too small |
+| One core pegged in `htop`, glitches scale with voices/FX | **CPU ceiling** — simplify DSP, cut polyphony, or accept the limit |
+| CPU low but still glitches | Scheduling / buffer / Python callback design — often **software-fixable** |
+| Feature needs much larger buffers to stay clean | You’re buying smoothness with **latency** — feel it before you keep it |
+| Still hungry after DSP is tight and Pi 2 is pegged | **Hardware ceiling** — same app can move to Pi 4/5 later; architecture must not assume Pi 2 forever |
+
+**Budget rule of thumb:** if a feature costs roughly **&lt;10–15% CPU** in a worst-case jam and doesn’t force painful buffer growth, it’s in budget. Document the measurement in the PR when landing FX.
+
+### What we are *not* chasing on the jambox half
+
+- Becoming Ableton / a tracker clone / a sample library host
+- Feature parity with picotracker or EP-class boxes
+- Convolution halls, unlimited polyphony, or plugin ecosystems on Pi 2
+
+We *are* chasing: **obvious controls, reliable loops/pads, a sound you want to sing over.**
 
 ## Phase 1 — Remap MVP (engine CLI first; Map mode UI next)
 
@@ -245,7 +307,7 @@ Not a DAW: no piano roll, no multi-track edit. Just “keep songs, set tempo, se
 
 Touch **4×4** grid (MPK Bank A + Bank B) where each cell holds a short recorded MIDI sequence. Launch a filled cell into the soft-synth — per-pad **ONE-SHOT** or **LOOP** (toggle). Empty cell → arm record into that cell. Persist under `tools/midi-tone/phrases/pad-NN.json`.
 
-### Pad enhancements — **implementing on `cursor/midi-tone-pad-enhance-1052`**
+### Pad enhancements — **done on `cursor/midi-tone-pad-enhance-1052`**
 
 | Feature | Behavior |
 |---------|----------|
@@ -410,19 +472,28 @@ flowchart LR
 
 ## Success criteria
 
-- Power on → kiosk MIDI UI, no desktop shell
-- Synth mode is fun/usable on Pi 2; Map mode configures thru without a second app
+**Jambox pillar**
+- Power on → kiosk; you can make a beat + melody performance without reading a manual
+- Synth / drums / looper / pads feel playable on Pi 2 (fun under the hands, not just “notes work”)
+- Record a phrase, loop it, launch pads, save/load `.mid` songs; LOCAL and/or USB→DIN when needed
+- FX (when added) survive the stress test above without turning the box into a science project
+- Stays obvious vs. gear you already own but don’t use because of learning cost
+
+**Remap pillar**
+- Map mode configures thru without a second app
 - Remap feels like a direct cable under UI abuse
-- Drum pads can roll at set per-pad rates without timing flubs
-- Record a phrase, loop it live, save/load `.mid` songs with tempo, play to soft-synth or USB→DIN
-- Phrases / Pads: launch recorded clips from a touch grid **and MPK drum pads** (Phase 3c); PLAY/EDIT, voice lock, per-pad MIDI out (pad-enhance)
+- Drum retrigger (when shipped) rolls without timing flubs
+
+**Shared**
 - Dev loop is SSH/deploy-based; imaging is exceptional
 - No coupling to play-my-synth
+- Neither pillar is treated as a temporary scaffold for the other
 
 ## Out of scope
 
 - play-my-synth integration
 - Browser / Electron UI
-- Soft-synth replacing the hardware-synth thru path (local audio is a *mode*, not the mapper)
+- Soft-synth **replacing** the hardware-synth thru path (jambox audio is first-class; it still is not the Rust mapper)
+- Cloning tracker / EP / DAW workflows wholesale
 - Custom kernel modules unless measurement forces it
 - Requiring a new SD image for every iteration
