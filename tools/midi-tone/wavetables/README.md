@@ -15,9 +15,8 @@ Drop any extra mono WAV single-cycle into this folder (any length); midi-tone re
 to 2048 points on load. Name the file `myvoice.wav` → it appears as voice `myvoice`.
 
 User-saved morphs (VOICES / MORPH → **SAVE AS…**) land in `../user-wavetables/` as
-`name.wav` + `name.json` (wave + FX insert + amp macros) so they don't overwrite the
-bundled AKWF set. Those load after this folder; built-ins `sine`/`square`/`saw`/`triangle`
-stay protected.
+single-cycle `.wav` files with morph + drive + tone baked into the wave shape
+(delay/reverb stay live FX). Built-ins `sine`/`square`/`saw`/`triangle` stay protected.
 
 To pull more from AKWF:
 

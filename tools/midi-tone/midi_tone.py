@@ -80,7 +80,6 @@ PHRASE_GRID_CELLS = (
 )
 MAX_PHRASE_PLAYERS = 8
 SETTINGS_VERSION = 1
-VOICE_PATCH_VERSION = 1
 BUILTIN_VOICE_NAMES = ("sine", "square", "saw", "triangle")
 VOICE_NAME_MAX = 24
 
@@ -400,42 +399,6 @@ def write_wavetable_wav(
         w.setsampwidth(2)
         w.setframerate(int(sample_rate))
         w.writeframes(pcm.tobytes())
-
-
-def write_voice_patch(path: pathlib.Path, patch: Dict[str, Any]) -> None:
-    path = pathlib.Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(patch, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-
-
-def load_voice_patch(path: pathlib.Path) -> Optional[Dict[str, Any]]:
-    path = pathlib.Path(path)
-    if not path.is_file():
-        return None
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return None
-    return data if isinstance(data, dict) else None
-
-
-def load_user_voice_patches(directory: pathlib.Path) -> Dict[str, Dict[str, Any]]:
-    """Map voice name → patch dict for *.json sidecars next to user wavetables."""
-    out: Dict[str, Dict[str, Any]] = {}
-    directory = pathlib.Path(directory)
-    if not directory.is_dir():
-        return out
-    for path in sorted(directory.glob("*.json")):
-        name = sanitize_voice_name(path.stem)
-        if not name or name in BUILTIN_VOICE_NAMES:
-            continue
-        patch = load_voice_patch(path)
-        if patch is None:
-            continue
-        patch = dict(patch)
-        patch["name"] = name
-        out[name] = patch
-    return out
 
 
 def circular_moving_average(x: np.ndarray, win: int) -> np.ndarray:
@@ -1491,26 +1454,45 @@ class SineEngine:
                 self._rebuild_morph_table_unlocked()
             return np.copy(self._morph_table)
 
-    def bake_voice_cycle(self, *, apply_tone: bool = True) -> np.ndarray:
+    def bake_voice_cycle(
+        self, *, apply_drive: bool = True, apply_tone: bool = True
+    ) -> np.ndarray:
         """
-        Freeze the live morph cycle into a new single-cycle table.
+        Freeze the live morph into a new single-cycle wavetable shape.
 
-        Tone (brightness) can be baked as a static spectral shape on the cycle.
-        Drive / delay / reverb stay on the per-voice FX insert and are copied
-        into the saved patch separately — they are not single-cycle data.
+        Bakes what can become wave shape:
+          - morph blend
+          - nearer voice's drive (waveshape)
+          - tone / brightness (static spectral shape on the cycle)
+
+        Delay and reverb are time-domain — they cannot live in one cycle and are
+        left as live FX (not written into the saved wave).
         """
         with self._lock:
             if self._morph_dirty:
                 self._rebuild_morph_table_unlocked()
             out = np.copy(self._morph_table)
+            near = self._morph_a if self._morph < 0.5 else self._morph_b
+            src_name = self._voice_names[near]
+
+            if apply_drive:
+                fx = self._voice_fx.get(src_name)
+                drive = float(fx.drive) if fx is not None else 0.0
+                if drive > 0.001:
+                    amount = 1.0 + drive * 12.0
+                    tmp = np.tanh(out * np.float32(amount))
+                    norm = math.tanh(amount) if amount > 1e-6 else 1.0
+                    out = (tmp * np.float32(1.0 / max(0.25, norm))).astype(np.float32)
+
             if apply_tone:
                 tone = float(self._tone)
                 if tone < 0.999:
                     win = max(1, int(round((1.0 - tone) * 48.0)))
                     if win > 1:
                         out = circular_moving_average(out, win)
-                        peak = float(np.max(np.abs(out))) or 1.0
-                        out = (out / np.float32(peak)) * np.float32(TABLE_PEAK)
+
+            peak = float(np.max(np.abs(out))) or 1.0
+            out = (out / np.float32(peak)) * np.float32(TABLE_PEAK)
             return out
 
     def current_voice_fx_source(self) -> str:
@@ -1521,83 +1503,26 @@ class SineEngine:
             near = self._morph_a if self._morph < 0.5 else self._morph_b
             return self._voice_names[near]
 
-    def snapshot_voice_patch(self, name: str, *, source: Optional[str] = None) -> Dict[str, Any]:
-        """Macros + FX insert that recreate the dialed-in voice with `name`'s table."""
-        key = sanitize_voice_name(name)
-        with self._lock:
-            if self._morph_dirty:
-                self._rebuild_morph_table_unlocked()
-            src = sanitize_voice_name(source or self._voice_names[
-                self._morph_a if self._morph < 0.5 else self._morph_b
-            ])
-            fx_src = self._ensure_voice_fx_unlocked(src)
-            return {
-                "version": VOICE_PATCH_VERSION,
-                "name": key,
-                "source": src,
-                "morph_a": self._voice_names[self._morph_a],
-                "morph_b": self._voice_names[self._morph_b],
-                "morph": float(self._morph),
-                "fx": fx_src.snapshot(),
-                "tone": float(self._tone),
-                "attack_sec": float(self._attack_sec),
-                "release_sec": float(self._release_sec),
-                "vib_hz": float(self._vib_hz),
-                "vib_depth": float(self._vib_depth_semis),
-                "level": float(self._level),
-            }
-
-    def apply_voice_patch(self, patch: Dict[str, Any], *, apply_macros: bool = True) -> None:
-        """Restore a saved voice's FX insert (+ optional tone/env/vib/level)."""
-        if not isinstance(patch, dict):
-            return
-        name = sanitize_voice_name(str(patch.get("name", "")))
-        if not name:
-            return
-        with self._lock:
-            fx = patch.get("fx")
-            if isinstance(fx, dict):
-                self._ensure_voice_fx_unlocked(name).apply_snapshot(fx)
-            if not apply_macros:
-                return
-            if "tone" in patch:
-                self._tone = max(0.0, min(1.0, float(patch["tone"])))
-            if "attack_sec" in patch:
-                self._attack_sec = max(
-                    self.ATTACK_SEC_MIN, min(self.ATTACK_SEC_MAX, float(patch["attack_sec"]))
-                )
-            if "release_sec" in patch:
-                self._release_sec = max(
-                    self.RELEASE_SEC_MIN,
-                    min(self.RELEASE_SEC_MAX, float(patch["release_sec"])),
-                )
-            if "vib_hz" in patch:
-                self._vib_hz = max(0.1, min(20.0, float(patch["vib_hz"])))
-            if "vib_depth" in patch:
-                self._vib_depth_semis = max(0.0, min(4.0, float(patch["vib_depth"])))
-            if "level" in patch:
-                self._level = max(0.0, min(1.0, float(patch["level"])))
-            # Point FX edit at this voice when in insert mode
-            if self._fx_mode and self._fx_edit_kind in ("voice", "drums", "drum"):
-                self._fx_edit_kind = "voice"
-
-    def save_current_voice(self, name: str) -> Tuple[str, np.ndarray, Dict[str, Any]]:
+    def save_current_voice(self, name: str) -> Tuple[str, np.ndarray]:
         """
-        Bake morph+tone into a new table, copy the live voice FX insert onto it,
-        select it as pure A=B, and return (key, cycle, patch).
+        Bake morph + drive + tone into a new dry wavetable and select it (A=B).
+
+        The new voice starts with a clean FX insert — the timbre is in the wave.
+        Delay/reverb (if any) stay performance FX you dial afterward.
         """
-        source = self.current_voice_fx_source()
-        cycle = self.bake_voice_cycle(apply_tone=True)
-        patch = self.snapshot_voice_patch(name, source=source)
+        cycle = self.bake_voice_cycle(apply_drive=True, apply_tone=True)
         key = self.add_wavetable(name, cycle)
-        patch["name"] = key
-        # Attach FX to the new voice (don't leave drive only on the source)
+        # Ensure a dry insert slot exists under the new name (do not copy delay/reverb)
         with self._lock:
-            fx = patch.get("fx")
-            if isinstance(fx, dict):
-                self._ensure_voice_fx_unlocked(key).apply_snapshot(fx)
+            self._ensure_voice_fx_unlocked(key)  # defaults: drive/delay/reverb = off
+            # If we somehow had leftover params from an overwrite, clear them
+            fx = self._voice_fx[key]
+            fx.drive = 0.0
+            fx.delay_mix = 0.0
+            fx.delay_fb = 0.0
+            fx.reverb_mix = 0.0
             self._fx_edit_kind = "voice"
-        return key, cycle, patch
+        return key, cycle
 
     def add_wavetable(self, name: str, table: np.ndarray) -> str:
         """
@@ -3543,12 +3468,6 @@ class MidiToneApp:
             pass
         self._tables = load_wavetables(self._waves_dir, self._user_waves_dir)
         self.engine = SineEngine(self._tables, max_voices=max_voices)
-        # Sidecar patches (FX + macros) for user-saved voices
-        self._voice_patches: Dict[str, Dict[str, Any]] = load_user_voice_patches(
-            self._user_waves_dir
-        )
-        for _name, patch in self._voice_patches.items():
-            self.engine.apply_voice_patch(patch, apply_macros=False)
         self._inport: Optional[mido.ports.BaseInput] = None
         self._poll_thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
@@ -5654,10 +5573,6 @@ class MidiToneApp:
         name = self._voice_names[self._voice_index]
         # VOICES / PREV / NEXT set morph-A and park at pure A (B stays as morph target)
         self.engine.set_morph_index(self._voice_index)
-        # Restore dialed-in FX + macros when this is a saved user voice
-        patch = self._voice_patches.get(name)
-        if patch is not None:
-            self.engine.apply_voice_patch(patch, apply_macros=True)
         self._mark_settings_dirty()
         if self._voice_lbl is not None:
             self._voice_lbl.configure(text=self._voice_label_text())
@@ -5686,7 +5601,7 @@ class MidiToneApp:
             self._paint_morph_menu()
 
     def _open_save_voice(self) -> None:
-        """Bake morph+tone and save the live voice FX / macros under a new name."""
+        """Bake morph + drive + tone into a new dry wavetable (shape only)."""
         if self._save_voice_open:
             return
         if self._mode != "synth":
@@ -5716,11 +5631,10 @@ class MidiToneApp:
             bg="#111111",
         ).pack(side=tk.LEFT)
         a, b, blend = self.engine.morph_neighbors()
-        src = self.engine.current_voice_fx_source()
         hint = a if a == b else f"{a}→{b} {int(blend * 100)}%"
         tk.Label(
             header,
-            text=f"{hint} · fx:{src}",
+            text=f"bake shape · {hint}",
             font=("DejaVu Sans", 11),
             fg="#a89984",
             bg="#111111",
@@ -5729,9 +5643,9 @@ class MidiToneApp:
         tk.Label(
             self._save_voice_frame,
             text=(
-                "Saves the whole dialed-in voice: morph (+ tone) → wavetable, "
-                "plus drive/delay/reverb insert, attack/release, vibrato, and level. "
-                "Selecting this voice later restores that patch."
+                "Writes a new single-cycle wavetable: morph + drive + tone become "
+                "the wave shape. Delay/reverb cannot fit in one cycle — dial those "
+                "live afterward. The new voice starts dry."
             ),
             font=("DejaVu Sans", 10),
             fg="#a89984",
@@ -5758,10 +5672,7 @@ class MidiToneApp:
 
         self._save_voice_status = tk.Label(
             self._save_voice_frame,
-            text=(
-                f"Will write {self._user_waves_dir.name}/{suggested}.wav "
-                f"+ {suggested}.json"
-            ),
+            text=f"Will write {self._user_waves_dir.name}/{suggested}.wav",
             font=("DejaVu Sans Mono", 11),
             fg="#83a598",
             bg="#111111",
@@ -5794,7 +5705,7 @@ class MidiToneApp:
         self._mk_touch_btn(
             footer, "CANCEL", self._close_save_voice, bg="#9d0006"
         ).pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=14)
-        self._append_log("SAVE VOICE — morph + FX + macros → named patch")
+        self._append_log("SAVE VOICE — bake morph/drive/tone into a new wave shape")
 
     def _paint_save_voice_keyboard(self) -> None:
         keys = getattr(self, "_save_voice_keys", None)
@@ -5863,10 +5774,7 @@ class MidiToneApp:
         exists = name in self.engine.voice_names or path.is_file()
         tag = "overwrite" if exists else "new"
         self._save_voice_status.configure(
-            text=(
-                f"{tag}: {self._user_waves_dir.name}/{name}.wav "
-                f"+ {name}.json (wave + FX + macros)"
-            ),
+            text=f"{tag}: {self._user_waves_dir.name}/{name}.wav (baked wave shape)",
             fg="#fabd2f" if exists else "#83a598",
         )
 
@@ -5886,12 +5794,9 @@ class MidiToneApp:
                 )
             return
         try:
-            key, cycle, patch = self.engine.save_current_voice(name)
+            key, cycle = self.engine.save_current_voice(name)
             wav_path = self._user_waves_dir / f"{key}.wav"
-            json_path = self._user_waves_dir / f"{key}.json"
             write_wavetable_wav(wav_path, cycle, sample_rate=44100)
-            write_voice_patch(json_path, patch)
-            self._voice_patches[key] = patch
         except Exception as exc:
             if self._save_voice_status is not None:
                 self._save_voice_status.configure(text=f"Save failed: {exc}", fg="#fb4934")
@@ -5903,18 +5808,12 @@ class MidiToneApp:
             self._voice_index = self._voice_names.index(key)
         except ValueError:
             self._voice_index = 0
-        # Selecting the new voice restores its patch (already applied via save)
-        self.engine.apply_voice_patch(patch, apply_macros=True)
         if self._voice_lbl is not None:
             self._voice_lbl.configure(text=self._voice_label_text())
         self.mod_var.set(self._format_mod_line())
         self._mark_settings_dirty()
-        fx = patch.get("fx") if isinstance(patch.get("fx"), dict) else {}
         self._append_log(
-            f"Saved voice '{key}' → {wav_path.name} + patch "
-            f"(drive={int(float(fx.get('fx_drive', 0)) * 127)} "
-            f"dly={int(float(fx.get('fx_delay_mix', 0)) * 127)} "
-            f"rvb={int(float(fx.get('fx_reverb_mix', 0)) * 127)})"
+            f"Saved voice '{key}' → {wav_path.name} (morph+drive+tone baked into wave)"
         )
         self._close_save_voice()
         self._paint_synth_waveform(force=True)
