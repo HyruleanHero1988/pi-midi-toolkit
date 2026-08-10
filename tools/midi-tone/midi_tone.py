@@ -13,6 +13,7 @@ import json
 import math
 import pathlib
 import queue
+import re
 import shutil
 import sys
 import threading
@@ -55,6 +56,7 @@ DRUM_CHANNEL = 9
 NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
 HERE = pathlib.Path(__file__).resolve().parent
 DEFAULT_WAVETABLE_DIR = HERE / "wavetables"
+USER_WAVETABLES_DIR = HERE / "user-wavetables"
 SETTINGS_PATH = HERE / "settings.json"
 PRESETS_DIR = HERE / "user-presets"
 PRESET_SLOTS = 8
@@ -78,6 +80,8 @@ PHRASE_GRID_CELLS = (
 )
 MAX_PHRASE_PLAYERS = 8
 SETTINGS_VERSION = 1
+BUILTIN_VOICE_NAMES = ("sine", "square", "saw", "triangle")
+VOICE_NAME_MAX = 24
 
 
 def list_song_files(directory: pathlib.Path = SONGS_DIR) -> List[pathlib.Path]:
@@ -328,22 +332,73 @@ def _resample_cycle(x: np.ndarray, n: int = TABLE_SIZE) -> np.ndarray:
     return (y / peak) * np.float32(TABLE_PEAK)
 
 
-def load_wavetables(directory: pathlib.Path) -> Dict[str, np.ndarray]:
-    """Built-ins first, then any *.wav in directory (stem = voice name)."""
+def load_wavetables(*directories: pathlib.Path) -> Dict[str, np.ndarray]:
+    """Built-ins first, then *.wav from each directory (later dirs override)."""
     tables = _builtin_tables()
-    if directory.is_dir():
-        for path in sorted(directory.glob("*.wav")):
+    for directory in directories:
+        if not directory or not pathlib.Path(directory).is_dir():
+            continue
+        for path in sorted(pathlib.Path(directory).glob("*.wav")):
             name = path.stem.lower().strip()
             if not name:
                 continue
             # Keep core procedural oscillators; files can add/replace everything else
-            if name in ("sine", "square", "saw", "triangle"):
+            if name in BUILTIN_VOICE_NAMES:
                 continue
             try:
                 tables[name] = _resample_cycle(_load_wav_mono(path))
             except Exception as exc:
                 print(f"wavetable skip {path.name}: {exc}", flush=True)
     return tables
+
+
+def sanitize_voice_name(raw: str) -> str:
+    """Lowercase [a-z0-9_], max VOICE_NAME_MAX — safe for filenames + UI."""
+    s = re.sub(r"[^a-z0-9_]+", "_", str(raw or "").lower().strip())
+    s = re.sub(r"_+", "_", s).strip("_")
+    if not s:
+        s = "voice"
+    return s[:VOICE_NAME_MAX]
+
+
+def suggest_voice_name(name_a: str, name_b: str, morph: float) -> str:
+    a = sanitize_voice_name(name_a) or "a"
+    b = sanitize_voice_name(name_b) or "b"
+    pct = int(round(max(0.0, min(1.0, float(morph))) * 100.0))
+    if a == b:
+        return sanitize_voice_name(f"{a}_saved")
+    return sanitize_voice_name(f"{a}_{b}_{pct}")
+
+
+def unique_voice_name(base: str, existing: List[str]) -> str:
+    key = sanitize_voice_name(base)
+    if key not in BUILTIN_VOICE_NAMES and key not in existing:
+        return key
+    for n in range(2, 1000):
+        suffix = f"_{n}"
+        stem = key[: max(1, VOICE_NAME_MAX - len(suffix))]
+        cand = f"{stem}{suffix}"
+        if cand not in BUILTIN_VOICE_NAMES and cand not in existing:
+            return cand
+    return sanitize_voice_name(f"voice_{int(time.time()) % 100000}")
+
+
+def write_wavetable_wav(
+    path: pathlib.Path, table: np.ndarray, *, sample_rate: int = 44100
+) -> None:
+    """Write a mono 16-bit single-cycle WAV (loadable by load_wavetables)."""
+    y = np.asarray(table, dtype=np.float32).reshape(-1)
+    if y.shape[0] != TABLE_SIZE:
+        y = _resample_cycle(y)
+    peak = float(np.max(np.abs(y))) or 1.0
+    pcm = np.clip(y / peak * 32767.0, -32768, 32767).astype("<i2")
+    path = pathlib.Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with wave.open(str(path), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(int(sample_rate))
+        w.writeframes(pcm.tobytes())
 
 
 def midi_note_name(note: int) -> str:
@@ -1386,6 +1441,70 @@ class SineEngine:
             if self._morph_dirty:
                 self._rebuild_morph_table_unlocked()
             return np.copy(self._morph_table)
+
+    def bake_voice_cycle(self, *, apply_drive: bool = True) -> np.ndarray:
+        """
+        Freeze the live morph cycle into a new single-cycle table.
+
+        Optionally bake the nearer morph endpoint's *drive* waveshape into the
+        cycle. Delay / reverb / tone are time-domain or continuous and are not
+        part of a single-cycle wavetable.
+        """
+        with self._lock:
+            if self._morph_dirty:
+                self._rebuild_morph_table_unlocked()
+            out = np.copy(self._morph_table)
+            if apply_drive:
+                near = self._morph_a if self._morph < 0.5 else self._morph_b
+                name = self._voice_names[near]
+                fx = self._voice_fx.get(name)
+                drive = float(fx.drive) if fx is not None else 0.0
+                if drive > 0.001:
+                    amount = 1.0 + drive * 12.0
+                    tmp = np.tanh(out * np.float32(amount))
+                    norm = math.tanh(amount) if amount > 1e-6 else 1.0
+                    out = (tmp * np.float32(1.0 / max(0.25, norm))).astype(np.float32)
+                    peak = float(np.max(np.abs(out))) or 1.0
+                    out = (out / np.float32(peak)) * np.float32(TABLE_PEAK)
+            return out
+
+    def add_wavetable(self, name: str, table: np.ndarray) -> str:
+        """
+        Hot-register a single-cycle table under `name` and select it as the
+        current pure morph voice (A=B, morph=0).
+        """
+        key = sanitize_voice_name(name)
+        if key in BUILTIN_VOICE_NAMES:
+            raise ValueError(f"cannot replace built-in voice '{key}'")
+        arr = np.asarray(table, dtype=np.float32).reshape(-1)
+        if arr.shape[0] != TABLE_SIZE:
+            arr = _resample_cycle(arr)
+        else:
+            peak = float(np.max(np.abs(arr))) or 1.0
+            arr = (arr / np.float32(peak)) * np.float32(TABLE_PEAK)
+        with self._lock:
+            if key in self._tables:
+                idx = self._voice_names.index(key)
+                self._tables[key] = arr
+                self._table_list[idx] = arr
+            else:
+                self._tables[key] = arr
+                self._voice_names.append(key)
+                self._table_list.append(arr)
+            idx = self._voice_names.index(key)
+            self._morph_a = idx
+            self._morph_b = idx
+            self._morph = 0.0
+            self._waveform = key
+            self._morph_dirty = True
+            self._rebuild_morph_table_unlocked()
+        return key
+
+    def suggested_save_voice_name(self) -> str:
+        a, b, blend = self.morph_neighbors()
+        return unique_voice_name(
+            suggest_voice_name(a, b, blend), self.voice_names
+        )
 
     def drum_macros(self) -> Tuple[float, float, float, float]:
         """pitch, decay(stretch), noise, tone — current drum-edit macros."""
@@ -3285,7 +3404,13 @@ class MidiToneApp:
     ) -> None:
         self.port_filter = port_filter.strip().lower()
         self.event_q: queue.Queue = queue.Queue(maxsize=EVENT_Q_MAX)
-        self._tables = load_wavetables(waves_dir)
+        self._waves_dir = pathlib.Path(waves_dir)
+        self._user_waves_dir = USER_WAVETABLES_DIR
+        try:
+            self._user_waves_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        self._tables = load_wavetables(self._waves_dir, self._user_waves_dir)
         self.engine = SineEngine(self._tables, max_voices=max_voices)
         self._inport: Optional[mido.ports.BaseInput] = None
         self._poll_thread: Optional[threading.Thread] = None
@@ -3360,6 +3485,14 @@ class MidiToneApp:
         self._kit_status_var = tk.StringVar(value="")
         self._kit_selected_note = 36  # factory kick
         self._kit_all_drums = False  # FX edit target = shared kit group bus
+        self._save_voice_open = False
+        self._save_voice_frame: Optional[tk.Frame] = None
+        self._save_voice_entry: Optional[tk.Entry] = None
+        self._save_voice_status: Optional[tk.Label] = None
+        self._save_voice_apply_drive = True
+        self._save_voice_drive_btn: Optional[tk.Button] = None
+        self._save_voice_keys: Optional[tk.Frame] = None
+        self._save_voice_keys_digits = False
         self._mode = "synth"  # synth | looper | pads | songs | log | presets
         self._mode_btns: Dict[str, tk.Button] = {}
         self._looper = MidiLooper(self.engine, self._q_put)
@@ -3668,7 +3801,12 @@ class MidiToneApp:
         )
 
     def _overlay_busy(self) -> bool:
-        return self._grid_open or self._morph_ui_open or self._kit_ui_open
+        return (
+            self._grid_open
+            or self._morph_ui_open
+            or self._kit_ui_open
+            or self._save_voice_open
+        )
 
     def _session_dict(self) -> Dict[str, Any]:
         return {
@@ -4576,6 +4714,8 @@ class MidiToneApp:
             self._close_voice_grid(restore_main=False)
         if self._morph_ui_open:
             self._close_morph_menu(restore_main=False)
+        if self._save_voice_open:
+            self._close_save_voice(restore_main=False)
 
         # If insert FX MODE is on, keep drum-group target or point at selected drum.
         # If BUS FX is on, keep global edit (kit is audition/preview only).
@@ -5203,6 +5343,8 @@ class MidiToneApp:
             self._close_morph_menu(restore_main=False)
         if self._kit_ui_open:
             self._close_kit_explorer(restore_main=False)
+        if self._save_voice_open:
+            self._close_save_voice(restore_main=False)
 
         # Leaving pads while recording: keep the take
         if self._mode == "pads" and mode != "pads":
@@ -5403,11 +5545,268 @@ class MidiToneApp:
         if self._morph_ui_open:
             self._paint_morph_menu()
 
+    def _open_save_voice(self) -> None:
+        """Bake current morph (+ optional drive) to a named user wavetable."""
+        if self._save_voice_open:
+            return
+        if self._mode != "synth":
+            self._switch_mode("synth")
+        # Leave other overlays so the name pad is full-screen
+        if self._grid_open:
+            self._close_voice_grid(restore_main=False)
+        if self._morph_ui_open:
+            self._close_morph_menu(restore_main=False)
+        if self._kit_ui_open:
+            self._close_kit_explorer(restore_main=False)
+
+        self._save_voice_open = True
+        self._save_voice_apply_drive = True
+        self._save_voice_keys_digits = False
+        self._synth_shell.pack_forget()
+
+        self._save_voice_frame = tk.Frame(self._mode_host, bg="#111111")
+        self._save_voice_frame.pack(fill=tk.BOTH, expand=True)
+
+        header = tk.Frame(self._save_voice_frame, bg="#111111")
+        header.pack(fill=tk.X, padx=6, pady=(6, 2))
+        tk.Label(
+            header,
+            text="SAVE VOICE",
+            font=("DejaVu Sans", 16, "bold"),
+            fg="#fbf1c7",
+            bg="#111111",
+        ).pack(side=tk.LEFT)
+        a, b, blend = self.engine.morph_neighbors()
+        hint = a if a == b else f"{a}→{b} {int(blend * 100)}%"
+        tk.Label(
+            header,
+            text=f"bake morph · {hint}",
+            font=("DejaVu Sans", 11),
+            fg="#a89984",
+            bg="#111111",
+        ).pack(side=tk.RIGHT)
+
+        tk.Label(
+            self._save_voice_frame,
+            text="Single-cycle wavetable only — drive can bake in; delay/reverb/tone stay live FX.",
+            font=("DejaVu Sans", 10),
+            fg="#a89984",
+            bg="#111111",
+            wraplength=760,
+            justify=tk.LEFT,
+            anchor="w",
+        ).pack(fill=tk.X, padx=8, pady=(0, 4))
+
+        name_row = tk.Frame(self._save_voice_frame, bg="#111111")
+        name_row.pack(fill=tk.X, padx=8, pady=4)
+        suggested = self.engine.suggested_save_voice_name()
+        self._save_voice_entry = tk.Entry(
+            name_row,
+            font=("DejaVu Sans Mono", 18),
+            bg="#1d2021",
+            fg="#fbf1c7",
+            insertbackground="#fbf1c7",
+            relief=tk.FLAT,
+        )
+        self._save_voice_entry.pack(side=tk.LEFT, expand=True, fill=tk.BOTH, ipady=10)
+        self._save_voice_entry.insert(0, suggested)
+        self._save_voice_entry.focus_set()
+
+        self._save_voice_status = tk.Label(
+            self._save_voice_frame,
+            text=f"Will write {self._user_waves_dir.name}/{suggested}.wav",
+            font=("DejaVu Sans Mono", 11),
+            fg="#83a598",
+            bg="#111111",
+            anchor="w",
+        )
+        self._save_voice_status.pack(fill=tk.X, padx=8, pady=(0, 4))
+
+        opt = tk.Frame(self._save_voice_frame, bg="#111111")
+        opt.pack(fill=tk.X, padx=6, pady=2)
+        self._save_voice_drive_btn = self._mk_touch_btn(
+            opt, "DRIVE: ON", self._toggle_save_voice_drive, bg="#b16286"
+        )
+        self._save_voice_drive_btn.pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=8)
+        self._mk_touch_btn(
+            opt, "SUGGEST", self._reset_save_voice_name, bg="#458588"
+        ).pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=8)
+        self._mk_touch_btn(
+            opt, "⌫", lambda: self._save_voice_type("\b"), bg="#504945"
+        ).pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=8)
+        self._mk_touch_btn(
+            opt, "CLR", lambda: self._save_voice_type("\x15"), bg="#504945"
+        ).pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=8)
+
+        keys = tk.Frame(self._save_voice_frame, bg="#111111")
+        keys.pack(fill=tk.BOTH, expand=True, padx=4, pady=2)
+        self._save_voice_keys = keys
+        self._paint_save_voice_keyboard()
+
+        footer = tk.Frame(self._save_voice_frame, bg="#111111")
+        footer.pack(fill=tk.X, padx=6, pady=6)
+        self._mk_touch_btn(
+            footer, "SAVE", self._confirm_save_voice, bg="#689d6a"
+        ).pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=14)
+        self._mk_touch_btn(
+            footer, "CANCEL", self._close_save_voice, bg="#9d0006"
+        ).pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=14)
+        self._append_log("SAVE VOICE — name the baked morph cycle")
+
+    def _paint_save_voice_keyboard(self) -> None:
+        keys = getattr(self, "_save_voice_keys", None)
+        if keys is None:
+            return
+        for w in keys.winfo_children():
+            w.destroy()
+        if self._save_voice_keys_digits:
+            rows = ("1234567890", "-.")
+            toggle_label = "ABC"
+        else:
+            rows = ("qwertyuiop", "asdfghjkl", "zxcvbnm_")
+            toggle_label = "123"
+        for r, row in enumerate(rows):
+            fr = tk.Frame(keys, bg="#111111")
+            fr.pack(fill=tk.BOTH, expand=True, pady=1)
+            for ch in row:
+                self._mk_touch_btn(
+                    fr,
+                    ch.upper() if ch.isalpha() else ch,
+                    lambda c=ch: self._save_voice_type(c),
+                    bg="#3c3836",
+                ).pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=1, ipady=6)
+        fr = tk.Frame(keys, bg="#111111")
+        fr.pack(fill=tk.BOTH, expand=True, pady=1)
+        self._mk_touch_btn(
+            fr, toggle_label, self._toggle_save_voice_keys, bg="#504945"
+        ).pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=1, ipady=6)
+
+    def _toggle_save_voice_keys(self) -> None:
+        self._save_voice_keys_digits = not self._save_voice_keys_digits
+        self._paint_save_voice_keyboard()
+
+    def _toggle_save_voice_drive(self) -> None:
+        self._save_voice_apply_drive = not self._save_voice_apply_drive
+        if self._save_voice_drive_btn is not None:
+            if self._save_voice_apply_drive:
+                self._save_voice_drive_btn.configure(
+                    text="DRIVE: ON", bg="#b16286", activebackground="#b16286"
+                )
+            else:
+                self._save_voice_drive_btn.configure(
+                    text="DRIVE: OFF", bg="#3c3836", activebackground="#3c3836"
+                )
+
+    def _reset_save_voice_name(self) -> None:
+        if self._save_voice_entry is None:
+            return
+        suggested = self.engine.suggested_save_voice_name()
+        self._save_voice_entry.delete(0, tk.END)
+        self._save_voice_entry.insert(0, suggested)
+        self._update_save_voice_status()
+
+    def _save_voice_type(self, ch: str) -> None:
+        entry = self._save_voice_entry
+        if entry is None:
+            return
+        if ch == "\b":
+            cur = entry.get()
+            entry.delete(0, tk.END)
+            entry.insert(0, cur[:-1])
+        elif ch == "\x15":
+            entry.delete(0, tk.END)
+        else:
+            entry.insert(tk.END, ch)
+        self._update_save_voice_status()
+
+    def _update_save_voice_status(self) -> None:
+        if self._save_voice_status is None or self._save_voice_entry is None:
+            return
+        name = sanitize_voice_name(self._save_voice_entry.get())
+        if name in BUILTIN_VOICE_NAMES:
+            self._save_voice_status.configure(
+                text=f"'{name}' is a built-in — pick another name", fg="#fb4934"
+            )
+            return
+        path = self._user_waves_dir / f"{name}.wav"
+        exists = name in self.engine.voice_names or path.is_file()
+        tag = "overwrite" if exists else "new"
+        self._save_voice_status.configure(
+            text=f"{tag}: {self._user_waves_dir.name}/{name}.wav",
+            fg="#fabd2f" if exists else "#83a598",
+        )
+
+    def _confirm_save_voice(self) -> None:
+        if self._save_voice_entry is None:
+            return
+        raw = self._save_voice_entry.get()
+        name = sanitize_voice_name(raw)
+        if not name:
+            if self._save_voice_status is not None:
+                self._save_voice_status.configure(text="Need a name", fg="#fb4934")
+            return
+        if name in BUILTIN_VOICE_NAMES:
+            if self._save_voice_status is not None:
+                self._save_voice_status.configure(
+                    text=f"Cannot replace built-in '{name}'", fg="#fb4934"
+                )
+            return
+        try:
+            cycle = self.engine.bake_voice_cycle(
+                apply_drive=bool(self._save_voice_apply_drive)
+            )
+            path = self._user_waves_dir / f"{name}.wav"
+            write_wavetable_wav(path, cycle, sample_rate=44100)
+            key = self.engine.add_wavetable(name, cycle)
+        except Exception as exc:
+            if self._save_voice_status is not None:
+                self._save_voice_status.configure(text=f"Save failed: {exc}", fg="#fb4934")
+            self._append_log(f"SAVE VOICE failed: {exc}")
+            return
+
+        self._voice_names = self.engine.voice_names
+        try:
+            self._voice_index = self._voice_names.index(key)
+        except ValueError:
+            self._voice_index = 0
+        if self._voice_lbl is not None:
+            self._voice_lbl.configure(text=self._voice_label_text())
+        self.mod_var.set(self._format_mod_line())
+        self._mark_settings_dirty()
+        self._append_log(
+            f"Saved voice '{key}' → {path.name}"
+            + (" (with drive)" if self._save_voice_apply_drive else "")
+        )
+        self._close_save_voice()
+        self._paint_synth_waveform(force=True)
+
+    def _close_save_voice(self, restore_main: bool = True) -> None:
+        if not self._save_voice_open:
+            return
+        if self._save_voice_frame is not None:
+            self._save_voice_frame.destroy()
+            self._save_voice_frame = None
+        self._save_voice_entry = None
+        self._save_voice_status = None
+        self._save_voice_drive_btn = None
+        self._save_voice_keys = None
+        self._save_voice_open = False
+        if restore_main and self._mode == "synth":
+            self._synth_shell.pack(fill=tk.BOTH, expand=True)
+            self._main.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+            self._touch.pack(side=tk.BOTTOM, fill=tk.X, padx=6, pady=6)
+            if self._voice_lbl is not None:
+                self._voice_lbl.configure(text=self._voice_label_text())
+            self.mod_var.set(self._format_mod_line())
+            self._paint_synth_waveform(force=True)
+
     def _open_voice_grid(self) -> None:
         if self._grid_open:
             return
         if self._mode != "synth":
             self._switch_mode("synth")
+        if self._save_voice_open:
+            self._close_save_voice(restore_main=False)
         if self._morph_ui_open:
             self._close_morph_menu(restore_main=False)
         if self._kit_ui_open:
@@ -5487,8 +5886,11 @@ class MidiToneApp:
 
         footer = tk.Frame(self._grid_frame, bg="#111111")
         footer.pack(fill=tk.X, padx=6, pady=6)
+        self._mk_touch_btn(
+            footer, "SAVE AS…", self._open_save_voice, bg="#689d6a"
+        ).pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=14)
         self._mk_touch_btn(footer, "CLOSE", self._close_voice_grid, bg="#9d0006").pack(
-            fill=tk.BOTH, ipady=14
+            side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=14
         )
         self._paint_voice_grid()
 
@@ -5526,6 +5928,8 @@ class MidiToneApp:
             self._switch_mode("synth")
         if self._grid_open:
             self._close_voice_grid(restore_main=False)
+        if self._save_voice_open:
+            self._close_save_voice(restore_main=False)
         if self._kit_ui_open:
             self._close_kit_explorer(restore_main=False)
         # Hand knobs back to morph while editing the pair
@@ -5623,7 +6027,10 @@ class MidiToneApp:
 
         footer = tk.Frame(self._morph_frame, bg="#111111")
         footer.pack(fill=tk.X, padx=6, pady=6)
-        self._mk_touch_btn(footer, "DONE", self._close_morph_menu, bg="#689d6a").pack(
+        self._mk_touch_btn(
+            footer, "SAVE AS…", self._open_save_voice, bg="#689d6a"
+        ).pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=14)
+        self._mk_touch_btn(footer, "DONE", self._close_morph_menu, bg="#458588").pack(
             side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=14
         )
         self._mk_touch_btn(footer, "CANCEL", self._close_morph_menu, bg="#9d0006").pack(
