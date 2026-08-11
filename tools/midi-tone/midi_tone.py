@@ -4852,7 +4852,7 @@ class MidiToneApp:
 
         row4 = tk.Frame(shell, bg="#111111")
         row4.pack(fill=tk.X, padx=8, pady=(4, 8))
-        self._mk_touch_btn(row4, "STOP", self._seq_stop, bg="#504945").pack(
+        self._mk_touch_btn(row4, "STOP ALL", self._seq_stop, bg="#504945").pack(
             side=tk.LEFT, expand=True, fill=tk.BOTH, padx=4, ipady=12
         )
         self._mk_touch_btn(row4, "CLEAR", self._seq_clear, bg="#3c3836").pack(
