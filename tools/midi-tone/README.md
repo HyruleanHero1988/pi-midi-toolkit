@@ -4,9 +4,9 @@ Hear and see MIDI from the **Akai MPK mini** on the Pi **without** USB-DIN or a 
 
 - Opens a MIDI input (prefers a port name containing `MPK`)
 - Note-on → wavetable tone through the Pi audio jack / HDMI
-- **Modes** (top right): **SYNTH**, **LOOPER**, **PADS**, **SONGS**, **PRESETS**, **LOG** — fully separate UIs
+- **Modes** (top right): **SYNTH**, **SEQ**, **PADS**, **SONGS**, **PRESETS**, **LOG** — fully separate UIs
 - Synth: voices, A/B morph, knobs, live morph-cycle scope; **MPK pads (ch10) = analog drum voices**; **KIT** drill-down scopes a selected drum
-- Looper: record a MIDI note sequence, play it on repeat
+- Sequencer: record a backbone loop, then overdub layers of drums and keys over it
 - Pads: 16 phrase clips (Bank A+B); record from keys, launch from touch squares **or** MPK pads
 - Songs: scrolling list of every `.mid` in `songs/`, tempo, play local and/or USB→DIN
 - Presets: 8 save slots + autosave last session (`settings.json`)
@@ -125,7 +125,7 @@ Keyboard notes keep the wavetable morph synth. Pad aftertouch still trims the ri
 Top-right tabs stay visible:
 
 - **SYNTH** — wavetable soft-synth, voice grid, morph pair
-- **LOOPER** — record MIDI notes, then play them back on a loop (free timing; notes only)
+- **SEQ** — record a backbone loop, overdub layers over it, KEEP / DROP / UNDO (free timing; notes only)
 - **PADS** — 4×4 phrase clip launcher (MPK Bank A+B); touch or drum pads
 - **SONGS** — lists every `.mid` / `.midi` in `songs/`; big ▲ UP / ▼ DOWN to scroll; tempo; LOCAL/USB out
 - **PRESETS** — 8 touch slots: SAVE / LOAD / DELETE current sound + full-velocity
@@ -137,17 +137,25 @@ User-saved morph wavetables live in `user-wavetables/*.wav` (+ `*.fx.json` for d
 Song files live as whatever you put in `songs/` (any `.mid` name).
 Phrase pads persist as `phrases/pad-01.json` … `pad-16.json` (gitignored).
 
-### Looper
+### Sequencer (SEQ)
 
-1. Open **LOOPER**
-2. Tap **RECORD**, play notes on the MPK
-3. Tap **RECORD** again (or **STOP**) to finish
-4. Tap **PLAY** to loop; tap **PLAY**/**STOP** to halt
-5. **CLEAR** wipes the take
+808-style overdubbing: build a beat by adding to it while it plays. Drums and keys both record.
 
-On stop, the take is **auto-trimmed**: leading silence before the first hit is removed, and trailing silence after the last hit is capped to the largest gap between note-ons (so lag hitting STOP doesn’t leave a dead bar at the loop point). Same trim applies to phrase-pad recordings.
+1. Open **SEQ**, tap **REC BACKBONE**, play the groove
+2. Tap **REC** again — the take is trimmed, its length becomes the loop, and it starts playing
+3. Tap **REC** again to **overdub**: play more drums or a melody over the running loop. What you played shows up on the next pass, so you hear the layer in place before deciding
+4. **KEEP** flattens the layer onto the sequence · **DROP** throws it away · **UNDO** peels the last kept layer back off
+5. **STOP** halts playback (material stays) · **CLEAR** starts over
 
-Live playing still works while a loop runs. Voice/morph/knob settings from Synth apply to looped notes too.
+The backbone is the only take that sets length; everything after it is measured in backbone cycles.
+
+- **LEN ×2 / ÷2** grows or shrinks the sequence in whole cycles. The groove tiles underneath, so a doubled sequence lets you overdub a fill that only happens the second time around. ÷2 refuses to cut a layer that is longer than the target.
+- **OVERDUB: WRAP** (default) folds a long take back onto the same cycle, the way a drum machine does. **OVERDUB: EXTEND** instead stretches the sequence to as many whole backbone cycles as the take needs (up to 8).
+- Layers are a stack, not one flat list, so UNDO works layer by layer. **SONGS → SAVE SEQ** exports the flattened result as `.mid`.
+
+On stop, every free-timing take is **auto-trimmed**: leading silence before the first hit is removed, and trailing silence after the last hit is capped to the largest gap between note-ons (so lag hitting REC doesn’t leave a dead bar at the loop point). The same trim runs on phrase-pad recordings.
+
+Live playing still works while the sequence runs. Voice/morph/knob settings from Synth apply to sequenced notes too. Recording keeps going if you switch modes — handy for changing voice mid-overdub.
 
 ### Phrase Pads
 
@@ -181,7 +189,7 @@ While a phrase is **recording**, MPK pads play/record **drum voices** (not launc
 Ways to get files into `songs/`:
 
 1. **Bundled demos (offline)** — `demo-songs/` ships **12 classical Mutopia MIDIs** with the deploy (Bach, Beethoven, Debussy, Joplin, Mozart, Satie, …). On launch, any missing ones are copied into `songs/` (no internet). See `demo-songs/LICENSE.txt`.
-2. **Record your own** — LOOPER → record → **SONGS** → **SAVE LOOP** (writes `take-001.mid`, `take-002.mid`, …)
+2. **Record your own** — SEQ → record → **SONGS** → **SAVE SEQ** (writes `take-001.mid`, `take-002.mid`, …)
 3. **Optional online refresh** — if the Pi has network:
    ```bash
    cd ~/midi-tone

@@ -31,7 +31,7 @@ RECONNECT_MAX = 5.0
 
 
 def seconds_to_ticks(seconds: float, bpm: float) -> int:
-    """Convert free-timing looper seconds into musical ticks."""
+    """Convert free-timing take seconds into musical ticks."""
     beats = max(0.0, float(seconds)) * (float(bpm) / 60.0)
     return int(round(beats * PPQ))
 
