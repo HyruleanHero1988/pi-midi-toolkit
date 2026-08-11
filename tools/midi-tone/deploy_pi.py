@@ -20,6 +20,7 @@ CREDS = HERE / ".pi-credentials"
 
 FILES = [
     "midi_tone.py",
+    "sequencer.py",  # imported by midi_tone.py — the app won't start without it
     "fetch_akwf.py",
     "fetch_songs.py",
     "requirements.txt",
