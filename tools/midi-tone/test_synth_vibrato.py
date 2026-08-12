@@ -109,6 +109,37 @@ class VibratoTest(unittest.TestCase):
             engine.nudge_vib_rate(-self.midi_tone.VIB_RATE_STEP)
         self.assertAlmostEqual(engine.vib_state()[1], engine.VIB_HZ_MIN, places=6)
 
+    def test_per_voice_vibrato_is_independent_of_the_live_rig(self) -> None:
+        """A phrase pad's baked wobble plays even with the rig's vibrato off."""
+        baked = self.make_engine()
+        baked.note_on(0, 60, 100, vib=(2.0, 6.0, 1.0))
+        self.render(baked, 256)
+        wobbled = self.render(baked, 256)
+
+        dry = self.make_engine()
+        dry.note_on(0, 60, 100)
+        self.render(dry, 256)
+        flat = self.render(dry, 256)
+
+        self.assertFalse(np.allclose(wobbled, flat, atol=1e-4))
+
+    def test_baked_vibrato_ignores_the_global_setting(self) -> None:
+        """Two engines, opposite rig settings, same baked pad note → same sound."""
+        rig_off = self.make_engine()
+        rig_off.note_on(0, 60, 100, vib=(1.0, 5.0, 1.0))
+        self.render(rig_off, 256)
+        a = self.render(rig_off, 256)
+
+        rig_on = self.make_engine()
+        rig_on.set_vib_always(1.0)
+        rig_on.nudge_vib_depth(1.0)
+        rig_on.set_mod_wheel(127)
+        rig_on.note_on(0, 60, 100, vib=(1.0, 5.0, 1.0))
+        self.render(rig_on, 256)
+        b = self.render(rig_on, 256)
+
+        np.testing.assert_allclose(a, b, atol=1e-6)
+
     def test_always_on_survives_a_preset_round_trip(self) -> None:
         engine = self.make_engine()
         engine.set_vib_always(1.0)

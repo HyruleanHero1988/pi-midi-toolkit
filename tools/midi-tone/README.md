@@ -179,6 +179,7 @@ Two views (top-right of PADS): **EDIT** (record / fine-tune) and **PLAY** (perfo
    - **CLEAR** then tap a pad → erase
    - **FOLLOW** / **LOCK** — FOLLOW uses the live morph and the live master level; LOCK freezes the current morph **and the master level** onto that pad (multi-timbre; up to 4 locked pads at once)
    - **VOL− / VOL+** — per-pad trim, 10% a tap (10–200%). Audible on the next note, so you can balance a pad against the mix while it loops. Switching a pad back to FOLLOW resets its trim to 100%
+   - **VIB** — vibrato is captured when you stop recording, so a phrase keeps the wobble it was played with no matter what the rig does later. Tap to switch that pad between its baked value (`VIB 0.9st`, or `VIB none` if you recorded dry) and the live rig (`VIB live`); LOCK re-captures it along with the voice
    - **CH:rec** / **CH:n** — emit on recorded channels or force MIDI ch 1–16
    - **SYNTH** / **MIDI** — local soft-synth on/off (off = sequence only over USB/DIN)
    - **OUT: LOCAL / USB / BOTH** — session routing (shares the Songs USB port)

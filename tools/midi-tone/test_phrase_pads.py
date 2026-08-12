@@ -22,18 +22,24 @@ class FakeEngine:
 
     MAX_LOCKED_TIMBRES = 2
 
-    def __init__(self, level: float = 1.0) -> None:
+    def __init__(self, level: float = 1.0, vib=(0.0, 5.0, 0.0)) -> None:
         self._level = float(level)
+        self._vib = tuple(float(v) for v in vib)
         self.ons: list[tuple[int, int, int]] = []
+        self.vibs: list = []
 
     def note_on(self, channel, note, velocity, **k) -> None:
         self.ons.append((channel, note, velocity))
+        self.vibs.append(k.get("vib"))
 
     def note_off(self, *a, **k) -> None:
         pass
 
     def level(self) -> float:
         return self._level
+
+    def vib_state(self):
+        return self._vib
 
     def snapshot_morph(self):
         return ("sine", "saw", 0.0)
@@ -156,6 +162,80 @@ class PhrasePadTrimTest(unittest.TestCase):
         self.assertAlmostEqual(bank.set_gain(0, -3.0), self.midi_tone.PHRASE_GAIN_MIN, places=6)
         self.assertEqual(self.midi_tone.scale_velocity(1, 0.1), 1)
         self.assertEqual(self.midi_tone.scale_velocity(127, 2.0), 127)
+
+    def test_recording_bakes_the_vibrato_it_was_played_with(self) -> None:
+        engine = FakeEngine(vib=(0.8, 4.5, 1.0))
+        bank = self.make_bank(engine)
+        bank.arm_record(0)
+        bank.record_note(True, 0, 60, 100)
+        bank.record_note(False, 0, 60, 0)
+        bank.stop_record()
+
+        cell = bank.cell(0)
+        self.assertTrue(cell.vib_baked)
+        self.assertEqual(cell.vib_tuple(), (0.8, 4.5, 1.0))
+
+        # Changing the live rig afterwards must not reach the recorded phrase
+        engine._vib = (0.0, 5.0, 0.0)
+        self.assertEqual(bank.cell(0).vib_tuple(), (0.8, 4.5, 1.0))
+
+    def test_baked_vibrato_is_handed_to_the_synth_on_playback(self) -> None:
+        engine = FakeEngine(vib=(0.6, 6.0, 1.0))
+        bank = self.make_bank(engine)
+        bank.arm_record(0)
+        bank.record_note(True, 0, 60, 100)
+        bank.record_note(False, 0, 60, 0)
+        bank.stop_record()
+
+        def emit_one() -> None:
+            bank._emit_phrase_note(
+                on=True,
+                src_channel=0,
+                note=60,
+                velocity=100,
+                out_channel=self.midi_tone.PHRASE_OUT_AS_RECORDED,
+                local_synth=True,
+                out_mode="local",
+                timbre=None,
+                fx_name=None,
+                idx=0,
+            )
+
+        emit_one()
+        self.assertEqual(engine.vibs[-1], (0.6, 6.0, 1.0))
+
+        # VIB live hands the pad back to whatever the rig is doing
+        bank.set_vib_live(0)
+        emit_one()
+        self.assertIsNone(engine.vibs[-1])
+
+        bank.toggle_vib_baked(0)
+        emit_one()
+        self.assertEqual(engine.vibs[-1], (0.6, 6.0, 1.0))
+
+    def test_baked_vibrato_survives_save_and_reload(self) -> None:
+        engine = FakeEngine(vib=(1.2, 3.5, 1.0))
+        bank = self.make_bank(engine)
+        bank.arm_record(3)
+        bank.record_note(True, 0, 64, 100)
+        bank.record_note(False, 0, 64, 0)
+        bank.stop_record()
+
+        reloaded = self.make_bank()
+        self.assertEqual(reloaded.cell(3).vib_tuple(), (1.2, 3.5, 1.0))
+
+    def test_lock_recaptures_vibrato_with_the_voice(self) -> None:
+        engine = FakeEngine(vib=(0.0, 5.0, 0.0))
+        bank = self.make_bank(engine)
+        bank.arm_record(1)
+        bank.record_note(True, 0, 60, 100)
+        bank.record_note(False, 0, 60, 0)
+        bank.stop_record()
+        self.assertEqual(bank.cell(1).vib_tuple(), (0.0, 5.0, 0.0))
+
+        engine._vib = (1.5, 7.0, 1.0)
+        bank.lock_voice_from_engine(1)
+        self.assertEqual(bank.cell(1).vib_tuple(), (1.5, 7.0, 1.0))
 
     def test_empty_pad_take_stays_empty(self) -> None:
         bank = self.make_bank()

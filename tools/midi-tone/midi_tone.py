@@ -823,6 +823,9 @@ class Voice:
     timbre: Optional[np.ndarray] = None
     # FX slot key: wavetable name for live morph endpoint, or locked pad morph_a
     fx_name: Optional[str] = None
+    # None → live global vibrato; (depth semitones, Hz, amount) → phrase-pad bake
+    vib: Optional[Tuple[float, float, float]] = None
+    vib_phase: float = 0.0
 
 
 @dataclass
@@ -1058,6 +1061,7 @@ class SineEngine:
         *,
         timbre: Optional[np.ndarray] = None,
         fx_name: Optional[str] = None,
+        vib: Optional[Tuple[float, float, float]] = None,
     ) -> None:
         if velocity <= 0:
             self.note_off(channel, note)
@@ -1092,6 +1096,8 @@ class SineEngine:
                 existing.age = serial
                 existing.timbre = timbre
                 existing.fx_name = fx_name
+                existing.vib = vib
+                existing.vib_phase = 0.0
                 return
             if len(self._voices) >= self.max_voices:
                 drop = self._steal_key()
@@ -1107,6 +1113,7 @@ class SineEngine:
                 age=serial,
                 timbre=timbre,
                 fx_name=fx_name,
+                vib=vib,
             )
 
     def _drum_note_on(self, note: int, velocity: float) -> None:
@@ -1868,6 +1875,7 @@ class SineEngine:
             if self._vib_phase > 2.0 * math.pi:
                 self._vib_phase %= 2.0 * math.pi
             vib_semis = vib_depth * mod * math.sin(self._vib_phase)
+        block_turns = frames / sr
 
         if frames > self._key_bus.shape[0]:
             self._key_bus = np.zeros(frames, dtype=np.float32)
@@ -1884,7 +1892,19 @@ class SineEngine:
         dead: List[Tuple[int, int]] = []
         denom = np.float32(max(frames - 1, 1))
         for key, v in items:
-            hz = midi_to_hz(v.note) * (2.0 ** ((bend + vib_semis) / 12.0))
+            if v.vib is None:
+                semis = vib_semis
+            else:
+                # Phrase pad with its own vibrato baked in at record time
+                v_depth, v_hz, v_amount = v.vib
+                if v_amount > 0.01 and v_depth > 0.001:
+                    v.vib_phase += 2.0 * math.pi * v_hz * block_turns
+                    if v.vib_phase > 2.0 * math.pi:
+                        v.vib_phase %= 2.0 * math.pi
+                    semis = v_depth * v_amount * math.sin(v.vib_phase)
+                else:
+                    semis = 0.0
+            hz = midi_to_hz(v.note) * (2.0 ** ((bend + semis) / 12.0))
             phase_inc = (hz * TABLE_SIZE) / sr
             np.add(v.phase, arange * np.float32(phase_inc), out=ph)
             # Linear interpolation (nicer for sampled AKWF cycles)
@@ -2138,6 +2158,24 @@ class PhraseCell:
     # Per-pad trim so a locked voice can sit under (or over) the rest of the mix.
     # 1.0 = as recorded; LOCK bakes the master level here, VOL −/+ tunes it.
     gain: float = 1.0
+    # Vibrato as it sounded while recording. False = follow the live rig.
+    vib_baked: bool = False
+    vib_depth: float = 0.0  # semitones
+    vib_rate: float = 5.0  # Hz
+    vib_amount: float = 0.0  # 0..1 (wheel or screen, whichever was asking)
+
+    def vib_tuple(self) -> Optional[Tuple[float, float, float]]:
+        """What to hand the engine for this pad's key notes."""
+        if not self.vib_baked:
+            return None
+        return (float(self.vib_depth), float(self.vib_rate), float(self.vib_amount))
+
+    def vib_label(self) -> str:
+        if not self.vib_baked:
+            return "live"
+        if self.vib_amount <= 0.01 or self.vib_depth <= 0.001:
+            return "none"
+        return f"{self.vib_depth:.1f}st"
 
     def is_empty(self) -> bool:
         return not self.events or self.length <= 0.0
@@ -2155,7 +2193,7 @@ class PhraseCell:
         if och < -1 or och > 15:
             och = PHRASE_OUT_AS_RECORDED
         return {
-            "version": 3,
+            "version": 4,
             "length": float(self.length),
             "trigger_mode": mode,
             "voice_mode": vmode,
@@ -2165,6 +2203,10 @@ class PhraseCell:
             "out_channel": och,
             "local_synth": bool(self.local_synth),
             "gain": float(clamp_phrase_gain(self.gain)),
+            "vib_baked": bool(self.vib_baked),
+            "vib_depth": float(self.vib_depth),
+            "vib_rate": float(self.vib_rate),
+            "vib_amount": float(self.vib_amount),
             "events": [
                 {
                     "t": float(e.t),
@@ -2218,6 +2260,13 @@ class PhraseCell:
             gain = float(data.get("gain", 1.0))
         except (TypeError, ValueError):
             gain = 1.0
+
+        def _num(key: str, default: float, lo: float, hi: float) -> float:
+            try:
+                return max(lo, min(hi, float(data.get(key, default))))
+            except (TypeError, ValueError):
+                return default
+
         return PhraseCell(
             events=events,
             length=length,
@@ -2229,6 +2278,10 @@ class PhraseCell:
             out_channel=och,
             local_synth=bool(data.get("local_synth", True)),
             gain=clamp_phrase_gain(gain),
+            vib_baked=bool(data.get("vib_baked", False)),
+            vib_depth=_num("vib_depth", 0.0, 0.0, 4.0),
+            vib_rate=_num("vib_rate", 5.0, 0.1, 20.0),
+            vib_amount=_num("vib_amount", 0.0, 0.0, 1.0),
         )
 
 
@@ -2296,6 +2349,10 @@ class PhrasePadBank:
             out_channel=int(c.out_channel),
             local_synth=bool(c.local_synth),
             gain=float(c.gain),
+            vib_baked=bool(c.vib_baked),
+            vib_depth=float(c.vib_depth),
+            vib_rate=float(c.vib_rate),
+            vib_amount=float(c.vib_amount),
         )
 
     def cell(self, idx: int) -> PhraseCell:
@@ -2360,6 +2417,10 @@ class PhrasePadBank:
             level = float(self._engine.level())
         except Exception:
             level = 1.0
+        try:
+            vib_depth, vib_rate, vib_amount = self._engine.vib_state()
+        except Exception:
+            vib_depth, vib_rate, vib_amount = (0.0, 5.0, 0.0)
         gain = clamp_phrase_gain(level)
         with self._lock:
             c = self._cells[idx]
@@ -2368,6 +2429,10 @@ class PhrasePadBank:
             c.morph_b = b
             c.morph = float(morph)
             c.gain = gain
+            c.vib_baked = True
+            c.vib_depth = float(vib_depth)
+            c.vib_rate = float(vib_rate)
+            c.vib_amount = float(vib_amount)
             self._selected = idx
         self.save_cell(idx)
         self._emit(("phrase",))
@@ -2379,6 +2444,50 @@ class PhrasePadBank:
                 False,
             )
         )
+        return True
+
+    def bake_vib_from_engine(self, idx: int) -> bool:
+        """Freeze the live vibrato onto this pad (what REC does automatically)."""
+        if not (0 <= idx < PHRASE_PAD_COUNT):
+            return False
+        try:
+            depth, rate, amount = self._engine.vib_state()
+        except Exception:
+            return False
+        with self._lock:
+            c = self._cells[idx]
+            c.vib_baked = True
+            c.vib_depth = float(depth)
+            c.vib_rate = float(rate)
+            c.vib_amount = float(amount)
+            self._selected = idx
+            label = c.vib_label()
+        self.save_cell(idx)
+        self._emit(("phrase",))
+        self._emit(("log", f"Phrase {phrase_pad_label(idx)} vibrato baked ({label})", False))
+        return True
+
+    def set_vib_live(self, idx: int) -> bool:
+        """Hand this pad's vibrato back to the live rig."""
+        if not (0 <= idx < PHRASE_PAD_COUNT):
+            return False
+        with self._lock:
+            self._cells[idx].vib_baked = False
+            self._selected = idx
+        self.save_cell(idx)
+        self._emit(("phrase",))
+        self._emit(("log", f"Phrase {phrase_pad_label(idx)} vibrato live", False))
+        return True
+
+    def toggle_vib_baked(self, idx: int) -> Optional[bool]:
+        if not (0 <= idx < PHRASE_PAD_COUNT):
+            return None
+        with self._lock:
+            baked = self._cells[idx].vib_baked
+        if baked:
+            self.set_vib_live(idx)
+            return False
+        self.bake_vib_from_engine(idx)
         return True
 
     def gain(self, idx: int) -> float:
@@ -2502,7 +2611,7 @@ class PhrasePadBank:
             trig = "LOOP" if c.is_loop() else "1SHOT"
             return (
                 f"EDIT {phrase_pad_label(sel)} · {trig} · {v} · vol {int(c.gain * 100)}% · "
-                f"{och} · {syn} · {filled}/16"
+                f"vib {c.vib_label()} · {och} · {syn} · {filled}/16"
             )
         if playing:
             names = ",".join(phrase_pad_label(i) for i in playing[:6])
@@ -2553,6 +2662,7 @@ class PhrasePadBank:
                 and cell.out_channel == PHRASE_OUT_AS_RECORDED
                 and cell.local_synth
                 and abs(cell.gain - 1.0) < 1e-6
+                and not cell.vib_baked
             )
             if defaultish:
                 if path.is_file():
@@ -2593,6 +2703,7 @@ class PhrasePadBank:
                 morph=prev.morph,
                 out_channel=prev.out_channel,
                 local_synth=prev.local_synth,
+                gain=prev.gain,
             )
             self._recording_cell = idx
             self._rec_t0 = time.monotonic()
@@ -2603,6 +2714,11 @@ class PhrasePadBank:
 
     def stop_record(self) -> Optional[int]:
         """Finish recording. Returns cell index, or None if not recording."""
+        # Vibrato is part of how the take sounded, so it travels with the clip.
+        try:
+            vib_depth, vib_rate, vib_amount = self._engine.vib_state()
+        except Exception:
+            vib_depth, vib_rate, vib_amount = (0.0, 5.0, 0.0)
         with self._lock:
             idx = self._recording_cell
             if idx is None:
@@ -2612,6 +2728,10 @@ class PhrasePadBank:
                 trimmed, length = trim_loop_take(list(cell.events))
                 cell.events = trimmed
                 cell.length = length
+                cell.vib_baked = True
+                cell.vib_depth = float(vib_depth)
+                cell.vib_rate = float(vib_rate)
+                cell.vib_amount = float(vib_amount)
             else:
                 cell.length = 0.0
             self._recording_cell = None
@@ -2857,10 +2977,16 @@ class PhrasePadBank:
         n = note & 0x7F
         want_usb = out_mode in ("usb", "both")
         want_local = bool(local_synth) and out_mode in ("local", "both")
+        vib: Optional[Tuple[float, float, float]] = None
         if on:
-            # Read the trim live so VOL −/+ is audible without relaunching
+            # Read trim + vibrato live so edits land without relaunching the pad
             with self._lock:
-                gain = self._cells[idx].gain if 0 <= idx < PHRASE_PAD_COUNT else 1.0
+                if 0 <= idx < PHRASE_PAD_COUNT:
+                    cell = self._cells[idx]
+                    gain = cell.gain
+                    vib = cell.vib_tuple()
+                else:
+                    gain = 1.0
             velocity = scale_velocity(velocity, gain)
         if want_usb:
             port = self._get_outport()
@@ -2886,7 +3012,7 @@ class PhrasePadBank:
                 # Drums use per-model FX inside the engine; keys use fx_name slot.
                 use_fx = fx_name if (ch & 0x0F) != DRUM_CHANNEL else None
                 self._engine.note_on(
-                    ch, n, velocity, timbre=timbre, fx_name=use_fx
+                    ch, n, velocity, timbre=timbre, fx_name=use_fx, vib=vib
                 )
                 with self._lock:
                     self._held.setdefault(idx, set()).add((ch, n))
@@ -3520,6 +3646,7 @@ class MidiToneApp:
         self._phrase_voice_btn: Optional[tk.Button] = None
         self._phrase_ch_btn: Optional[tk.Button] = None
         self._phrase_synth_btn: Optional[tk.Button] = None
+        self._phrase_vib_btn: Optional[tk.Button] = None
         self._phrase_clear_armed = False
         self._phrase_mode_armed = False
         self._phrase_shell: Optional[tk.Frame] = None
@@ -5018,6 +5145,7 @@ class MidiToneApp:
         self._phrase_voice_btn = None
         self._phrase_ch_btn = None
         self._phrase_synth_btn = None
+        self._phrase_vib_btn = None
 
         play_view = self._pads_view == "play"
 
@@ -5083,6 +5211,13 @@ class MidiToneApp:
             self._mk_touch_btn(row, "STOP ALL", self._phrase_stop_all, bg="#3c3836").pack(
                 side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=8
             )
+            # Session routing lives with the transport; the row below is per pad
+            self._phrase_out_btn = self._mk_touch_btn(
+                row, "OUT: LOCAL", self._phrase_cycle_out_mode, bg="#504945"
+            )
+            self._phrase_out_btn.pack(
+                side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=8
+            )
 
             self._phrase_trig_btn = self._mk_touch_btn(
                 detail, "TRIG", self._phrase_edit_trig, bg="#458588"
@@ -5108,10 +5243,10 @@ class MidiToneApp:
             self._phrase_synth_btn.pack(
                 side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=8
             )
-            self._phrase_out_btn = self._mk_touch_btn(
-                detail, "OUT: LOCAL", self._phrase_cycle_out_mode, bg="#504945"
+            self._phrase_vib_btn = self._mk_touch_btn(
+                detail, "VIB live", self._phrase_edit_vib, bg="#458588"
             )
-            self._phrase_out_btn.pack(
+            self._phrase_vib_btn.pack(
                 side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=8
             )
             # Narrow trim pair — balance one pad against the rest of the mix
@@ -5239,6 +5374,13 @@ class MidiToneApp:
         if sel is None:
             return
         self._phrases.toggle_local_synth(sel)
+        self._paint_phrase_pads()
+
+    def _phrase_edit_vib(self) -> None:
+        sel = self._phrase_selected_or_status()
+        if sel is None:
+            return
+        self._phrases.toggle_vib_baked(sel)
         self._paint_phrase_pads()
 
     def _phrase_edit_gain(self, delta: float) -> None:
@@ -5390,6 +5532,14 @@ class MidiToneApp:
                 try:
                     self._phrase_synth_btn.configure(
                         text=s, bg=sbg, activebackground=sbg
+                    )
+                except Exception:
+                    pass
+            if self._phrase_vib_btn is not None:
+                vbg2 = "#458588" if cell.vib_baked else "#3c3836"
+                try:
+                    self._phrase_vib_btn.configure(
+                        text=f"VIB {cell.vib_label()}", bg=vbg2, activebackground=vbg2
                     )
                 except Exception:
                     pass
