@@ -18,15 +18,22 @@ from unittest import mock
 
 
 class FakeEngine:
-    """Enough of SineEngine for PhrasePadBank to record and stop."""
+    """Enough of SineEngine for PhrasePadBank to record, launch and stop."""
 
     MAX_LOCKED_TIMBRES = 2
 
-    def note_on(self, *a, **k) -> None:
-        pass
+    def __init__(self, level: float = 1.0) -> None:
+        self._level = float(level)
+        self.ons: list[tuple[int, int, int]] = []
+
+    def note_on(self, channel, note, velocity, **k) -> None:
+        self.ons.append((channel, note, velocity))
 
     def note_off(self, *a, **k) -> None:
         pass
+
+    def level(self) -> float:
+        return self._level
 
     def snapshot_morph(self):
         return ("sine", "saw", 0.0)
@@ -60,8 +67,10 @@ class PhrasePadTrimTest(unittest.TestCase):
     def tearDown(self) -> None:
         self._tmp.cleanup()
 
-    def make_bank(self):
-        return self.midi_tone.PhrasePadBank(FakeEngine(), lambda _m: None, self.dir)
+    def make_bank(self, engine: FakeEngine | None = None):
+        return self.midi_tone.PhrasePadBank(
+            engine or FakeEngine(), lambda _m: None, self.dir
+        )
 
     def test_pad_take_is_trimmed_like_a_sequencer_take(self) -> None:
         bank = self.make_bank()
@@ -87,6 +96,66 @@ class PhrasePadTrimTest(unittest.TestCase):
 
         self.assertIs(self.midi_tone.trim_loop_take, sequencer.trim_loop_take)
         self.assertIs(self.midi_tone.LoopEvent, sequencer.LoopEvent)
+
+    def test_lock_bakes_the_master_level_as_the_pad_trim(self) -> None:
+        engine = FakeEngine(level=0.6)
+        bank = self.make_bank(engine)
+        bank.arm_record(0)
+        bank.record_note(True, 0, 60, 100)
+        bank.record_note(False, 0, 60, 0)
+        bank.stop_record()
+
+        bank.lock_voice_from_engine(0)
+        self.assertAlmostEqual(bank.cell(0).gain, 0.6, places=6)
+        # Master level moving later must not drag the locked pad with it
+        engine._level = 1.0
+        self.assertAlmostEqual(bank.cell(0).gain, 0.6, places=6)
+
+        bank.set_voice_follow(0)
+        self.assertAlmostEqual(bank.cell(0).gain, 1.0, places=6)
+
+    def test_trim_scales_played_velocity(self) -> None:
+        engine = FakeEngine()
+        bank = self.make_bank(engine)
+        bank.arm_record(0)
+        bank.record_note(True, 0, 60, 100)
+        bank.record_note(False, 0, 60, 0)
+        bank.stop_record()
+        bank.set_gain(0, 0.5)
+
+        bank._emit_phrase_note(
+            on=True,
+            src_channel=0,
+            note=60,
+            velocity=100,
+            out_channel=self.midi_tone.PHRASE_OUT_AS_RECORDED,
+            local_synth=True,
+            out_mode="local",
+            timbre=None,
+            fx_name=None,
+            idx=0,
+        )
+        self.assertEqual(engine.ons[-1], (0, 60, 50))
+
+    def test_trim_survives_save_and_reload(self) -> None:
+        bank = self.make_bank()
+        bank.arm_record(2)
+        bank.record_note(True, 9, 36, 120)
+        bank.record_note(False, 9, 36, 0)
+        bank.stop_record()
+        bank.nudge_gain(2, -self.midi_tone.PHRASE_GAIN_STEP)
+        expected = bank.cell(2).gain
+        self.assertLess(expected, 1.0)
+
+        reloaded = self.make_bank()
+        self.assertAlmostEqual(reloaded.cell(2).gain, expected, places=6)
+
+    def test_trim_is_clamped_and_never_silences_a_hit(self) -> None:
+        bank = self.make_bank()
+        self.assertAlmostEqual(bank.set_gain(0, 99.0), self.midi_tone.PHRASE_GAIN_MAX, places=6)
+        self.assertAlmostEqual(bank.set_gain(0, -3.0), self.midi_tone.PHRASE_GAIN_MIN, places=6)
+        self.assertEqual(self.midi_tone.scale_velocity(1, 0.1), 1)
+        self.assertEqual(self.midi_tone.scale_velocity(127, 2.0), 127)
 
     def test_empty_pad_take_stays_empty(self) -> None:
         bank = self.make_bank()

@@ -374,12 +374,13 @@ Touch **4×4** grid (MPK Bank A + Bank B) where each cell holds a short recorded
 | Feature | Behavior |
 |---------|----------|
 | **PLAY / EDIT views** | PLAY = launch grid + STOP ALL + OUT; EDIT = record/clear/mode + per-pad drill-down |
-| **FOLLOW / LOCKED voice** | FOLLOW uses global morph; LOCKED bakes A/B+morph onto that pad (max 4 concurrent locked tables) |
+| **FOLLOW / LOCKED voice** | FOLLOW uses global morph + live master level; LOCKED bakes A/B+morph **and the master level** onto that pad (max 4 concurrent locked tables) |
+| **Per-pad trim** | `VOL− / VOL+` scales that pad's velocities 10–200% so a locked voice can sit under the mix; FOLLOW resets it to 100% |
 | **Out channel** | Per pad: as-recorded or force ch1–16 on emit |
 | **Local synth** | Per pad ON/OFF — OFF = MIDI-only (DIN/USB via session OUT) |
 | **Pads OUT** | Session `LOCAL` / `USB` / `BOTH` (shares Songs USB outport) |
 
-Persist per-pad fields in `phrases/pad-NN.json` (version 2); session stores pads `view` + `out_mode` in `settings.json`.
+Persist per-pad fields in `phrases/pad-NN.json` (version 3 — adds per-pad `gain`); session stores pads `view` + `out_mode` in `settings.json`.
 
 ### Launch inputs (both)
 

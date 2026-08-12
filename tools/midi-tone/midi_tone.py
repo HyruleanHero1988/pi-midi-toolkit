@@ -1216,6 +1216,11 @@ class SineEngine:
         with self._lock:
             self._level = max(0.0, min(1.0, float(value)))
 
+    def level(self) -> float:
+        """Master level 0..1 — phrase pads bake this in when a voice is LOCKED."""
+        with self._lock:
+            return float(self._level)
+
     def set_attack(self, value: float) -> None:
         if value > 1.0:
             value = value / 127.0
@@ -2056,6 +2061,25 @@ PHRASE_VOICE_LOCKED = "locked"
 PHRASE_VOICE_MODES = (PHRASE_VOICE_FOLLOW, PHRASE_VOICE_LOCKED)
 # out_channel -1 = use each event's recorded channel; 0..15 = force MIDI ch 1..16
 PHRASE_OUT_AS_RECORDED = -1
+PHRASE_GAIN_MIN = 0.10
+PHRASE_GAIN_MAX = 2.00
+PHRASE_GAIN_STEP = 0.10
+
+
+def clamp_phrase_gain(value: float) -> float:
+    try:
+        gain = float(value)
+    except (TypeError, ValueError):
+        return 1.0
+    if gain != gain:  # NaN
+        return 1.0
+    return max(PHRASE_GAIN_MIN, min(PHRASE_GAIN_MAX, gain))
+
+
+def scale_velocity(velocity: int, gain: float) -> int:
+    """Apply a pad's trim to one note. Never silences a hit that was recorded."""
+    scaled = int(round(max(0, int(velocity)) * clamp_phrase_gain(gain)))
+    return max(1, min(127, scaled))
 
 
 @dataclass
@@ -2069,6 +2093,9 @@ class PhraseCell:
     morph: float = 0.0
     out_channel: int = PHRASE_OUT_AS_RECORDED  # -1 or 0..15
     local_synth: bool = True  # False = MIDI-only (no soft-synth for this pad)
+    # Per-pad trim so a locked voice can sit under (or over) the rest of the mix.
+    # 1.0 = as recorded; LOCK bakes the master level here, VOL −/+ tunes it.
+    gain: float = 1.0
 
     def is_empty(self) -> bool:
         return not self.events or self.length <= 0.0
@@ -2086,7 +2113,7 @@ class PhraseCell:
         if och < -1 or och > 15:
             och = PHRASE_OUT_AS_RECORDED
         return {
-            "version": 2,
+            "version": 3,
             "length": float(self.length),
             "trigger_mode": mode,
             "voice_mode": vmode,
@@ -2095,6 +2122,7 @@ class PhraseCell:
             "morph": float(self.morph),
             "out_channel": och,
             "local_synth": bool(self.local_synth),
+            "gain": float(clamp_phrase_gain(self.gain)),
             "events": [
                 {
                     "t": float(e.t),
@@ -2144,6 +2172,10 @@ class PhraseCell:
             morph = float(data.get("morph", 0.0) or 0.0)
         except (TypeError, ValueError):
             morph = 0.0
+        try:
+            gain = float(data.get("gain", 1.0))
+        except (TypeError, ValueError):
+            gain = 1.0
         return PhraseCell(
             events=events,
             length=length,
@@ -2154,6 +2186,7 @@ class PhraseCell:
             morph=max(0.0, min(1.0, morph)),
             out_channel=och,
             local_synth=bool(data.get("local_synth", True)),
+            gain=clamp_phrase_gain(gain),
         )
 
 
@@ -2220,6 +2253,7 @@ class PhrasePadBank:
             morph=float(c.morph),
             out_channel=int(c.out_channel),
             local_synth=bool(c.local_synth),
+            gain=float(c.gain),
         )
 
     def cell(self, idx: int) -> PhraseCell:
@@ -2265,7 +2299,10 @@ class PhrasePadBank:
         if not (0 <= idx < PHRASE_PAD_COUNT):
             return False
         with self._lock:
-            self._cells[idx].voice_mode = PHRASE_VOICE_FOLLOW
+            c = self._cells[idx]
+            c.voice_mode = PHRASE_VOICE_FOLLOW
+            # Back to following the live rig: master level owns this pad again.
+            c.gain = 1.0
             self._selected = idx
         self.save_cell(idx)
         self._emit(("phrase",))
@@ -2273,23 +2310,62 @@ class PhrasePadBank:
         return True
 
     def lock_voice_from_engine(self, idx: int) -> bool:
-        """Snapshot current global morph onto this pad (LOCKED)."""
+        """Snapshot current global morph *and* level onto this pad (LOCKED)."""
         if not (0 <= idx < PHRASE_PAD_COUNT):
             return False
         a, b, morph = self._engine.snapshot_morph()
+        try:
+            level = float(self._engine.level())
+        except Exception:
+            level = 1.0
+        gain = clamp_phrase_gain(level)
         with self._lock:
             c = self._cells[idx]
             c.voice_mode = PHRASE_VOICE_LOCKED
             c.morph_a = a
             c.morph_b = b
             c.morph = float(morph)
+            c.gain = gain
             self._selected = idx
         self.save_cell(idx)
         self._emit(("phrase",))
         self._emit(
-            ("log", f"Phrase {phrase_pad_label(idx)} voice LOCKED ({a}→{b} {int(morph*100)}%)", False)
+            (
+                "log",
+                f"Phrase {phrase_pad_label(idx)} voice LOCKED "
+                f"({a}→{b} {int(morph * 100)}%, vol {int(gain * 100)}%)",
+                False,
+            )
         )
         return True
+
+    def gain(self, idx: int) -> float:
+        with self._lock:
+            if not (0 <= idx < PHRASE_PAD_COUNT):
+                return 1.0
+            return float(self._cells[idx].gain)
+
+    def set_gain(self, idx: int, gain: float) -> Optional[float]:
+        if not (0 <= idx < PHRASE_PAD_COUNT):
+            return None
+        value = clamp_phrase_gain(gain)
+        with self._lock:
+            if abs(self._cells[idx].gain - value) < 1e-6:
+                return float(self._cells[idx].gain)
+            self._cells[idx].gain = value
+            self._selected = idx
+        self.save_cell(idx)
+        self._emit(("phrase",))
+        self._emit(("log", f"Phrase {phrase_pad_label(idx)} vol {int(value * 100)}%", False))
+        return value
+
+    def nudge_gain(self, idx: int, delta: float) -> Optional[float]:
+        """VOL − / + on the selected pad — audible on the next note, mid-loop."""
+        if not (0 <= idx < PHRASE_PAD_COUNT):
+            return None
+        with self._lock:
+            current = self._cells[idx].gain
+        return self.set_gain(idx, current + float(delta))
 
     def toggle_voice_lock(self, idx: int) -> Optional[str]:
         if not (0 <= idx < PHRASE_PAD_COUNT):
@@ -2383,8 +2459,8 @@ class PhrasePadBank:
             syn = "SYN" if c.local_synth else "MIDI"
             trig = "LOOP" if c.is_loop() else "1SHOT"
             return (
-                f"EDIT {phrase_pad_label(sel)} · {trig} · {v} · {och} · {syn} · "
-                f"{filled}/16"
+                f"EDIT {phrase_pad_label(sel)} · {trig} · {v} · vol {int(c.gain * 100)}% · "
+                f"{och} · {syn} · {filled}/16"
             )
         if playing:
             names = ",".join(phrase_pad_label(i) for i in playing[:6])
@@ -2434,6 +2510,7 @@ class PhrasePadBank:
                 and cell.voice_mode == PHRASE_VOICE_FOLLOW
                 and cell.out_channel == PHRASE_OUT_AS_RECORDED
                 and cell.local_synth
+                and abs(cell.gain - 1.0) < 1e-6
             )
             if defaultish:
                 if path.is_file():
@@ -2738,6 +2815,11 @@ class PhrasePadBank:
         n = note & 0x7F
         want_usb = out_mode in ("usb", "both")
         want_local = bool(local_synth) and out_mode in ("local", "both")
+        if on:
+            # Read the trim live so VOL −/+ is audible without relaunching
+            with self._lock:
+                gain = self._cells[idx].gain if 0 <= idx < PHRASE_PAD_COUNT else 1.0
+            velocity = scale_velocity(velocity, gain)
         if want_usb:
             port = self._get_outport()
             if port is not None:
@@ -4915,27 +4997,11 @@ class MidiToneApp:
         )
         status.pack(fill=tk.X, padx=10, pady=(2, 4))
 
-        grid = tk.Frame(shell, bg="#111111")
-        grid.pack(fill=tk.BOTH, expand=True, padx=6, pady=2)
-        for row in range(4):
-            grid.rowconfigure(row, weight=1)
-        for col in range(4):
-            grid.columnconfigure(col, weight=1)
-        for i, cell in enumerate(PHRASE_GRID_CELLS):
-            r, c = divmod(i, 4)
-            btn = self._mk_touch_btn(
-                grid,
-                phrase_pad_label(cell),
-                lambda idx=cell: self._phrase_pad_tap(idx),
-                bg="#3c3836",
-            )
-            btn.configure(font=("DejaVu Sans", 13, "bold"), pady=10)
-            btn.grid(row=r, column=c, sticky="nsew", padx=3, pady=3)
-            self._phrase_pad_btns[cell] = btn
-
+        # Control rows are packed from the bottom *before* the grid, so a short
+        # screen shrinks the pad squares instead of pushing the row off-screen.
         if play_view:
             row = tk.Frame(shell, bg="#111111")
-            row.pack(fill=tk.X, padx=6, pady=(4, 6))
+            row.pack(side=tk.BOTTOM, fill=tk.X, padx=6, pady=(4, 6))
             self._mk_touch_btn(row, "STOP ALL", self._phrase_stop_all, bg="#3c3836").pack(
                 side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=10
             )
@@ -4946,8 +5012,11 @@ class MidiToneApp:
                 side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=10
             )
         else:
+            # Bottom-up: detail row lands under the transport row
+            detail = tk.Frame(shell, bg="#111111")
+            detail.pack(side=tk.BOTTOM, fill=tk.X, padx=6, pady=(2, 6))
             row = tk.Frame(shell, bg="#111111")
-            row.pack(fill=tk.X, padx=6, pady=(4, 2))
+            row.pack(side=tk.BOTTOM, fill=tk.X, padx=6, pady=(4, 2))
             self._mk_touch_btn(row, "STOP REC", self._phrase_stop_rec, bg="#504945").pack(
                 side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=8
             )
@@ -4967,8 +5036,6 @@ class MidiToneApp:
                 side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=8
             )
 
-            detail = tk.Frame(shell, bg="#111111")
-            detail.pack(fill=tk.X, padx=6, pady=(2, 6))
             self._phrase_trig_btn = self._mk_touch_btn(
                 detail, "TRIG", self._phrase_edit_trig, bg="#458588"
             )
@@ -4999,6 +5066,32 @@ class MidiToneApp:
             self._phrase_out_btn.pack(
                 side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=8
             )
+            # Narrow trim pair — balance one pad against the rest of the mix
+            for label, delta in (("VOL−", -PHRASE_GAIN_STEP), ("VOL+", PHRASE_GAIN_STEP)):
+                btn = self._mk_touch_btn(
+                    detail, label, lambda d=delta: self._phrase_edit_gain(d), bg="#98971a"
+                )
+                btn.configure(padx=4)
+                btn.pack(side=tk.LEFT, fill=tk.BOTH, padx=2, ipady=8)
+
+        grid = tk.Frame(shell, bg="#111111")
+        grid.pack(fill=tk.BOTH, expand=True, padx=6, pady=2)
+        for row_idx in range(4):
+            grid.rowconfigure(row_idx, weight=1)
+        for col in range(4):
+            grid.columnconfigure(col, weight=1)
+        for i, cell in enumerate(PHRASE_GRID_CELLS):
+            r, c = divmod(i, 4)
+            btn = self._mk_touch_btn(
+                grid,
+                phrase_pad_label(cell),
+                lambda idx=cell: self._phrase_pad_tap(idx),
+                bg="#3c3836",
+            )
+            btn.configure(font=("DejaVu Sans", 13, "bold"), pady=10)
+            btn.grid(row=r, column=c, sticky="nsew", padx=3, pady=3)
+            self._phrase_pad_btns[cell] = btn
+
         self._paint_phrase_pads()
 
     def _phrase_set_view(self, view: str) -> None:
@@ -5098,6 +5191,13 @@ class MidiToneApp:
         if sel is None:
             return
         self._phrases.toggle_local_synth(sel)
+        self._paint_phrase_pads()
+
+    def _phrase_edit_gain(self, delta: float) -> None:
+        sel = self._phrase_selected_or_status()
+        if sel is None:
+            return
+        self._phrases.nudge_gain(sel, delta)
         self._paint_phrase_pads()
 
     def _phrase_cycle_out_mode(self) -> None:
@@ -5219,7 +5319,10 @@ class MidiToneApp:
                 except Exception:
                     pass
             if self._phrase_voice_btn is not None:
-                v = "LOCK" if cell.is_voice_locked() else "FOLLOW"
+                trim = int(round(cell.gain * 100))
+                v = f"LOCK {trim}%" if cell.is_voice_locked() else "FOLLOW"
+                if not cell.is_voice_locked() and trim != 100:
+                    v = f"FOLLOW {trim}%"
                 vbg = "#b16286" if cell.is_voice_locked() else "#689d6a"
                 try:
                     self._phrase_voice_btn.configure(

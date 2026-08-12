@@ -170,7 +170,8 @@ Two views (top-right of PADS): **EDIT** (record / fine-tune) and **PLAY** (perfo
 6. Bottom rows:
    - **MODE** then tap a pad → ONE-SHOT ↔ LOOP (or use **TRIG** on the selected pad)
    - **CLEAR** then tap a pad → erase
-   - **FOLLOW** / **LOCK** — FOLLOW uses the live morph; LOCK freezes the current morph onto that pad (multi-timbre; up to 4 locked pads at once)
+   - **FOLLOW** / **LOCK** — FOLLOW uses the live morph and the live master level; LOCK freezes the current morph **and the master level** onto that pad (multi-timbre; up to 4 locked pads at once)
+   - **VOL− / VOL+** — per-pad trim, 10% a tap (10–200%). Audible on the next note, so you can balance a pad against the mix while it loops. Switching a pad back to FOLLOW resets its trim to 100%
    - **CH:rec** / **CH:n** — emit on recorded channels or force MIDI ch 1–16
    - **SYNTH** / **MIDI** — local soft-synth on/off (off = sequence only over USB/DIN)
    - **OUT: LOCAL / USB / BOTH** — session routing (shares the Songs USB port)
