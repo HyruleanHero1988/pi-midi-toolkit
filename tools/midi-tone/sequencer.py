@@ -29,6 +29,10 @@ from typing import Callable, Dict, List, Optional, Sequence as Seq, Tuple
 MAX_CYCLES = 8
 # Guard against a stuck note when a recorded note-off went missing.
 HELD_NOTE_GRACE = 0.05
+# MIDI channel 10 (1-based) — drums don't take pitch vibrato
+DRUM_CHANNEL = 9
+
+VibTuple = Tuple[float, float, float]  # depth semis, rate Hz, amount 0..1
 
 
 @dataclass
@@ -38,6 +42,27 @@ class LoopEvent:
     channel: int
     note: int
     velocity: int
+
+
+@dataclass
+class ScheduledNote:
+    """One event in a play pass, carrying the layer's baked vibrato (if any)."""
+
+    t: float
+    on: bool
+    channel: int
+    note: int
+    velocity: int
+    vib: Optional[VibTuple] = None
+
+    def as_loop_event(self) -> LoopEvent:
+        return LoopEvent(
+            t=self.t,
+            on=self.on,
+            channel=self.channel,
+            note=self.note,
+            velocity=self.velocity,
+        )
 
 
 def trim_loop_take(
@@ -137,31 +162,37 @@ def close_open_notes(events: List[LoopEvent], span: float) -> List[LoopEvent]:
     return out
 
 
-def _order_key(ev: LoopEvent) -> Tuple[float, int, int, int]:
+def _order_key(ev: LoopEvent | ScheduledNote) -> Tuple[float, int, int, int]:
     # Note-offs first at the same instant so a re-hit of the same note retriggers.
     return (ev.t, 1 if ev.on else 0, ev.channel, ev.note)
 
 
-def tile_layer(layer: "SeqLayer", cycle_len: float, cycles: int) -> List[LoopEvent]:
+def tile_layer(
+    layer: "SeqLayer", cycle_len: float, cycles: int
+) -> List[ScheduledNote]:
     """Repeat a layer across the sequence (a 1-cycle groove under a 4-cycle take)."""
     if cycle_len <= 0.0 or cycles <= 0 or not layer.events:
         return []
     span = max(1, min(int(layer.span), cycles))
     repeats = max(1, cycles // span)
     period = span * cycle_len
-    out: List[LoopEvent] = []
+    vib = layer.vib_tuple()
+    out: List[ScheduledNote] = []
     for rep in range(repeats):
         offset = rep * period
         for ev in layer.events:
             if ev.t >= period - 1e-9 and rep < repeats - 1:
                 continue
+            # Drums are one-shots — never inherit a pitched vibrato bake
+            note_vib = None if (ev.channel & 0x0F) == DRUM_CHANNEL else vib
             out.append(
-                LoopEvent(
+                ScheduledNote(
                     t=ev.t + offset,
                     on=ev.on,
                     channel=ev.channel,
                     note=ev.note,
                     velocity=ev.velocity,
+                    vib=note_vib if ev.on else None,
                 )
             )
     return out
@@ -174,6 +205,11 @@ class SeqLayer:
     events: List[LoopEvent] = field(default_factory=list)
     span: int = 1
     label: str = ""
+    # Vibrato as it sounded while this take was recorded. False → live rig.
+    vib_baked: bool = False
+    vib_depth: float = 0.0  # semitones
+    vib_rate: float = 5.0  # Hz
+    vib_amount: float = 0.0  # 0..1
 
     def copy(self) -> "SeqLayer":
         return SeqLayer(
@@ -183,10 +219,32 @@ class SeqLayer:
             ],
             span=int(self.span),
             label=str(self.label),
+            vib_baked=bool(self.vib_baked),
+            vib_depth=float(self.vib_depth),
+            vib_rate=float(self.vib_rate),
+            vib_amount=float(self.vib_amount),
         )
 
     def is_empty(self) -> bool:
         return not self.events
+
+    def vib_tuple(self) -> Optional[VibTuple]:
+        if not self.vib_baked:
+            return None
+        return (float(self.vib_depth), float(self.vib_rate), float(self.vib_amount))
+
+    def set_vib(self, depth: float, rate: float, amount: float) -> None:
+        self.vib_baked = True
+        self.vib_depth = max(0.0, min(4.0, float(depth)))
+        self.vib_rate = max(0.1, min(20.0, float(rate)))
+        self.vib_amount = max(0.0, min(1.0, float(amount)))
+
+    def vib_label(self) -> str:
+        if not self.vib_baked:
+            return "live"
+        if self.vib_amount <= 0.01 or self.vib_depth <= 0.001:
+            return "none"
+        return f"{self.vib_depth:.1f}st"
 
 
 class Sequence:
@@ -218,10 +276,19 @@ class Sequence:
             n += len(self.pending.events)
         return n
 
-    def set_backbone(self, events: List[LoopEvent], length: float) -> None:
+    def set_backbone(
+        self,
+        events: List[LoopEvent],
+        length: float,
+        *,
+        vib: Optional[VibTuple] = None,
+    ) -> None:
         self.cycle_len = max(0.0, float(length))
         self.cycles = 1
-        self.layers = [SeqLayer(events=list(events), span=1, label="backbone")]
+        layer = SeqLayer(events=list(events), span=1, label="backbone")
+        if vib is not None:
+            layer.set_vib(*vib)
+        self.layers = [layer]
         self.pending = None
 
     def keep_pending(self) -> bool:
@@ -268,11 +335,11 @@ class Sequence:
         self.layers = []
         self.pending = None
 
-    def schedule(self, *, include_pending: bool = True) -> List[LoopEvent]:
+    def schedule(self, *, include_pending: bool = True) -> List[ScheduledNote]:
         """Every layer tiled onto one pass of the sequence, in play order."""
         if self.cycle_len <= 0.0:
             return []
-        out: List[LoopEvent] = []
+        out: List[ScheduledNote] = []
         for layer in self.layers:
             out.extend(tile_layer(layer, self.cycle_len, self.cycles))
         if include_pending and self.pending is not None:
@@ -406,18 +473,32 @@ class OverdubSequencer:
             seq = self._seq
             if not seq.layers:
                 return "no layers yet"
-            parts = [f"backbone {len(seq.layers[0].events)}ev"]
-            for i, layer in enumerate(seq.layers[1:], start=1):
+            parts = []
+            for i, layer in enumerate(seq.layers):
+                name = "backbone" if i == 0 else f"L{i}"
                 tail = f"×{layer.span}" if layer.span > 1 else ""
-                parts.append(f"L{i} {len(layer.events)}ev{tail}")
+                vib = f" vib {layer.vib_label()}" if layer.vib_baked else ""
+                parts.append(f"{name} {len(layer.events)}ev{tail}{vib}")
             if seq.pending is not None and seq.pending.events:
-                parts.append(f"[pending {len(seq.pending.events)}ev]")
+                vib = f" vib {seq.pending.vib_label()}" if seq.pending.vib_baked else ""
+                parts.append(f"[pending {len(seq.pending.events)}ev{vib}]")
             return " · ".join(parts)
 
     def snapshot(self) -> Tuple[List[LoopEvent], float]:
         """Flat event list for exporting (Songs `SAVE SEQ`)."""
         with self._lock:
-            return self._seq.schedule(), self._seq.total_len()
+            return (
+                [s.as_loop_event() for s in self._seq.schedule()],
+                self._seq.total_len(),
+            )
+
+    def _read_engine_vib(self) -> VibTuple:
+        """Vibrato the take is being played with — depth, rate, amount."""
+        try:
+            depth, rate, amount = self._engine.vib_state()
+            return (float(depth), float(rate), float(amount))
+        except Exception:
+            return (0.0, 5.0, 0.0)
 
     # ------------------------------------------------------------- recording
 
@@ -469,7 +550,10 @@ class OverdubSequencer:
                 phase = max(0.0, min(total - 1e-4, phase))
             self._overdub_start_phase = phase
             self._state = SEQ_OVERDUB
-            self._seq.pending = SeqLayer(events=[], span=self._seq.cycles, label="pending")
+            pending = SeqLayer(events=[], span=self._seq.cycles, label="pending")
+            # Bake now so the next pass of the pending take already has the wobble
+            pending.set_vib(*self._read_engine_vib())
+            self._seq.pending = pending
         self._emit(("log", "SEQ overdub REC", False))
         return True
 
@@ -483,6 +567,7 @@ class OverdubSequencer:
         return False
 
     def _finish_backbone(self) -> bool:
+        vib = self._read_engine_vib()
         with self._lock:
             events = list(self._rec_events)
             self._rec_events = []
@@ -494,12 +579,14 @@ class OverdubSequencer:
             trimmed, length = trim_loop_take(events)
             trimmed = close_open_notes(trimmed, length)
             trimmed.sort(key=_order_key)
-            self._seq.set_backbone(trimmed, length)
+            self._seq.set_backbone(trimmed, length, vib=vib)
             self._state = SEQ_STOPPED
+            vib_label = self._seq.layers[0].vib_label()
         self._emit(
             (
                 "log",
-                f"SEQ backbone {length:.2f}s ({len(trimmed)} events) — loop length locked",
+                f"SEQ backbone {length:.2f}s ({len(trimmed)} events, vib {vib_label})"
+                " — loop length locked",
                 False,
             )
         )
@@ -508,6 +595,7 @@ class OverdubSequencer:
         return True
 
     def _finish_overdub(self) -> bool:
+        vib = self._read_engine_vib()
         with self._lock:
             events = list(self._rec_events)
             self._rec_events = []
@@ -520,9 +608,18 @@ class OverdubSequencer:
             span_len = layer.span * self._seq.cycle_len
             layer.events = close_open_notes(list(events), span_len)
             layer.events.sort(key=_order_key)
+            # Re-bake at close so mid-take vibrato changes stick with the take
+            layer.set_vib(*vib)
             self._state = SEQ_REVIEW
             n = len(layer.events)
-        self._emit(("log", f"SEQ overdub take: {n} events — KEEP or DROP", False))
+            vib_label = layer.vib_label()
+        self._emit(
+            (
+                "log",
+                f"SEQ overdub take: {n} events, vib {vib_label} — KEEP or DROP",
+                False,
+            )
+        )
         self._emit(("seq",))
         return True
 
@@ -738,11 +835,21 @@ class OverdubSequencer:
                 if self._state in (SEQ_PLAYING, SEQ_OVERDUB, SEQ_REVIEW):
                     self._state = SEQ_STOPPED if not self._seq.is_empty() else SEQ_EMPTY
 
-    def _fire(self, ev: LoopEvent) -> None:
+    def _fire(self, ev: ScheduledNote | LoopEvent) -> None:
         key = (ev.channel, ev.note)
         if ev.on:
+            vib = getattr(ev, "vib", None)
             try:
-                self._engine.note_on(ev.channel, ev.note, ev.velocity)
+                if vib is not None:
+                    self._engine.note_on(ev.channel, ev.note, ev.velocity, vib=vib)
+                else:
+                    self._engine.note_on(ev.channel, ev.note, ev.velocity)
+            except TypeError:
+                # Older test doubles that don't accept vib=
+                try:
+                    self._engine.note_on(ev.channel, ev.note, ev.velocity)
+                except Exception:
+                    return
             except Exception:
                 return
             self._held[key] = self._now()

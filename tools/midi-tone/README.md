@@ -154,6 +154,8 @@ Phrase pads persist as `phrases/pad-01.json` … `pad-16.json` (gitignored).
 4. **KEEP** flattens the layer onto the sequence · **DROP** throws it away · **UNDO** peels the last kept layer back off
 5. **STOP** halts playback (material stays) · **CLEAR** starts over
 
+Each take (backbone and every overdub) **bakes the vibrato it was played with** — depth, rate, and amount — onto that layer. Key notes from that layer keep their own LFO on playback; changing the live vibrato afterwards (or recording a dry layer over a wobbly one) doesn't rewrite older layers. Drum hits never take vibrato. The layer strip shows `vib 0.9st` / `vib none` next to each take.
+
 The backbone is the only take that sets length; everything after it is measured in backbone cycles.
 
 - **LEN ×2 / ÷2** grows or shrinks the sequence in whole cycles. The groove tiles underneath, so a doubled sequence lets you overdub a fill that only happens the second time around. ÷2 refuses to cut a layer that is longer than the target.

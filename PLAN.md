@@ -340,6 +340,7 @@ The free-timing looper grew into the **SEQ** mode and replaced it outright. One 
 | **UNDO** | Pops the newest kept layer. Layers stay separate on disk-free memory, so "flatten" doesn't mean "forget" |
 | **Length** | `LEN ×2 / ÷2` in whole backbone cycles (max 8); short layers tile under long ones |
 | **WRAP / EXTEND** | WRAP (default) folds a long take back onto the cycle, drum-machine style. EXTEND stretches the sequence to fit the take in whole cycles |
+| **Per-layer vibrato** | Depth/rate/amount baked when a take closes; key notes from that layer get their own LFO on playback (drums never). Live rig changes don't rewrite older layers |
 | **Export** | `SONGS → SAVE SEQ` writes the flattened sequence to `take-NNN.mid` |
 
 Model and transport live in `tools/midi-tone/sequencer.py`, deliberately free of Tk / numpy / audio so the timing rules are unit-tested (`test_sequencer.py`) on any machine; `test_ui_seq.py` drives the real Tk screen under Xvfb with stub audio + MIDI ports.

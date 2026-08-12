@@ -33,17 +33,23 @@ from sequencer import (
 class FakeEngine:
     """Records what the sequencer asked the synth to play."""
 
-    def __init__(self) -> None:
+    def __init__(self, vib=(0.0, 5.0, 0.0)) -> None:
         self.calls: list[tuple] = []
+        self.vibs: list = []
+        self._vib = tuple(float(v) for v in vib)
         self._lock = threading.Lock()
 
-    def note_on(self, channel: int, note: int, velocity: int) -> None:
+    def note_on(self, channel: int, note: int, velocity: int, **kwargs) -> None:
         with self._lock:
             self.calls.append(("on", channel, note, velocity))
+            self.vibs.append(kwargs.get("vib"))
 
     def note_off(self, channel: int, note: int) -> None:
         with self._lock:
             self.calls.append(("off", channel, note))
+
+    def vib_state(self):
+        return self._vib
 
     def ons(self) -> list[int]:
         with self._lock:
@@ -73,8 +79,8 @@ def hit(seq: OverdubSequencer, clock: FakeClock, note: int, *, channel: int = 9,
     seq.record_note(False, channel, note, 0)
 
 
-def make_seq(**kwargs) -> tuple[OverdubSequencer, FakeClock, FakeEngine]:
-    engine = FakeEngine()
+def make_seq(vib=(0.0, 5.0, 0.0), **kwargs) -> tuple[OverdubSequencer, FakeClock, FakeEngine]:
+    engine = FakeEngine(vib=vib)
     clock = FakeClock()
     seq = OverdubSequencer(engine, lambda _m: None, autoplay=False, clock=clock, **kwargs)
     return seq, clock, engine
@@ -304,6 +310,73 @@ class OverdubTest(unittest.TestCase):
         self.start_overdub_at(seq, clock, phase=0.1)
         self.assertEqual(seq.status()["layers"], 2)
         self.assertEqual(seq.state(), SEQ_OVERDUB)
+
+
+class LayerVibTest(unittest.TestCase):
+    def start_overdub_at(self, seq: OverdubSequencer, clock: FakeClock, phase: float) -> None:
+        seq._pass_t0 = clock.t - phase
+        seq._state = SEQ_PLAYING
+        seq.start_overdub()
+
+    def test_backbone_bakes_the_vibrato_it_was_played_with(self) -> None:
+        seq, clock, engine = make_seq(vib=(0.9, 4.0, 1.0))
+        record_backbone(seq, clock)
+        layer = seq._seq.layers[0]
+        self.assertTrue(layer.vib_baked)
+        self.assertEqual(layer.vib_tuple(), (0.9, 4.0, 1.0))
+        # Changing the live rig afterwards must not reach the take
+        engine._vib = (0.0, 5.0, 0.0)
+        self.assertEqual(seq._seq.layers[0].vib_tuple(), (0.9, 4.0, 1.0))
+
+    def test_overdub_layer_keeps_its_own_vibrato(self) -> None:
+        seq, clock, engine = make_seq(vib=(0.0, 5.0, 0.0))
+        record_backbone(seq, clock)
+        engine._vib = (1.2, 6.5, 1.0)
+        self.start_overdub_at(seq, clock, phase=0.1)
+        hit(seq, clock, 60, channel=0, dt=0.2)
+        seq.stop_record()
+        self.assertTrue(seq.keep())
+        self.assertEqual(seq._seq.layers[0].vib_tuple(), (0.0, 5.0, 0.0))
+        self.assertEqual(seq._seq.layers[1].vib_tuple(), (1.2, 6.5, 1.0))
+
+    def test_schedule_hands_vibrato_to_key_notes_not_drums(self) -> None:
+        seq = Sequence()
+        seq.set_backbone(
+            [
+                LoopEvent(t=0.0, on=True, channel=9, note=36, velocity=100),
+                LoopEvent(t=0.05, on=True, channel=0, note=60, velocity=100),
+            ],
+            1.0,
+            vib=(0.8, 5.0, 1.0),
+        )
+        schedule = seq.schedule()
+        drum = next(s for s in schedule if s.channel == 9 and s.on)
+        key = next(s for s in schedule if s.channel == 0 and s.on)
+        self.assertIsNone(drum.vib)
+        self.assertEqual(key.vib, (0.8, 5.0, 1.0))
+
+    def test_playback_passes_baked_vibrato_to_the_synth(self) -> None:
+        engine = FakeEngine()
+        seq = OverdubSequencer(engine, lambda _m: None, autoplay=False)
+        seq._seq.set_backbone(
+            [
+                LoopEvent(t=0.0, on=True, channel=0, note=60, velocity=100),
+                LoopEvent(t=0.05, on=False, channel=0, note=60, velocity=0),
+            ],
+            0.15,
+            vib=(1.0, 5.5, 1.0),
+        )
+        seq._state = SEQ_STOPPED
+        self.assertTrue(seq.start_playback())
+        time.sleep(0.25)
+        seq.stop_playback()
+        self.assertIn((1.0, 5.5, 1.0), engine.vibs)
+
+    def test_dry_take_still_bakes_as_none(self) -> None:
+        seq, clock, _engine = make_seq(vib=(0.0, 5.0, 0.0))
+        record_backbone(seq, clock)
+        self.assertTrue(seq._seq.layers[0].vib_baked)
+        self.assertEqual(seq._seq.layers[0].vib_label(), "none")
 
 
 class TransportTest(unittest.TestCase):
