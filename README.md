@@ -51,7 +51,7 @@ systemd unit: [`deploy/jambox-engine.service`](deploy/jambox-engine.service).
 
 ```bash
 cd tools/midi-tone
-python3 -m unittest test_sequencer test_phrase_pads test_jambox_client
+python3 -m unittest test_sequencer test_phrase_pads test_synth_vibrato test_jambox_client
 xvfb-run -a python3 -m unittest test_ui_seq     # builds the real Tk screen with stub audio/MIDI
 ```
 

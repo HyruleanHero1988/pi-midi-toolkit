@@ -57,6 +57,13 @@ Factory **Prog Select → Pad 1** (MPC program) maps knobs to CC70–77:
 
 Joystick Y still sends **CC1** = vibrato amount. PREV/NEXT jumps morph to a voice; Knob 1 sweeps continuously between them.
 
+**Vibrato without a wheel:** the **VOICES** screen has a vibrato row — `DEPTH −/+` (0–2 semitones) and `RATE −/+` (1–9 Hz), plus a toggle:
+
+- **WHEEL** — vibrato follows CC1 (joystick), as it always has
+- **ON** — vibrato runs at the set depth with no wheel input; the joystick can still push it further (whichever asks for more wins)
+
+Raising depth from the screen while the joystick is centred flips the toggle to **ON**, so the control you just touched is the one you hear. Depth, rate and the toggle are saved in `settings.json` and presets, and knobs 5/6 keep editing the same values.
+
 If a knob does nothing, check the event log for its CC number — your MPK program may differ.
 
 ### Drum pads (channel 10) — all 16 MPK pads

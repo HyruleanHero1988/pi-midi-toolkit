@@ -143,6 +143,9 @@ CC_ATTACK = 72         # Knob 3 — amp attack
 CC_RELEASE = 73        # Knob 4 — amp release
 CC_VIB_DEPTH = 74      # Knob 5 — vibrato depth
 CC_VIB_RATE = 75       # Knob 6 — vibrato rate
+# Touch steps for the VOICES-screen vibrato pair
+VIB_DEPTH_STEP = 0.10  # semitones
+VIB_RATE_STEP = 0.5    # Hz
 CC_LEVEL = 77          # Knob 8 — output level
 # Knob 7 (CC76) reserved / free for later
 KNOB_CCS = {CC_MORPH, CC_TONE, CC_ATTACK, CC_RELEASE, CC_VIB_DEPTH, CC_VIB_RATE, CC_LEVEL}
@@ -868,6 +871,9 @@ class SineEngine:
         self._bend_semitones = 0.0
         self._bend_range = 2.0
         self._mod = 0.0
+        # Screen-set vibrato amount. The mod wheel still works; whichever is
+        # higher wins, so touch control doesn't need a wheel to be audible.
+        self._vib_always = 0.0
         self._vib_hz = 5.0
         self._vib_depth_semis = 0.5
         self._vib_phase = 0.0
@@ -1244,6 +1250,37 @@ class SineEngine:
         with self._lock:
             # 0..2 semitones
             self._vib_depth_semis = max(0.0, min(1.0, float(value))) * 2.0
+
+    VIB_DEPTH_MAX = 2.0  # semitones — matches the knob's top end
+    VIB_HZ_MIN = 1.0
+    VIB_HZ_MAX = 9.0
+
+    def vib_state(self) -> Tuple[float, float, float]:
+        """(depth semitones, rate Hz, always-on amount 0..1) for the touch UI."""
+        with self._lock:
+            return (
+                float(self._vib_depth_semis),
+                float(self._vib_hz),
+                float(self._vib_always),
+            )
+
+    def set_vib_always(self, amount: float) -> float:
+        """0 = mod wheel gates vibrato (as before); 1 = always on at set depth."""
+        with self._lock:
+            self._vib_always = max(0.0, min(1.0, float(amount)))
+            return float(self._vib_always)
+
+    def nudge_vib_depth(self, delta_semis: float) -> float:
+        with self._lock:
+            depth = self._vib_depth_semis + float(delta_semis)
+            self._vib_depth_semis = max(0.0, min(self.VIB_DEPTH_MAX, depth))
+            return float(self._vib_depth_semis)
+
+    def nudge_vib_rate(self, delta_hz: float) -> float:
+        with self._lock:
+            hz = self._vib_hz + float(delta_hz)
+            self._vib_hz = max(self.VIB_HZ_MIN, min(self.VIB_HZ_MAX, hz))
+            return float(self._vib_hz)
 
     def set_vib_rate(self, value: float) -> None:
         if value > 1.0:
@@ -1684,6 +1721,7 @@ class SineEngine:
                 "release": self._release_sec,
                 "vib_hz": self._vib_hz,
                 "vib_depth": self._vib_depth_semis,
+                "vib_always": self._vib_always,
                 "drum_pitch": self._drum_pitch,
                 "drum_decay": self._drum_decay,
                 "drum_noise": self._drum_noise,
@@ -1707,6 +1745,7 @@ class SineEngine:
                 "release_sec": float(self._release_sec),
                 "vib_hz": float(self._vib_hz),
                 "vib_depth": float(self._vib_depth_semis),
+                "vib_always": float(self._vib_always),
                 "drum_pitch": float(self._drum_pitch),
                 "drum_decay": float(self._drum_decay),
                 "drum_noise": float(self._drum_noise),
@@ -1744,6 +1783,8 @@ class SineEngine:
                 self._vib_hz = max(0.1, min(20.0, float(data["vib_hz"])))
             if "vib_depth" in data:
                 self._vib_depth_semis = max(0.0, min(4.0, float(data["vib_depth"])))
+            if "vib_always" in data:
+                self._vib_always = max(0.0, min(1.0, float(data["vib_always"])))
             if "drum_pitch" in data:
                 self._drum_pitch = max(0.0, min(1.0, float(data["drum_pitch"])))
             if "drum_decay" in data:
@@ -1803,7 +1844,8 @@ class SineEngine:
             items = list(self._voices.items())
             drum_hits = list(self._drums.values())
             bend = self._bend_semitones
-            mod = self._mod
+            # Wheel or screen — whichever asks for more vibrato
+            mod = max(self._mod, self._vib_always)
             vib_hz = self._vib_hz
             vib_depth = self._vib_depth_semis
             table = self._morph_table
@@ -3490,6 +3532,9 @@ class MidiToneApp:
         self._seq_undo_btn: Optional[tk.Button] = None
         self._seq_extend_btn: Optional[tk.Button] = None
         self._seq_len_var = tk.StringVar(value="LEN 1×")
+        self._vib_depth_var = tk.StringVar(value="0.50 st")
+        self._vib_rate_var = tk.StringVar(value="5.0 Hz")
+        self._vib_toggle_btn: Optional[tk.Button] = None
         self._preset_status_var = tk.StringVar(value="Tap a slot, then LOAD or SAVE.")
         self._preset_slot = 0
         self._preset_slot_btns: Dict[int, tk.Button] = {}
@@ -3759,12 +3804,15 @@ class MidiToneApp:
             morph_txt = left
         else:
             morph_txt = f"{left}→{right}"
+        depth, rate, always = self.engine.vib_state()
+        amount = max(float(st["mod"]), always)
+        vib_txt = f"{depth:.1f}st@{rate:.1f}Hz" if amount > 0.01 else "off"
         return (
             f"Morph:{int(blend * 100):3d}% ({morph_txt})  "
             f"Tone:{int(st['tone'] * 127):3d}  "
             f"Lvl:{int(st['level'] * 127):3d}  "
             f"Bend:{st['bend']:+.2f}  "
-            f"Vib:{int(st['mod'] * 127)}"
+            f"Vib:{vib_txt}"
         )
 
     def _overlay_busy(self) -> bool:
@@ -5923,6 +5971,35 @@ class MidiToneApp:
         for c in range(cols):
             inner.grid_columnconfigure(c, weight=1)
 
+        vib = tk.Frame(self._grid_frame, bg="#111111")
+        vib.pack(fill=tk.X, padx=6, pady=(2, 0))
+        tk.Label(
+            vib, text="VIB", font=("DejaVu Sans", 12, "bold"),
+            fg="#a89984", bg="#111111", padx=4,
+        ).pack(side=tk.LEFT)
+        self._vib_toggle_btn = self._mk_touch_btn(
+            vib, "WHEEL", self._toggle_vib_always, bg="#3c3836"
+        )
+        self._vib_toggle_btn.configure(font=("DejaVu Sans", 12, "bold"), padx=6)
+        self._vib_toggle_btn.pack(side=tk.LEFT, fill=tk.BOTH, padx=(0, 8), ipady=8)
+        def _vib_btn(text: str, command) -> None:
+            btn = self._mk_touch_btn(vib, text, command, bg="#504945")
+            btn.configure(font=("DejaVu Sans", 12, "bold"), padx=6)
+            btn.pack(side=tk.LEFT, fill=tk.BOTH, padx=2, ipady=8)
+
+        def _vib_value(var: tk.StringVar) -> None:
+            tk.Label(
+                vib, textvariable=var, font=("DejaVu Sans Mono", 12, "bold"),
+                fg="#fabd2f", bg="#111111", width=8,
+            ).pack(side=tk.LEFT)
+
+        _vib_btn("DEPTH −", lambda: self._nudge_vib_depth(-VIB_DEPTH_STEP))
+        _vib_value(self._vib_depth_var)
+        _vib_btn("DEPTH +", lambda: self._nudge_vib_depth(VIB_DEPTH_STEP))
+        _vib_btn("RATE −", lambda: self._nudge_vib_rate(-VIB_RATE_STEP))
+        _vib_value(self._vib_rate_var)
+        _vib_btn("RATE +", lambda: self._nudge_vib_rate(VIB_RATE_STEP))
+
         footer = tk.Frame(self._grid_frame, bg="#111111")
         footer.pack(fill=tk.X, padx=6, pady=6)
         self._mk_touch_btn(
@@ -5931,7 +6008,49 @@ class MidiToneApp:
         self._mk_touch_btn(footer, "CLOSE", self._close_voice_grid, bg="#9d0006").pack(
             side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=14
         )
+        self._paint_vib_controls()
         self._paint_voice_grid()
+
+    def _paint_vib_controls(self) -> None:
+        depth, rate, always = self.engine.vib_state()
+        self._vib_depth_var.set(f"{depth:.2f} st")
+        self._vib_rate_var.set(f"{rate:.1f} Hz")
+        if self._vib_toggle_btn is not None:
+            on = always > 0.01
+            color = "#b16286" if on else "#3c3836"
+            try:
+                self._vib_toggle_btn.configure(
+                    text="ON" if on else "WHEEL", bg=color, activebackground=color
+                )
+            except Exception:
+                pass
+
+    def _toggle_vib_always(self) -> None:
+        _depth, _rate, always = self.engine.vib_state()
+        value = self.engine.set_vib_always(0.0 if always > 0.01 else 1.0)
+        self._mark_settings_dirty()
+        self._paint_vib_controls()
+        self.mod_var.set(self._format_mod_line())
+        self._append_log(f"Vibrato {'always on' if value > 0.01 else 'follows mod wheel'}")
+
+    def _nudge_vib_depth(self, delta: float) -> None:
+        depth = self.engine.nudge_vib_depth(delta)
+        st = self.engine.modulation_state()
+        # Turning depth up with the wheel down would be silent — engage it so
+        # the control you just touched is the one you hear.
+        if depth > 0.001 and float(st.get("mod", 0.0)) < 0.01:
+            _d, _r, always = self.engine.vib_state()
+            if always < 0.01:
+                self.engine.set_vib_always(1.0)
+                self._append_log("Vibrato ON (screen control)")
+        self._mark_settings_dirty()
+        self._paint_vib_controls()
+        self.mod_var.set(self._format_mod_line())
+
+    def _nudge_vib_rate(self, delta: float) -> None:
+        self.engine.nudge_vib_rate(delta)
+        self._mark_settings_dirty()
+        self._paint_vib_controls()
 
     def _paint_voice_grid(self) -> None:
         if not self._grid_btns:
@@ -5949,6 +6068,7 @@ class MidiToneApp:
             self._grid_frame.destroy()
             self._grid_frame = None
         self._grid_btns = {}
+        self._vib_toggle_btn = None
         self._grid_open = False
         if restore_main and self._mode == "synth":
             self._synth_shell.pack(fill=tk.BOTH, expand=True)
@@ -6553,6 +6673,9 @@ class MidiToneApp:
         if getattr(self, "_mod_dirty", False):
             self._mod_dirty = False
             self.mod_var.set(self._format_mod_line())
+            if self._grid_open:
+                # Knobs 5/6 and the screen edit the same vibrato
+                self._paint_vib_controls()
             if self._kit_ui_open:
                 self._paint_kit_waveform()
             elif self._mode == "synth" and not self._overlay_busy():
