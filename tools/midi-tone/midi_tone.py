@@ -5657,6 +5657,11 @@ class MidiToneApp:
                 self._seq_play_btn.configure(
                     text="■ STOP", bg="#d79921", activebackground="#d79921"
                 )
+            elif state == SEQ_EMPTY:
+                # Nothing to run yet — REC should be the only lit way forward
+                self._seq_play_btn.configure(
+                    text="PLAY", bg="#3c3836", activebackground="#3c3836"
+                )
             else:
                 self._seq_play_btn.configure(
                     text="PLAY", bg="#689d6a", activebackground="#689d6a"
@@ -6259,6 +6264,9 @@ class MidiToneApp:
 
         self._morph_ui_open = True
         self._morph_pick_side = "a"
+        # Remember the pair we came in with so CANCEL can put it back
+        a_idx, b_idx = self.engine.morph_pair_indices()
+        self._morph_undo = (a_idx, b_idx, self.engine.morph(), self._voice_index)
         self._synth_shell.pack_forget()
 
         self._morph_frame = tk.Frame(self._mode_host, bg="#111111")
@@ -6348,7 +6356,7 @@ class MidiToneApp:
         self._mk_touch_btn(footer, "DONE", self._close_morph_menu, bg="#458588").pack(
             side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=14
         )
-        self._mk_touch_btn(footer, "CANCEL", self._close_morph_menu, bg="#9d0006").pack(
+        self._mk_touch_btn(footer, "CANCEL", self._cancel_morph_menu, bg="#9d0006").pack(
             side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=14
         )
         self._paint_morph_menu()
@@ -6411,6 +6419,17 @@ class MidiToneApp:
             else:
                 color = "#3c3836"
             btn.configure(bg=color, activebackground=color)
+
+    def _cancel_morph_menu(self) -> None:
+        """CANCEL means the pair you walked in with, not the one you auditioned."""
+        undo = getattr(self, "_morph_undo", None)
+        if undo is not None:
+            a_idx, b_idx, blend, voice_idx = undo
+            self.engine.set_morph_pair(a_idx, b_idx, morph=blend)
+            self._voice_index = voice_idx
+            self._mark_settings_dirty()
+            self._q_put(("log", "Morph pair restored (CANCEL)", False))
+        self._close_morph_menu()
 
     def _close_morph_menu(self, restore_main: bool = True) -> None:
         if not self._morph_ui_open:
