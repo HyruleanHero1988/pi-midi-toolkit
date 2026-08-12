@@ -3568,7 +3568,7 @@ class MidiToneApp:
         self.root = tk.Tk()
         print("ui: Tk root ok", flush=True)
         self.root.title("midi-tone")
-        self.root.geometry("800x420")
+        self.root.geometry("800x480")
         self.root.configure(bg="#111111")
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         if self._fullscreen:
@@ -4117,47 +4117,84 @@ class MidiToneApp:
         bpm_row = tk.Frame(header, bg="#111111")
         bpm_row.pack(side=tk.RIGHT)
         self._mk_touch_btn(bpm_row, "BPM −", lambda: self._song_nudge_bpm(-1), bg="#3c3836").pack(
-            side=tk.LEFT, padx=2, ipady=4
+            side=tk.LEFT, padx=2
         )
         self._song_bpm_lbl = tk.Label(
             bpm_row,
             text=self._song_bpm_label(),
-            font=("DejaVu Sans", 14, "bold"),
+            font=("DejaVu Sans", 13, "bold"),
             fg="#fabd2f",
             bg="#111111",
-            padx=8,
+            padx=6,
         )
         self._song_bpm_lbl.pack(side=tk.LEFT)
         self._mk_touch_btn(bpm_row, "BPM +", lambda: self._song_nudge_bpm(1), bg="#3c3836").pack(
-            side=tk.LEFT, padx=2, ipady=4
+            side=tk.LEFT, padx=2
         )
         self._mk_touch_btn(bpm_row, "−5", lambda: self._song_nudge_bpm(-5), bg="#3c3836").pack(
-            side=tk.LEFT, padx=2, ipady=4
+            side=tk.LEFT, padx=2
         )
         self._mk_touch_btn(bpm_row, "+5", lambda: self._song_nudge_bpm(5), bg="#3c3836").pack(
-            side=tk.LEFT, padx=2, ipady=4
+            side=tk.LEFT, padx=2
         )
 
         status = tk.Label(
             shell, textvariable=self._song_status_var,
-            font=("DejaVu Sans", 12, "bold"),
+            font=("DejaVu Sans", 11, "bold"),
             fg="#fabd2f", bg="#111111",
-            wraplength=760, justify=tk.LEFT, anchor="w",
+            wraplength=780, justify=tk.LEFT, anchor="w",
         )
         status.pack(fill=tk.X, padx=10, pady=(2, 4))
 
-        # Chunky list with dedicated scroll targets (no tiny scrollbar)
+        # Transport is packed from the bottom *before* the list, so a short panel
+        # shrinks the song rows instead of pushing PLAY/STOP off the screen.
+        row_b = tk.Frame(shell, bg="#111111")
+        row_b.pack(side=tk.BOTTOM, fill=tk.X, padx=8, pady=(3, 8))
+        self._mk_touch_btn(
+            row_b, "SAVE SEQ", self._song_save_from_seq, bg="#458588"
+        ).pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=8)
+        self._mk_touch_btn(row_b, "DELETE", self._song_delete_selected, bg="#9d0006").pack(
+            side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=8
+        )
+        self._song_out_btn = self._mk_touch_btn(
+            row_b, "OUT: LOCAL", self._song_cycle_out_mode, bg="#3c3836"
+        )
+        self._song_out_btn.pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=8)
+        self._song_loop_btn = self._mk_touch_btn(
+            row_b, "SONG LOOP: OFF", self._song_toggle_loop, bg="#3c3836"
+        )
+        self._song_loop_btn.pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=8)
+
+        row_a = tk.Frame(shell, bg="#111111")
+        row_a.pack(side=tk.BOTTOM, fill=tk.X, padx=8, pady=(4, 3))
+        self._song_play_btn = self._mk_touch_btn(
+            row_a, "PLAY", self._song_toggle_play, bg="#689d6a"
+        )
+        self._song_play_btn.pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=10)
+        self._mk_touch_btn(row_a, "STOP", self._song_stop, bg="#d79921").pack(
+            side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=10
+        )
+
+        # Chunky list with dedicated scroll targets (no tiny scrollbar). They sit
+        # in a side column so paging costs width, which is plentiful, not height.
         list_wrap = tk.Frame(shell, bg="#111111")
         list_wrap.pack(fill=tk.BOTH, expand=True, padx=8, pady=2)
 
+        pager = tk.Frame(list_wrap, bg="#111111")
+        pager.pack(side=tk.RIGHT, fill=tk.Y, padx=(6, 0))
         self._song_up_btn = self._mk_touch_btn(
-            list_wrap, "▲  UP", lambda: self._song_scroll_by(-SONG_LIST_VISIBLE), bg="#504945"
+            pager, "▲", lambda: self._song_scroll_by(-SONG_LIST_VISIBLE), bg="#504945"
         )
-        self._song_up_btn.configure(font=("DejaVu Sans", 16, "bold"), pady=10)
-        self._song_up_btn.pack(fill=tk.X, pady=(0, 4), ipady=6)
+        self._song_up_btn.configure(font=("DejaVu Sans", 18, "bold"), padx=14)
+        self._song_up_btn.pack(side=tk.TOP, expand=True, fill=tk.BOTH, pady=(0, 2))
+        self._song_down_btn = self._mk_touch_btn(
+            pager, "▼", lambda: self._song_scroll_by(SONG_LIST_VISIBLE), bg="#504945"
+        )
+        self._song_down_btn.configure(font=("DejaVu Sans", 18, "bold"), padx=14)
+        self._song_down_btn.pack(side=tk.BOTTOM, expand=True, fill=tk.BOTH, pady=(2, 0))
 
         rows = tk.Frame(list_wrap, bg="#111111")
-        rows.pack(fill=tk.BOTH, expand=True)
+        rows.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self._song_row_btns = []
         for i in range(SONG_LIST_VISIBLE):
             btn = self._mk_touch_btn(
@@ -4167,49 +4204,13 @@ class MidiToneApp:
                 bg="#3c3836",
             )
             btn.configure(
-                font=("DejaVu Sans", 14, "bold"),
+                font=("DejaVu Sans", 13, "bold"),
                 anchor="w",
                 justify=tk.LEFT,
-                pady=12,
+                pady=4,
             )
-            btn.pack(fill=tk.BOTH, expand=True, pady=2, ipady=8)
+            btn.pack(fill=tk.BOTH, expand=True, pady=2, ipady=2)
             self._song_row_btns.append(btn)
-
-        self._song_down_btn = self._mk_touch_btn(
-            list_wrap, "▼  DOWN", lambda: self._song_scroll_by(SONG_LIST_VISIBLE), bg="#504945"
-        )
-        self._song_down_btn.configure(font=("DejaVu Sans", 16, "bold"), pady=10)
-        self._song_down_btn.pack(fill=tk.X, pady=(4, 0), ipady=6)
-
-        row_a = tk.Frame(shell, bg="#111111")
-        row_a.pack(fill=tk.X, padx=8, pady=(6, 3))
-        self._song_play_btn = self._mk_touch_btn(
-            row_a, "PLAY", self._song_toggle_play, bg="#689d6a"
-        )
-        self._song_play_btn.pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=12)
-        self._mk_touch_btn(row_a, "STOP", self._song_stop, bg="#d79921").pack(
-            side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=12
-        )
-
-        row_b = tk.Frame(shell, bg="#111111")
-        row_b.pack(fill=tk.X, padx=8, pady=3)
-        self._mk_touch_btn(
-            row_b, "SAVE SEQ", self._song_save_from_seq, bg="#458588"
-        ).pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=10)
-        self._mk_touch_btn(row_b, "DELETE", self._song_delete_selected, bg="#9d0006").pack(
-            side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=10
-        )
-
-        row_c = tk.Frame(shell, bg="#111111")
-        row_c.pack(fill=tk.X, padx=8, pady=(3, 8))
-        self._song_out_btn = self._mk_touch_btn(
-            row_c, "OUT: LOCAL", self._song_cycle_out_mode, bg="#3c3836"
-        )
-        self._song_out_btn.pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=8)
-        self._song_loop_btn = self._mk_touch_btn(
-            row_c, "SONG LOOP: OFF", self._song_toggle_loop, bg="#3c3836"
-        )
-        self._song_loop_btn.pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=8)
 
         self._paint_song_list()
         self._paint_song_controls()
@@ -4248,10 +4249,12 @@ class MidiToneApp:
         return title
 
     def _song_row_label(self, path: pathlib.Path) -> str:
+        """One line per row — four fat targets beat two tall ones on a 480px panel."""
         title = self._song_title_from_file(path)
         if title.lower() == path.stem.lower() or title == path.stem:
             return f"  {path.name}"
-        return f"  {title}\n  {path.name}"
+        label = f"  {title} · {path.name}"
+        return label if len(label) <= 58 else label[:57] + "…"
 
     def _song_scroll_by(self, delta: int) -> None:
         if not self._song_files:
@@ -4922,6 +4925,9 @@ class MidiToneApp:
             "<Configure>", lambda _e: self._paint_kit_waveform(force=True)
         )
 
+        footer = tk.Frame(self._kit_frame, bg="#111111")
+        footer.pack(side=tk.BOTTOM, fill=tk.X, padx=6, pady=6)
+
         grid = tk.Frame(self._kit_frame, bg="#111111")
         grid.pack(fill=tk.BOTH, expand=True, padx=4, pady=2)
         for r in range(4):
@@ -4944,8 +4950,6 @@ class MidiToneApp:
             btn.grid(row=r, column=c, sticky="nsew", padx=2, pady=2)
             self._kit_btns[note] = btn
 
-        footer = tk.Frame(self._kit_frame, bg="#111111")
-        footer.pack(fill=tk.X, padx=6, pady=6)
         self._kit_all_btn = self._mk_touch_btn(
             footer, "ALL DRUMS", self._select_kit_all_drums, bg="#504945"
         )
@@ -5068,6 +5072,42 @@ class MidiToneApp:
         )
         layers.pack(fill=tk.X, padx=10, pady=(0, 6))
 
+        # Button rows claim their strips first, so REC/PLAY keep full height and
+        # the how-to line at the very end is the only thing a short panel drops.
+        row4 = tk.Frame(shell, bg="#111111")
+        row4.pack(side=tk.BOTTOM, fill=tk.X, padx=8, pady=(4, 2))
+        self._mk_touch_btn(row4, "STOP ALL", self._seq_stop, bg="#504945").pack(
+            side=tk.LEFT, expand=True, fill=tk.BOTH, padx=4, ipady=10
+        )
+        self._mk_touch_btn(row4, "CLEAR", self._seq_clear, bg="#3c3836").pack(
+            side=tk.LEFT, expand=True, fill=tk.BOTH, padx=4, ipady=10
+        )
+        self._mk_touch_btn(row4, "ALL NOTES OFF", self._panic, bg="#9d0006").pack(
+            side=tk.LEFT, expand=True, fill=tk.BOTH, padx=4, ipady=10
+        )
+
+        row3 = tk.Frame(shell, bg="#111111")
+        row3.pack(side=tk.BOTTOM, fill=tk.X, padx=8, pady=4)
+        self._mk_touch_btn(row3, "LEN ×2", self._seq_double, bg="#504945").pack(
+            side=tk.LEFT, expand=True, fill=tk.BOTH, padx=4, ipady=10
+        )
+        self._mk_touch_btn(row3, "LEN ÷2", self._seq_halve, bg="#504945").pack(
+            side=tk.LEFT, expand=True, fill=tk.BOTH, padx=4, ipady=10
+        )
+        self._seq_extend_btn = self._mk_touch_btn(
+            row3, "OVERDUB: WRAP", self._seq_toggle_extend, bg="#3c3836"
+        )
+        self._seq_extend_btn.pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=4, ipady=10)
+
+        row2 = tk.Frame(shell, bg="#111111")
+        row2.pack(side=tk.BOTTOM, fill=tk.X, padx=8, pady=4)
+        self._seq_keep_btn = self._mk_touch_btn(row2, "KEEP", self._seq_keep, bg="#458588")
+        self._seq_keep_btn.pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=4, ipady=12)
+        self._seq_drop_btn = self._mk_touch_btn(row2, "DROP", self._seq_drop, bg="#3c3836")
+        self._seq_drop_btn.pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=4, ipady=12)
+        self._seq_undo_btn = self._mk_touch_btn(row2, "UNDO", self._seq_undo, bg="#3c3836")
+        self._seq_undo_btn.pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=4, ipady=12)
+
         # Transport — the two buttons you hit while playing
         row1 = tk.Frame(shell, bg="#111111")
         row1.pack(fill=tk.BOTH, expand=True, padx=8, pady=2)
@@ -5083,42 +5123,6 @@ class MidiToneApp:
         self._seq_play_btn.configure(font=("DejaVu Sans", 18, "bold"), pady=22)
         self._seq_play_btn.pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=4)
 
-        # Layer decisions
-        row2 = tk.Frame(shell, bg="#111111")
-        row2.pack(fill=tk.X, padx=8, pady=4)
-        self._seq_keep_btn = self._mk_touch_btn(row2, "KEEP", self._seq_keep, bg="#458588")
-        self._seq_keep_btn.pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=4, ipady=14)
-        self._seq_drop_btn = self._mk_touch_btn(row2, "DROP", self._seq_drop, bg="#3c3836")
-        self._seq_drop_btn.pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=4, ipady=14)
-        self._seq_undo_btn = self._mk_touch_btn(row2, "UNDO", self._seq_undo, bg="#3c3836")
-        self._seq_undo_btn.pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=4, ipady=14)
-
-        # Sequence shape + panic
-        row3 = tk.Frame(shell, bg="#111111")
-        row3.pack(fill=tk.X, padx=8, pady=4)
-        self._mk_touch_btn(row3, "LEN ×2", self._seq_double, bg="#504945").pack(
-            side=tk.LEFT, expand=True, fill=tk.BOTH, padx=4, ipady=12
-        )
-        self._mk_touch_btn(row3, "LEN ÷2", self._seq_halve, bg="#504945").pack(
-            side=tk.LEFT, expand=True, fill=tk.BOTH, padx=4, ipady=12
-        )
-        self._seq_extend_btn = self._mk_touch_btn(
-            row3, "OVERDUB: WRAP", self._seq_toggle_extend, bg="#3c3836"
-        )
-        self._seq_extend_btn.pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=4, ipady=12)
-
-        row4 = tk.Frame(shell, bg="#111111")
-        row4.pack(fill=tk.X, padx=8, pady=(4, 8))
-        self._mk_touch_btn(row4, "STOP ALL", self._seq_stop, bg="#504945").pack(
-            side=tk.LEFT, expand=True, fill=tk.BOTH, padx=4, ipady=12
-        )
-        self._mk_touch_btn(row4, "CLEAR", self._seq_clear, bg="#3c3836").pack(
-            side=tk.LEFT, expand=True, fill=tk.BOTH, padx=4, ipady=12
-        )
-        self._mk_touch_btn(row4, "ALL NOTES OFF", self._panic, bg="#9d0006").pack(
-            side=tk.LEFT, expand=True, fill=tk.BOTH, padx=4, ipady=12
-        )
-
         tip = tk.Label(
             shell,
             text=(
@@ -5127,9 +5131,9 @@ class MidiToneApp:
                 "3) KEEP flattens the layer, DROP throws it away, UNDO peels the last one off"
             ),
             font=("DejaVu Sans", 10), fg="#83a598", bg="#111111",
-            wraplength=760, justify=tk.LEFT, anchor="w",
+            wraplength=780, justify=tk.LEFT, anchor="w",
         )
-        tip.pack(fill=tk.X, padx=10, pady=(0, 8))
+        tip.pack(side=tk.BOTTOM, fill=tk.X, padx=10, pady=(2, 6))
         self._paint_seq_buttons()
 
     def _build_pads_mode(self) -> None:
@@ -5883,19 +5887,21 @@ class MidiToneApp:
             opt, "CLR", lambda: self._save_voice_type("\x15"), bg="#504945"
         ).pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=8)
 
+        # SAVE/CANCEL claim their strip first — the keyboard shrinks, never the
+        # buttons that end the job.
+        footer = tk.Frame(self._save_voice_frame, bg="#111111")
+        footer.pack(side=tk.BOTTOM, fill=tk.X, padx=6, pady=6)
+        self._mk_touch_btn(
+            footer, "SAVE", self._confirm_save_voice, bg="#689d6a"
+        ).pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=10)
+        self._mk_touch_btn(
+            footer, "CANCEL", self._close_save_voice, bg="#9d0006"
+        ).pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=10)
+
         keys = tk.Frame(self._save_voice_frame, bg="#111111")
         keys.pack(fill=tk.BOTH, expand=True, padx=4, pady=2)
         self._save_voice_keys = keys
         self._paint_save_voice_keyboard()
-
-        footer = tk.Frame(self._save_voice_frame, bg="#111111")
-        footer.pack(fill=tk.X, padx=6, pady=6)
-        self._mk_touch_btn(
-            footer, "SAVE", self._confirm_save_voice, bg="#689d6a"
-        ).pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=14)
-        self._mk_touch_btn(
-            footer, "CANCEL", self._close_save_voice, bg="#9d0006"
-        ).pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=14)
         self._append_log("SAVE VOICE — bake wave shape + keep delay/reverb alongside")
 
     def _paint_save_voice_keyboard(self) -> None:
