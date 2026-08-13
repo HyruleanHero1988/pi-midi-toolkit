@@ -2862,6 +2862,7 @@ class PhrasePadBank:
         *,
         clear_armed: bool = False,
         mode_armed: bool = False,
+        assign_armed: bool = False,
         view: str = "edit",
     ) -> str:
         with self._lock:
@@ -2869,6 +2870,11 @@ class PhrasePadBank:
             rec = self._recording_cell
             playing = sorted(self._playing.keys())
             sel = self._selected
+        if assign_armed:
+            return (
+                "SEQ → PAD armed — tap a pad (touch or MPK) to drop the sequence there · "
+                "→ PAD again to cancel"
+            )
         if mode_armed:
             return "MODE armed — tap a pad to toggle ONE-SHOT ↔ LOOP · MODE again to cancel"
         if clear_armed:
@@ -3105,6 +3111,72 @@ class PhrasePadBank:
         self.save_cell(target)
         self._emit(("phrase",))
         self._emit(("log", f"Phrase {phrase_pad_label(target)} cleared", False))
+        return True
+
+    def load_from_events(
+        self,
+        idx: int,
+        events: List[LoopEvent],
+        length: float,
+        *,
+        trigger_mode: str = PHRASE_TRIG_LOOP,
+    ) -> bool:
+        """Replace a pad's contents with a free-timing take (e.g. from SEQ)."""
+        if not (0 <= idx < PHRASE_PAD_COUNT):
+            return False
+        if self.is_recording():
+            self.stop_record()
+        self.stop_cell(idx)
+        copied = [
+            LoopEvent(
+                t=float(e.t),
+                on=bool(e.on),
+                channel=int(e.channel) & 0x0F,
+                note=int(e.note) & 0x7F,
+                velocity=max(0, min(127, int(e.velocity))),
+            )
+            for e in events
+        ]
+        length = float(length)
+        if copied and length <= 0.0:
+            length = max(e.t for e in copied) + 0.05
+        if not copied or length <= 0.0:
+            return False
+        mode = trigger_mode if trigger_mode in PHRASE_TRIG_MODES else PHRASE_TRIG_LOOP
+        try:
+            vib_depth, vib_rate, vib_amount = self._engine.vib_state()
+        except Exception:
+            vib_depth, vib_rate, vib_amount = (0.0, 5.0, 0.0)
+        with self._lock:
+            prev = self._cells[idx]
+            self._cells[idx] = PhraseCell(
+                events=copied,
+                length=length,
+                trigger_mode=mode,
+                voice_mode=prev.voice_mode,
+                morph_a=prev.morph_a,
+                morph_b=prev.morph_b,
+                morph=prev.morph,
+                out_channel=prev.out_channel,
+                local_synth=prev.local_synth,
+                gain=prev.gain,
+                vib_baked=True,
+                vib_depth=float(vib_depth),
+                vib_rate=float(vib_rate),
+                vib_amount=float(vib_amount),
+            )
+            self._selected = idx
+        self.save_cell(idx)
+        self._emit(("phrase",))
+        self._emit(
+            (
+                "log",
+                f"Phrase {phrase_pad_label(idx)} ← seq "
+                f"({len(copied)} ev, {length:.2f}s, "
+                f"{'LOOP' if mode == PHRASE_TRIG_LOOP else 'ONE-SHOT'})",
+                False,
+            )
+        )
         return True
 
     def stop_cell(self, idx: int) -> None:
@@ -4052,6 +4124,8 @@ class MidiToneApp:
         self._phrase_vib_btn: Optional[tk.Button] = None
         self._phrase_clear_armed = False
         self._phrase_mode_armed = False
+        self._seq_to_pad_armed = False
+        self._seq_to_pad_btn: Optional[tk.Button] = None
         self._phrase_shell: Optional[tk.Frame] = None
         self._seq_status_var = tk.StringVar(value=self._seq.status_line())
         self._seq_layer_var = tk.StringVar(value="no layers yet")
@@ -6300,6 +6374,10 @@ class MidiToneApp:
         self._mk_touch_btn(row4, "STOP ALL", self._seq_stop, bg="#504945").pack(
             side=tk.LEFT, expand=True, fill=tk.BOTH, padx=4, ipady=10
         )
+        self._seq_to_pad_btn = self._mk_touch_btn(
+            row4, "→ PAD", self._seq_assign_to_pad, bg="#458588"
+        )
+        self._seq_to_pad_btn.pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=4, ipady=10)
         self._mk_touch_btn(row4, "CLEAR", self._seq_clear, bg="#3c3836").pack(
             side=tk.LEFT, expand=True, fill=tk.BOTH, padx=4, ipady=10
         )
@@ -6349,7 +6427,8 @@ class MidiToneApp:
             text=(
                 "1) REC + play the groove → REC again locks the loop length  "
                 "2) it loops; REC again to overdub drums or keys  "
-                "3) KEEP flattens the layer, DROP throws it away, UNDO peels the last one off"
+                "3) KEEP flattens the layer, DROP throws it away, UNDO peels the last one off  "
+                "4) → PAD then tap a square or MPK pad to drop the sequence onto a phrase clip"
             ),
             font=("DejaVu Sans", 10), fg="#83a598", bg="#111111",
             wraplength=780, justify=tk.LEFT, anchor="w",
@@ -6516,6 +6595,9 @@ class MidiToneApp:
         self._build_pads_mode()
 
     def _phrase_pad_tap(self, idx: int) -> None:
+        if self._seq_to_pad_armed:
+            self._finish_seq_to_pad(idx)
+            return
         if self._pads_view == "edit" and self._phrase_mode_armed:
             self._phrases.toggle_trigger_mode(idx)
             self._phrase_mode_armed = False
@@ -6635,10 +6717,12 @@ class MidiToneApp:
     def _paint_phrase_pads(self) -> None:
         clear_armed = bool(self._phrase_clear_armed) and self._pads_view == "edit"
         mode_armed = bool(self._phrase_mode_armed) and self._pads_view == "edit"
+        assign_armed = bool(self._seq_to_pad_armed)
         self._phrase_status_var.set(
             self._phrases.status_line(
                 clear_armed=clear_armed,
                 mode_armed=mode_armed,
+                assign_armed=assign_armed,
                 view=self._pads_view,
             )
         )
@@ -6654,6 +6738,9 @@ class MidiToneApp:
             if mode_armed:
                 text = f"{label}\n{mode_mark}?"
                 color = "#b16286"
+            elif assign_armed:
+                text = f"{label}\nDROP?"
+                color = "#458588"
             elif clear_armed:
                 text = f"{label}\nCLR?" if not cell.is_empty() else f"{label}\n—"
                 color = "#cc241d" if not cell.is_empty() else "#504945"
@@ -6673,6 +6760,7 @@ class MidiToneApp:
             if (
                 not clear_armed
                 and not mode_armed
+                and not assign_armed
                 and selected == idx
                 and rec != idx
                 and idx not in playing
@@ -6777,6 +6865,7 @@ class MidiToneApp:
                 self._phrases.status_line(
                     clear_armed=self._phrase_clear_armed,
                     mode_armed=self._phrase_mode_armed,
+                    assign_armed=self._seq_to_pad_armed,
                     view=self._pads_view,
                 )
             )
@@ -6803,6 +6892,10 @@ class MidiToneApp:
                 self._phrases.stop_record()
             self._phrase_clear_armed = False
             self._phrase_mode_armed = False
+            if mode != "seq":
+                self._seq_to_pad_armed = False
+        if mode not in ("pads", "seq"):
+            self._seq_to_pad_armed = False
 
         self._mode = mode
         self._synth_shell.pack_forget()
@@ -6924,6 +7017,14 @@ class MidiToneApp:
                 bg=color,
                 activebackground=color,
             )
+        if self._seq_to_pad_btn is not None:
+            armed = bool(self._seq_to_pad_armed)
+            color = "#83a598" if armed else "#458588"
+            self._seq_to_pad_btn.configure(
+                text="→ PAD…" if armed else "→ PAD",
+                bg=color,
+                activebackground=color,
+            )
 
     def _seq_toggle_record(self) -> None:
         action = self._seq.toggle_record()
@@ -6967,13 +7068,65 @@ class MidiToneApp:
         self._refresh_seq_status()
 
     def _seq_stop(self) -> None:
+        self._seq_to_pad_armed = False
         self._seq.stop()
         self._q_put(("seq",))
         self._refresh_seq_status()
 
     def _seq_clear(self) -> None:
+        self._seq_to_pad_armed = False
         self._seq.clear()
         self._refresh_seq_status()
+
+    def _seq_assign_to_pad(self) -> None:
+        """Arm SEQ → PAD: next phrase-pad tap (touch or MPK) receives this take as a LOOP."""
+        if self._seq.is_recording():
+            self._seq.toggle_record()
+        events, length = self._seq.snapshot()
+        if not events or length <= 0.0:
+            self._seq_status_var.set("Nothing to assign — record a backbone first.")
+            self._seq_to_pad_armed = False
+            self._paint_seq_buttons()
+            return
+        self._phrase_clear_armed = False
+        self._phrase_mode_armed = False
+        self._seq_to_pad_armed = not self._seq_to_pad_armed
+        self._refresh_seq_status()
+        if self._seq_to_pad_armed:
+            self._pads_view = "edit"
+            self._switch_mode("pads")
+            self._build_pads_mode()
+            self._paint_phrase_pads()
+            self._phrase_status_var.set(
+                "SEQ → PAD — tap a pad (touch or MPK) to drop the sequence (overwrites that pad)"
+            )
+            self._append_log("SEQ → PAD armed — tap a phrase pad")
+
+    def _finish_seq_to_pad(self, idx: int) -> None:
+        events, length = self._seq.snapshot()
+        self._seq_to_pad_armed = False
+        if not events or length <= 0.0:
+            self._phrase_status_var.set("Sequence was empty — assignment cancelled")
+            self._paint_phrase_pads()
+            self._paint_seq_buttons()
+            return
+        ok = self._phrases.load_from_events(
+            idx, events, length, trigger_mode=PHRASE_TRIG_LOOP
+        )
+        if ok:
+            self._append_log(
+                f"SEQ → {phrase_pad_label(idx)} ({len(events)} ev, {length:.2f}s LOOP)"
+            )
+            # PLAY so the same drum pad now launches the clip
+            self._pads_view = "play"
+            self._build_pads_mode()
+            self._phrase_status_var.set(
+                f"Loaded SEQ → {phrase_pad_label(idx)} as LOOP — hit that pad to trigger it"
+            )
+        else:
+            self._phrase_status_var.set("Could not assign sequence to that pad")
+            self._paint_phrase_pads()
+        self._paint_seq_buttons()
 
     def _pack_screen_regions(
         self,
@@ -8119,6 +8272,20 @@ class MidiToneApp:
         if msg.type == "note_on" and msg.velocity > 0:
             is_drum = msg.channel == DRUM_CHANNEL
             phrase_recording = self._phrases.is_recording()
+            # SEQ → PAD: MPK pad picks the destination clip (works from SEQ or PADS).
+            if is_drum and self._seq_to_pad_armed:
+                cell = phrase_cell_for_note(msg.note)
+                if cell is not None:
+                    self._seq_to_pad_armed = False
+                    self._q_put(("seq_to_pad", cell))
+                    self._q_put(
+                        (
+                            "log",
+                            f"Pad→SEQ {phrase_pad_label(cell)}  note {msg.note}",
+                            False,
+                        )
+                    )
+                    return
             # PADS mode: MPK pads launch/arm phrases — unless recording (then drums)
             # or CLEAR/MODE is armed.
             if pads_mode and is_drum and not phrase_recording:
@@ -8305,6 +8472,8 @@ class MidiToneApp:
                     self._refresh_seq_status()
                 elif kind == "phrase":
                     self._refresh_phrase_status()
+                elif kind == "seq_to_pad":
+                    self._finish_seq_to_pad(int(item[1]))
                 elif kind == "song":
                     self._refresh_song_status()
                 elif kind == "kit_sel":
