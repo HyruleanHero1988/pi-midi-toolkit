@@ -52,6 +52,16 @@ from sequencer import (  # noqa: E402  (local module, imported after the hard de
     OverdubSequencer,
     trim_loop_take,
 )
+from screensaver import (  # noqa: E402
+    PIXEL_SHIFT_AMPLITUDE,
+    IdleWatch,
+    PanelBacklight,
+    next_timeout_preset,
+    orbit_xy,
+    pixel_shift_xy,
+    timeout_from_env,
+    timeout_label,
+)
 
 
 SAMPLE_RATE = 44100
@@ -3752,6 +3762,18 @@ class MidiToneApp:
         self.root = tk.Tk()
         print("ui: Tk root ok", flush=True)
         self.root.title("PiDI")
+        # Idle watch before the MIDI thread so notes can poke it safely.
+        self._idle = IdleWatch(timeout_from_env())
+        self._backlight = PanelBacklight()
+        self._saver_canvas: Optional[tk.Canvas] = None
+        self._saver_hint: Optional[int] = None
+        self._saver_clock: Optional[int] = None
+        self._saver_started = 0.0
+        self._saver_timeout_btn: Optional[tk.Button] = None
+        self._saver_tick_after: Optional[str] = None
+        self._shift_started = time.monotonic()
+        self._shift_xy = (None, None)
+        self.root.bind("<Destroy>", self._on_root_destroy, add="+")
         # TFT70 / Pi panel target is 800×480 (older builds used 800×420 and left a gap)
         self.root.geometry("800x480")
         self.root.configure(bg="#111111")
@@ -4146,6 +4168,13 @@ class MidiToneApp:
         self._append_log("If knobs do nothing: Prog Select + Pad 1 (MPC program).")
         print("ui: construction complete", flush=True)
         self.root.after(2000, self._autosave_tick)
+        self.root.bind_all("<ButtonPress>", self._on_pointer_activity, add="+")
+        self._saver_tick_after = self.root.after(1000, self._screensaver_tick)
+        self._apply_pixel_shift()
+        self._append_log(
+            f"TFT burn-in guard: {timeout_label(self._idle.timeout_sec)} "
+            "— tap the panel to wake; MIDI does not."
+        )
 
     def _voice_label_text(self) -> str:
         left, right, blend = self.engine.morph_neighbors()
@@ -4201,6 +4230,7 @@ class MidiToneApp:
             or self._morph_ui_open
             or self._kit_ui_open
             or self._save_voice_open
+            or bool(getattr(self, "_idle", None) and self._idle.active)
         )
 
     def _session_dict(self) -> Dict[str, Any]:
@@ -4219,6 +4249,7 @@ class MidiToneApp:
                 "loop": bool(self._songs.loop_enabled()),
                 "out_mode": self._songs.out_mode(),
             },
+            "screensaver_sec": float(self._idle.timeout_sec),
         }
 
     def _apply_session_dict(self, data: Dict[str, Any]) -> None:
@@ -4226,6 +4257,11 @@ class MidiToneApp:
         try:
             if "full_velocity" in data:
                 self._full_vel = bool(data["full_velocity"])
+            if "screensaver_sec" in data and "MIDI_TONE_SCREENSAVER_SEC" not in os.environ:
+                try:
+                    self._idle.timeout_sec = max(0.0, float(data["screensaver_sec"]))
+                except (TypeError, ValueError):
+                    pass
             if "active_preset" in data:
                 name = data["active_preset"]
                 self._active_preset_name = str(name) if name else None
@@ -7375,6 +7411,179 @@ class MidiToneApp:
         self.root.geometry(f"{sw}x{sh}+0+0")
         print(f"ui: geometry {sw}x{sh}", flush=True)
 
+    def _on_pointer_activity(self, _event: object = None) -> None:
+        idle = getattr(self, "_idle", None)
+        if idle is None or idle.active:
+            return
+        idle.poke()
+
+    def _on_root_destroy(self, event: tk.Event) -> None:  # type: ignore[name-defined]
+        if event.widget is not self.root:
+            return
+        self._stop.set()
+        self._cancel_screensaver_tick()
+
+    def _cancel_screensaver_tick(self) -> None:
+        aid = self._saver_tick_after
+        self._saver_tick_after = None
+        if aid is None:
+            return
+        try:
+            self.root.after_cancel(aid)
+        except Exception:
+            pass
+
+    def _arm_screensaver_tick(self) -> None:
+        self._cancel_screensaver_tick()
+        if self._stop.is_set():
+            return
+        try:
+            if not self.root.winfo_exists():
+                return
+            self._saver_tick_after = self.root.after(1000, self._screensaver_tick)
+        except tk.TclError:
+            self._saver_tick_after = None
+
+    def _screensaver_tick(self) -> None:
+        if self._stop.is_set():
+            return
+        try:
+            if not self.root.winfo_exists():
+                return
+        except tk.TclError:
+            return
+        if self._idle.due():
+            self._show_screensaver()
+        elif self._idle.active:
+            self._nudge_screensaver_orbit()
+        else:
+            self._apply_pixel_shift()
+        self._arm_screensaver_tick()
+
+    def _show_screensaver(self, *, force: bool = False) -> None:
+        if self._saver_canvas is not None:
+            self._nudge_screensaver_orbit()
+            return
+        if not force and not self._idle.due():
+            return
+        self._idle.activate()
+        self._saver_started = time.monotonic()
+        canvas = tk.Canvas(
+            self.root,
+            bg="#000000",
+            highlightthickness=0,
+            bd=0,
+            cursor="none",
+        )
+        canvas.place(x=0, y=0, relwidth=1, relheight=1)
+        try:
+            canvas.lift()
+        except Exception:
+            pass
+        try:
+            canvas.grab_set()
+        except Exception:
+            pass
+        canvas.bind("<ButtonPress>", self._on_screensaver_tap)
+        canvas.bind("<ButtonRelease>", lambda _e: "break")
+        self._saver_canvas = canvas
+        self._saver_hint = canvas.create_text(
+            40,
+            40,
+            text="tap to wake",
+            fill="#2a2a2a",
+            font=("DejaVu Sans", 18, "bold"),
+            anchor="nw",
+        )
+        self._saver_clock = canvas.create_text(
+            40,
+            72,
+            text=time.strftime("%H:%M"),
+            fill="#1a1a1a",
+            font=("DejaVu Sans", 14),
+            anchor="nw",
+        )
+        self._nudge_screensaver_orbit()
+        self._backlight.dim()
+        print("ui: screensaver on", flush=True)
+
+    def _nudge_screensaver_orbit(self) -> None:
+        canvas = self._saver_canvas
+        if canvas is None or self._saver_hint is None:
+            return
+        try:
+            w = int(canvas.winfo_width())
+            h = int(canvas.winfo_height())
+        except Exception:
+            w, h = 800, 480
+        if w <= 1 or h <= 1:
+            w, h = 800, 480
+        elapsed = time.monotonic() - self._saver_started
+        x, y = orbit_xy(elapsed, w, h, 220, 56)
+        canvas.coords(self._saver_hint, x, y)
+        if self._saver_clock is not None:
+            canvas.itemconfigure(self._saver_clock, text=time.strftime("%H:%M"))
+            canvas.coords(self._saver_clock, x, y + 28)
+
+    def _apply_pixel_shift(self) -> None:
+        """Nudge chrome a couple of pixels so bold boxes don't sit still."""
+        if getattr(self, "_idle", None) is not None and self._idle.active:
+            return
+        elapsed = time.monotonic() - getattr(self, "_shift_started", time.monotonic())
+        dx, dy = pixel_shift_xy(elapsed)
+        if (dx, dy) == getattr(self, "_shift_xy", (None, None)):
+            return
+        self._shift_xy = (dx, dy)
+        gutter = PIXEL_SHIFT_AMPLITUDE
+        try:
+            self._nav.pack_configure(
+                padx=(gutter + dx, gutter - dx),
+                pady=(gutter + dy, 0),
+            )
+            self._mode_host.pack_configure(
+                padx=(gutter + dx, gutter - dx),
+                pady=(0, gutter - dy),
+            )
+        except Exception:
+            pass
+
+    def _on_screensaver_tap(self, _event: object = None) -> str:
+        self._hide_screensaver()
+        return "break"
+
+    def _hide_screensaver(self) -> None:
+        idle = getattr(self, "_idle", None)
+        if idle is not None:
+            idle.poke()
+        canvas = self._saver_canvas
+        self._saver_canvas = None
+        self._saver_hint = None
+        self._saver_clock = None
+        if canvas is not None:
+            try:
+                canvas.grab_release()
+            except Exception:
+                pass
+            try:
+                canvas.destroy()
+            except Exception:
+                pass
+            print("ui: screensaver off", flush=True)
+        self._backlight.restore()
+        self._apply_pixel_shift()
+
+    def _blank_screen_now(self) -> None:
+        self._close_power_menu(restore_main=True)
+        self._show_screensaver(force=True)
+
+    def _cycle_screensaver_timeout(self) -> None:
+        self._idle.timeout_sec = next_timeout_preset(self._idle.timeout_sec)
+        self._idle.poke()
+        self._mark_settings_dirty()
+        if self._saver_timeout_btn is not None:
+            self._saver_timeout_btn.configure(text=timeout_label(self._idle.timeout_sec))
+        self._append_log(f"TFT burn-in guard → {timeout_label(self._idle.timeout_sec)}")
+
     def _open_power_menu(self) -> None:
         """Confirm screen for safe Pi shutdown / reboot (kiosk has no desktop power UI)."""
         if self._power_ui_open:
@@ -7422,21 +7631,29 @@ class MidiToneApp:
             fg="#fbf1c7",
             bg="#111111",
         ).pack(side=tk.LEFT)
-        tk.Label(
+        self._saver_timeout_btn = self._mk_touch_btn(
             header,
-            text="safe shutdown for kiosk",
-            font=("DejaVu Sans", 12),
-            fg="#a89984",
-            bg="#111111",
-        ).pack(side=tk.RIGHT)
+            timeout_label(self._idle.timeout_sec),
+            self._cycle_screensaver_timeout,
+            bg="#3c3836",
+        )
+        self._saver_timeout_btn.configure(font=("DejaVu Sans", 10, "bold"), pady=8, padx=8)
+        self._saver_timeout_btn.pack(side=tk.RIGHT)
 
+        footer.columnconfigure(0, weight=1)
+        footer.columnconfigure(1, weight=1)
         self._mk_touch_btn(
             footer, "CANCEL", self._close_power_menu, bg="#504945"
-        ).pack(fill=tk.X, ipady=18)
+        ).grid(row=0, column=0, sticky="ew", padx=(0, 4), ipady=18)
+        self._mk_touch_btn(
+            footer, "SCREEN OFF", self._blank_screen_now, bg="#1d2021"
+        ).grid(row=0, column=1, sticky="ew", padx=(4, 0), ipady=18)
 
         tk.Label(
             body,
-            text="Shut down cleanly before unplugging. Reboot restarts into kiosk.",
+            text="Shut down cleanly before unplugging. Reboot restarts into kiosk. "
+            "SCREEN OFF blanks the TFT (tap to wake; playing MIDI will not). "
+            "While the UI is up it also pixel-shifts so bold chrome cannot ghost.",
             font=("DejaVu Sans", 13),
             fg="#ebdbb2",
             bg="#111111",
@@ -7536,6 +7753,11 @@ class MidiToneApp:
 
     def _on_close(self) -> None:
         self._stop.set()
+        self._cancel_screensaver_tick()
+        try:
+            self._hide_screensaver()
+        except Exception:
+            pass
         try:
             self._seq.stop()
         except Exception:

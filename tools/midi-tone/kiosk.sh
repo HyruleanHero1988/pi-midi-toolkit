@@ -32,7 +32,8 @@ done
 LOG=/tmp/midi-tone-kiosk.log
 echo "==== midi-tone kiosk $(date -Is) pid=$$ display=$DISPLAY ====" >>"$LOG"
 
-# Disable screen blanking / DPMS if xset exists
+# X screensaver / DPMS stays off so LightDM never races the app. midi-tone
+# blanks the TFT itself after idle (burn-in / image-retention guard).
 if command -v xset >/dev/null 2>&1; then
   xset s off >/dev/null 2>&1 || true
   xset -dpms >/dev/null 2>&1 || true

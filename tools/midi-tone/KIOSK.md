@@ -233,7 +233,7 @@ Logs: `/tmp/midi-tone-kiosk.log`, `/tmp/midi-tone.log`.
 | Symptom | Likely cause | Fix |
 | --- | --- | --- |
 | Boots to **gray Pi desktop** | LightDM still on `LXDE-pi-x` | Re-run `./install-kiosk.sh --boot-only` and confirm **main** `lightdm.conf` sessions; reboot |
-| Blank / solid dark screen, process running | Duplicate app instances or WM fight | `pkill -f midi_tone.py`; check a single `kiosk.sh`; reboot once |
+| Blank / solid dark screen, process running | Idle burn-in guard, or duplicate app instances | Tap the panel (MIDI will not wake it); `pkill -f midi_tone.py`; check a single `kiosk.sh`; reboot once |
 | `couldn't connect to display ":0"` | X/LightDM not up yet or crashed | `systemctl status lightdm`; `sudo systemctl start lightdm` |
 | POWER shut down fails | Missing sudoers | Re-run `install-kiosk.sh` (writes `/etc/sudoers.d/midi-tone-power`) |
 | No sound | HDMI vs jack / mute | `./fix-audio-headphones.sh`; check `alsamixer` |
