@@ -1,0 +1,23 @@
+[Unit]
+Description=pi-midi-toolkit jambox audio + sequencer engine
+After=sound.target multi-user.target
+
+[Service]
+Type=simple
+User=pi
+Group=pi
+WorkingDirectory=/home/pi/pi-midi-toolkit
+# The kiosk UI connects to the control socket; it never renders audio itself.
+ExecStart=/home/pi/pi-midi-toolkit/bin/jambox-engine run \
+  --midi-in MPK \
+  --control /tmp/jambox.sock \
+  --rt
+Restart=on-failure
+RestartSec=2
+# Soft realtime when the kernel allows it (see deploy/setup-pi.sh limits.d).
+LimitRTPRIO=95
+LimitMEMLOCK=infinity
+Environment=RUST_LOG=info
+
+[Install]
+WantedBy=multi-user.target

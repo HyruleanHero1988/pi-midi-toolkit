@@ -13,6 +13,7 @@ import json
 import math
 import pathlib
 import queue
+import re
 import shutil
 import sys
 import threading
@@ -41,6 +42,15 @@ try:
 except ImportError as e:
     sys.exit("mido required: pip install mido python-rtmidi\n" + str(e))
 
+from sequencer import (  # noqa: E402  (local module, imported after the hard deps)
+    SEQ_EMPTY,
+    SEQ_OVERDUB,
+    SEQ_REC_BACKBONE,
+    LoopEvent,
+    OverdubSequencer,
+    trim_loop_take,
+)
+
 
 SAMPLE_RATE = 44100
 BLOCKSIZE = 1024
@@ -55,6 +65,7 @@ DRUM_CHANNEL = 9
 NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
 HERE = pathlib.Path(__file__).resolve().parent
 DEFAULT_WAVETABLE_DIR = HERE / "wavetables"
+USER_WAVETABLES_DIR = HERE / "user-wavetables"
 SETTINGS_PATH = HERE / "settings.json"
 PRESETS_DIR = HERE / "user-presets"
 PRESET_SLOTS = 8
@@ -78,6 +89,8 @@ PHRASE_GRID_CELLS = (
 )
 MAX_PHRASE_PLAYERS = 8
 SETTINGS_VERSION = 1
+BUILTIN_VOICE_NAMES = ("sine", "square", "saw", "triangle")
+VOICE_NAME_MAX = 24
 
 
 def list_song_files(directory: pathlib.Path = SONGS_DIR) -> List[pathlib.Path]:
@@ -130,6 +143,9 @@ CC_ATTACK = 72         # Knob 3 — amp attack
 CC_RELEASE = 73        # Knob 4 — amp release
 CC_VIB_DEPTH = 74      # Knob 5 — vibrato depth
 CC_VIB_RATE = 75       # Knob 6 — vibrato rate
+# Touch steps for the VOICES-screen vibrato pair
+VIB_DEPTH_STEP = 0.10  # semitones
+VIB_RATE_STEP = 0.5    # Hz
 CC_LEVEL = 77          # Knob 8 — output level
 # Knob 7 (CC76) reserved / free for later
 KNOB_CCS = {CC_MORPH, CC_TONE, CC_ATTACK, CC_RELEASE, CC_VIB_DEPTH, CC_VIB_RATE, CC_LEVEL}
@@ -149,8 +165,9 @@ FX_REVERB_MAX_SEC = 0.55
 
 class MixBusFx:
     """
-    Cheap jambox mix-bus FX for Pi 2: drive → echo → short multi-tap tank.
-    All params 0..1; process() mutates `buf` in place.
+    Per-instrument FX insert (one instance per wavetable voice or drum model).
+    drive → echo → short multi-tap tank. Params 0..1; process() mutates buf.
+    Not a global master-bus effect — melody and drums keep separate slots.
     """
 
     def __init__(self, sample_rate: int) -> None:
@@ -327,22 +344,149 @@ def _resample_cycle(x: np.ndarray, n: int = TABLE_SIZE) -> np.ndarray:
     return (y / peak) * np.float32(TABLE_PEAK)
 
 
-def load_wavetables(directory: pathlib.Path) -> Dict[str, np.ndarray]:
-    """Built-ins first, then any *.wav in directory (stem = voice name)."""
+def load_wavetables(*directories: pathlib.Path) -> Dict[str, np.ndarray]:
+    """Built-ins first, then *.wav from each directory (later dirs override)."""
     tables = _builtin_tables()
-    if directory.is_dir():
-        for path in sorted(directory.glob("*.wav")):
+    for directory in directories:
+        if not directory or not pathlib.Path(directory).is_dir():
+            continue
+        for path in sorted(pathlib.Path(directory).glob("*.wav")):
             name = path.stem.lower().strip()
             if not name:
                 continue
             # Keep core procedural oscillators; files can add/replace everything else
-            if name in ("sine", "square", "saw", "triangle"):
+            if name in BUILTIN_VOICE_NAMES:
                 continue
             try:
                 tables[name] = _resample_cycle(_load_wav_mono(path))
             except Exception as exc:
                 print(f"wavetable skip {path.name}: {exc}", flush=True)
     return tables
+
+
+def sanitize_voice_name(raw: str) -> str:
+    """Lowercase [a-z0-9_], max VOICE_NAME_MAX — safe for filenames + UI."""
+    s = re.sub(r"[^a-z0-9_]+", "_", str(raw or "").lower().strip())
+    s = re.sub(r"_+", "_", s).strip("_")
+    if not s:
+        s = "voice"
+    return s[:VOICE_NAME_MAX]
+
+
+def suggest_voice_name(name_a: str, name_b: str, morph: float) -> str:
+    a = sanitize_voice_name(name_a) or "a"
+    b = sanitize_voice_name(name_b) or "b"
+    pct = int(round(max(0.0, min(1.0, float(morph))) * 100.0))
+    if a == b:
+        return sanitize_voice_name(f"{a}_saved")
+    return sanitize_voice_name(f"{a}_{b}_{pct}")
+
+
+def unique_voice_name(base: str, existing: List[str]) -> str:
+    key = sanitize_voice_name(base)
+    if key not in BUILTIN_VOICE_NAMES and key not in existing:
+        return key
+    for n in range(2, 1000):
+        suffix = f"_{n}"
+        stem = key[: max(1, VOICE_NAME_MAX - len(suffix))]
+        cand = f"{stem}{suffix}"
+        if cand not in BUILTIN_VOICE_NAMES and cand not in existing:
+            return cand
+    return sanitize_voice_name(f"voice_{int(time.time()) % 100000}")
+
+
+def write_wavetable_wav(
+    path: pathlib.Path, table: np.ndarray, *, sample_rate: int = 44100
+) -> None:
+    """Write a mono 16-bit single-cycle WAV (loadable by load_wavetables)."""
+    y = np.asarray(table, dtype=np.float32).reshape(-1)
+    if y.shape[0] != TABLE_SIZE:
+        y = _resample_cycle(y)
+    peak = float(np.max(np.abs(y))) or 1.0
+    pcm = np.clip(y / peak * 32767.0, -32768, 32767).astype("<i2")
+    path = pathlib.Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with wave.open(str(path), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(int(sample_rate))
+        w.writeframes(pcm.tobytes())
+
+
+# Time-domain FX that cannot bake into a single cycle — stored beside the .wav
+VOICE_FX_SIDECAR_KEYS = (
+    "fx_delay_time",
+    "fx_delay_fb",
+    "fx_delay_mix",
+    "fx_reverb_size",
+    "fx_reverb_mix",
+)
+
+
+def voice_fx_sidecar_path(waves_dir: pathlib.Path, name: str) -> pathlib.Path:
+    return pathlib.Path(waves_dir) / f"{sanitize_voice_name(name)}.fx.json"
+
+
+def write_voice_fx_sidecar(path: pathlib.Path, fx: Dict[str, float]) -> None:
+    """Tiny JSON next to a user wavetable: delay/reverb mixes (+ time/fb/size)."""
+    out = {"version": 1}
+    for key in VOICE_FX_SIDECAR_KEYS:
+        try:
+            out[key] = max(0.0, min(1.0, float(fx.get(key, 0.0))))
+        except (TypeError, ValueError):
+            out[key] = 0.0
+    path = pathlib.Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(out, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def load_voice_fx_sidecar(path: pathlib.Path) -> Optional[Dict[str, float]]:
+    path = pathlib.Path(path)
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    out: Dict[str, float] = {}
+    for key in VOICE_FX_SIDECAR_KEYS:
+        if key not in data:
+            continue
+        try:
+            out[key] = max(0.0, min(1.0, float(data[key])))
+        except (TypeError, ValueError):
+            continue
+    return out or None
+
+
+def load_user_voice_fx_map(directory: pathlib.Path) -> Dict[str, Dict[str, float]]:
+    """voice name → delay/reverb sidecar for user-wavetables/."""
+    result: Dict[str, Dict[str, float]] = {}
+    directory = pathlib.Path(directory)
+    if not directory.is_dir():
+        return result
+    for path in sorted(directory.glob("*.fx.json")):
+        name = sanitize_voice_name(path.name[: -len(".fx.json")])
+        if not name or name in BUILTIN_VOICE_NAMES:
+            continue
+        snap = load_voice_fx_sidecar(path)
+        if snap:
+            result[name] = snap
+    return result
+
+
+def circular_moving_average(x: np.ndarray, win: int) -> np.ndarray:
+    """Tone-bake helper: low-pass a periodic single cycle."""
+    n = int(x.shape[0])
+    win = max(1, int(win))
+    if win <= 1 or n == 0:
+        return np.asarray(x, dtype=np.float32)
+    k = np.ones(win, dtype=np.float32) / np.float32(win)
+    tiled = np.tile(np.asarray(x, dtype=np.float32), 3)
+    y = np.convolve(tiled, k, mode="same")
+    return y[n : 2 * n].astype(np.float32, copy=False)
 
 
 def midi_note_name(note: int) -> str:
@@ -677,6 +821,11 @@ class Voice:
     age: int = 0  # bump on each note_on for steal ordering
     # None → live global morph table; ndarray → locked pad timbre (multi-timbre)
     timbre: Optional[np.ndarray] = None
+    # FX slot key: wavetable name for live morph endpoint, or locked pad morph_a
+    fx_name: Optional[str] = None
+    # None → live global vibrato; (depth semitones, Hz, amount) → phrase-pad bake
+    vib: Optional[Tuple[float, float, float]] = None
+    vib_phase: float = 0.0
 
 
 @dataclass
@@ -725,6 +874,9 @@ class SineEngine:
         self._bend_semitones = 0.0
         self._bend_range = 2.0
         self._mod = 0.0
+        # Screen-set vibrato amount. The mod wheel still works; whichever is
+        # higher wins, so touch control doesn't need a wheel to be audible.
+        self._vib_always = 0.0
         self._vib_hz = 5.0
         self._vib_depth_semis = 0.5
         self._vib_phase = 0.0
@@ -757,8 +909,22 @@ class SineEngine:
         self._drum_noise = 0.55
         self._drum_tone = 0.60
         self._drum_mode = False  # if True, knobs 1–4 edit drums instead of morph/tone
-        self._fx_mode = False  # if True, knobs edit mix-bus FX
-        self._fx = MixBusFx(self.sample_rate)
+        self._fx_mode = False  # if True, knobs edit per-voice / per-drum insert FX
+        self._bus_fx_mode = False  # if True, knobs edit the master mix-bus FX
+        # Per wavetable name / per drum model — not a global master bus
+        self._voice_fx: Dict[str, MixBusFx] = {}
+        self._drum_fx: Dict[str, MixBusFx] = {}
+        # Shared wet on the whole kit (after per-model inserts, before keys sum)
+        self._drum_group_fx = MixBusFx(self.sample_rate)
+        # Optional global wet after keys+drums are summed (separate from inserts)
+        self._bus_fx = MixBusFx(self.sample_rate)
+        self._fx_edit_kind = "voice"  # voice | drum | drums | bus
+        self._fx_edit_drum = "kick"
+        self._key_bus = np.zeros(BLOCKSIZE * 2, dtype=np.float32)
+        self._drum_bus = np.zeros(BLOCKSIZE * 2, dtype=np.float32)
+        self._fx_tmp = np.zeros(BLOCKSIZE * 2, dtype=np.float32)
+        # Reused per-callback accumulators keyed by wavetable / drum model name
+        self._voice_fx_buckets: Dict[str, np.ndarray] = {}
         self._rebuild_morph_table_unlocked()
 
     @property
@@ -824,10 +990,23 @@ class SineEngine:
 
         # Keep FX buffers matched to the actual device rate
         with self._lock:
-            if self._fx.sample_rate != self.sample_rate:
-                snap = self._fx.snapshot()
-                self._fx = MixBusFx(self.sample_rate)
-                self._fx.apply_snapshot(snap)
+            need = (
+                self._bus_fx.sample_rate != self.sample_rate
+                or self._drum_group_fx.sample_rate != self.sample_rate
+                or any(
+                    fx.sample_rate != self.sample_rate
+                    for fx in list(self._voice_fx.values()) + list(self._drum_fx.values())
+                )
+            )
+            if need:
+                self._bus_fx = self._clone_fx(self._bus_fx, self.sample_rate)
+                self._drum_group_fx = self._clone_fx(self._drum_group_fx, self.sample_rate)
+                self._voice_fx = {
+                    k: self._clone_fx(v, self.sample_rate) for k, v in self._voice_fx.items()
+                }
+                self._drum_fx = {
+                    k: self._clone_fx(v, self.sample_rate) for k, v in self._drum_fx.items()
+                }
 
         kwargs = dict(
             samplerate=self.sample_rate,
@@ -881,6 +1060,8 @@ class SineEngine:
         velocity: int,
         *,
         timbre: Optional[np.ndarray] = None,
+        fx_name: Optional[str] = None,
+        vib: Optional[Tuple[float, float, float]] = None,
     ) -> None:
         if velocity <= 0:
             self.note_off(channel, note)
@@ -894,6 +1075,13 @@ class SineEngine:
         key = (ch, n)
         target = vel * VOICE_AMP
         with self._lock:
+            if fx_name is None:
+                # Live keys: FX follows the nearer morph endpoint voice name
+                if self._morph_dirty:
+                    self._rebuild_morph_table_unlocked()
+                ia, ib = self._morph_a, self._morph_b
+                near = ia if self._morph < 0.5 else ib
+                fx_name = self._voice_names[near]
             self._note_serial += 1
             serial = self._note_serial
             existing = self._voices.get(key)
@@ -907,6 +1095,9 @@ class SineEngine:
                 existing.target_amp = target
                 existing.age = serial
                 existing.timbre = timbre
+                existing.fx_name = fx_name
+                existing.vib = vib
+                existing.vib_phase = 0.0
                 return
             if len(self._voices) >= self.max_voices:
                 drop = self._steal_key()
@@ -915,11 +1106,14 @@ class SineEngine:
             self._voices[key] = Voice(
                 note=n,
                 velocity=vel,
+                phase=0.0,
+                releasing=False,
                 amp=0.0,
                 target_amp=target,
-                releasing=False,
                 age=serial,
                 timbre=timbre,
+                fx_name=fx_name,
+                vib=vib,
             )
 
     def _drum_note_on(self, note: int, velocity: float) -> None:
@@ -1035,6 +1229,11 @@ class SineEngine:
         with self._lock:
             self._level = max(0.0, min(1.0, float(value)))
 
+    def level(self) -> float:
+        """Master level 0..1 — phrase pads bake this in when a voice is LOCKED."""
+        with self._lock:
+            return float(self._level)
+
     def set_attack(self, value: float) -> None:
         if value > 1.0:
             value = value / 127.0
@@ -1058,6 +1257,37 @@ class SineEngine:
         with self._lock:
             # 0..2 semitones
             self._vib_depth_semis = max(0.0, min(1.0, float(value))) * 2.0
+
+    VIB_DEPTH_MAX = 2.0  # semitones — matches the knob's top end
+    VIB_HZ_MIN = 1.0
+    VIB_HZ_MAX = 9.0
+
+    def vib_state(self) -> Tuple[float, float, float]:
+        """(depth semitones, rate Hz, always-on amount 0..1) for the touch UI."""
+        with self._lock:
+            return (
+                float(self._vib_depth_semis),
+                float(self._vib_hz),
+                float(self._vib_always),
+            )
+
+    def set_vib_always(self, amount: float) -> float:
+        """0 = mod wheel gates vibrato (as before); 1 = always on at set depth."""
+        with self._lock:
+            self._vib_always = max(0.0, min(1.0, float(amount)))
+            return float(self._vib_always)
+
+    def nudge_vib_depth(self, delta_semis: float) -> float:
+        with self._lock:
+            depth = self._vib_depth_semis + float(delta_semis)
+            self._vib_depth_semis = max(0.0, min(self.VIB_DEPTH_MAX, depth))
+            return float(self._vib_depth_semis)
+
+    def nudge_vib_rate(self, delta_hz: float) -> float:
+        with self._lock:
+            hz = self._vib_hz + float(delta_hz)
+            self._vib_hz = max(self.VIB_HZ_MIN, min(self.VIB_HZ_MAX, hz))
+            return float(self._vib_hz)
 
     def set_vib_rate(self, value: float) -> None:
         if value > 1.0:
@@ -1090,27 +1320,33 @@ class SineEngine:
     def drum_knob_focus(self) -> bool:
         """True only in explicit drum mode (DRUM MODE button)."""
         with self._lock:
-            return self._drum_mode and not self._fx_mode
+            return self._drum_mode and not self._fx_mode and not self._bus_fx_mode
 
     def set_drum_mode(self, enabled: bool) -> None:
         with self._lock:
             self._drum_mode = bool(enabled)
             if self._drum_mode:
                 self._fx_mode = False
+                self._bus_fx_mode = False
 
     def drum_mode(self) -> bool:
         with self._lock:
             return self._drum_mode
 
     def fx_knob_focus(self) -> bool:
+        """True when knobs edit insert FX or master bus FX."""
         with self._lock:
-            return self._fx_mode
+            return self._fx_mode or self._bus_fx_mode
 
     def set_fx_mode(self, enabled: bool) -> None:
+        """Per-voice / per-drum insert FX edit mode."""
         with self._lock:
             self._fx_mode = bool(enabled)
             if self._fx_mode:
                 self._drum_mode = False
+                self._bus_fx_mode = False
+                if self._fx_edit_kind == "bus":
+                    self._fx_edit_kind = "voice"
 
     def fx_mode(self) -> bool:
         with self._lock:
@@ -1122,6 +1358,25 @@ class SineEngine:
         self.set_fx_mode(nxt)
         return nxt
 
+    def set_bus_fx_mode(self, enabled: bool) -> None:
+        """Master mix-bus FX edit mode (whole keys+drums sum)."""
+        with self._lock:
+            self._bus_fx_mode = bool(enabled)
+            if self._bus_fx_mode:
+                self._drum_mode = False
+                self._fx_mode = False
+                self._fx_edit_kind = "bus"
+
+    def bus_fx_mode(self) -> bool:
+        with self._lock:
+            return self._bus_fx_mode
+
+    def toggle_bus_fx_mode(self) -> bool:
+        with self._lock:
+            nxt = not self._bus_fx_mode
+        self.set_bus_fx_mode(nxt)
+        return nxt
+
     # Back-compat aliases used by older call sites / UI helpers
     def set_drum_lock(self, locked: bool) -> None:
         self.set_drum_mode(locked)
@@ -1129,41 +1384,118 @@ class SineEngine:
     def drum_lock(self) -> bool:
         return self.drum_mode()
 
-    def set_fx_drive(self, value: float) -> None:
+    @staticmethod
+    def _clone_fx(src: MixBusFx, sample_rate: int) -> MixBusFx:
+        out = MixBusFx(sample_rate)
+        out.apply_snapshot(src.snapshot())
+        return out
+
+    def _ensure_voice_fx_unlocked(self, name: str) -> MixBusFx:
+        key = str(name or "sine").lower().strip() or "sine"
+        fx = self._voice_fx.get(key)
+        if fx is None:
+            fx = MixBusFx(self.sample_rate)
+            self._voice_fx[key] = fx
+        return fx
+
+    def _ensure_drum_fx_unlocked(self, model: str) -> MixBusFx:
+        key = str(model or "kick").lower().strip() or "kick"
+        fx = self._drum_fx.get(key)
+        if fx is None:
+            fx = MixBusFx(self.sample_rate)
+            self._drum_fx[key] = fx
+        return fx
+
+    def set_fx_edit_voice(self, name: Optional[str] = None) -> None:
+        """Point insert-FX knobs at a wavetable slot (default: nearer morph endpoint)."""
+        with self._lock:
+            self._fx_edit_kind = "voice"
+            if name:
+                self._ensure_voice_fx_unlocked(str(name))
+            else:
+                if self._morph_dirty:
+                    self._rebuild_morph_table_unlocked()
+                near = self._morph_a if self._morph < 0.5 else self._morph_b
+                self._ensure_voice_fx_unlocked(self._voice_names[near])
+
+    def set_fx_edit_drum(self, model: str) -> None:
+        """Point insert-FX knobs at a drum model insert (kick, snare, …)."""
+        with self._lock:
+            self._fx_edit_kind = "drum"
+            self._fx_edit_drum = str(model or "kick")
+            self._ensure_drum_fx_unlocked(self._fx_edit_drum)
+
+    def set_fx_edit_drums(self) -> None:
+        """Point insert-FX knobs at the shared all-drums group bus."""
+        with self._lock:
+            self._fx_edit_kind = "drums"
+
+    def set_fx_edit_bus(self) -> None:
+        """Point knobs at the master mix-bus FX."""
+        with self._lock:
+            self._fx_edit_kind = "bus"
+
+    def fx_edit_kind(self) -> str:
+        with self._lock:
+            if self._bus_fx_mode:
+                return "bus"
+            return str(self._fx_edit_kind)
+
+    def fx_edit_label(self) -> str:
+        with self._lock:
+            if self._fx_edit_kind == "bus" or self._bus_fx_mode:
+                return "bus"
+            if self._fx_edit_kind == "drums":
+                return "drums"
+            if self._fx_edit_kind == "drum":
+                return f"drum:{self._fx_edit_drum}"
+            # Prefer nearer morph endpoint as the voice being sculpted
+            if self._morph_dirty:
+                self._rebuild_morph_table_unlocked()
+            near = self._morph_a if self._morph < 0.5 else self._morph_b
+            return f"voice:{self._voice_names[near]}"
+
+    def _fx_edit_slot_unlocked(self) -> MixBusFx:
+        if self._fx_edit_kind == "bus" or self._bus_fx_mode:
+            return self._bus_fx
+        if self._fx_edit_kind == "drums":
+            return self._drum_group_fx
+        if self._fx_edit_kind == "drum":
+            return self._ensure_drum_fx_unlocked(self._fx_edit_drum)
+        if self._morph_dirty:
+            self._rebuild_morph_table_unlocked()
+        near = self._morph_a if self._morph < 0.5 else self._morph_b
+        return self._ensure_voice_fx_unlocked(self._voice_names[near])
+
+    def _set_fx_param(self, attr: str, value: float) -> None:
         if value > 1.0:
             value = value / 127.0
+        value = max(0.0, min(1.0, float(value)))
         with self._lock:
-            self._fx.drive = max(0.0, min(1.0, float(value)))
+            slot = self._fx_edit_slot_unlocked()
+            setattr(slot, attr, value)
+
+    def set_fx_drive(self, value: float) -> None:
+        self._set_fx_param("drive", value)
 
     def set_fx_delay_time(self, value: float) -> None:
-        if value > 1.0:
-            value = value / 127.0
-        with self._lock:
-            self._fx.delay_time = max(0.0, min(1.0, float(value)))
+        self._set_fx_param("delay_time", value)
 
     def set_fx_delay_fb(self, value: float) -> None:
-        if value > 1.0:
-            value = value / 127.0
-        with self._lock:
-            self._fx.delay_fb = max(0.0, min(1.0, float(value)))
+        self._set_fx_param("delay_fb", value)
 
     def set_fx_delay_mix(self, value: float) -> None:
-        if value > 1.0:
-            value = value / 127.0
-        with self._lock:
-            self._fx.delay_mix = max(0.0, min(1.0, float(value)))
+        self._set_fx_param("delay_mix", value)
 
     def set_fx_reverb_size(self, value: float) -> None:
-        if value > 1.0:
-            value = value / 127.0
-        with self._lock:
-            self._fx.reverb_size = max(0.0, min(1.0, float(value)))
+        self._set_fx_param("reverb_size", value)
 
     def set_fx_reverb_mix(self, value: float) -> None:
-        if value > 1.0:
-            value = value / 127.0
+        self._set_fx_param("reverb_mix", value)
+
+    def fx_edit_snapshot(self) -> Dict[str, float]:
         with self._lock:
-            self._fx.reverb_mix = max(0.0, min(1.0, float(value)))
+            return self._fx_edit_slot_unlocked().snapshot()
 
     def set_drum_pitch(self, value: float) -> None:
         if value > 1.0:
@@ -1244,6 +1576,123 @@ class SineEngine:
                 self._rebuild_morph_table_unlocked()
             return np.copy(self._morph_table)
 
+    def bake_voice_cycle(
+        self, *, apply_drive: bool = True, apply_tone: bool = True
+    ) -> np.ndarray:
+        """
+        Freeze the live morph into a new single-cycle wavetable shape.
+
+        Bakes what can become wave shape:
+          - morph blend
+          - nearer voice's drive (waveshape)
+          - tone / brightness (static spectral shape on the cycle)
+
+        Delay and reverb are time-domain — they cannot live in one cycle and are
+        left as live FX (not written into the saved wave).
+        """
+        with self._lock:
+            if self._morph_dirty:
+                self._rebuild_morph_table_unlocked()
+            out = np.copy(self._morph_table)
+            near = self._morph_a if self._morph < 0.5 else self._morph_b
+            src_name = self._voice_names[near]
+
+            if apply_drive:
+                fx = self._voice_fx.get(src_name)
+                drive = float(fx.drive) if fx is not None else 0.0
+                if drive > 0.001:
+                    amount = 1.0 + drive * 12.0
+                    tmp = np.tanh(out * np.float32(amount))
+                    norm = math.tanh(amount) if amount > 1e-6 else 1.0
+                    out = (tmp * np.float32(1.0 / max(0.25, norm))).astype(np.float32)
+
+            if apply_tone:
+                tone = float(self._tone)
+                if tone < 0.999:
+                    win = max(1, int(round((1.0 - tone) * 48.0)))
+                    if win > 1:
+                        out = circular_moving_average(out, win)
+
+            peak = float(np.max(np.abs(out))) or 1.0
+            out = (out / np.float32(peak)) * np.float32(TABLE_PEAK)
+            return out
+
+    def current_voice_fx_source(self) -> str:
+        """Wavetable name whose insert FX is 'on' the current morph sound."""
+        with self._lock:
+            if self._morph_dirty:
+                self._rebuild_morph_table_unlocked()
+            near = self._morph_a if self._morph < 0.5 else self._morph_b
+            return self._voice_names[near]
+
+    def save_current_voice(self, name: str) -> Tuple[str, np.ndarray, Dict[str, float]]:
+        """
+        Bake morph + drive + tone into a new wavetable and select it (A=B).
+
+        Returns (key, cycle, delay/reverb sidecar). Drive stays 0 on the new
+        insert (already in the wave); delay/reverb ride along as numbers.
+        """
+        source = self.current_voice_fx_source()
+        with self._lock:
+            src_fx = self._ensure_voice_fx_unlocked(source).snapshot()
+        sidecar = {k: float(src_fx.get(k, 0.0)) for k in VOICE_FX_SIDECAR_KEYS}
+        cycle = self.bake_voice_cycle(apply_drive=True, apply_tone=True)
+        key = self.add_wavetable(name, cycle)
+        with self._lock:
+            fx = self._ensure_voice_fx_unlocked(key)
+            fx.drive = 0.0  # baked into wave
+            fx.apply_snapshot(sidecar)
+            self._fx_edit_kind = "voice"
+        return key, cycle, sidecar
+
+    def apply_voice_fx_sidecar(self, name: str, fx: Dict[str, float]) -> None:
+        """Restore delay/reverb for a user voice; keep drive at 0 (in the wave)."""
+        key = sanitize_voice_name(name)
+        if not key or key in BUILTIN_VOICE_NAMES:
+            return
+        with self._lock:
+            slot = self._ensure_voice_fx_unlocked(key)
+            slot.drive = 0.0
+            slot.apply_snapshot(fx)
+
+    def add_wavetable(self, name: str, table: np.ndarray) -> str:
+        """
+        Hot-register a single-cycle table under `name` and select it as the
+        current pure morph voice (A=B, morph=0).
+        """
+        key = sanitize_voice_name(name)
+        if key in BUILTIN_VOICE_NAMES:
+            raise ValueError(f"cannot replace built-in voice '{key}'")
+        arr = np.asarray(table, dtype=np.float32).reshape(-1)
+        if arr.shape[0] != TABLE_SIZE:
+            arr = _resample_cycle(arr)
+        else:
+            peak = float(np.max(np.abs(arr))) or 1.0
+            arr = (arr / np.float32(peak)) * np.float32(TABLE_PEAK)
+        with self._lock:
+            if key in self._tables:
+                idx = self._voice_names.index(key)
+                self._tables[key] = arr
+                self._table_list[idx] = arr
+            else:
+                self._tables[key] = arr
+                self._voice_names.append(key)
+                self._table_list.append(arr)
+            idx = self._voice_names.index(key)
+            self._morph_a = idx
+            self._morph_b = idx
+            self._morph = 0.0
+            self._waveform = key
+            self._morph_dirty = True
+            self._rebuild_morph_table_unlocked()
+        return key
+
+    def suggested_save_voice_name(self) -> str:
+        a, b, blend = self.morph_neighbors()
+        return unique_voice_name(
+            suggest_voice_name(a, b, blend), self.voice_names
+        )
+
     def drum_macros(self) -> Tuple[float, float, float, float]:
         """pitch, decay(stretch), noise, tone — current drum-edit macros."""
         with self._lock:
@@ -1268,7 +1717,7 @@ class SineEngine:
 
     def modulation_state(self) -> Dict[str, float]:
         with self._lock:
-            fx = self._fx.snapshot()
+            fx = self._fx_edit_slot_unlocked().snapshot()
             return {
                 "bend": self._bend_semitones,
                 "mod": self._mod,
@@ -1279,19 +1728,21 @@ class SineEngine:
                 "release": self._release_sec,
                 "vib_hz": self._vib_hz,
                 "vib_depth": self._vib_depth_semis,
+                "vib_always": self._vib_always,
                 "drum_pitch": self._drum_pitch,
                 "drum_decay": self._drum_decay,
                 "drum_noise": self._drum_noise,
                 "drum_tone": self._drum_tone,
                 "drum_mode": 1.0 if self._drum_mode else 0.0,
                 "fx_mode": 1.0 if self._fx_mode else 0.0,
+                "bus_fx_mode": 1.0 if self._bus_fx_mode else 0.0,
                 **fx,
             }
 
     def snapshot_settings(self) -> Dict[str, Any]:
         """Serialize synth sound settings for JSON presets / session restore."""
         with self._lock:
-            out = {
+            out: Dict[str, Any] = {
                 "morph_a": self._voice_names[self._morph_a],
                 "morph_b": self._voice_names[self._morph_b],
                 "morph": float(self._morph),
@@ -1301,13 +1752,18 @@ class SineEngine:
                 "release_sec": float(self._release_sec),
                 "vib_hz": float(self._vib_hz),
                 "vib_depth": float(self._vib_depth_semis),
+                "vib_always": float(self._vib_always),
                 "drum_pitch": float(self._drum_pitch),
                 "drum_decay": float(self._drum_decay),
                 "drum_noise": float(self._drum_noise),
                 "drum_tone": float(self._drum_tone),
-                # drum_mode / fx_mode are session UI toggles only — never persist
+                # Per-instrument inserts + kit group + optional master bus
+                "voice_fx": {k: v.snapshot() for k, v in self._voice_fx.items()},
+                "drum_fx": {k: v.snapshot() for k, v in self._drum_fx.items()},
+                "drum_group_fx": self._drum_group_fx.snapshot(),
+                "bus_fx": self._bus_fx.snapshot(),
+                # drum_mode / fx_mode / bus_fx_mode are session UI toggles only
             }
-            out.update(self._fx.snapshot())
             return out
 
     def apply_settings(self, data: Dict[str, Any]) -> None:
@@ -1334,6 +1790,8 @@ class SineEngine:
                 self._vib_hz = max(0.1, min(20.0, float(data["vib_hz"])))
             if "vib_depth" in data:
                 self._vib_depth_semis = max(0.0, min(4.0, float(data["vib_depth"])))
+            if "vib_always" in data:
+                self._vib_always = max(0.0, min(1.0, float(data["vib_always"])))
             if "drum_pitch" in data:
                 self._drum_pitch = max(0.0, min(1.0, float(data["drum_pitch"])))
             if "drum_decay" in data:
@@ -1342,10 +1800,32 @@ class SineEngine:
                 self._drum_noise = max(0.0, min(1.0, float(data["drum_noise"])))
             if "drum_tone" in data:
                 self._drum_tone = max(0.0, min(1.0, float(data["drum_tone"])))
-            self._fx.apply_snapshot(data)
+            # Per-instrument inserts
+            vfx = data.get("voice_fx")
+            if isinstance(vfx, dict):
+                for name, snap in vfx.items():
+                    if isinstance(snap, dict):
+                        self._ensure_voice_fx_unlocked(str(name)).apply_snapshot(snap)
+            dfx = data.get("drum_fx")
+            if isinstance(dfx, dict):
+                for model, snap in dfx.items():
+                    if isinstance(snap, dict):
+                        self._ensure_drum_fx_unlocked(str(model)).apply_snapshot(snap)
+            dgfx = data.get("drum_group_fx")
+            if isinstance(dgfx, dict):
+                self._drum_group_fx.apply_snapshot(dgfx)
+            # Master bus FX (explicit map, or legacy flat fx_* when no maps existed)
+            bfx = data.get("bus_fx")
+            if isinstance(bfx, dict):
+                self._bus_fx.apply_snapshot(bfx)
+            elif any(k.startswith("fx_") for k in data.keys()) and not isinstance(vfx, dict):
+                # Early mix-bus experiment stored flat fx_* on the master
+                self._bus_fx.apply_snapshot(data)
             # Modes are session-only; always restore knobs to morph
             self._drum_mode = False
             self._fx_mode = False
+            self._bus_fx_mode = False
+            self._fx_edit_kind = "voice"
             self._morph_dirty = True
             self._rebuild_morph_table_unlocked()
 
@@ -1371,7 +1851,8 @@ class SineEngine:
             items = list(self._voices.items())
             drum_hits = list(self._drums.values())
             bend = self._bend_semitones
-            mod = self._mod
+            # Wheel or screen — whichever asks for more vibrato
+            mod = max(self._mod, self._vib_always)
             vib_hz = self._vib_hz
             vib_depth = self._vib_depth_semis
             table = self._morph_table
@@ -1394,11 +1875,36 @@ class SineEngine:
             if self._vib_phase > 2.0 * math.pi:
                 self._vib_phase %= 2.0 * math.pi
             vib_semis = vib_depth * mod * math.sin(self._vib_phase)
+        block_turns = frames / sr
 
+        if frames > self._key_bus.shape[0]:
+            self._key_bus = np.zeros(frames, dtype=np.float32)
+            self._drum_bus = np.zeros(frames, dtype=np.float32)
+            self._fx_tmp = np.zeros(frames, dtype=np.float32)
+        key_bus = self._key_bus[:frames]
+        drum_bus = self._drum_bus[:frames]
+        tmp = self._fx_tmp[:frames]
+        key_bus.fill(0.0)
+        drum_bus.fill(0.0)
+
+        # Group key voices by FX slot (wavetable / locked morph_a name)
+        groups: Dict[str, np.ndarray] = {}
         dead: List[Tuple[int, int]] = []
         denom = np.float32(max(frames - 1, 1))
         for key, v in items:
-            hz = midi_to_hz(v.note) * (2.0 ** ((bend + vib_semis) / 12.0))
+            if v.vib is None:
+                semis = vib_semis
+            else:
+                # Phrase pad with its own vibrato baked in at record time
+                v_depth, v_hz, v_amount = v.vib
+                if v_amount > 0.01 and v_depth > 0.001:
+                    v.vib_phase += 2.0 * math.pi * v_hz * block_turns
+                    if v.vib_phase > 2.0 * math.pi:
+                        v.vib_phase %= 2.0 * math.pi
+                    semis = v_depth * v_amount * math.sin(v.vib_phase)
+                else:
+                    semis = 0.0
+            hz = midi_to_hz(v.note) * (2.0 ** ((bend + semis) / 12.0))
             phase_inc = (hz * TABLE_SIZE) / sr
             np.add(v.phase, arange * np.float32(phase_inc), out=ph)
             # Linear interpolation (nicer for sampled AKWF cycles)
@@ -1425,15 +1931,33 @@ class SineEngine:
                 end_amp = start_amp
             np.multiply(arange, np.float32((end_amp - start_amp) / float(denom)), out=ramp)
             np.add(ramp, np.float32(start_amp), out=ramp)
-            buf += wave * ramp
+            np.multiply(wave, ramp, out=tmp)
+            fx_key = (v.fx_name or "sine").lower().strip() or "sine"
+            bucket = groups.get(fx_key)
+            if bucket is None:
+                pool = self._voice_fx_buckets.get(fx_key)
+                if pool is None or pool.shape[0] < frames:
+                    pool = np.zeros(frames, dtype=np.float32)
+                    self._voice_fx_buckets[fx_key] = pool
+                bucket = pool[:frames]
+                bucket.fill(0.0)
+                groups[fx_key] = bucket
+            bucket += tmp
             v.amp = float(end_amp)
             v.phase = float((v.phase + phase_inc * frames) % TABLE_SIZE)
             if v.releasing and v.amp < 0.0005:
                 dead.append(key)
 
-        # Procedural ch10 drums (Synsonics-ish) — mixed before key bus tone filter
+        # Apply per-wavetable FX, then sum onto key bus
+        with self._lock:
+            for fx_key, bucket in groups.items():
+                fx = self._ensure_voice_fx_unlocked(fx_key)
+                fx.process(bucket)
+                key_bus += bucket
+
+        # Procedural ch10 drums — per-model FX, then shared kit-group FX
         dead_drums = self._render_drums(
-            buf,
+            drum_bus,
             frames,
             sr,
             drum_hits,
@@ -1442,29 +1966,36 @@ class SineEngine:
             decay=drum_decay,
             noise_amt=drum_noise,
             tone=drum_tone,
+            apply_model_fx=True,
         )
+        if frames > 0:
+            with self._lock:
+                drum_group_fx = self._drum_group_fx
+            drum_group_fx.process(drum_bus)
 
-        # Cheap bus low-pass for "tone" knob (moving average). tone=1 → open.
+        # Tone filter on keys only (drums keep their own tone macro)
         if tone < 0.999 and frames > 0:
             win = max(1, int(round((1.0 - tone) * 48.0)))
             if win > 1:
                 kernel = np.ones(win, dtype=np.float32) / np.float32(win)
-                # Continue from last filter state so block edges don't click
                 pad_left = np.full(win - 1, self._filter_state, dtype=np.float32)
-                padded = np.concatenate([pad_left, buf])
+                padded = np.concatenate([pad_left, key_bus])
                 filtered = np.convolve(padded, kernel, mode="valid")
-                buf[:] = filtered[:frames]
-                self._filter_state = float(buf[-1])
+                key_bus[:] = filtered[:frames]
+                self._filter_state = float(key_bus[-1])
             else:
-                self._filter_state = float(buf[-1])
+                self._filter_state = float(key_bus[-1]) if frames else self._filter_state
         elif frames > 0:
-            self._filter_state = float(buf[-1])
+            self._filter_state = float(key_bus[-1])
 
-        # Mix-bus FX: drive → delay → reverb (before master level)
+        buf[:] = key_bus
+        buf += drum_bus
+
+        # Master mix-bus FX (optional global wet — separate from per-voice/per-drum inserts)
         if frames > 0:
             with self._lock:
-                fx = self._fx
-            fx.process(buf)
+                bus_fx = self._bus_fx
+            bus_fx.process(buf)
 
         if level < 0.999:
             buf *= np.float32(level)
@@ -1493,14 +2024,20 @@ class SineEngine:
         decay: float,
         noise_amt: float,
         tone: float,
+        apply_model_fx: bool = False,
     ) -> List[int]:
-        """Add analog-style drum hits into buf. Returns note keys that finished."""
+        """Add analog-style drum hits into buf. Returns note keys that finished.
+
+        When apply_model_fx is True, each drum *model* (kick, snare, …) runs
+        through its own MixBusFx insert before summing onto buf.
+        """
         dead: List[int] = []
         if not hits:
             return dead
         two_pi = 2.0 * math.pi
         inv_sr = 1.0 / sr
-        for hit in hits:
+
+        def _synth_hit(hit: DrumHit) -> Tuple[np.ndarray, float]:
             # Keep hit snapshot in sync so UI/debug stay honest; audio uses live macros
             hit.pitch = pitch
             hit.decay = decay
@@ -1534,275 +2071,33 @@ class SineEngine:
                 inv_sr=inv_sr,
             )
             hit.phase = new_phase
-            buf += audio * np.float32(DRUM_BUS_GAIN)
             hit.pos += frames
             if hit.pos > int(dur * sr) or float(np.max(np.abs(audio))) < 0.0002:
                 dead.append(hit.note)
-        return dead
+            return audio, dur
 
+        if not apply_model_fx:
+            for hit in hits:
+                audio, _dur = _synth_hit(hit)
+                buf += audio * np.float32(DRUM_BUS_GAIN)
+            return dead
 
-@dataclass
-class LoopEvent:
-    t: float  # seconds from record start
-    on: bool
-    channel: int
-    note: int
-    velocity: int
+        # Per drum *model* insert FX (kick ≠ snare ≠ hat, …).
+        by_model: Dict[str, List[DrumHit]] = {}
+        for hit in hits:
+            by_model.setdefault(str(hit.model), []).append(hit)
 
-
-def trim_loop_take(
-    events: List[LoopEvent],
-    *,
-    default_gap: float = 0.35,
-    min_gap: float = 0.05,
-    max_gap: float = 2.0,
-) -> Tuple[List[LoopEvent], float]:
-    """
-    Trim leading/trailing dead space from a free-timing take.
-
-    - Shift so the first note-on starts at t=0 (drop pre-roll before the groove).
-    - Trailing silence after the last note-on is capped to the largest gap
-      between consecutive note-ons (so STOP lag doesn't inflate the loop).
-    - Note-offs after the last hit are still kept; trail is measured from ons.
-    """
-    if not events:
-        return [], 0.0
-    ons = sorted(e.t for e in events if e.on)
-    if not ons:
-        # Degenerate: only note-offs — keep relative timing, short length
-        t0 = min(e.t for e in events)
-        shifted = [
-            LoopEvent(
-                t=max(0.0, e.t - t0),
-                on=e.on,
-                channel=e.channel,
-                note=e.note,
-                velocity=e.velocity,
-            )
-            for e in events
-        ]
-        length = max(e.t for e in shifted) + min_gap
-        return shifted, max(min_gap, length)
-
-    t0 = ons[0]
-    gaps = [ons[i + 1] - ons[i] for i in range(len(ons) - 1) if ons[i + 1] > ons[i]]
-    if gaps:
-        trail = max(min_gap, min(max_gap, max(gaps)))
-    else:
-        # Single hit: small default pad (not the whole time spent hitting STOP)
-        trail = max(min_gap, min(max_gap, default_gap))
-
-    last_on = ons[-1]
-    last_ev = max(e.t for e in events)
-    # Loop end from first hit: last onset + trail, but never cut off a later note-off
-    end_abs = max(last_on + trail, last_ev + 0.01)
-    length = max(min_gap, end_abs - t0)
-
-    shifted = [
-        LoopEvent(
-            t=max(0.0, e.t - t0),
-            on=e.on,
-            channel=e.channel,
-            note=e.note,
-            velocity=e.velocity,
-        )
-        for e in events
-        if e.t >= t0 - 1e-6
-    ]
-    # Drop events that fall past the trimmed end (shouldn't happen often)
-    shifted = [e for e in shifted if e.t <= length + 1e-6]
-    if not shifted:
-        return [], 0.0
-    return shifted, float(length)
-
-
-class MidiLooper:
-    """Simple free-timing MIDI note looper (record → play on repeat)."""
-
-    def __init__(
-        self,
-        engine: "SineEngine",
-        emit,  # callable matching event_q tuples: ("on",...) / ("off",...)
-    ) -> None:
-        self._engine = engine
-        self._emit = emit
-        self._lock = threading.Lock()
-        self._events: List[LoopEvent] = []
-        self._recording = False
-        self._playing = False
-        self._rec_t0 = 0.0
-        self._loop_len = 0.0
-        self._stop_play = threading.Event()
-        self._thread: Optional[threading.Thread] = None
-        self._held: set[Tuple[int, int]] = set()
-
-    def is_recording(self) -> bool:
-        with self._lock:
-            return self._recording
-
-    def is_playing(self) -> bool:
-        with self._lock:
-            return self._playing
-
-    def event_count(self) -> int:
-        with self._lock:
-            return len(self._events)
-
-    def loop_length(self) -> float:
-        with self._lock:
-            return self._loop_len
-
-    def status(self) -> Dict[str, object]:
-        with self._lock:
-            return {
-                "recording": self._recording,
-                "playing": self._playing,
-                "events": len(self._events),
-                "length": self._loop_len,
-            }
-
-    def start_record(self) -> None:
-        self.stop_playback()
-        with self._lock:
-            self._events = []
-            self._recording = True
-            self._rec_t0 = time.monotonic()
-            self._loop_len = 0.0
-
-    def stop_record(self) -> None:
-        with self._lock:
-            if not self._recording:
-                return
-            self._recording = False
-            if self._events:
-                trimmed, length = trim_loop_take(list(self._events))
-                self._events = trimmed
-                self._loop_len = length
-            else:
-                self._loop_len = 0.0
-
-    def toggle_record(self) -> bool:
-        if self.is_recording():
-            self.stop_record()
-            return False
-        self.start_record()
-        return True
-
-    def record_note(self, on: bool, channel: int, note: int, velocity: int) -> None:
-        with self._lock:
-            if not self._recording:
-                return
-            t = time.monotonic() - self._rec_t0
-            self._events.append(
-                LoopEvent(
-                    t=t,
-                    on=on,
-                    channel=channel & 0x0F,
-                    note=note & 0x7F,
-                    velocity=max(1, min(127, int(velocity))) if on else 0,
-                )
-            )
-
-    def clear(self) -> None:
-        self.stop_playback()
-        with self._lock:
-            self._events = []
-            self._loop_len = 0.0
-            self._recording = False
-
-    def snapshot(self) -> Tuple[List[LoopEvent], float]:
-        with self._lock:
-            return list(self._events), float(self._loop_len)
-
-    def start_playback(self) -> bool:
-        if self.is_recording():
-            self.stop_record()
-        with self._lock:
-            if not self._events or self._loop_len <= 0.0:
-                return False
-            if self._playing:
-                return True
-            self._playing = True
-            self._stop_play.clear()
-        self._thread = threading.Thread(target=self._play_loop, daemon=True)
-        self._thread.start()
-        return True
-
-    def stop_playback(self) -> None:
-        self._stop_play.set()
-        thread = self._thread
-        if thread is not None and thread.is_alive():
-            thread.join(timeout=1.5)
-        self._thread = None
-        with self._lock:
-            self._playing = False
-        self._release_held()
-
-    def toggle_playback(self) -> bool:
-        if self.is_playing():
-            self.stop_playback()
-            return False
-        return self.start_playback()
-
-    def _release_held(self) -> None:
-        held = list(self._held)
-        self._held.clear()
-        for ch, note in held:
-            try:
-                self._engine.note_off(ch, note)
-            except Exception:
-                pass
-            try:
-                self._emit(("off", ch, note))
-            except Exception:
-                pass
-
-    def _play_loop(self) -> None:
-        while not self._stop_play.is_set():
+        scratch = self._fx_tmp[:frames]
+        for model, model_hits in by_model.items():
+            scratch.fill(0.0)
+            for hit in model_hits:
+                audio, _dur = _synth_hit(hit)
+                scratch += audio * np.float32(DRUM_BUS_GAIN)
             with self._lock:
-                events = list(self._events)
-                loop_len = self._loop_len
-            if not events or loop_len <= 0.0:
-                break
-            cycle_t0 = time.monotonic()
-            self._release_held()
-            for ev in events:
-                if self._stop_play.is_set():
-                    self._release_held()
-                    with self._lock:
-                        self._playing = False
-                    return
-                target = cycle_t0 + ev.t
-                while True:
-                    remain = target - time.monotonic()
-                    if remain <= 0:
-                        break
-                    if self._stop_play.wait(min(0.003, remain)):
-                        self._release_held()
-                        with self._lock:
-                            self._playing = False
-                        return
-                if ev.on:
-                    self._engine.note_on(ev.channel, ev.note, ev.velocity)
-                    self._held.add((ev.channel, ev.note))
-                    self._emit(("on", ev.channel, ev.note, ev.velocity))
-                else:
-                    self._engine.note_off(ev.channel, ev.note)
-                    self._held.discard((ev.channel, ev.note))
-                    self._emit(("off", ev.channel, ev.note))
-            end = cycle_t0 + loop_len
-            while True:
-                remain = end - time.monotonic()
-                if remain <= 0:
-                    break
-                if self._stop_play.wait(min(0.003, remain)):
-                    self._release_held()
-                    with self._lock:
-                        self._playing = False
-                    return
-            self._release_held()
-        with self._lock:
-            self._playing = False
+                fx = self._ensure_drum_fx_unlocked(model)
+            fx.process(scratch)
+            buf += scratch
+        return dead
 
 
 def phrase_pad_label(cell: int) -> str:
@@ -1828,6 +2123,25 @@ PHRASE_VOICE_LOCKED = "locked"
 PHRASE_VOICE_MODES = (PHRASE_VOICE_FOLLOW, PHRASE_VOICE_LOCKED)
 # out_channel -1 = use each event's recorded channel; 0..15 = force MIDI ch 1..16
 PHRASE_OUT_AS_RECORDED = -1
+PHRASE_GAIN_MIN = 0.10
+PHRASE_GAIN_MAX = 2.00
+PHRASE_GAIN_STEP = 0.10
+
+
+def clamp_phrase_gain(value: float) -> float:
+    try:
+        gain = float(value)
+    except (TypeError, ValueError):
+        return 1.0
+    if gain != gain:  # NaN
+        return 1.0
+    return max(PHRASE_GAIN_MIN, min(PHRASE_GAIN_MAX, gain))
+
+
+def scale_velocity(velocity: int, gain: float) -> int:
+    """Apply a pad's trim to one note. Never silences a hit that was recorded."""
+    scaled = int(round(max(0, int(velocity)) * clamp_phrase_gain(gain)))
+    return max(1, min(127, scaled))
 
 
 @dataclass
@@ -1841,6 +2155,27 @@ class PhraseCell:
     morph: float = 0.0
     out_channel: int = PHRASE_OUT_AS_RECORDED  # -1 or 0..15
     local_synth: bool = True  # False = MIDI-only (no soft-synth for this pad)
+    # Per-pad trim so a locked voice can sit under (or over) the rest of the mix.
+    # 1.0 = as recorded; LOCK bakes the master level here, VOL −/+ tunes it.
+    gain: float = 1.0
+    # Vibrato as it sounded while recording. False = follow the live rig.
+    vib_baked: bool = False
+    vib_depth: float = 0.0  # semitones
+    vib_rate: float = 5.0  # Hz
+    vib_amount: float = 0.0  # 0..1 (wheel or screen, whichever was asking)
+
+    def vib_tuple(self) -> Optional[Tuple[float, float, float]]:
+        """What to hand the engine for this pad's key notes."""
+        if not self.vib_baked:
+            return None
+        return (float(self.vib_depth), float(self.vib_rate), float(self.vib_amount))
+
+    def vib_label(self) -> str:
+        if not self.vib_baked:
+            return "live"
+        if self.vib_amount <= 0.01 or self.vib_depth <= 0.001:
+            return "none"
+        return f"{self.vib_depth:.1f}st"
 
     def is_empty(self) -> bool:
         return not self.events or self.length <= 0.0
@@ -1858,7 +2193,7 @@ class PhraseCell:
         if och < -1 or och > 15:
             och = PHRASE_OUT_AS_RECORDED
         return {
-            "version": 2,
+            "version": 4,
             "length": float(self.length),
             "trigger_mode": mode,
             "voice_mode": vmode,
@@ -1867,6 +2202,11 @@ class PhraseCell:
             "morph": float(self.morph),
             "out_channel": och,
             "local_synth": bool(self.local_synth),
+            "gain": float(clamp_phrase_gain(self.gain)),
+            "vib_baked": bool(self.vib_baked),
+            "vib_depth": float(self.vib_depth),
+            "vib_rate": float(self.vib_rate),
+            "vib_amount": float(self.vib_amount),
             "events": [
                 {
                     "t": float(e.t),
@@ -1916,6 +2256,17 @@ class PhraseCell:
             morph = float(data.get("morph", 0.0) or 0.0)
         except (TypeError, ValueError):
             morph = 0.0
+        try:
+            gain = float(data.get("gain", 1.0))
+        except (TypeError, ValueError):
+            gain = 1.0
+
+        def _num(key: str, default: float, lo: float, hi: float) -> float:
+            try:
+                return max(lo, min(hi, float(data.get(key, default))))
+            except (TypeError, ValueError):
+                return default
+
         return PhraseCell(
             events=events,
             length=length,
@@ -1926,6 +2277,11 @@ class PhraseCell:
             morph=max(0.0, min(1.0, morph)),
             out_channel=och,
             local_synth=bool(data.get("local_synth", True)),
+            gain=clamp_phrase_gain(gain),
+            vib_baked=bool(data.get("vib_baked", False)),
+            vib_depth=_num("vib_depth", 0.0, 0.0, 4.0),
+            vib_rate=_num("vib_rate", 5.0, 0.1, 20.0),
+            vib_amount=_num("vib_amount", 0.0, 0.0, 1.0),
         )
 
 
@@ -1992,6 +2348,11 @@ class PhrasePadBank:
             morph=float(c.morph),
             out_channel=int(c.out_channel),
             local_synth=bool(c.local_synth),
+            gain=float(c.gain),
+            vib_baked=bool(c.vib_baked),
+            vib_depth=float(c.vib_depth),
+            vib_rate=float(c.vib_rate),
+            vib_amount=float(c.vib_amount),
         )
 
     def cell(self, idx: int) -> PhraseCell:
@@ -2037,7 +2398,10 @@ class PhrasePadBank:
         if not (0 <= idx < PHRASE_PAD_COUNT):
             return False
         with self._lock:
-            self._cells[idx].voice_mode = PHRASE_VOICE_FOLLOW
+            c = self._cells[idx]
+            c.voice_mode = PHRASE_VOICE_FOLLOW
+            # Back to following the live rig: master level owns this pad again.
+            c.gain = 1.0
             self._selected = idx
         self.save_cell(idx)
         self._emit(("phrase",))
@@ -2045,23 +2409,114 @@ class PhrasePadBank:
         return True
 
     def lock_voice_from_engine(self, idx: int) -> bool:
-        """Snapshot current global morph onto this pad (LOCKED)."""
+        """Snapshot current global morph *and* level onto this pad (LOCKED)."""
         if not (0 <= idx < PHRASE_PAD_COUNT):
             return False
         a, b, morph = self._engine.snapshot_morph()
+        try:
+            level = float(self._engine.level())
+        except Exception:
+            level = 1.0
+        try:
+            vib_depth, vib_rate, vib_amount = self._engine.vib_state()
+        except Exception:
+            vib_depth, vib_rate, vib_amount = (0.0, 5.0, 0.0)
+        gain = clamp_phrase_gain(level)
         with self._lock:
             c = self._cells[idx]
             c.voice_mode = PHRASE_VOICE_LOCKED
             c.morph_a = a
             c.morph_b = b
             c.morph = float(morph)
+            c.gain = gain
+            c.vib_baked = True
+            c.vib_depth = float(vib_depth)
+            c.vib_rate = float(vib_rate)
+            c.vib_amount = float(vib_amount)
             self._selected = idx
         self.save_cell(idx)
         self._emit(("phrase",))
         self._emit(
-            ("log", f"Phrase {phrase_pad_label(idx)} voice LOCKED ({a}→{b} {int(morph*100)}%)", False)
+            (
+                "log",
+                f"Phrase {phrase_pad_label(idx)} voice LOCKED "
+                f"({a}→{b} {int(morph * 100)}%, vol {int(gain * 100)}%)",
+                False,
+            )
         )
         return True
+
+    def bake_vib_from_engine(self, idx: int) -> bool:
+        """Freeze the live vibrato onto this pad (what REC does automatically)."""
+        if not (0 <= idx < PHRASE_PAD_COUNT):
+            return False
+        try:
+            depth, rate, amount = self._engine.vib_state()
+        except Exception:
+            return False
+        with self._lock:
+            c = self._cells[idx]
+            c.vib_baked = True
+            c.vib_depth = float(depth)
+            c.vib_rate = float(rate)
+            c.vib_amount = float(amount)
+            self._selected = idx
+            label = c.vib_label()
+        self.save_cell(idx)
+        self._emit(("phrase",))
+        self._emit(("log", f"Phrase {phrase_pad_label(idx)} vibrato baked ({label})", False))
+        return True
+
+    def set_vib_live(self, idx: int) -> bool:
+        """Hand this pad's vibrato back to the live rig."""
+        if not (0 <= idx < PHRASE_PAD_COUNT):
+            return False
+        with self._lock:
+            self._cells[idx].vib_baked = False
+            self._selected = idx
+        self.save_cell(idx)
+        self._emit(("phrase",))
+        self._emit(("log", f"Phrase {phrase_pad_label(idx)} vibrato live", False))
+        return True
+
+    def toggle_vib_baked(self, idx: int) -> Optional[bool]:
+        if not (0 <= idx < PHRASE_PAD_COUNT):
+            return None
+        with self._lock:
+            baked = self._cells[idx].vib_baked
+        if baked:
+            self.set_vib_live(idx)
+            return False
+        self.bake_vib_from_engine(idx)
+        return True
+
+    def gain(self, idx: int) -> float:
+        with self._lock:
+            if not (0 <= idx < PHRASE_PAD_COUNT):
+                return 1.0
+            return float(self._cells[idx].gain)
+
+    def set_gain(self, idx: int, gain: float) -> Optional[float]:
+        if not (0 <= idx < PHRASE_PAD_COUNT):
+            return None
+        value = clamp_phrase_gain(gain)
+        with self._lock:
+            if abs(self._cells[idx].gain - value) < 1e-6:
+                return float(self._cells[idx].gain)
+            self._cells[idx].gain = value
+            self._selected = idx
+        self.save_cell(idx)
+        self._emit(("phrase",))
+        self._emit(("log", f"Phrase {phrase_pad_label(idx)} vol {int(value * 100)}%", False))
+        return value
+
+    def nudge_gain(self, idx: int, delta: float) -> Optional[float]:
+        """VOL − / + on the selected pad — audible on the next note, mid-loop."""
+        if not (0 <= idx < PHRASE_PAD_COUNT):
+            return None
+        with self._lock:
+            current = self._cells[idx].gain
+        return self.set_gain(idx, current + float(delta))
 
     def toggle_voice_lock(self, idx: int) -> Optional[str]:
         if not (0 <= idx < PHRASE_PAD_COUNT):
@@ -2155,8 +2610,8 @@ class PhrasePadBank:
             syn = "SYN" if c.local_synth else "MIDI"
             trig = "LOOP" if c.is_loop() else "1SHOT"
             return (
-                f"EDIT {phrase_pad_label(sel)} · {trig} · {v} · {och} · {syn} · "
-                f"{filled}/16"
+                f"EDIT {phrase_pad_label(sel)} · {trig} · {v} · vol {int(c.gain * 100)}% · "
+                f"vib {c.vib_label()} · {och} · {syn} · {filled}/16"
             )
         if playing:
             names = ",".join(phrase_pad_label(i) for i in playing[:6])
@@ -2206,6 +2661,8 @@ class PhrasePadBank:
                 and cell.voice_mode == PHRASE_VOICE_FOLLOW
                 and cell.out_channel == PHRASE_OUT_AS_RECORDED
                 and cell.local_synth
+                and abs(cell.gain - 1.0) < 1e-6
+                and not cell.vib_baked
             )
             if defaultish:
                 if path.is_file():
@@ -2246,6 +2703,7 @@ class PhrasePadBank:
                 morph=prev.morph,
                 out_channel=prev.out_channel,
                 local_synth=prev.local_synth,
+                gain=prev.gain,
             )
             self._recording_cell = idx
             self._rec_t0 = time.monotonic()
@@ -2256,6 +2714,11 @@ class PhrasePadBank:
 
     def stop_record(self) -> Optional[int]:
         """Finish recording. Returns cell index, or None if not recording."""
+        # Vibrato is part of how the take sounded, so it travels with the clip.
+        try:
+            vib_depth, vib_rate, vib_amount = self._engine.vib_state()
+        except Exception:
+            vib_depth, vib_rate, vib_amount = (0.0, 5.0, 0.0)
         with self._lock:
             idx = self._recording_cell
             if idx is None:
@@ -2265,6 +2728,10 @@ class PhrasePadBank:
                 trimmed, length = trim_loop_take(list(cell.events))
                 cell.events = trimmed
                 cell.length = length
+                cell.vib_baked = True
+                cell.vib_depth = float(vib_depth)
+                cell.vib_rate = float(vib_rate)
+                cell.vib_amount = float(vib_amount)
             else:
                 cell.length = 0.0
             self._recording_cell = None
@@ -2400,6 +2867,11 @@ class PhrasePadBank:
         if want_usb:
             self._ensure_outport()
 
+        # Locked pads keep morph_a's FX insert; FOLLOW pads use live nearer endpoint.
+        fx_name: Optional[str] = None
+        if cell.is_voice_locked():
+            fx_name = str(cell.morph_a or "sine")
+
         was_playing = already
         self.stop_cell(idx)
         stop_ev = threading.Event()
@@ -2419,6 +2891,7 @@ class PhrasePadBank:
                 stop_ev,
                 loop,
                 timbre,
+                fx_name,
                 cell.out_channel,
                 cell.local_synth,
                 out_mode,
@@ -2497,12 +2970,24 @@ class PhrasePadBank:
         local_synth: bool,
         out_mode: str,
         timbre: Optional[np.ndarray],
+        fx_name: Optional[str],
         idx: int,
     ) -> None:
         ch = (out_channel & 0x0F) if out_channel >= 0 else (src_channel & 0x0F)
         n = note & 0x7F
         want_usb = out_mode in ("usb", "both")
         want_local = bool(local_synth) and out_mode in ("local", "both")
+        vib: Optional[Tuple[float, float, float]] = None
+        if on:
+            # Read trim + vibrato live so edits land without relaunching the pad
+            with self._lock:
+                if 0 <= idx < PHRASE_PAD_COUNT:
+                    cell = self._cells[idx]
+                    gain = cell.gain
+                    vib = cell.vib_tuple()
+                else:
+                    gain = 1.0
+            velocity = scale_velocity(velocity, gain)
         if want_usb:
             port = self._get_outport()
             if port is not None:
@@ -2524,7 +3009,11 @@ class PhrasePadBank:
                     pass
         if want_local:
             if on:
-                self._engine.note_on(ch, n, velocity, timbre=timbre)
+                # Drums use per-model FX inside the engine; keys use fx_name slot.
+                use_fx = fx_name if (ch & 0x0F) != DRUM_CHANNEL else None
+                self._engine.note_on(
+                    ch, n, velocity, timbre=timbre, fx_name=use_fx, vib=vib
+                )
                 with self._lock:
                     self._held.setdefault(idx, set()).add((ch, n))
                 self._emit(("on", ch, n, velocity))
@@ -2549,6 +3038,7 @@ class PhrasePadBank:
         stop_ev: threading.Event,
         loop: bool,
         timbre: Optional[np.ndarray],
+        fx_name: Optional[str],
         out_channel: int,
         local_synth: bool,
         out_mode: str,
@@ -2582,6 +3072,7 @@ class PhrasePadBank:
                         local_synth=local_synth,
                         out_mode=out_mode,
                         timbre=timbre if (ev.channel & 0x0F) != DRUM_CHANNEL else None,
+                        fx_name=fx_name,
                         idx=idx,
                     )
                 end = t0 + length
@@ -2611,13 +3102,13 @@ def _sec_to_ticks(seconds: float, bpm: float, ticks_per_beat: int) -> int:
     return max(0, int(round(float(seconds) * (float(bpm) / 60.0) * ticks_per_beat)))
 
 
-def looper_events_to_midifile(
+def take_events_to_midifile(
     events: List[LoopEvent],
     loop_len: float,
     bpm: float = DEFAULT_SONG_BPM,
     ticks_per_beat: int = 480,
 ) -> mido.MidiFile:
-    """Build a Type 0 SMF from free-timing looper note events."""
+    """Build a Type 0 SMF from a free-timing take (sequencer or pad)."""
     bpm = max(20.0, min(400.0, float(bpm)))
     mid = mido.MidiFile(type=0, ticks_per_beat=ticks_per_beat)
     track = mido.MidiTrack()
@@ -3037,8 +3528,20 @@ class MidiToneApp:
     ) -> None:
         self.port_filter = port_filter.strip().lower()
         self.event_q: queue.Queue = queue.Queue(maxsize=EVENT_Q_MAX)
-        self._tables = load_wavetables(waves_dir)
+        self._waves_dir = pathlib.Path(waves_dir)
+        self._user_waves_dir = USER_WAVETABLES_DIR
+        try:
+            self._user_waves_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        self._tables = load_wavetables(self._waves_dir, self._user_waves_dir)
         self.engine = SineEngine(self._tables, max_voices=max_voices)
+        # Delay/reverb numbers beside user wavetables (drive/tone already in the wave)
+        self._voice_fx_sidecars: Dict[str, Dict[str, float]] = load_user_voice_fx_map(
+            self._user_waves_dir
+        )
+        for vname, snap in self._voice_fx_sidecars.items():
+            self.engine.apply_voice_fx_sidecar(vname, snap)
         self._inport: Optional[mido.ports.BaseInput] = None
         self._poll_thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
@@ -3084,6 +3587,7 @@ class MidiToneApp:
         self._full_vel_btn: Optional[tk.Button] = None
         self._drum_lock_btn: Optional[tk.Button] = None
         self._fx_mode_btn: Optional[tk.Button] = None
+        self._bus_fx_mode_btn: Optional[tk.Button] = None
         self._voice_lbl: Optional[tk.Label] = None
         self._wave_canvas: Optional[tk.Canvas] = None
         self._wave_caption: Optional[tk.Label] = None
@@ -3099,12 +3603,21 @@ class MidiToneApp:
         self._kit_ui_open = False
         self._kit_frame: Optional[tk.Frame] = None
         self._kit_btns: Dict[int, tk.Button] = {}
+        self._kit_all_btn: Optional[tk.Button] = None
         self._kit_wave_canvas: Optional[tk.Canvas] = None
         self._kit_status_var = tk.StringVar(value="")
         self._kit_selected_note = 36  # factory kick
-        self._mode = "synth"  # synth | looper | pads | songs | log | presets
+        self._kit_all_drums = False  # FX edit target = shared kit group bus
+        self._save_voice_open = False
+        self._save_voice_frame: Optional[tk.Frame] = None
+        self._save_voice_entry: Optional[tk.Entry] = None
+        self._save_voice_status: Optional[tk.Label] = None
+        self._save_voice_drive_btn: Optional[tk.Button] = None
+        self._save_voice_keys: Optional[tk.Frame] = None
+        self._save_voice_keys_digits = False
+        self._mode = "synth"  # synth | seq | pads | songs | log | presets
         self._mode_btns: Dict[str, tk.Button] = {}
-        self._looper = MidiLooper(self.engine, self._q_put)
+        self._seq = OverdubSequencer(self.engine, self._q_put)
         self._phrases = PhrasePadBank(self.engine, self._q_put, PHRASES_DIR)
         self._songs = SongPlayer(self.engine, self._q_put)
         self._pads_view = "edit"  # play | edit
@@ -3126,12 +3639,22 @@ class MidiToneApp:
         self._phrase_voice_btn: Optional[tk.Button] = None
         self._phrase_ch_btn: Optional[tk.Button] = None
         self._phrase_synth_btn: Optional[tk.Button] = None
+        self._phrase_vib_btn: Optional[tk.Button] = None
         self._phrase_clear_armed = False
         self._phrase_mode_armed = False
         self._phrase_shell: Optional[tk.Frame] = None
-        self._loop_status_var = tk.StringVar(value="Loop empty — tap RECORD, play notes, STOP, then PLAY.")
-        self._loop_rec_btn: Optional[tk.Button] = None
-        self._loop_play_btn: Optional[tk.Button] = None
+        self._seq_status_var = tk.StringVar(value=self._seq.status_line())
+        self._seq_layer_var = tk.StringVar(value="no layers yet")
+        self._seq_rec_btn: Optional[tk.Button] = None
+        self._seq_play_btn: Optional[tk.Button] = None
+        self._seq_keep_btn: Optional[tk.Button] = None
+        self._seq_drop_btn: Optional[tk.Button] = None
+        self._seq_undo_btn: Optional[tk.Button] = None
+        self._seq_extend_btn: Optional[tk.Button] = None
+        self._seq_len_var = tk.StringVar(value="LEN 1×")
+        self._vib_depth_var = tk.StringVar(value="0.50 st")
+        self._vib_rate_var = tk.StringVar(value="5.0 Hz")
+        self._vib_toggle_btn: Optional[tk.Button] = None
         self._preset_status_var = tk.StringVar(value="Tap a slot, then LOAD or SAVE.")
         self._preset_slot = 0
         self._preset_slot_btns: Dict[int, tk.Button] = {}
@@ -3164,7 +3687,7 @@ class MidiToneApp:
         nav_modes.pack(side=tk.RIGHT, padx=4, pady=4)
         for key, label in (
             ("synth", "SYNTH"),
-            ("looper", "LOOPER"),
+            ("seq", "SEQ"),
             ("pads", "PADS"),
             ("songs", "SONGS"),
             ("presets", "PRESETS"),
@@ -3182,7 +3705,7 @@ class MidiToneApp:
         self._mode_host.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
 
         self._synth_shell = tk.Frame(self._mode_host, bg="#111111")
-        self._looper_shell = tk.Frame(self._mode_host, bg="#111111")
+        self._seq_shell = tk.Frame(self._mode_host, bg="#111111")
         self._pads_shell = tk.Frame(self._mode_host, bg="#111111")
         self._phrase_shell = self._pads_shell
         self._songs_shell = tk.Frame(self._mode_host, bg="#111111")
@@ -3206,6 +3729,10 @@ class MidiToneApp:
             row1, "FX MODE", self._toggle_fx_mode, bg="#3c3836"
         )
         self._fx_mode_btn.pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3)
+        self._bus_fx_mode_btn = self._mk_touch_btn(
+            row1, "BUS FX", self._toggle_bus_fx_mode, bg="#3c3836"
+        )
+        self._bus_fx_mode_btn.pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3)
 
         # Voice picker — prev / name / next + full grid
         row2 = tk.Frame(self._touch, bg="#111111")
@@ -3317,7 +3844,7 @@ class MidiToneApp:
         PHRASES_DIR.mkdir(parents=True, exist_ok=True)
         seeded = seed_demo_songs()
 
-        self._build_looper_mode()
+        self._build_seq_mode()
         self._build_pads_mode()
         self._build_songs_mode()
         self._build_presets_mode()
@@ -3329,6 +3856,7 @@ class MidiToneApp:
         self._paint_full_vel_btn()
         self._paint_drum_lock_btn()
         self._paint_fx_mode_btn()
+        self._paint_bus_fx_mode_btn()
         self._sync_voice_index_from_morph()
         # Rebuild pads chrome so restored PLAY/EDIT + OUT mode paint correctly
         self._build_pads_mode()
@@ -3347,7 +3875,7 @@ class MidiToneApp:
             "Pads = analog drum voices. After a pad (or DRUM LOCK): knobs → "
             "pitch / stretch / noise / drum-tone / — / — / — / level"
         )
-        self._append_log("Modes: SYNTH / LOOPER / PADS / SONGS / PRESETS / LOG (top right).")
+        self._append_log("Modes: SYNTH / SEQ / PADS / SONGS / PRESETS / LOG (top right).")
         if seeded:
             self._append_log(
                 f"Added {seeded} demo song(s) from demo-songs/ (offline classical pack)."
@@ -3371,8 +3899,10 @@ class MidiToneApp:
         st = self.engine.modulation_state()
         if self.engine.fx_knob_focus():
             delay_ms = int((0.05 + st.get("fx_delay_time", 0.0) * 0.70) * 1000)
+            target = self.engine.fx_edit_label()
+            prefix = "BUS FX" if self.engine.bus_fx_mode() else f"FX {target}"
             return (
-                "FX MODE  "
+                f"{prefix}  "
                 f"Drive:{int(st.get('fx_drive', 0.0) * 127):3d}  "
                 f"Dly:{delay_ms:3d}ms  "
                 f"Fb:{int(st.get('fx_delay_fb', 0.0) * 127):3d}  "
@@ -3394,16 +3924,24 @@ class MidiToneApp:
             morph_txt = left
         else:
             morph_txt = f"{left}→{right}"
+        depth, rate, always = self.engine.vib_state()
+        amount = max(float(st["mod"]), always)
+        vib_txt = f"{depth:.1f}st@{rate:.1f}Hz" if amount > 0.01 else "off"
         return (
             f"Morph:{int(blend * 100):3d}% ({morph_txt})  "
             f"Tone:{int(st['tone'] * 127):3d}  "
             f"Lvl:{int(st['level'] * 127):3d}  "
             f"Bend:{st['bend']:+.2f}  "
-            f"Vib:{int(st['mod'] * 127)}"
+            f"Vib:{vib_txt}"
         )
 
     def _overlay_busy(self) -> bool:
-        return self._grid_open or self._morph_ui_open or self._kit_ui_open
+        return (
+            self._grid_open
+            or self._morph_ui_open
+            or self._kit_ui_open
+            or self._save_voice_open
+        )
 
     def _session_dict(self) -> Dict[str, Any]:
         return {
@@ -3572,47 +4110,84 @@ class MidiToneApp:
         bpm_row = tk.Frame(header, bg="#111111")
         bpm_row.pack(side=tk.RIGHT)
         self._mk_touch_btn(bpm_row, "BPM −", lambda: self._song_nudge_bpm(-1), bg="#3c3836").pack(
-            side=tk.LEFT, padx=2, ipady=4
+            side=tk.LEFT, padx=2
         )
         self._song_bpm_lbl = tk.Label(
             bpm_row,
             text=self._song_bpm_label(),
-            font=("DejaVu Sans", 14, "bold"),
+            font=("DejaVu Sans", 13, "bold"),
             fg="#fabd2f",
             bg="#111111",
-            padx=8,
+            padx=6,
         )
         self._song_bpm_lbl.pack(side=tk.LEFT)
         self._mk_touch_btn(bpm_row, "BPM +", lambda: self._song_nudge_bpm(1), bg="#3c3836").pack(
-            side=tk.LEFT, padx=2, ipady=4
+            side=tk.LEFT, padx=2
         )
         self._mk_touch_btn(bpm_row, "−5", lambda: self._song_nudge_bpm(-5), bg="#3c3836").pack(
-            side=tk.LEFT, padx=2, ipady=4
+            side=tk.LEFT, padx=2
         )
         self._mk_touch_btn(bpm_row, "+5", lambda: self._song_nudge_bpm(5), bg="#3c3836").pack(
-            side=tk.LEFT, padx=2, ipady=4
+            side=tk.LEFT, padx=2
         )
 
         status = tk.Label(
             shell, textvariable=self._song_status_var,
-            font=("DejaVu Sans", 12, "bold"),
+            font=("DejaVu Sans", 11, "bold"),
             fg="#fabd2f", bg="#111111",
-            wraplength=760, justify=tk.LEFT, anchor="w",
+            wraplength=780, justify=tk.LEFT, anchor="w",
         )
         status.pack(fill=tk.X, padx=10, pady=(2, 4))
 
-        # Chunky list with dedicated scroll targets (no tiny scrollbar)
+        # Transport is packed from the bottom *before* the list, so a short panel
+        # shrinks the song rows instead of pushing PLAY/STOP off the screen.
+        row_b = tk.Frame(shell, bg="#111111")
+        row_b.pack(side=tk.BOTTOM, fill=tk.X, padx=8, pady=(3, 8))
+        self._mk_touch_btn(
+            row_b, "SAVE SEQ", self._song_save_from_seq, bg="#458588"
+        ).pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=8)
+        self._mk_touch_btn(row_b, "DELETE", self._song_delete_selected, bg="#9d0006").pack(
+            side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=8
+        )
+        self._song_out_btn = self._mk_touch_btn(
+            row_b, "OUT: LOCAL", self._song_cycle_out_mode, bg="#3c3836"
+        )
+        self._song_out_btn.pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=8)
+        self._song_loop_btn = self._mk_touch_btn(
+            row_b, "SONG LOOP: OFF", self._song_toggle_loop, bg="#3c3836"
+        )
+        self._song_loop_btn.pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=8)
+
+        row_a = tk.Frame(shell, bg="#111111")
+        row_a.pack(side=tk.BOTTOM, fill=tk.X, padx=8, pady=(4, 3))
+        self._song_play_btn = self._mk_touch_btn(
+            row_a, "PLAY", self._song_toggle_play, bg="#689d6a"
+        )
+        self._song_play_btn.pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=10)
+        self._mk_touch_btn(row_a, "STOP", self._song_stop, bg="#d79921").pack(
+            side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=10
+        )
+
+        # Chunky list with dedicated scroll targets (no tiny scrollbar). They sit
+        # in a side column so paging costs width, which is plentiful, not height.
         list_wrap = tk.Frame(shell, bg="#111111")
         list_wrap.pack(fill=tk.BOTH, expand=True, padx=8, pady=2)
 
+        pager = tk.Frame(list_wrap, bg="#111111")
+        pager.pack(side=tk.RIGHT, fill=tk.Y, padx=(6, 0))
         self._song_up_btn = self._mk_touch_btn(
-            list_wrap, "▲  UP", lambda: self._song_scroll_by(-SONG_LIST_VISIBLE), bg="#504945"
+            pager, "▲", lambda: self._song_scroll_by(-SONG_LIST_VISIBLE), bg="#504945"
         )
-        self._song_up_btn.configure(font=("DejaVu Sans", 16, "bold"), pady=10)
-        self._song_up_btn.pack(fill=tk.X, pady=(0, 4), ipady=6)
+        self._song_up_btn.configure(font=("DejaVu Sans", 18, "bold"), padx=14)
+        self._song_up_btn.pack(side=tk.TOP, expand=True, fill=tk.BOTH, pady=(0, 2))
+        self._song_down_btn = self._mk_touch_btn(
+            pager, "▼", lambda: self._song_scroll_by(SONG_LIST_VISIBLE), bg="#504945"
+        )
+        self._song_down_btn.configure(font=("DejaVu Sans", 18, "bold"), padx=14)
+        self._song_down_btn.pack(side=tk.BOTTOM, expand=True, fill=tk.BOTH, pady=(2, 0))
 
         rows = tk.Frame(list_wrap, bg="#111111")
-        rows.pack(fill=tk.BOTH, expand=True)
+        rows.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self._song_row_btns = []
         for i in range(SONG_LIST_VISIBLE):
             btn = self._mk_touch_btn(
@@ -3622,49 +4197,13 @@ class MidiToneApp:
                 bg="#3c3836",
             )
             btn.configure(
-                font=("DejaVu Sans", 14, "bold"),
+                font=("DejaVu Sans", 13, "bold"),
                 anchor="w",
                 justify=tk.LEFT,
-                pady=12,
+                pady=4,
             )
-            btn.pack(fill=tk.BOTH, expand=True, pady=2, ipady=8)
+            btn.pack(fill=tk.BOTH, expand=True, pady=2, ipady=2)
             self._song_row_btns.append(btn)
-
-        self._song_down_btn = self._mk_touch_btn(
-            list_wrap, "▼  DOWN", lambda: self._song_scroll_by(SONG_LIST_VISIBLE), bg="#504945"
-        )
-        self._song_down_btn.configure(font=("DejaVu Sans", 16, "bold"), pady=10)
-        self._song_down_btn.pack(fill=tk.X, pady=(4, 0), ipady=6)
-
-        row_a = tk.Frame(shell, bg="#111111")
-        row_a.pack(fill=tk.X, padx=8, pady=(6, 3))
-        self._song_play_btn = self._mk_touch_btn(
-            row_a, "PLAY", self._song_toggle_play, bg="#689d6a"
-        )
-        self._song_play_btn.pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=12)
-        self._mk_touch_btn(row_a, "STOP", self._song_stop, bg="#d79921").pack(
-            side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=12
-        )
-
-        row_b = tk.Frame(shell, bg="#111111")
-        row_b.pack(fill=tk.X, padx=8, pady=3)
-        self._mk_touch_btn(
-            row_b, "SAVE LOOP", self._song_save_from_looper, bg="#458588"
-        ).pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=10)
-        self._mk_touch_btn(row_b, "DELETE", self._song_delete_selected, bg="#9d0006").pack(
-            side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=10
-        )
-
-        row_c = tk.Frame(shell, bg="#111111")
-        row_c.pack(fill=tk.X, padx=8, pady=(3, 8))
-        self._song_out_btn = self._mk_touch_btn(
-            row_c, "OUT: LOCAL", self._song_cycle_out_mode, bg="#3c3836"
-        )
-        self._song_out_btn.pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=8)
-        self._song_loop_btn = self._mk_touch_btn(
-            row_c, "SONG LOOP: OFF", self._song_toggle_loop, bg="#3c3836"
-        )
-        self._song_loop_btn.pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=8)
 
         self._paint_song_list()
         self._paint_song_controls()
@@ -3703,10 +4242,12 @@ class MidiToneApp:
         return title
 
     def _song_row_label(self, path: pathlib.Path) -> str:
+        """One line per row — four fat targets beat two tall ones on a 480px panel."""
         title = self._song_title_from_file(path)
         if title.lower() == path.stem.lower() or title == path.stem:
             return f"  {path.name}"
-        return f"  {title}\n  {path.name}"
+        label = f"  {title} · {path.name}"
+        return label if len(label) <= 58 else label[:57] + "…"
 
     def _song_scroll_by(self, delta: int) -> None:
         if not self._song_files:
@@ -3816,7 +4357,7 @@ class MidiToneApp:
         out = str(st["out_mode"]).upper()
         out_name = st.get("out_name") or "—"
         if nfiles == 0:
-            msg = "songs/ is empty — SAVE LOOP, or drop .mid files in. Demos seed on first launch."
+            msg = "songs/ is empty — SAVE SEQ, or drop .mid files in. Demos seed on first launch."
         elif st["playing"]:
             msg = (
                 f"▶ PLAYING {name}  @ {int(round(float(st['bpm'])))} BPM  "
@@ -3883,7 +4424,7 @@ class MidiToneApp:
                 if mode == "usb":
                     self._q_put(("log", "Song PLAY failed — no USB MIDI out", False))
                 else:
-                    self._q_put(("log", "Song empty — tap a file or SAVE LOOP", False))
+                    self._q_put(("log", "Song empty — tap a file or SAVE SEQ", False))
             else:
                 self._q_put(("log", "Song PLAY start", False))
         self._q_put(("song",))
@@ -3896,10 +4437,10 @@ class MidiToneApp:
             self._q_put(("song",))
         self._refresh_song_status()
 
-    def _song_save_from_looper(self) -> None:
-        events, loop_len = self._looper.snapshot()
+    def _song_save_from_seq(self) -> None:
+        events, loop_len = self._seq.snapshot()
         if not events or loop_len <= 0.0:
-            self._song_status_var.set("Looper is empty — record something in LOOPER first.")
+            self._song_status_var.set("Sequence is empty — record something in SEQ first.")
             return
         if self._songs.is_playing():
             self._songs.stop()
@@ -3907,7 +4448,7 @@ class MidiToneApp:
         bpm = self._songs.bpm()
         try:
             SONGS_DIR.mkdir(parents=True, exist_ok=True)
-            mid = looper_events_to_midifile(events, loop_len, bpm=bpm)
+            mid = take_events_to_midifile(events, loop_len, bpm=bpm)
             # Title for list label
             if mid.tracks:
                 mid.tracks[0].insert(
@@ -3925,7 +4466,7 @@ class MidiToneApp:
             self._paint_song_list()
             self._refresh_song_status()
             self._append_log(f"Song saved: {path.name} ({len(events)} events @ {int(bpm)} BPM)")
-            self._song_status_var.set(f"Saved looper → {path.name}")
+            self._song_status_var.set(f"Saved sequence → {path.name}")
         except Exception as exc:
             self._song_status_var.set(f"Save failed: {exc}")
             self._append_log(f"Song SAVE error: {exc}")
@@ -4147,10 +4688,23 @@ class MidiToneApp:
                 text="FX MODE", bg="#3c3836", activebackground="#3c3836"
             )
 
+    def _paint_bus_fx_mode_btn(self) -> None:
+        if self._bus_fx_mode_btn is None:
+            return
+        if self.engine.bus_fx_mode():
+            self._bus_fx_mode_btn.configure(
+                text="BUS FX: ON", bg="#8f3f71", activebackground="#8f3f71"
+            )
+        else:
+            self._bus_fx_mode_btn.configure(
+                text="BUS FX", bg="#3c3836", activebackground="#3c3836"
+            )
+
     def _toggle_drum_lock(self) -> None:
         self.engine.set_drum_mode(not self.engine.drum_mode())
         self._paint_drum_lock_btn()
         self._paint_fx_mode_btn()
+        self._paint_bus_fx_mode_btn()
         self.mod_var.set(self._format_mod_line())
         self._append_log(
             "DRUM MODE ON — Knob 1–4 edit drums"
@@ -4164,14 +4718,38 @@ class MidiToneApp:
 
     def _toggle_fx_mode(self) -> None:
         on = self.engine.toggle_fx_mode()
+        if on:
+            # KIT open → edit that drum's insert; else nearer morph wavetable.
+            if self._kit_ui_open:
+                self.engine.set_fx_edit_drum(self._kit_model_selected())
+            else:
+                self.engine.set_fx_edit_voice(None)
+        self._paint_fx_mode_btn()
+        self._paint_bus_fx_mode_btn()
+        self._paint_drum_lock_btn()
+        self.mod_var.set(self._format_mod_line())
+        target = self.engine.fx_edit_label() if on else ""
+        self._append_log(
+            f"FX MODE ON — insert FX on {target} "
+            "(not the whole mix). KIT → ALL DRUMS for kit echo; tap a pad for one drum; "
+            "close KIT for nearer morph voice. Use BUS FX for global wet."
+            if on
+            else "FX MODE OFF — knobs back to morph / tone / …"
+        )
+
+    def _toggle_bus_fx_mode(self) -> None:
+        on = self.engine.toggle_bus_fx_mode()
+        if on:
+            self.engine.set_fx_edit_bus()
+        self._paint_bus_fx_mode_btn()
         self._paint_fx_mode_btn()
         self._paint_drum_lock_btn()
         self.mod_var.set(self._format_mod_line())
         self._append_log(
-            "FX MODE ON — Knobs: drive / delay-time / delay-fb / delay-mix / "
-            "reverb-size / reverb-mix / — / level"
+            "BUS FX ON — knobs wet the whole soft-synth mix (keys + drums + phrases). "
+            "Per-voice/per-drum inserts still run underneath; use FX MODE to edit those."
             if on
-            else "FX MODE OFF — knobs back to morph / tone / …"
+            else "BUS FX OFF — knobs back to morph / tone / …"
         )
 
     def _paint_synth_waveform(self, *, force: bool = False) -> None:
@@ -4220,20 +4798,46 @@ class MidiToneApp:
 
     def _paint_kit_pad_btns(self) -> None:
         for note, btn in self._kit_btns.items():
-            on = note == self._kit_selected_note
+            on = (not self._kit_all_drums) and note == self._kit_selected_note
             color = "#d79921" if on else "#3c3836"
             try:
                 btn.configure(bg=color, activebackground=color)
             except Exception:
                 pass
+        if self._kit_all_btn is not None:
+            color = "#b16286" if self._kit_all_drums else "#504945"
+            try:
+                self._kit_all_btn.configure(bg=color, activebackground=color)
+            except Exception:
+                pass
+
+    def _select_kit_all_drums(self) -> None:
+        """Point FX MODE at the shared kit-group bus (echo on all drums)."""
+        self._kit_all_drums = True
+        if not self.engine.fx_mode():
+            self.engine.set_fx_mode(True)
+            self._paint_fx_mode_btn()
+            self._paint_bus_fx_mode_btn()
+            self._paint_drum_lock_btn()
+        self.engine.set_fx_edit_drums()
+        self._paint_kit_pad_btns()
+        self.mod_var.set(self._format_mod_line())
+        self._kit_status_var.set(
+            "ALL DRUMS · FX MODE edits the shared kit bus (echo/drive on whole kit)"
+        )
+        self._append_log("KIT — ALL DRUMS FX (shared kit bus)")
 
     def _select_kit_note(self, note: int, *, audition: bool = False) -> None:
         note = int(note) & 0x7F
         if note < PHRASE_PAD_BASE or note >= PHRASE_PAD_BASE + 16:
             return
         self._kit_selected_note = note
+        self._kit_all_drums = False
         self._paint_kit_pad_btns()
         self._paint_kit_waveform(force=True)
+        if self.engine.fx_mode():
+            self.engine.set_fx_edit_drum(drum_model_for_note(note))
+            self.mod_var.set(self._format_mod_line())
         if audition:
             self.engine.note_on(DRUM_CHANNEL, note, 110)
             self._q_put(("log", f"Kit audition {drum_model_for_note(note)}", False))
@@ -4248,9 +4852,22 @@ class MidiToneApp:
             self._close_voice_grid(restore_main=False)
         if self._morph_ui_open:
             self._close_morph_menu(restore_main=False)
+        if self._save_voice_open:
+            self._close_save_voice(restore_main=False)
 
-        # Knobs should edit drums while shaping the preview
-        if not self.engine.drum_mode():
+        # If insert FX MODE is on, keep drum-group target or point at selected drum.
+        # If BUS FX is on, keep global edit (kit is audition/preview only).
+        # Otherwise turn on DRUM MODE so knobs reshape the one-shot body.
+        if self.engine.fx_mode():
+            if self.engine.fx_edit_kind() == "drums":
+                self._kit_all_drums = True
+            else:
+                self._kit_all_drums = False
+                self.engine.set_fx_edit_drum(self._kit_model_selected())
+            self.mod_var.set(self._format_mod_line())
+        elif self.engine.bus_fx_mode():
+            self.mod_var.set(self._format_mod_line())
+        elif not self.engine.drum_mode():
             self.engine.set_drum_mode(True)
             self._paint_drum_lock_btn()
             self.mod_var.set(self._format_mod_line())
@@ -4301,6 +4918,9 @@ class MidiToneApp:
             "<Configure>", lambda _e: self._paint_kit_waveform(force=True)
         )
 
+        footer = tk.Frame(self._kit_frame, bg="#111111")
+        footer.pack(side=tk.BOTTOM, fill=tk.X, padx=6, pady=6)
+
         grid = tk.Frame(self._kit_frame, bg="#111111")
         grid.pack(fill=tk.BOTH, expand=True, padx=4, pady=2)
         for r in range(4):
@@ -4323,8 +4943,10 @@ class MidiToneApp:
             btn.grid(row=r, column=c, sticky="nsew", padx=2, pady=2)
             self._kit_btns[note] = btn
 
-        footer = tk.Frame(self._kit_frame, bg="#111111")
-        footer.pack(fill=tk.X, padx=6, pady=6)
+        self._kit_all_btn = self._mk_touch_btn(
+            footer, "ALL DRUMS", self._select_kit_all_drums, bg="#504945"
+        )
+        self._kit_all_btn.pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=12)
         self._mk_touch_btn(
             footer, "AUDITION", lambda: self._select_kit_note(self._kit_selected_note, audition=True),
             bg="#458588",
@@ -4334,7 +4956,15 @@ class MidiToneApp:
         )
         self._paint_kit_pad_btns()
         self._paint_kit_waveform(force=True)
-        self._append_log("KIT — pick a drum; DRUM MODE knobs reshape its wave")
+        if self.engine.fx_mode():
+            if self.engine.fx_edit_kind() == "drums":
+                self._kit_all_drums = True
+                self._paint_kit_pad_btns()
+            self._append_log(
+                "KIT — ALL DRUMS = shared kit FX; tap a pad for that drum's insert"
+            )
+        else:
+            self._append_log("KIT — pick a drum; DRUM MODE knobs reshape its wave")
 
     def _close_kit_explorer(self, restore_main: bool = True) -> None:
         if not self._kit_ui_open:
@@ -4343,8 +4973,15 @@ class MidiToneApp:
             self._kit_frame.destroy()
             self._kit_frame = None
         self._kit_btns = {}
+        self._kit_all_btn = None
         self._kit_wave_canvas = None
         self._kit_ui_open = False
+        # Leaving KIT: keep shared-kit FX edit; single-drum insert → nearer morph voice.
+        if self.engine.fx_mode():
+            if self.engine.fx_edit_kind() == "drum":
+                self._kit_all_drums = False
+                self.engine.set_fx_edit_voice(None)
+            # kind == "drums" stays so you can keep twisting kit echo after CLOSE
         if restore_main and self._mode == "synth":
             self._synth_shell.pack(fill=tk.BOTH, expand=True)
             self._main.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
@@ -4396,65 +5033,101 @@ class MidiToneApp:
             side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=16
         )
 
-    def _build_looper_mode(self) -> None:
-        shell = self._looper_shell
+    def _build_seq_mode(self) -> None:
+        shell = self._seq_shell
         for w in shell.winfo_children():
             w.destroy()
 
         header = tk.Frame(shell, bg="#111111")
-        header.pack(fill=tk.X, padx=8, pady=(10, 4))
+        header.pack(fill=tk.X, padx=8, pady=(8, 2))
         tk.Label(
-            header, text="Looper", font=("DejaVu Sans", 18, "bold"),
+            header, text="Sequencer", font=("DejaVu Sans", 18, "bold"),
             fg="#fbf1c7", bg="#111111",
         ).pack(side=tk.LEFT)
         tk.Label(
-            header, text="MIDI notes only · free timing",
+            header, text="drums + keys · free timing · overdub layers",
             font=("DejaVu Sans", 11), fg="#a89984", bg="#111111",
         ).pack(side=tk.RIGHT)
 
         status = tk.Label(
-            shell, textvariable=self._loop_status_var,
+            shell, textvariable=self._seq_status_var,
             font=("DejaVu Sans", 14, "bold"),
             fg="#fabd2f", bg="#111111",
             wraplength=760, justify=tk.LEFT, anchor="w",
         )
-        status.pack(fill=tk.X, padx=10, pady=(8, 12))
+        status.pack(fill=tk.X, padx=10, pady=(6, 2))
 
-        # Giant transport buttons
-        row1 = tk.Frame(shell, bg="#111111")
-        row1.pack(fill=tk.BOTH, expand=True, padx=8, pady=4)
-        self._loop_rec_btn = self._mk_touch_btn(
-            row1, "RECORD", self._loop_toggle_record, bg="#9d0006"
+        layers = tk.Label(
+            shell, textvariable=self._seq_layer_var,
+            font=("DejaVu Sans Mono", 11),
+            fg="#83a598", bg="#111111",
+            wraplength=760, justify=tk.LEFT, anchor="w",
         )
-        self._loop_rec_btn.configure(font=("DejaVu Sans", 20, "bold"), pady=28)
-        self._loop_rec_btn.pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=4)
+        layers.pack(fill=tk.X, padx=10, pady=(0, 6))
 
-        self._loop_play_btn = self._mk_touch_btn(
-            row1, "PLAY", self._loop_toggle_play, bg="#689d6a"
+        # Button rows claim their strips first, so REC/PLAY keep full height and
+        # the how-to line at the very end is the only thing a short panel drops.
+        row4 = tk.Frame(shell, bg="#111111")
+        row4.pack(side=tk.BOTTOM, fill=tk.X, padx=8, pady=(4, 2))
+        self._mk_touch_btn(row4, "STOP ALL", self._seq_stop, bg="#504945").pack(
+            side=tk.LEFT, expand=True, fill=tk.BOTH, padx=4, ipady=10
         )
-        self._loop_play_btn.configure(font=("DejaVu Sans", 20, "bold"), pady=28)
-        self._loop_play_btn.pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=4)
+        self._mk_touch_btn(row4, "CLEAR", self._seq_clear, bg="#3c3836").pack(
+            side=tk.LEFT, expand=True, fill=tk.BOTH, padx=4, ipady=10
+        )
+        self._mk_touch_btn(row4, "ALL NOTES OFF", self._panic, bg="#9d0006").pack(
+            side=tk.LEFT, expand=True, fill=tk.BOTH, padx=4, ipady=10
+        )
+
+        row3 = tk.Frame(shell, bg="#111111")
+        row3.pack(side=tk.BOTTOM, fill=tk.X, padx=8, pady=4)
+        self._mk_touch_btn(row3, "LEN ×2", self._seq_double, bg="#504945").pack(
+            side=tk.LEFT, expand=True, fill=tk.BOTH, padx=4, ipady=10
+        )
+        self._mk_touch_btn(row3, "LEN ÷2", self._seq_halve, bg="#504945").pack(
+            side=tk.LEFT, expand=True, fill=tk.BOTH, padx=4, ipady=10
+        )
+        self._seq_extend_btn = self._mk_touch_btn(
+            row3, "OVERDUB: WRAP", self._seq_toggle_extend, bg="#3c3836"
+        )
+        self._seq_extend_btn.pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=4, ipady=10)
 
         row2 = tk.Frame(shell, bg="#111111")
-        row2.pack(fill=tk.X, padx=8, pady=(4, 10))
-        self._mk_touch_btn(row2, "STOP", self._loop_stop, bg="#504945").pack(
-            side=tk.LEFT, expand=True, fill=tk.BOTH, padx=4, ipady=18
+        row2.pack(side=tk.BOTTOM, fill=tk.X, padx=8, pady=4)
+        self._seq_keep_btn = self._mk_touch_btn(row2, "KEEP", self._seq_keep, bg="#458588")
+        self._seq_keep_btn.pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=4, ipady=12)
+        self._seq_drop_btn = self._mk_touch_btn(row2, "DROP", self._seq_drop, bg="#3c3836")
+        self._seq_drop_btn.pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=4, ipady=12)
+        self._seq_undo_btn = self._mk_touch_btn(row2, "UNDO", self._seq_undo, bg="#3c3836")
+        self._seq_undo_btn.pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=4, ipady=12)
+
+        # Transport — the two buttons you hit while playing
+        row1 = tk.Frame(shell, bg="#111111")
+        row1.pack(fill=tk.BOTH, expand=True, padx=8, pady=2)
+        self._seq_rec_btn = self._mk_touch_btn(
+            row1, "REC BACKBONE", self._seq_toggle_record, bg="#9d0006"
         )
-        self._mk_touch_btn(row2, "CLEAR", self._loop_clear, bg="#3c3836").pack(
-            side=tk.LEFT, expand=True, fill=tk.BOTH, padx=4, ipady=18
+        self._seq_rec_btn.configure(font=("DejaVu Sans", 18, "bold"), pady=22)
+        self._seq_rec_btn.pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=4)
+
+        self._seq_play_btn = self._mk_touch_btn(
+            row1, "PLAY", self._seq_toggle_play, bg="#689d6a"
         )
-        self._mk_touch_btn(row2, "ALL NOTES OFF", self._panic, bg="#9d0006").pack(
-            side=tk.LEFT, expand=True, fill=tk.BOTH, padx=4, ipady=18
-        )
+        self._seq_play_btn.configure(font=("DejaVu Sans", 18, "bold"), pady=22)
+        self._seq_play_btn.pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=4)
 
         tip = tk.Label(
             shell,
-            text="1) RECORD  2) play notes on the MPK  3) RECORD again to stop  4) PLAY loops it",
-            font=("DejaVu Sans", 11), fg="#83a598", bg="#111111",
-            wraplength=760, justify=tk.LEFT, anchor="w",
+            text=(
+                "1) REC + play the groove → REC again locks the loop length  "
+                "2) it loops; REC again to overdub drums or keys  "
+                "3) KEEP flattens the layer, DROP throws it away, UNDO peels the last one off"
+            ),
+            font=("DejaVu Sans", 10), fg="#83a598", bg="#111111",
+            wraplength=780, justify=tk.LEFT, anchor="w",
         )
-        tip.pack(fill=tk.X, padx=10, pady=(0, 10))
-        self._paint_looper_buttons()
+        tip.pack(side=tk.BOTTOM, fill=tk.X, padx=10, pady=(2, 6))
+        self._paint_seq_buttons()
 
     def _build_pads_mode(self) -> None:
         shell = self._pads_shell
@@ -4469,6 +5142,7 @@ class MidiToneApp:
         self._phrase_voice_btn = None
         self._phrase_ch_btn = None
         self._phrase_synth_btn = None
+        self._phrase_vib_btn = None
 
         play_view = self._pads_view == "play"
 
@@ -4496,27 +5170,11 @@ class MidiToneApp:
         )
         status.pack(fill=tk.X, padx=10, pady=(2, 4))
 
-        grid = tk.Frame(shell, bg="#111111")
-        grid.pack(fill=tk.BOTH, expand=True, padx=6, pady=2)
-        for row in range(4):
-            grid.rowconfigure(row, weight=1)
-        for col in range(4):
-            grid.columnconfigure(col, weight=1)
-        for i, cell in enumerate(PHRASE_GRID_CELLS):
-            r, c = divmod(i, 4)
-            btn = self._mk_touch_btn(
-                grid,
-                phrase_pad_label(cell),
-                lambda idx=cell: self._phrase_pad_tap(idx),
-                bg="#3c3836",
-            )
-            btn.configure(font=("DejaVu Sans", 13, "bold"), pady=10)
-            btn.grid(row=r, column=c, sticky="nsew", padx=3, pady=3)
-            self._phrase_pad_btns[cell] = btn
-
+        # Control rows are packed from the bottom *before* the grid, so a short
+        # screen shrinks the pad squares instead of pushing the row off-screen.
         if play_view:
             row = tk.Frame(shell, bg="#111111")
-            row.pack(fill=tk.X, padx=6, pady=(4, 6))
+            row.pack(side=tk.BOTTOM, fill=tk.X, padx=6, pady=(4, 6))
             self._mk_touch_btn(row, "STOP ALL", self._phrase_stop_all, bg="#3c3836").pack(
                 side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=10
             )
@@ -4527,8 +5185,11 @@ class MidiToneApp:
                 side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=10
             )
         else:
+            # Bottom-up: detail row lands under the transport row
+            detail = tk.Frame(shell, bg="#111111")
+            detail.pack(side=tk.BOTTOM, fill=tk.X, padx=6, pady=(2, 6))
             row = tk.Frame(shell, bg="#111111")
-            row.pack(fill=tk.X, padx=6, pady=(4, 2))
+            row.pack(side=tk.BOTTOM, fill=tk.X, padx=6, pady=(4, 2))
             self._mk_touch_btn(row, "STOP REC", self._phrase_stop_rec, bg="#504945").pack(
                 side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=8
             )
@@ -4547,9 +5208,14 @@ class MidiToneApp:
             self._mk_touch_btn(row, "STOP ALL", self._phrase_stop_all, bg="#3c3836").pack(
                 side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=8
             )
+            # Session routing lives with the transport; the row below is per pad
+            self._phrase_out_btn = self._mk_touch_btn(
+                row, "OUT: LOCAL", self._phrase_cycle_out_mode, bg="#504945"
+            )
+            self._phrase_out_btn.pack(
+                side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=8
+            )
 
-            detail = tk.Frame(shell, bg="#111111")
-            detail.pack(fill=tk.X, padx=6, pady=(2, 6))
             self._phrase_trig_btn = self._mk_touch_btn(
                 detail, "TRIG", self._phrase_edit_trig, bg="#458588"
             )
@@ -4574,12 +5240,38 @@ class MidiToneApp:
             self._phrase_synth_btn.pack(
                 side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=8
             )
-            self._phrase_out_btn = self._mk_touch_btn(
-                detail, "OUT: LOCAL", self._phrase_cycle_out_mode, bg="#504945"
+            self._phrase_vib_btn = self._mk_touch_btn(
+                detail, "VIB live", self._phrase_edit_vib, bg="#458588"
             )
-            self._phrase_out_btn.pack(
+            self._phrase_vib_btn.pack(
                 side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=8
             )
+            # Narrow trim pair — balance one pad against the rest of the mix
+            for label, delta in (("VOL−", -PHRASE_GAIN_STEP), ("VOL+", PHRASE_GAIN_STEP)):
+                btn = self._mk_touch_btn(
+                    detail, label, lambda d=delta: self._phrase_edit_gain(d), bg="#98971a"
+                )
+                btn.configure(padx=4)
+                btn.pack(side=tk.LEFT, fill=tk.BOTH, padx=2, ipady=8)
+
+        grid = tk.Frame(shell, bg="#111111")
+        grid.pack(fill=tk.BOTH, expand=True, padx=6, pady=2)
+        for row_idx in range(4):
+            grid.rowconfigure(row_idx, weight=1)
+        for col in range(4):
+            grid.columnconfigure(col, weight=1)
+        for i, cell in enumerate(PHRASE_GRID_CELLS):
+            r, c = divmod(i, 4)
+            btn = self._mk_touch_btn(
+                grid,
+                phrase_pad_label(cell),
+                lambda idx=cell: self._phrase_pad_tap(idx),
+                bg="#3c3836",
+            )
+            btn.configure(font=("DejaVu Sans", 13, "bold"), pady=10)
+            btn.grid(row=r, column=c, sticky="nsew", padx=3, pady=3)
+            self._phrase_pad_btns[cell] = btn
+
         self._paint_phrase_pads()
 
     def _phrase_set_view(self, view: str) -> None:
@@ -4679,6 +5371,20 @@ class MidiToneApp:
         if sel is None:
             return
         self._phrases.toggle_local_synth(sel)
+        self._paint_phrase_pads()
+
+    def _phrase_edit_vib(self) -> None:
+        sel = self._phrase_selected_or_status()
+        if sel is None:
+            return
+        self._phrases.toggle_vib_baked(sel)
+        self._paint_phrase_pads()
+
+    def _phrase_edit_gain(self, delta: float) -> None:
+        sel = self._phrase_selected_or_status()
+        if sel is None:
+            return
+        self._phrases.nudge_gain(sel, delta)
         self._paint_phrase_pads()
 
     def _phrase_cycle_out_mode(self) -> None:
@@ -4800,7 +5506,10 @@ class MidiToneApp:
                 except Exception:
                     pass
             if self._phrase_voice_btn is not None:
-                v = "LOCK" if cell.is_voice_locked() else "FOLLOW"
+                trim = int(round(cell.gain * 100))
+                v = f"LOCK {trim}%" if cell.is_voice_locked() else "FOLLOW"
+                if not cell.is_voice_locked() and trim != 100:
+                    v = f"FOLLOW {trim}%"
                 vbg = "#b16286" if cell.is_voice_locked() else "#689d6a"
                 try:
                     self._phrase_voice_btn.configure(
@@ -4823,6 +5532,14 @@ class MidiToneApp:
                     )
                 except Exception:
                     pass
+            if self._phrase_vib_btn is not None:
+                vbg2 = "#458588" if cell.vib_baked else "#3c3836"
+                try:
+                    self._phrase_vib_btn.configure(
+                        text=f"VIB {cell.vib_label()}", bg=vbg2, activebackground=vbg2
+                    )
+                except Exception:
+                    pass
 
     def _refresh_phrase_status(self) -> None:
         if self._mode == "pads":
@@ -4837,7 +5554,7 @@ class MidiToneApp:
             )
 
     def _switch_mode(self, mode: str) -> None:
-        mode = mode if mode in ("synth", "looper", "pads", "songs", "log", "presets") else "synth"
+        mode = mode if mode in ("synth", "seq", "pads", "songs", "log", "presets") else "synth"
         # Close synth-only overlays before swapping shells
         if self._grid_open:
             self._close_voice_grid(restore_main=False)
@@ -4845,6 +5562,8 @@ class MidiToneApp:
             self._close_morph_menu(restore_main=False)
         if self._kit_ui_open:
             self._close_kit_explorer(restore_main=False)
+        if self._save_voice_open:
+            self._close_save_voice(restore_main=False)
 
         # Leaving pads while recording: keep the take
         if self._mode == "pads" and mode != "pads":
@@ -4855,7 +5574,7 @@ class MidiToneApp:
 
         self._mode = mode
         self._synth_shell.pack_forget()
-        self._looper_shell.pack_forget()
+        self._seq_shell.pack_forget()
         self._pads_shell.pack_forget()
         self._songs_shell.pack_forget()
         self._presets_shell.pack_forget()
@@ -4867,9 +5586,9 @@ class MidiToneApp:
         if self._kit_frame is not None:
             self._kit_frame.pack_forget()
 
-        if mode == "looper":
-            self._looper_shell.pack(fill=tk.BOTH, expand=True)
-            self._refresh_loop_status()
+        if mode == "seq":
+            self._seq_shell.pack(fill=tk.BOTH, expand=True)
+            self._refresh_seq_status()
         elif mode == "pads":
             self._pads_shell.pack(fill=tk.BOTH, expand=True)
             self._paint_phrase_pads()
@@ -4907,84 +5626,107 @@ class MidiToneApp:
             color = "#458588" if on else "#3c3836"
             btn.configure(bg=color, activebackground=color)
 
-    def _refresh_loop_status(self) -> None:
-        st = self._looper.status()
-        n = int(st["events"])
-        length = float(st["length"])
-        if st["recording"]:
-            msg = f"● RECORDING…  {n} events  (tap RECORD to stop)"
-        elif st["playing"]:
-            msg = f"▶ PLAYING loop  {length:.2f}s · {n} events  (tap PLAY to stop)"
-        elif n == 0:
-            msg = "Loop empty — tap RECORD, play notes, RECORD again, then PLAY."
-        else:
-            msg = f"Ready  {length:.2f}s · {n} events — tap PLAY to loop."
-        self._loop_status_var.set(msg)
-        self._paint_looper_buttons()
+    def _refresh_seq_status(self) -> None:
+        self._seq_status_var.set(self._seq.status_line())
+        self._seq_layer_var.set(self._seq.layer_line())
+        self._paint_seq_buttons()
 
-    def _paint_looper_buttons(self) -> None:
-        if self._loop_rec_btn is not None:
-            if self._looper.is_recording():
-                self._loop_rec_btn.configure(
-                    text="● STOP REC", bg="#cc241d", activebackground="#cc241d"
-                )
+    def _paint_seq_buttons(self) -> None:
+        st = self._seq.status()
+        state = str(st["state"])
+        pending = int(st["pending"]) > 0 or state == SEQ_OVERDUB
+        if self._seq_rec_btn is not None:
+            if state == SEQ_REC_BACKBONE:
+                text, color = "● STOP REC", "#cc241d"
+            elif state == SEQ_OVERDUB:
+                text, color = "● STOP OVERDUB", "#cc241d"
+            elif state == SEQ_EMPTY:
+                text, color = "REC BACKBONE", "#9d0006"
             else:
-                self._loop_rec_btn.configure(
-                    text="RECORD", bg="#9d0006", activebackground="#9d0006"
-                )
-        if self._loop_play_btn is not None:
-            if self._looper.is_playing():
-                self._loop_play_btn.configure(
+                text, color = "REC OVERDUB", "#9d0006"
+            self._seq_rec_btn.configure(text=text, bg=color, activebackground=color)
+        if self._seq_play_btn is not None:
+            if self._seq.is_playing():
+                self._seq_play_btn.configure(
                     text="■ STOP", bg="#d79921", activebackground="#d79921"
                 )
+            elif state == SEQ_EMPTY:
+                # Nothing to run yet — REC should be the only lit way forward
+                self._seq_play_btn.configure(
+                    text="PLAY", bg="#3c3836", activebackground="#3c3836"
+                )
             else:
-                self._loop_play_btn.configure(
+                self._seq_play_btn.configure(
                     text="PLAY", bg="#689d6a", activebackground="#689d6a"
                 )
-
-    def _loop_toggle_record(self) -> None:
-        recording = self._looper.toggle_record()
-        if recording:
-            self._q_put(("log", "Loop RECORD start", False))
-        else:
-            st = self._looper.status()
-            self._q_put(
-                (
-                    "log",
-                    f"Loop RECORD stop — trimmed to {float(st['length']):.2f}s "
-                    f"({int(st['events'])} events)",
-                    False,
-                )
+        for btn, live in (
+            (self._seq_keep_btn, pending),
+            (self._seq_drop_btn, pending),
+            (self._seq_undo_btn, int(st["layers"]) > 1),
+        ):
+            if btn is None:
+                continue
+            base = "#458588" if btn is self._seq_keep_btn else "#665c54"
+            color = base if live else "#3c3836"
+            btn.configure(bg=color, activebackground=color)
+        if self._seq_extend_btn is not None:
+            on = bool(st["extend"])
+            color = "#b16286" if on else "#3c3836"
+            self._seq_extend_btn.configure(
+                text="OVERDUB: EXTEND" if on else "OVERDUB: WRAP",
+                bg=color,
+                activebackground=color,
             )
-        self._q_put(("loop",))
-        self._refresh_loop_status()
 
-    def _loop_toggle_play(self) -> None:
-        if self._looper.is_playing():
-            self._looper.stop_playback()
-            self._q_put(("log", "Loop PLAY stop", False))
-        else:
-            if not self._looper.start_playback():
-                self._q_put(("log", "Loop empty — record something first", False))
-            else:
-                self._q_put(("log", "Loop PLAY start", False))
-        self._q_put(("loop",))
-        self._refresh_loop_status()
+    def _seq_toggle_record(self) -> None:
+        action = self._seq.toggle_record()
+        if action == "backbone" and self._mode != "seq":
+            self._switch_mode("seq")
+        self._q_put(("seq",))
+        self._refresh_seq_status()
 
-    def _loop_stop(self) -> None:
-        if self._looper.is_recording():
-            self._looper.stop_record()
-        if self._looper.is_playing():
-            self._looper.stop_playback()
-        self._q_put(("log", "Loop STOP", False))
-        self._q_put(("loop",))
-        self._refresh_loop_status()
+    def _seq_toggle_play(self) -> None:
+        if self._seq.is_playing():
+            self._seq.stop_playback()
+        elif not self._seq.start_playback():
+            self._q_put(("log", "SEQ empty — record a backbone first", False))
+        self._q_put(("seq",))
+        self._refresh_seq_status()
 
-    def _loop_clear(self) -> None:
-        self._looper.clear()
-        self._q_put(("log", "Loop CLEAR", False))
-        self._q_put(("loop",))
-        self._refresh_loop_status()
+    def _seq_keep(self) -> None:
+        self._seq.keep()
+        self._refresh_seq_status()
+
+    def _seq_drop(self) -> None:
+        self._seq.drop()
+        self._refresh_seq_status()
+
+    def _seq_undo(self) -> None:
+        self._seq.undo()
+        self._refresh_seq_status()
+
+    def _seq_double(self) -> None:
+        if not self._seq.double_length():
+            self._q_put(("log", "SEQ length unchanged (max 8 cycles)", False))
+        self._refresh_seq_status()
+
+    def _seq_halve(self) -> None:
+        if not self._seq.halve_length():
+            self._q_put(("log", "SEQ length unchanged — a layer is that long", False))
+        self._refresh_seq_status()
+
+    def _seq_toggle_extend(self) -> None:
+        self._seq.toggle_extend()
+        self._refresh_seq_status()
+
+    def _seq_stop(self) -> None:
+        self._seq.stop()
+        self._q_put(("seq",))
+        self._refresh_seq_status()
+
+    def _seq_clear(self) -> None:
+        self._seq.clear()
+        self._refresh_seq_status()
 
     def _mk_touch_btn(self, parent: tk.Misc, text: str, command, bg: str = "#3c3836") -> tk.Button:
         """Touch-friendly button: fire on press (resistive panels often miss click)."""
@@ -5018,6 +5760,9 @@ class MidiToneApp:
         name = self._voice_names[self._voice_index]
         # VOICES / PREV / NEXT set morph-A and park at pure A (B stays as morph target)
         self.engine.set_morph_index(self._voice_index)
+        snap = self._voice_fx_sidecars.get(name)
+        if snap is not None:
+            self.engine.apply_voice_fx_sidecar(name, snap)
         self._mark_settings_dirty()
         if self._voice_lbl is not None:
             self._voice_lbl.configure(text=self._voice_label_text())
@@ -5045,11 +5790,264 @@ class MidiToneApp:
         if self._morph_ui_open:
             self._paint_morph_menu()
 
+    def _open_save_voice(self) -> None:
+        """Bake morph + drive + tone into a new dry wavetable (shape only)."""
+        if self._save_voice_open:
+            return
+        if self._mode != "synth":
+            self._switch_mode("synth")
+        # Leave other overlays so the name pad is full-screen
+        if self._grid_open:
+            self._close_voice_grid(restore_main=False)
+        if self._morph_ui_open:
+            self._close_morph_menu(restore_main=False)
+        if self._kit_ui_open:
+            self._close_kit_explorer(restore_main=False)
+
+        self._save_voice_open = True
+        self._save_voice_keys_digits = False
+        self._synth_shell.pack_forget()
+
+        self._save_voice_frame = tk.Frame(self._mode_host, bg="#111111")
+        self._save_voice_frame.pack(fill=tk.BOTH, expand=True)
+
+        header = tk.Frame(self._save_voice_frame, bg="#111111")
+        header.pack(fill=tk.X, padx=6, pady=(6, 2))
+        tk.Label(
+            header,
+            text="SAVE VOICE",
+            font=("DejaVu Sans", 16, "bold"),
+            fg="#fbf1c7",
+            bg="#111111",
+        ).pack(side=tk.LEFT)
+        a, b, blend = self.engine.morph_neighbors()
+        hint = a if a == b else f"{a}→{b} {int(blend * 100)}%"
+        tk.Label(
+            header,
+            text=f"bake shape · {hint}",
+            font=("DejaVu Sans", 11),
+            fg="#a89984",
+            bg="#111111",
+        ).pack(side=tk.RIGHT)
+
+        tk.Label(
+            self._save_voice_frame,
+            text=(
+                "Wave shape: morph + drive + tone → .wav. "
+                "Alongside: delay/reverb amounts in a tiny .fx.json "
+                "(drive stays in the wave, not double-applied)."
+            ),
+            font=("DejaVu Sans", 10),
+            fg="#a89984",
+            bg="#111111",
+            wraplength=760,
+            justify=tk.LEFT,
+            anchor="w",
+        ).pack(fill=tk.X, padx=8, pady=(0, 4))
+
+        name_row = tk.Frame(self._save_voice_frame, bg="#111111")
+        name_row.pack(fill=tk.X, padx=8, pady=4)
+        suggested = self.engine.suggested_save_voice_name()
+        self._save_voice_entry = tk.Entry(
+            name_row,
+            font=("DejaVu Sans Mono", 18),
+            bg="#1d2021",
+            fg="#fbf1c7",
+            insertbackground="#fbf1c7",
+            relief=tk.FLAT,
+        )
+        self._save_voice_entry.pack(side=tk.LEFT, expand=True, fill=tk.BOTH, ipady=10)
+        self._save_voice_entry.insert(0, suggested)
+        self._save_voice_entry.focus_set()
+
+        self._save_voice_status = tk.Label(
+            self._save_voice_frame,
+            text=(
+                f"Will write {self._user_waves_dir.name}/{suggested}.wav "
+                f"+ {suggested}.fx.json"
+            ),
+            font=("DejaVu Sans Mono", 11),
+            fg="#83a598",
+            bg="#111111",
+            anchor="w",
+        )
+        self._save_voice_status.pack(fill=tk.X, padx=8, pady=(0, 4))
+
+        opt = tk.Frame(self._save_voice_frame, bg="#111111")
+        opt.pack(fill=tk.X, padx=6, pady=2)
+        self._mk_touch_btn(
+            opt, "SUGGEST", self._reset_save_voice_name, bg="#458588"
+        ).pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=8)
+        self._mk_touch_btn(
+            opt, "⌫", lambda: self._save_voice_type("\b"), bg="#504945"
+        ).pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=8)
+        self._mk_touch_btn(
+            opt, "CLR", lambda: self._save_voice_type("\x15"), bg="#504945"
+        ).pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=8)
+
+        # SAVE/CANCEL claim their strip first — the keyboard shrinks, never the
+        # buttons that end the job.
+        footer = tk.Frame(self._save_voice_frame, bg="#111111")
+        footer.pack(side=tk.BOTTOM, fill=tk.X, padx=6, pady=6)
+        self._mk_touch_btn(
+            footer, "SAVE", self._confirm_save_voice, bg="#689d6a"
+        ).pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=10)
+        self._mk_touch_btn(
+            footer, "CANCEL", self._close_save_voice, bg="#9d0006"
+        ).pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=10)
+
+        keys = tk.Frame(self._save_voice_frame, bg="#111111")
+        keys.pack(fill=tk.BOTH, expand=True, padx=4, pady=2)
+        self._save_voice_keys = keys
+        self._paint_save_voice_keyboard()
+        self._append_log("SAVE VOICE — bake wave shape + keep delay/reverb alongside")
+
+    def _paint_save_voice_keyboard(self) -> None:
+        keys = getattr(self, "_save_voice_keys", None)
+        if keys is None:
+            return
+        for w in keys.winfo_children():
+            w.destroy()
+        if self._save_voice_keys_digits:
+            rows = ("1234567890", "-.")
+            toggle_label = "ABC"
+        else:
+            rows = ("qwertyuiop", "asdfghjkl", "zxcvbnm_")
+            toggle_label = "123"
+        for r, row in enumerate(rows):
+            fr = tk.Frame(keys, bg="#111111")
+            fr.pack(fill=tk.BOTH, expand=True, pady=1)
+            for ch in row:
+                self._mk_touch_btn(
+                    fr,
+                    ch.upper() if ch.isalpha() else ch,
+                    lambda c=ch: self._save_voice_type(c),
+                    bg="#3c3836",
+                ).pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=1, ipady=6)
+        fr = tk.Frame(keys, bg="#111111")
+        fr.pack(fill=tk.BOTH, expand=True, pady=1)
+        self._mk_touch_btn(
+            fr, toggle_label, self._toggle_save_voice_keys, bg="#504945"
+        ).pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=1, ipady=6)
+
+    def _toggle_save_voice_keys(self) -> None:
+        self._save_voice_keys_digits = not self._save_voice_keys_digits
+        self._paint_save_voice_keyboard()
+
+    def _reset_save_voice_name(self) -> None:
+        if self._save_voice_entry is None:
+            return
+        suggested = self.engine.suggested_save_voice_name()
+        self._save_voice_entry.delete(0, tk.END)
+        self._save_voice_entry.insert(0, suggested)
+        self._update_save_voice_status()
+
+    def _save_voice_type(self, ch: str) -> None:
+        entry = self._save_voice_entry
+        if entry is None:
+            return
+        if ch == "\b":
+            cur = entry.get()
+            entry.delete(0, tk.END)
+            entry.insert(0, cur[:-1])
+        elif ch == "\x15":
+            entry.delete(0, tk.END)
+        else:
+            entry.insert(tk.END, ch)
+        self._update_save_voice_status()
+
+    def _update_save_voice_status(self) -> None:
+        if self._save_voice_status is None or self._save_voice_entry is None:
+            return
+        name = sanitize_voice_name(self._save_voice_entry.get())
+        if name in BUILTIN_VOICE_NAMES:
+            self._save_voice_status.configure(
+                text=f"'{name}' is a built-in — pick another name", fg="#fb4934"
+            )
+            return
+        path = self._user_waves_dir / f"{name}.wav"
+        exists = name in self.engine.voice_names or path.is_file()
+        tag = "overwrite" if exists else "new"
+        self._save_voice_status.configure(
+            text=(
+                f"{tag}: {self._user_waves_dir.name}/{name}.wav "
+                f"+ {name}.fx.json"
+            ),
+            fg="#fabd2f" if exists else "#83a598",
+        )
+
+    def _confirm_save_voice(self) -> None:
+        if self._save_voice_entry is None:
+            return
+        raw = self._save_voice_entry.get()
+        name = sanitize_voice_name(raw)
+        if not name:
+            if self._save_voice_status is not None:
+                self._save_voice_status.configure(text="Need a name", fg="#fb4934")
+            return
+        if name in BUILTIN_VOICE_NAMES:
+            if self._save_voice_status is not None:
+                self._save_voice_status.configure(
+                    text=f"Cannot replace built-in '{name}'", fg="#fb4934"
+                )
+            return
+        try:
+            key, cycle, sidecar = self.engine.save_current_voice(name)
+            wav_path = self._user_waves_dir / f"{key}.wav"
+            fx_path = voice_fx_sidecar_path(self._user_waves_dir, key)
+            write_wavetable_wav(wav_path, cycle, sample_rate=44100)
+            write_voice_fx_sidecar(fx_path, sidecar)
+            self._voice_fx_sidecars[key] = dict(sidecar)
+        except Exception as exc:
+            if self._save_voice_status is not None:
+                self._save_voice_status.configure(text=f"Save failed: {exc}", fg="#fb4934")
+            self._append_log(f"SAVE VOICE failed: {exc}")
+            return
+
+        self._voice_names = self.engine.voice_names
+        try:
+            self._voice_index = self._voice_names.index(key)
+        except ValueError:
+            self._voice_index = 0
+        if self._voice_lbl is not None:
+            self._voice_lbl.configure(text=self._voice_label_text())
+        self.mod_var.set(self._format_mod_line())
+        self._mark_settings_dirty()
+        self._append_log(
+            f"Saved voice '{key}' → {wav_path.name} + {fx_path.name} "
+            f"(dly={int(sidecar.get('fx_delay_mix', 0) * 127)} "
+            f"rvb={int(sidecar.get('fx_reverb_mix', 0) * 127)})"
+        )
+        self._close_save_voice()
+        self._paint_synth_waveform(force=True)
+
+    def _close_save_voice(self, restore_main: bool = True) -> None:
+        if not self._save_voice_open:
+            return
+        if self._save_voice_frame is not None:
+            self._save_voice_frame.destroy()
+            self._save_voice_frame = None
+        self._save_voice_entry = None
+        self._save_voice_status = None
+        self._save_voice_drive_btn = None
+        self._save_voice_keys = None
+        self._save_voice_open = False
+        if restore_main and self._mode == "synth":
+            self._synth_shell.pack(fill=tk.BOTH, expand=True)
+            self._main.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+            self._touch.pack(side=tk.BOTTOM, fill=tk.X, padx=6, pady=6)
+            if self._voice_lbl is not None:
+                self._voice_lbl.configure(text=self._voice_label_text())
+            self.mod_var.set(self._format_mod_line())
+            self._paint_synth_waveform(force=True)
+
     def _open_voice_grid(self) -> None:
         if self._grid_open:
             return
         if self._mode != "synth":
             self._switch_mode("synth")
+        if self._save_voice_open:
+            self._close_save_voice(restore_main=False)
         if self._morph_ui_open:
             self._close_morph_menu(restore_main=False)
         if self._kit_ui_open:
@@ -5127,12 +6125,86 @@ class MidiToneApp:
         for c in range(cols):
             inner.grid_columnconfigure(c, weight=1)
 
+        vib = tk.Frame(self._grid_frame, bg="#111111")
+        vib.pack(fill=tk.X, padx=6, pady=(2, 0))
+        tk.Label(
+            vib, text="VIB", font=("DejaVu Sans", 12, "bold"),
+            fg="#a89984", bg="#111111", padx=4,
+        ).pack(side=tk.LEFT)
+        self._vib_toggle_btn = self._mk_touch_btn(
+            vib, "WHEEL", self._toggle_vib_always, bg="#3c3836"
+        )
+        self._vib_toggle_btn.configure(font=("DejaVu Sans", 12, "bold"), padx=6)
+        self._vib_toggle_btn.pack(side=tk.LEFT, fill=tk.BOTH, padx=(0, 8), ipady=8)
+        def _vib_btn(text: str, command) -> None:
+            btn = self._mk_touch_btn(vib, text, command, bg="#504945")
+            btn.configure(font=("DejaVu Sans", 12, "bold"), padx=6)
+            btn.pack(side=tk.LEFT, fill=tk.BOTH, padx=2, ipady=8)
+
+        def _vib_value(var: tk.StringVar) -> None:
+            tk.Label(
+                vib, textvariable=var, font=("DejaVu Sans Mono", 12, "bold"),
+                fg="#fabd2f", bg="#111111", width=8,
+            ).pack(side=tk.LEFT)
+
+        _vib_btn("DEPTH −", lambda: self._nudge_vib_depth(-VIB_DEPTH_STEP))
+        _vib_value(self._vib_depth_var)
+        _vib_btn("DEPTH +", lambda: self._nudge_vib_depth(VIB_DEPTH_STEP))
+        _vib_btn("RATE −", lambda: self._nudge_vib_rate(-VIB_RATE_STEP))
+        _vib_value(self._vib_rate_var)
+        _vib_btn("RATE +", lambda: self._nudge_vib_rate(VIB_RATE_STEP))
+
         footer = tk.Frame(self._grid_frame, bg="#111111")
         footer.pack(fill=tk.X, padx=6, pady=6)
+        self._mk_touch_btn(
+            footer, "SAVE AS…", self._open_save_voice, bg="#689d6a"
+        ).pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=14)
         self._mk_touch_btn(footer, "CLOSE", self._close_voice_grid, bg="#9d0006").pack(
-            fill=tk.BOTH, ipady=14
+            side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=14
         )
+        self._paint_vib_controls()
         self._paint_voice_grid()
+
+    def _paint_vib_controls(self) -> None:
+        depth, rate, always = self.engine.vib_state()
+        self._vib_depth_var.set(f"{depth:.2f} st")
+        self._vib_rate_var.set(f"{rate:.1f} Hz")
+        if self._vib_toggle_btn is not None:
+            on = always > 0.01
+            color = "#b16286" if on else "#3c3836"
+            try:
+                self._vib_toggle_btn.configure(
+                    text="ON" if on else "WHEEL", bg=color, activebackground=color
+                )
+            except Exception:
+                pass
+
+    def _toggle_vib_always(self) -> None:
+        _depth, _rate, always = self.engine.vib_state()
+        value = self.engine.set_vib_always(0.0 if always > 0.01 else 1.0)
+        self._mark_settings_dirty()
+        self._paint_vib_controls()
+        self.mod_var.set(self._format_mod_line())
+        self._append_log(f"Vibrato {'always on' if value > 0.01 else 'follows mod wheel'}")
+
+    def _nudge_vib_depth(self, delta: float) -> None:
+        depth = self.engine.nudge_vib_depth(delta)
+        st = self.engine.modulation_state()
+        # Turning depth up with the wheel down would be silent — engage it so
+        # the control you just touched is the one you hear.
+        if depth > 0.001 and float(st.get("mod", 0.0)) < 0.01:
+            _d, _r, always = self.engine.vib_state()
+            if always < 0.01:
+                self.engine.set_vib_always(1.0)
+                self._append_log("Vibrato ON (screen control)")
+        self._mark_settings_dirty()
+        self._paint_vib_controls()
+        self.mod_var.set(self._format_mod_line())
+
+    def _nudge_vib_rate(self, delta: float) -> None:
+        self.engine.nudge_vib_rate(delta)
+        self._mark_settings_dirty()
+        self._paint_vib_controls()
 
     def _paint_voice_grid(self) -> None:
         if not self._grid_btns:
@@ -5150,6 +6222,7 @@ class MidiToneApp:
             self._grid_frame.destroy()
             self._grid_frame = None
         self._grid_btns = {}
+        self._vib_toggle_btn = None
         self._grid_open = False
         if restore_main and self._mode == "synth":
             self._synth_shell.pack(fill=tk.BOTH, expand=True)
@@ -5168,18 +6241,25 @@ class MidiToneApp:
             self._switch_mode("synth")
         if self._grid_open:
             self._close_voice_grid(restore_main=False)
+        if self._save_voice_open:
+            self._close_save_voice(restore_main=False)
         if self._kit_ui_open:
             self._close_kit_explorer(restore_main=False)
         # Hand knobs back to morph while editing the pair
-        if self.engine.drum_mode() or self.engine.fx_mode():
+        if self.engine.drum_mode() or self.engine.fx_mode() or self.engine.bus_fx_mode():
             self.engine.set_drum_mode(False)
             self.engine.set_fx_mode(False)
+            self.engine.set_bus_fx_mode(False)
             self._paint_drum_lock_btn()
             self._paint_fx_mode_btn()
+            self._paint_bus_fx_mode_btn()
             self.mod_var.set(self._format_mod_line())
 
         self._morph_ui_open = True
         self._morph_pick_side = "a"
+        # Remember the pair we came in with so CANCEL can put it back
+        a_idx, b_idx = self.engine.morph_pair_indices()
+        self._morph_undo = (a_idx, b_idx, self.engine.morph(), self._voice_index)
         self._synth_shell.pack_forget()
 
         self._morph_frame = tk.Frame(self._mode_host, bg="#111111")
@@ -5263,10 +6343,13 @@ class MidiToneApp:
 
         footer = tk.Frame(self._morph_frame, bg="#111111")
         footer.pack(fill=tk.X, padx=6, pady=6)
-        self._mk_touch_btn(footer, "DONE", self._close_morph_menu, bg="#689d6a").pack(
+        self._mk_touch_btn(
+            footer, "SAVE AS…", self._open_save_voice, bg="#689d6a"
+        ).pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=14)
+        self._mk_touch_btn(footer, "DONE", self._close_morph_menu, bg="#458588").pack(
             side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=14
         )
-        self._mk_touch_btn(footer, "CANCEL", self._close_morph_menu, bg="#9d0006").pack(
+        self._mk_touch_btn(footer, "CANCEL", self._cancel_morph_menu, bg="#9d0006").pack(
             side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=14
         )
         self._paint_morph_menu()
@@ -5329,6 +6412,17 @@ class MidiToneApp:
             else:
                 color = "#3c3836"
             btn.configure(bg=color, activebackground=color)
+
+    def _cancel_morph_menu(self) -> None:
+        """CANCEL means the pair you walked in with, not the one you auditioned."""
+        undo = getattr(self, "_morph_undo", None)
+        if undo is not None:
+            a_idx, b_idx, blend, voice_idx = undo
+            self.engine.set_morph_pair(a_idx, b_idx, morph=blend)
+            self._voice_index = voice_idx
+            self._mark_settings_dirty()
+            self._q_put(("log", "Morph pair restored (CANCEL)", False))
+        self._close_morph_menu()
 
     def _close_morph_menu(self, restore_main: bool = True) -> None:
         if not self._morph_ui_open:
@@ -5592,12 +6686,12 @@ class MidiToneApp:
                 self._q_put(("kit_sel", msg.note))
             vel = msg.velocity if is_drum or not self._full_vel else 127
             self.engine.note_on(msg.channel, msg.note, vel)
-            self._looper.record_note(True, msg.channel, msg.note, vel)
+            self._seq.record_note(True, msg.channel, msg.note, vel)
             if pads_mode or phrase_recording:
                 self._phrases.record_note(True, msg.channel, msg.note, vel)
             self._q_put(("on", msg.channel, msg.note, vel))
-            if self._looper.is_recording():
-                self._q_put(("loop",))
+            if self._seq.is_recording():
+                self._q_put(("seq",))
             if is_drum:
                 model = drum_model_for_note(msg.note)
                 rec_tag = " +rec" if phrase_recording else ""
@@ -5627,12 +6721,12 @@ class MidiToneApp:
                 if phrase_cell_for_note(msg.note) is not None:
                     return
             self.engine.note_off(msg.channel, msg.note)
-            self._looper.record_note(False, msg.channel, msg.note, 0)
+            self._seq.record_note(False, msg.channel, msg.note, 0)
             if pads_mode or self._phrases.is_recording():
                 self._phrases.record_note(False, msg.channel, msg.note, 0)
             self._q_put(("off", msg.channel, msg.note))
-            if self._looper.is_recording():
-                self._q_put(("loop",))
+            if self._seq.is_recording():
+                self._q_put(("seq",))
             self._q_put(("log", format_message(msg), False))
         elif msg.type == "polytouch":
             if (
@@ -5725,8 +6819,8 @@ class MidiToneApp:
                 elif kind == "panic":
                     self._active_notes.clear()
                     self._refresh_active()
-                elif kind == "loop":
-                    self._refresh_loop_status()
+                elif kind == "seq":
+                    self._refresh_seq_status()
                 elif kind == "phrase":
                     self._refresh_phrase_status()
                 elif kind == "song":
@@ -5747,6 +6841,9 @@ class MidiToneApp:
         if getattr(self, "_mod_dirty", False):
             self._mod_dirty = False
             self.mod_var.set(self._format_mod_line())
+            if self._grid_open:
+                # Knobs 5/6 and the screen edit the same vibrato
+                self._paint_vib_controls()
             if self._kit_ui_open:
                 self._paint_kit_waveform()
             elif self._mode == "synth" and not self._overlay_busy():
@@ -5793,8 +6890,10 @@ class MidiToneApp:
         self._log_lines = 0
 
     def _panic(self) -> None:
-        if self._looper.is_playing():
-            self._looper.stop_playback()
+        try:
+            self._seq.stop()
+        except Exception:
+            pass
         try:
             self._phrases.stop_all()
         except Exception:
@@ -5804,7 +6903,7 @@ class MidiToneApp:
         self.engine.all_notes_off()
         self._active_notes.clear()
         self._refresh_active()
-        self._refresh_loop_status()
+        self._refresh_seq_status()
         self._refresh_phrase_status()
         self._refresh_song_status()
         self._append_log("All Notes Off")
@@ -5841,8 +6940,7 @@ class MidiToneApp:
     def _on_close(self) -> None:
         self._stop.set()
         try:
-            self._looper.stop_playback()
-            self._looper.stop_record()
+            self._seq.stop()
         except Exception:
             pass
         try:

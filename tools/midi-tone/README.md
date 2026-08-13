@@ -4,9 +4,9 @@ Hear and see MIDI from the **Akai MPK mini** on the Pi **without** USB-DIN or a 
 
 - Opens a MIDI input (prefers a port name containing `MPK`)
 - Note-on → wavetable tone through the Pi audio jack / HDMI
-- **Modes** (top right): **SYNTH**, **LOOPER**, **PADS**, **SONGS**, **PRESETS**, **LOG** — fully separate UIs
+- **Modes** (top right): **SYNTH**, **SEQ**, **PADS**, **SONGS**, **PRESETS**, **LOG** — fully separate UIs
 - Synth: voices, A/B morph, knobs, live morph-cycle scope; **MPK pads (ch10) = analog drum voices**; **KIT** drill-down scopes a selected drum
-- Looper: record a MIDI note sequence, play it on repeat
+- Sequencer: record a backbone loop, then overdub layers of drums and keys over it
 - Pads: 16 phrase clips (Bank A+B); record from keys, launch from touch squares **or** MPK pads
 - Songs: scrolling list of every `.mid` in `songs/`, tempo, play local and/or USB→DIN
 - Presets: 8 save slots + autosave last session (`settings.json`)
@@ -57,6 +57,13 @@ Factory **Prog Select → Pad 1** (MPC program) maps knobs to CC70–77:
 
 Joystick Y still sends **CC1** = vibrato amount. PREV/NEXT jumps morph to a voice; Knob 1 sweeps continuously between them.
 
+**Vibrato without a wheel:** the **VOICES** screen has a vibrato row — `DEPTH −/+` (0–2 semitones) and `RATE −/+` (1–9 Hz), plus a toggle:
+
+- **WHEEL** — vibrato follows CC1 (joystick), as it always has
+- **ON** — vibrato runs at the set depth with no wheel input; the joystick can still push it further (whichever asks for more wins)
+
+Raising depth from the screen while the joystick is centred flips the toggle to **ON**, so the control you just touched is the one you hear. Depth, rate and the toggle are saved in `settings.json` and presets, and knobs 5/6 keep editing the same values.
+
 If a knob does nothing, check the event log for its CC number — your MPK program may differ.
 
 ### Drum pads (channel 10) — all 16 MPK pads
@@ -86,11 +93,18 @@ Factory MPC program (`Prog Select` → Pad 1): **Bank A = notes 36–43**, **Ban
 | 4 | 73 | Noise amount |
 | 8 | 77 | Master level (always) |
 
-Hitting pads does **not** steal morph knobs. With DRUM MODE off, Knob 1 stays morph. Opening **MORPH** turns DRUM MODE / FX MODE off. Session-only (not saved across restart).
+Hitting pads does **not** steal morph knobs. With DRUM MODE off, Knob 1 stays morph. Opening **MORPH** turns DRUM MODE / FX MODE / BUS FX off. Session-only (not saved across restart).
 
-**FX MODE** (Synth toolbar) — mix-bus effects on the whole soft-synth output (keys + drums + launched phrases):
+**FX MODE** (Synth toolbar) — **per-instrument inserts** + a shared kit bus. Knobs edit the current target:
 
-| Knob | CC | FX control |
+- Default target: the **nearer morph endpoint** wavetable (`voice:saw`, …).
+- Open **KIT** → **ALL DRUMS** → shared **kit-group** FX (`drums`) so one echo/drive hits the whole kit without wetting the melody.
+- Open **KIT** and tap a single pad → that **drum model** only (`drum:kick`, …). Closing KIT keeps `drums` if that was selected; otherwise returns to the morph voice.
+- Locked phrase pads keep their `morph_a` wavetable’s FX chain.
+
+**BUS FX** (separate toolbar button) — **master mix-bus** wet after keys + drums are summed. Same knob map as FX MODE, but the whole soft-synth output gets drive/delay/reverb. Insert FX still runs underneath; the two modes are mutually exclusive for knob focus (and with DRUM MODE).
+
+| Knob | CC | FX control (FX MODE or BUS FX) |
 |------|----|------------|
 | 1 | 70 | Drive / saturation |
 | 2 | 71 | Delay time (~50–750 ms) |
@@ -100,9 +114,16 @@ Hitting pads does **not** steal morph knobs. With DRUM MODE off, Knob 1 stays mo
 | 6 | 75 | Reverb mix |
 | 8 | 77 | Master level (always) |
 
-FX amounts persist in `settings.json` / presets; the FX MODE toggle itself does not.
+Amounts persist in `settings.json` / presets (`voice_fx` / `drum_fx` / `drum_group_fx` / `bus_fx`); the mode toggles themselves do not.
 
 **Waveforms:** SYNTH shows a live **morph-cycle** scope that redraws as Knob 1 / voice changes. Tap **KIT** for a drum drill-down — pick a pad (touch or MPK), watch its one-shot reshape with pitch / stretch / noise / tone knobs (DRUM MODE turns on while KIT is open). Keeps the main synth screen uncluttered.
+
+**SAVE AS…** (from **VOICES** or **MORPH**) writes a user voice under `user-wavetables/`:
+
+- `<name>.wav` — morph + **drive** + **tone** baked into the single-cycle shape
+- `<name>.fx.json` — delay/reverb numbers alongside (mix + time/feedback/size). Drive is not stored here (already in the wave)
+
+Selecting that voice restores the delay/reverb sidecar. Built-ins can’t be overwritten.
 
 Keyboard notes keep the wavetable morph synth. Pad aftertouch still trims the ringing hit. If a pad program uses other note numbers, unknown notes still cycle through the 16 voices.
 
@@ -111,7 +132,7 @@ Keyboard notes keep the wavetable morph synth. Pad aftertouch still trims the ri
 Top-right tabs stay visible:
 
 - **SYNTH** — wavetable soft-synth, voice grid, morph pair
-- **LOOPER** — record MIDI notes, then play them back on a loop (free timing; notes only)
+- **SEQ** — record a backbone loop, overdub layers over it, KEEP / DROP / UNDO (free timing; notes only)
 - **PADS** — 4×4 phrase clip launcher (MPK Bank A+B); touch or drum pads
 - **SONGS** — lists every `.mid` / `.midi` in `songs/`; big ▲ UP / ▼ DOWN to scroll; tempo; LOCAL/USB out
 - **PRESETS** — 8 touch slots: SAVE / LOAD / DELETE current sound + full-velocity
@@ -119,20 +140,31 @@ Top-right tabs stay visible:
 
 Last session autosaves to `settings.json` (gitignored) every few seconds and on quit.
 Named presets live in `user-presets/slot-01.json` … `slot-08.json`.
+User-saved morph wavetables live in `user-wavetables/*.wav` (+ `*.fx.json` for delay/reverb, gitignored).
 Song files live as whatever you put in `songs/` (any `.mid` name).
 Phrase pads persist as `phrases/pad-01.json` … `pad-16.json` (gitignored).
 
-### Looper
+### Sequencer (SEQ)
 
-1. Open **LOOPER**
-2. Tap **RECORD**, play notes on the MPK
-3. Tap **RECORD** again (or **STOP**) to finish
-4. Tap **PLAY** to loop; tap **PLAY**/**STOP** to halt
-5. **CLEAR** wipes the take
+808-style overdubbing: build a beat by adding to it while it plays. Drums and keys both record.
 
-On stop, the take is **auto-trimmed**: leading silence before the first hit is removed, and trailing silence after the last hit is capped to the largest gap between note-ons (so lag hitting STOP doesn’t leave a dead bar at the loop point). Same trim applies to phrase-pad recordings.
+1. Open **SEQ**, tap **REC BACKBONE**, play the groove
+2. Tap **REC** again — the take is trimmed, its length becomes the loop, and it starts playing
+3. Tap **REC** again to **overdub**: play more drums or a melody over the running loop. What you played shows up on the next pass, so you hear the layer in place before deciding
+4. **KEEP** flattens the layer onto the sequence · **DROP** throws it away · **UNDO** peels the last kept layer back off
+5. **STOP** halts playback (material stays) · **CLEAR** starts over
 
-Live playing still works while a loop runs. Voice/morph/knob settings from Synth apply to looped notes too.
+Each take (backbone and every overdub) **bakes the vibrato it was played with** — depth, rate, and amount — onto that layer. Key notes from that layer keep their own LFO on playback; changing the live vibrato afterwards (or recording a dry layer over a wobbly one) doesn't rewrite older layers. Drum hits never take vibrato. The layer strip shows `vib 0.9st` / `vib none` next to each take.
+
+The backbone is the only take that sets length; everything after it is measured in backbone cycles.
+
+- **LEN ×2 / ÷2** grows or shrinks the sequence in whole cycles. The groove tiles underneath, so a doubled sequence lets you overdub a fill that only happens the second time around. ÷2 refuses to cut a layer that is longer than the target.
+- **OVERDUB: WRAP** (default) folds a long take back onto the same cycle, the way a drum machine does. **OVERDUB: EXTEND** instead stretches the sequence to as many whole backbone cycles as the take needs (up to 8).
+- Layers are a stack, not one flat list, so UNDO works layer by layer. **SONGS → SAVE SEQ** exports the flattened result as `.mid`.
+
+On stop, every free-timing take is **auto-trimmed**: leading silence before the first hit is removed, and trailing silence after the last hit is capped to the largest gap between note-ons (so lag hitting REC doesn’t leave a dead bar at the loop point). The same trim runs on phrase-pad recordings.
+
+Live playing still works while the sequence runs. Voice/morph/knob settings from Synth apply to sequenced notes too. Recording keeps going if you switch modes — handy for changing voice mid-overdub.
 
 ### Phrase Pads
 
@@ -147,7 +179,9 @@ Two views (top-right of PADS): **EDIT** (record / fine-tune) and **PLAY** (perfo
 6. Bottom rows:
    - **MODE** then tap a pad → ONE-SHOT ↔ LOOP (or use **TRIG** on the selected pad)
    - **CLEAR** then tap a pad → erase
-   - **FOLLOW** / **LOCK** — FOLLOW uses the live morph; LOCK freezes the current morph onto that pad (multi-timbre; up to 4 locked pads at once)
+   - **FOLLOW** / **LOCK** — FOLLOW uses the live morph and the live master level; LOCK freezes the current morph **and the master level** onto that pad (multi-timbre; up to 4 locked pads at once)
+   - **VOL− / VOL+** — per-pad trim, 10% a tap (10–200%). Audible on the next note, so you can balance a pad against the mix while it loops. Switching a pad back to FOLLOW resets its trim to 100%
+   - **VIB** — vibrato is captured when you stop recording, so a phrase keeps the wobble it was played with no matter what the rig does later. Tap to switch that pad between its baked value (`VIB 0.9st`, or `VIB none` if you recorded dry) and the live rig (`VIB live`); LOCK re-captures it along with the voice
    - **CH:rec** / **CH:n** — emit on recorded channels or force MIDI ch 1–16
    - **SYNTH** / **MIDI** — local soft-synth on/off (off = sequence only over USB/DIN)
    - **OUT: LOCAL / USB / BOTH** — session routing (shares the Songs USB port)
@@ -166,7 +200,7 @@ While a phrase is **recording**, MPK pads play/record **drum voices** (not launc
 Ways to get files into `songs/`:
 
 1. **Bundled demos (offline)** — `demo-songs/` ships **12 classical Mutopia MIDIs** with the deploy (Bach, Beethoven, Debussy, Joplin, Mozart, Satie, …). On launch, any missing ones are copied into `songs/` (no internet). See `demo-songs/LICENSE.txt`.
-2. **Record your own** — LOOPER → record → **SONGS** → **SAVE LOOP** (writes `take-001.mid`, `take-002.mid`, …)
+2. **Record your own** — SEQ → record → **SONGS** → **SAVE SEQ** (writes `take-001.mid`, `take-002.mid`, …)
 3. **Optional online refresh** — if the Pi has network:
    ```bash
    cd ~/midi-tone

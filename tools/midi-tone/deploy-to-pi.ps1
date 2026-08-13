@@ -15,6 +15,7 @@ $Here = Split-Path -Parent $MyInvocation.MyCommand.Path
 Write-Host "Deploying midi-tone -> ${PiHost}:~/midi-tone/"
 scp -r `
     "$Here\midi_tone.py" `
+    "$Here\sequencer.py" `
     "$Here\requirements.txt" `
     "$Here\run.sh" `
     "$Here\setup-venv.sh" `

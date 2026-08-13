@@ -21,14 +21,14 @@ todos:
     content: "Phase 1: channel remap, CC remap + learn, always-full / velocity remap, stuck-note safety"
     status: pending
   - id: touch-ui
-    content: "One kiosk UI: Synth/Looper/Pads/Songs now; Map mode for remap thru (never on MIDI hot path)"
+    content: "One kiosk UI: Synth/Seq/Pads/Songs now; Map mode for remap thru (never on MIDI hot path)"
     status: in_progress
   - id: drum-retrigger
     content: "Phase 2: per-pad/note auto-retrigger with configurable interval"
     status: pending
   - id: phrase-loop
-    content: "Phase 3a: live MIDI note looper in kiosk (done in midi-tone); overdub/quantize later"
-    status: in_progress
+    content: "Phase 3a: SEQ mode — backbone take + 808-style overdub layers with keep/drop/undo; quantize later"
+    status: completed
   - id: songs-smf
     content: "Phase 3b: Songs mode — save/load .mid, tempo, play to soft-synth and/or USB→DIN"
     status: in_progress
@@ -45,11 +45,11 @@ todos:
     content: "Wave viz: live morph-cycle scope on SYNTH + KIT drill-down for per-drum one-shot preview"
     status: completed
   - id: jambox-fx
-    content: "Jambox FX track: mix-bus distortion → echo/delay → careful reverb; measure Pi 2 CPU/xruns"
+    content: "Jambox FX: voice/drum inserts + ALL DRUMS kit bus + master BUS FX; measure Pi 2 CPU/xruns"
     status: completed
   - id: rust-jambox-engine
     content: "Rust jambox engine: audio + sample-accurate sequencer clock; Tk UI becomes thin client (timing integrity)"
-    status: pending
+    status: in_progress
   - id: tft70-display
     content: "Migrate kiosk to BigTreeTech Pi TFT70 V2.1 (7\" DSI, capacitive GT911); retire ADS7846 resistive path"
     status: pending
@@ -81,7 +81,7 @@ Power on → Openbox kiosk → modes. The soft-synth path started as a Phase 0 h
 | Mode (UI) | Pillar | Job |
 |-----------|--------|-----|
 | **Synth** | Jambox | Wavetable morph synth + drum kit + scopes |
-| **Looper** | Jambox | Free-timing MIDI note loop into the soft-synth |
+| **Seq** | Jambox | Free-timing backbone loop + 808-style overdub layers (drums and keys) |
 | **Phrases / Pads** | Jambox (+ MIDI out) | 16 clip-launch cells; touch **and** MPK pads |
 | **Songs** | Both | `.mid` library; tempo; LOCAL and/or USB→DIN |
 | **Presets** | Jambox | Synth slots + session autosave |
@@ -93,7 +93,7 @@ Boot path: `install-kiosk.sh` + X11 Openbox session (already started). No normal
 ### Architecture rule (still true — and it helps the jambox)
 
 - **Rust `midi-engine`:** MIDI **thru/remap** hot path only (ALSA in → transform → out). RT-friendly, no UI work.
-- **Kiosk UI (`midi-tone` today):** the **jambox** — soft-synth, drums, looper, pads, songs, presets. Talks to the engine over IPC/files when Map mode is active.
+- **Kiosk UI (`midi-tone` today):** the **jambox** — soft-synth, drums, sequencer, pads, songs, presets. Talks to the engine over IPC/files when Map mode is active.
 - **UI never sits on the thru hot path.** Touching Map (or Synth) must not add jitter to live thru notes.
 - Soft-synth audio is a first-class product path; it is *not* the remap thru path.
 - **Songs / Pads → DIN** is a *player/emit* path (schedule MIDI out a USB port), not live thru. v1 may open MIDI out from the kiosk; later the engine can own the scheduler if we want RT priority / remap-on-playback.
@@ -135,7 +135,7 @@ flowchart LR
 ```
 
 - **Engine (Rust):** ALSA → fixed processor chain → out. `SCHED_FIFO`, `mlockall`, zero alloc after start, atomic preset publish.
-- **Kiosk UI (separate process):** jambox (Synth / Looper / Pads / Songs / …) + Map; config IPC to engine; local audio on the jambox path only.
+- **Kiosk UI (separate process):** jambox (Synth / Seq / Pads / Songs / …) + Map; config IPC to engine; local audio on the jambox path only.
 - **Not used:** Python/Node on the *thru* path, Chromium, Electron, anything from play-my-synth.
 
 ## Feature map (what you asked for)
@@ -151,15 +151,15 @@ These are different modes; don’t collapse them into one “arp”:
 | Mode | What it does | How it differs |
 |------|----------------|----------------|
 | **Drum retrigger** | On pad hit (or hold), re-fire **that same note** on a **per-note interval** (e.g. kick every 100ms, hat every 50ms) until release or latch off | One note, fixed pitch, rate per pad — rolls/stutters, not a melody |
-| **Phrase looper** | **Record** what you play (absolute notes + timing), then **loop that clip** | Captures your performance verbatim; loop length = what you recorded |
+| **Sequencer (SEQ)** | **Record** what you play (absolute notes + timing), loop it, then **overdub layers** onto it | Captures your performance verbatim; loop length = the backbone take |
 | **Arpeggiator** (key-relative) | You **author a relative step pattern** (intervals from a root); press a key → transpose pattern to that root and loop | Pattern is designed, not recorded; input key chooses transposition |
 
 **Phrase loop vs arp:** same family (repeating notes in time), different input model.
-- Looper = “record this lick, repeat it.”
+- Sequencer = “record this lick, repeat it, then keep adding to it.”
 - Arp = “here’s a pattern in scale degrees; play a root and I’ll spell it.”
-You likely want **both** eventually; ship **phrase looper first** (matches “record a note sequence and loop it”), keep key-relative arp as a later distinct mode.
+You likely want **both** eventually; the **sequencer shipped first** (matches “record a note sequence and loop it”), and key-relative arp stays a later distinct mode.
 
-Drum retrigger can share the engine’s RT timer infrastructure with looper/arp, but it’s a separate processor (per-note rate table, not a multi-step sequence).
+Drum retrigger can share the engine’s RT timer infrastructure with the sequencer/arp, but it’s a separate processor (per-note rate table, not a multi-step sequence).
 
 ## Inspiration: CME UxMIDI / HxMIDI Tools
 
@@ -192,7 +192,7 @@ CME’s PC/Mac app **configures their USB MIDI interfaces**. Filters, routes, an
 
 Live surface in `tools/midi-tone`:
 - Wavetable voices, A/B morph, MPK knobs, drum kit, scopes
-- Modes: Synth / Looper / Pads / Songs / Presets / Log
+- Modes: Synth / Seq / Pads / Songs / Presets / Log
 - Kiosk session (`kiosk.sh` / Openbox) so the box boots into the UI
 - **Session autosave** → `tools/midi-tone/settings.json` every ~2s when dirty and on quit
 - **Named presets** → `tools/midi-tone/user-presets/slot-01.json` … `slot-08.json`
@@ -233,9 +233,17 @@ This is **not** MIDI-out thru. It is the creative local instrument. Real use alr
 
 The diagnostic framing did **not** paint a software dead-end. Limits will show up as **CPU, audio xruns, or latency feel** — measurable — not as “we called it Phase 0.”
 
-### Effects (mix bus first) — **shipped in Python on `cursor/midi-tone-jambox-fx-1052`**
+### Effects (insert + kit group + bus) — **shipped in Python on `cursor/midi-tone-per-voice-fx-1052`**
 
-Apply to the soft-synth output (keys + drums + launched phrases) via **FX MODE** knobs — not a DAW plugin host.
+Same cheap DSP chain (drive → delay → light reverb), different routing:
+
+| Layer | UI | Routing |
+|-------|----|---------|
+| **Voice / drum insert** | **FX MODE** (+ KIT pad) | Per wavetable name, or one drum model. Melody wet does not smear a dry kit. |
+| **Kit group** | **KIT → ALL DRUMS** while FX MODE | Shared bus on the whole drum sum (one echo for the kit). Keys stay dry. |
+| **Master bus** | **BUS FX** | Optional wet after keys + drums are summed. |
+
+Knob focus is mutually exclusive across FX MODE / BUS FX / DRUM MODE. Amounts persist as `voice_fx` / `drum_fx` / `drum_group_fx` / `bus_fx`.
 
 | Effect | Status | Notes |
 |--------|--------|-------|
@@ -245,19 +253,39 @@ Apply to the soft-synth output (keys + drums + launched phrases) via **FX MODE**
 
 Play with these in the current `midi-tone` process **before** the Rust audio refactor so the feel is proven on hardware.
 
-### Next architecture: Rust jambox engine (planned)
+### Rust jambox engine — **scaffolded on `cursor/rust-jambox-engine-1052`**
 
 Dropped beats while looping (UI/GIL/wall-clock sequencer vs audio callback) are a real product risk. Same law as thru:
 
 > **UI is never on the audio / sequencer hot path.**
 
-| Step | Intent |
-|------|--------|
-| **Now** | Ship FX in Python; jam and measure |
-| **Next** | Dedicated **Rust jambox engine**: wavetable + drums + FX + **sample-accurate** loop/phrase clock |
-| **UI** | Tk becomes a thin client (mode switches, knobs, pad grid) over IPC — like Map ↔ `midi-engine` |
+| Step | Intent | Status |
+|------|--------|--------|
+| **Ship FX in Python** | Jam and measure so the rewrite targets a known sound | Done |
+| **`jambox-core`** | Wavetable + drums + FX + **sample-accurate** loop/phrase clock, no I/O | Done |
+| **`jambox-engine`** | Audio thread, MIDI in/out, control socket, RT hints | Done |
+| **UI cutover** | Tk becomes a thin client (mode switches, knobs, pad grid) over IPC | Client shipped; per-mode cutover next |
 
-Radical refactor is in scope. Do it after FX playtime so the rewrite targets a known sound, not a dry skeleton.
+#### Timing model (why this fixes dropped beats)
+
+The audio callback is the only clock. Clip events are stored in **ticks**, resolved to an **absolute frame** each block, and the block is **split at those frames** — a pad landing at frame 300 of a 512-frame buffer is heard at frame 300, not at the next boundary. Tests cover: exact frames under ragged block sizes, 32 loop cycles without drift, two pads launched apart still starting on the same bar, and a loop holding time while knob commands flood in every block.
+
+#### Threading contract
+
+| Thread | May do | Never does |
+|--------|--------|------------|
+| **Audio** | Arithmetic, ring pops, pointer swaps | Lock, allocate, free, log, syscall |
+| **Control (IPC)** | JSON parsing, clip allocation **and freeing**, disk | Touch DSP state directly |
+| **MIDI in** | Parse bytes → push command | Block on a full ring (drops instead) |
+| **MIDI out** | Send bytes to the port | Run inside the audio callback |
+
+Clips are built on the control thread, handed over as a `Box`, and the **old allocation is sent back** to be dropped off-thread — the callback only moves a pointer. Backpressure is reported to the UI (`command ring full`) rather than blocking anyone.
+
+#### Measuring
+
+`jambox-engine bench` renders a worst-case jam (held voices + drum loop + FX on every bus) offline and prints percent-of-one-core against the PLAN's <15% budget. No audio device required, so it runs in CI and over SSH on the Pi.
+
+Remaining before the Python synth can retire: wavetable upload at runtime, preset/settings bridge, and moving each kiosk mode onto the client one at a time (Pads first — it has the most to gain).
 
 ### Stress test (the limit detector)
 
@@ -300,9 +328,24 @@ Engine side is largely built: JSON presets + SSH/CLI. Prove channel/CC/velocity 
 - Optional velocity of repeats (fixed / follow first hit / decay)
 - Hot path: note-on arms a slot; RT timer re-sends note-on/off pairs; note-off or second hit clears
 
-## Phase 3a — Live phrase looper (kiosk; started)
+## Phase 3a — Sequencer / overdub looper (kiosk) — **done on `cursor/midi-tone-overdub-sequencer-1052`**
 
-In `midi-tone` today: free-timing note record → loop into the soft-synth. Later: overdub, quantize, optional feed into thru/Songs.
+The free-timing looper grew into the **SEQ** mode and replaced it outright. One take on repeat is still one tap away (REC → play → REC), so nothing was lost; what's new is everything after that first take.
+
+| Piece | Behavior |
+|-------|----------|
+| **Backbone** | First take. Auto-trimmed (`trim_loop_take`), and its length locks the cycle every later take is measured in |
+| **Overdub** | REC while it loops. Drums *and* keys record. Hits become audible on the next pass, so you judge the layer in place |
+| **KEEP / DROP** | KEEP flattens the take onto a layer stack; DROP abandons it. The backbone is never touched by a bad take |
+| **UNDO** | Pops the newest kept layer. Layers stay separate on disk-free memory, so "flatten" doesn't mean "forget" |
+| **Length** | `LEN ×2 / ÷2` in whole backbone cycles (max 8); short layers tile under long ones |
+| **WRAP / EXTEND** | WRAP (default) folds a long take back onto the cycle, drum-machine style. EXTEND stretches the sequence to fit the take in whole cycles |
+| **Per-layer vibrato** | Depth/rate/amount baked when a take closes; key notes from that layer get their own LFO on playback (drums never). Live rig changes don't rewrite older layers |
+| **Export** | `SONGS → SAVE SEQ` writes the flattened sequence to `take-NNN.mid` |
+
+Model and transport live in `tools/midi-tone/sequencer.py`, deliberately free of Tk / numpy / audio so the timing rules are unit-tested (`test_sequencer.py`) on any machine; `test_ui_seq.py` drives the real Tk screen under Xvfb with stub audio + MIDI ports.
+
+Still open: quantize, per-layer mute, and moving the transport onto the Rust engine's sample-accurate clock (the layer model maps onto `jambox-core`'s clip sequencer — a layer is a clip with a span in cycles).
 
 ## Phase 3b — Songs / SMF player (cheap win; in progress)
 
@@ -312,7 +355,7 @@ In `midi-tone` today: free-timing note record → loop into the soft-synth. Late
 |-------|----------|
 | Library | All `*.mid` / `*.midi` in `tools/midi-tone/songs/` (gitignored) |
 | Load (UI) | Chunky scrolling list + ▲ UP / ▼ DOWN; tap a row → **PLAY** |
-| Save | Export current **Looper** take → new `take-NNN.mid`; or drop any `.mid` into `songs/` |
+| Save | Export current **SEQ** sequence (all layers flattened) → new `take-NNN.mid`; or drop any `.mid` into `songs/` |
 | Demo pack | Bundled `demo-songs/` (~12 Mutopia classical MIDIs) ships with deploy; missing files seeded into `songs/` on launch. Optional `fetch_songs.py --all` when online. |
 | Play | Schedule note/CC events to **local soft-synth** and/or **USB MIDI out → DIN** |
 | Tempo | Touch BPM − / + (and show file’s native tempo); scales playback rate |
@@ -332,12 +375,14 @@ Touch **4×4** grid (MPK Bank A + Bank B) where each cell holds a short recorded
 | Feature | Behavior |
 |---------|----------|
 | **PLAY / EDIT views** | PLAY = launch grid + STOP ALL + OUT; EDIT = record/clear/mode + per-pad drill-down |
-| **FOLLOW / LOCKED voice** | FOLLOW uses global morph; LOCKED bakes A/B+morph onto that pad (max 4 concurrent locked tables) |
+| **FOLLOW / LOCKED voice** | FOLLOW uses global morph + live master level; LOCKED bakes A/B+morph **and the master level** onto that pad (max 4 concurrent locked tables) |
+| **Per-pad trim** | `VOL− / VOL+` scales that pad's velocities 10–200% so a locked voice can sit under the mix; FOLLOW resets it to 100% |
+| **Per-pad vibrato** | Depth/rate/amount captured when the take stops; the synth renders that pad's voices with their own LFO. `VIB` toggles baked ↔ live |
 | **Out channel** | Per pad: as-recorded or force ch1–16 on emit |
 | **Local synth** | Per pad ON/OFF — OFF = MIDI-only (DIN/USB via session OUT) |
 | **Pads OUT** | Session `LOCAL` / `USB` / `BOTH` (shares Songs USB outport) |
 
-Persist per-pad fields in `phrases/pad-NN.json` (version 2); session stores pads `view` + `out_mode` in `settings.json`.
+Persist per-pad fields in `phrases/pad-NN.json` (version 4 — adds per-pad `gain` and baked vibrato); session stores pads `view` + `out_mode` in `settings.json`.
 
 ### Launch inputs (both)
 
@@ -354,7 +399,7 @@ Persist per-pad fields in `phrases/pad-NN.json` (version 2); session stores pads
 
 | vs existing mode | Difference |
 |------------------|------------|
-| **Looper** | One free-timing loop on repeat |
+| **Seq** | One free-timing sequence: backbone loop plus overdub layers |
 | **Songs** | Whole `.mid` files + tempo transport |
 | **Phrases / Pads** | Many one-shot / loop *phrases*; launch like an MPC / clip launcher from **screen or drum pads** |
 
@@ -372,7 +417,7 @@ Persist per-pad fields in `phrases/pad-NN.json` (version 2); session stores pads
 
 - Edit step sequence (intervals, gates, optional velocity steps)
 - Held/latched root transposes and runs from engine clock
-- Only after looper / phrases exist so the product doesn’t overload one “sequence” concept
+- Only after the sequencer / phrases exist so the product doesn’t overload one “sequence” concept
 
 ## Repo / stack
 
@@ -416,7 +461,7 @@ flowchart TB
 ### Daily loop (painful path avoided)
 1. **Edit on your PC** in Cursor — same as any other repo.
 2. **Test logic on the PC** without the Pi:
-   - Pure Rust unit tests for remap, velocity tables, looper math, retrigger timing (fake clock).
+   - Pure Rust unit tests for remap, velocity tables, sequencer math, retrigger timing (fake clock).
    - Optional: run the engine on the PC with your USB MIDI devices (`midir` on Windows) to feel channel/CC/velocity; ALSA RT tuning is Linux-only, so this is functional, not final latency sign-off.
 3. **Push to the Pi over the network** — **cross-compile on the PC** strongly preferred on Pi 2 (`armv7-unknown-linux-gnueabihf`); on-device `cargo build` is painfully slow. `scp` the binary; restart `midi-engine` via SSH.
 4. **On-Pi checks** for what the PC can’t prove: ALSA port names, realtime scheduling, later touch UI / fullscreen.
@@ -514,7 +559,7 @@ flowchart LR
 
 **Jambox pillar**
 - Power on → kiosk; you can make a beat + melody performance without reading a manual
-- Synth / drums / looper / pads feel playable on Pi 2 (fun under the hands, not just “notes work”)
+- Synth / drums / sequencer / pads feel playable on Pi 2 (fun under the hands, not just “notes work”)
 - Record a phrase, loop it, launch pads, save/load `.mid` songs; LOCAL and/or USB→DIN when needed
 - FX (when added) survive the stress test above without turning the box into a science project
 - Stays obvious vs. gear you already own but don’t use because of learning cost

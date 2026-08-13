@@ -3,10 +3,14 @@ resolver = "2"
 members = [
     "crates/midi-core",
     "crates/midi-engine",
+    "crates/jambox-core",
+    "crates/jambox-engine",
 ]
 default-members = [
     "crates/midi-core",
     "crates/midi-engine",
+    "crates/jambox-core",
+    "crates/jambox-engine",
 ]
 
 [workspace.package]
@@ -16,6 +20,7 @@ license = "MIT"
 
 [workspace.dependencies]
 midi-core = { path = "crates/midi-core" }
+jambox-core = { path = "crates/jambox-core" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
