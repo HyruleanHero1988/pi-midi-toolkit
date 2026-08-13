@@ -53,11 +53,12 @@ from sequencer import (  # noqa: E402  (local module, imported after the hard de
     trim_loop_take,
 )
 from screensaver import (  # noqa: E402
-    MIDI_IDLE_IGNORE,
+    PIXEL_SHIFT_AMPLITUDE,
     IdleWatch,
     PanelBacklight,
     next_timeout_preset,
     orbit_xy,
+    pixel_shift_xy,
     timeout_from_env,
     timeout_label,
 )
@@ -3770,6 +3771,8 @@ class MidiToneApp:
         self._saver_started = 0.0
         self._saver_timeout_btn: Optional[tk.Button] = None
         self._saver_tick_after: Optional[str] = None
+        self._shift_started = time.monotonic()
+        self._shift_xy = (None, None)
         self.root.bind("<Destroy>", self._on_root_destroy, add="+")
         # TFT70 / Pi panel target is 800×480 (older builds used 800×420 and left a gap)
         self.root.geometry("800x480")
@@ -4136,11 +4139,11 @@ class MidiToneApp:
         print("ui: construction complete", flush=True)
         self.root.after(2000, self._autosave_tick)
         self.root.bind_all("<ButtonPress>", self._on_pointer_activity, add="+")
-        self.root.bind_all("<Key>", self._on_pointer_activity, add="+")
         self._saver_tick_after = self.root.after(1000, self._screensaver_tick)
+        self._apply_pixel_shift()
         self._append_log(
             f"TFT burn-in guard: {timeout_label(self._idle.timeout_sec)} "
-            "— tap or play to wake."
+            "— tap the panel to wake; MIDI does not."
         )
 
     def _voice_label_text(self) -> str:
@@ -7069,8 +7072,6 @@ class MidiToneApp:
         return None
 
     def _handle_midi(self, msg: mido.Message) -> None:
-        if msg.type not in MIDI_IDLE_IGNORE:
-            self._note_midi_activity()
         continuous = msg.type == "pitchwheel" or (
             msg.type == "control_change"
             and (msg.control == 1 or msg.control in KNOB_CCS)
@@ -7268,8 +7269,6 @@ class MidiToneApp:
                     self._refresh_phrase_status()
                 elif kind == "song":
                     self._refresh_song_status()
-                elif kind == "wake":
-                    self._hide_screensaver()
                 elif kind == "kit_sel":
                     self._select_kit_note(int(item[1]), audition=False)
         except queue.Empty:
@@ -7388,13 +7387,6 @@ class MidiToneApp:
             return
         idle.poke()
 
-    def _note_midi_activity(self) -> None:
-        idle = getattr(self, "_idle", None)
-        if idle is None:
-            return
-        if idle.poke():
-            self._q_put(("wake",))
-
     def _on_root_destroy(self, event: tk.Event) -> None:  # type: ignore[name-defined]
         if event.widget is not self.root:
             return
@@ -7434,6 +7426,8 @@ class MidiToneApp:
             self._show_screensaver()
         elif self._idle.active:
             self._nudge_screensaver_orbit()
+        else:
+            self._apply_pixel_shift()
         self._arm_screensaver_tick()
 
     def _show_screensaver(self, *, force: bool = False) -> None:
@@ -7462,11 +7456,6 @@ class MidiToneApp:
             pass
         canvas.bind("<ButtonPress>", self._on_screensaver_tap)
         canvas.bind("<ButtonRelease>", lambda _e: "break")
-        canvas.bind("<Key>", self._on_screensaver_tap)
-        try:
-            canvas.focus_set()
-        except Exception:
-            pass
         self._saver_canvas = canvas
         self._saver_hint = canvas.create_text(
             40,
@@ -7506,6 +7495,28 @@ class MidiToneApp:
             canvas.itemconfigure(self._saver_clock, text=time.strftime("%H:%M"))
             canvas.coords(self._saver_clock, x, y + 28)
 
+    def _apply_pixel_shift(self) -> None:
+        """Nudge chrome a couple of pixels so bold boxes don't sit still."""
+        if getattr(self, "_idle", None) is not None and self._idle.active:
+            return
+        elapsed = time.monotonic() - getattr(self, "_shift_started", time.monotonic())
+        dx, dy = pixel_shift_xy(elapsed)
+        if (dx, dy) == getattr(self, "_shift_xy", (None, None)):
+            return
+        self._shift_xy = (dx, dy)
+        gutter = PIXEL_SHIFT_AMPLITUDE
+        try:
+            self._nav.pack_configure(
+                padx=(gutter + dx, gutter - dx),
+                pady=(gutter + dy, 0),
+            )
+            self._mode_host.pack_configure(
+                padx=(gutter + dx, gutter - dx),
+                pady=(0, gutter - dy),
+            )
+        except Exception:
+            pass
+
     def _on_screensaver_tap(self, _event: object = None) -> str:
         self._hide_screensaver()
         return "break"
@@ -7529,6 +7540,7 @@ class MidiToneApp:
                 pass
             print("ui: screensaver off", flush=True)
         self._backlight.restore()
+        self._apply_pixel_shift()
 
     def _blank_screen_now(self) -> None:
         self._close_power_menu(restore_main=True)
@@ -7610,7 +7622,8 @@ class MidiToneApp:
         tk.Label(
             body,
             text="Shut down cleanly before unplugging. Reboot restarts into kiosk. "
-            "SCREEN OFF blanks the TFT so static chrome cannot ghost the panel.",
+            "SCREEN OFF blanks the TFT (tap to wake; playing MIDI will not). "
+            "While the UI is up it also pixel-shifts so bold chrome cannot ghost.",
             font=("DejaVu Sans", 13),
             fg="#ebdbb2",
             bg="#111111",

@@ -25,17 +25,6 @@ class TimeoutHelpersTest(unittest.TestCase):
             screensaver.DEFAULT_TIMEOUT_SEC,
         )
 
-    def test_midi_clock_is_not_user_activity(self) -> None:
-        for kind in ("clock", "active_sensing", "start", "stop", "sysex"):
-            self.assertIn(kind, screensaver.MIDI_IDLE_IGNORE)
-        self.assertEqual(screensaver.timeout_from_env({}), screensaver.DEFAULT_TIMEOUT_SEC)
-        self.assertEqual(screensaver.timeout_from_env({"MIDI_TONE_SCREENSAVER_SEC": "45"}), 45.0)
-        self.assertEqual(screensaver.timeout_from_env({"MIDI_TONE_SCREENSAVER_SEC": "0"}), 0.0)
-        self.assertEqual(
-            screensaver.timeout_from_env({"MIDI_TONE_SCREENSAVER_SEC": "nope"}),
-            screensaver.DEFAULT_TIMEOUT_SEC,
-        )
-
     def test_preset_cycle_and_label(self) -> None:
         self.assertEqual(screensaver.next_timeout_preset(180.0), 600.0)
         self.assertEqual(screensaver.next_timeout_preset(600.0), 0.0)
@@ -86,6 +75,24 @@ class OrbitTest(unittest.TestCase):
         x, y = screensaver.orbit_xy(12.0, 100, 50, 200, 80, margin=16)
         self.assertGreaterEqual(x, 16)
         self.assertGreaterEqual(y, 16)
+
+
+class PixelShiftTest(unittest.TestCase):
+    def test_dwells_then_moves_by_amplitude(self) -> None:
+        self.assertEqual(screensaver.pixel_shift_xy(0.0, amplitude=2, dwell_sec=10.0), (0, 0))
+        self.assertEqual(screensaver.pixel_shift_xy(9.9, amplitude=2, dwell_sec=10.0), (0, 0))
+        self.assertEqual(screensaver.pixel_shift_xy(10.0, amplitude=2, dwell_sec=10.0), (2, 0))
+        self.assertEqual(screensaver.pixel_shift_xy(20.0, amplitude=2, dwell_sec=10.0), (2, 2))
+
+    def test_visits_every_corner(self) -> None:
+        seen = {
+            screensaver.pixel_shift_xy(float(t), amplitude=1, dwell_sec=1.0)
+            for t in range(8)
+        }
+        self.assertEqual(len(seen), 8)
+        self.assertIn((0, 0), seen)
+        self.assertIn((1, 1), seen)
+        self.assertIn((-1, -1), seen)
 
 
 class PanelBacklightTest(unittest.TestCase):

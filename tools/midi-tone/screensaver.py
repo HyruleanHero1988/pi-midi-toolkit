@@ -1,12 +1,17 @@
 #!/usr/bin/env python3
 """Idle blanking for the TFT kiosk — image-retention / burn-in protection.
 
-The panel is an IPS LCD (BigTreeTech Pi TFT70). Static chrome left on for hours
-can ghost. midi-tone already turns X DPMS off so the kiosk never blanks on its
-own; this module is the replacement: after a stretch of no touch and no MIDI,
-cover the UI with a black moving hint and dim the DSI backlight if sysfs allows.
+The panel is an IPS LCD (BigTreeTech Pi TFT70). The kiosk chrome is bold and
+mostly static, so a long jam with no touch still ghosts the same pixels.
+midi-tone already turns X DPMS off so the kiosk never blanks on its own; this
+module is the replacement:
 
-Audio / sequencer / songs keep running. A tap or a real MIDI note wakes it.
+- After a stretch of **no touch**, cover the UI and dim the DSI backlight.
+- While the UI is up, slowly shift it by a couple of pixels so labels/boxes
+  do not sit on the same cells for the whole session.
+
+Audio / sequencer / songs keep running. Only a tap wakes the panel — MIDI
+never counts as activity.
 """
 
 from __future__ import annotations
@@ -19,21 +24,8 @@ from typing import Mapping, Optional, Sequence, Tuple
 
 DEFAULT_TIMEOUT_SEC = 180.0  # 3 minutes
 TIMEOUT_PRESETS: Tuple[float, ...] = (60.0, 180.0, 600.0, 0.0)
-# MIDI clock / sense would keep the panel awake forever if counted as activity.
-MIDI_IDLE_IGNORE = frozenset(
-    {
-        "clock",
-        "start",
-        "continue",
-        "stop",
-        "songpos",
-        "song_select",
-        "sysex",
-        "tune_request",
-        "reset",
-        "active_sensing",
-    }
-)
+PIXEL_SHIFT_AMPLITUDE = 2
+PIXEL_SHIFT_DWELL_SEC = 40.0
 
 
 def timeout_from_env(env: Optional[Mapping[str, str]] = None) -> float:
@@ -83,6 +75,29 @@ def orbit_xy(
         (math.sin(elapsed * 2.0 * math.pi / 31.0 + 1.2) * 0.5 + 0.5) * span_y
     )
     return x, y
+
+
+def pixel_shift_xy(
+    elapsed: float,
+    amplitude: int = PIXEL_SHIFT_AMPLITUDE,
+    dwell_sec: float = PIXEL_SHIFT_DWELL_SEC,
+) -> Tuple[int, int]:
+    """1–2px square orbit. Dwells so the chrome is not constantly jittering."""
+    amp = max(1, int(amplitude))
+    dwell = dwell_sec if dwell_sec > 0 else PIXEL_SHIFT_DWELL_SEC
+    idx = int(max(0.0, float(elapsed)) // dwell) % 8
+    pattern = (
+        (0, 0),
+        (1, 0),
+        (1, 1),
+        (0, 1),
+        (-1, 1),
+        (-1, 0),
+        (-1, -1),
+        (0, -1),
+    )
+    dx, dy = pattern[idx]
+    return dx * amp, dy * amp
 
 
 class IdleWatch:
