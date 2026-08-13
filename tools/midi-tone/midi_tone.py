@@ -597,6 +597,14 @@ def mpk_note_for_phrase_cell(cell: int) -> int:
     return PHRASE_PAD_BASE + (int(cell) & 0x0F)
 
 
+SCOPE_CRT_BG = "#031a08"
+SCOPE_CRT_WAVE = "#39ff14"  # phosphor green
+SCOPE_CRT_GRID = "#14532d"
+SCOPE_CRT_AXIS = "#4ade80"
+SCOPE_MORPH_CYCLES = 3  # several periods — one cycle looks sparse on a wide panel
+DRUM_SCOPE_SEC = 0.40  # fixed time window so stretch reads as envelope length
+
+
 def downsample_waveform(samples: np.ndarray, points: int) -> np.ndarray:
     """Reduce a sample buffer to `points` peaks for canvas drawing."""
     if samples is None or len(samples) == 0 or points <= 0:
@@ -666,14 +674,81 @@ def render_drum_preview(
     return audio.astype(np.float32, copy=False)
 
 
+def draw_scope_grid(
+    canvas: "tk.Canvas",
+    *,
+    grid_color: str = SCOPE_CRT_GRID,
+    axis_color: str = SCOPE_CRT_AXIS,
+    duration_sec: Optional[float] = None,
+    x_label: Optional[str] = None,
+) -> None:
+    """Static CRT grid + axis (drawn once; wave polyline updates separately)."""
+    try:
+        canvas.delete("grid")
+        w = int(canvas.winfo_width())
+        h = int(canvas.winfo_height())
+    except Exception:
+        return
+    if w < 8 or h < 8:
+        return
+    axis_h = 16 if duration_sec is not None or x_label else 0
+    plot_h = max(8, h - axis_h)
+    mid = plot_h * 0.5
+    for frac in (0.25, 0.5, 0.75):
+        y = plot_h * frac
+        canvas.create_line(0, y, w, y, fill=grid_color, tags="grid")
+        x = (w - 1) * frac
+        canvas.create_line(x, 0, x, plot_h, fill=grid_color, tags="grid")
+    canvas.create_line(0, mid, w, mid, fill=axis_color, tags="grid")
+    if duration_sec is not None and duration_sec > 0:
+        ticks_ms = [0]
+        step = 100 if duration_sec >= 0.35 else 50
+        t = step
+        while t < duration_sec * 1000 - 1:
+            ticks_ms.append(t)
+            t += step
+        end_ms = int(round(duration_sec * 1000))
+        if ticks_ms[-1] != end_ms:
+            ticks_ms.append(end_ms)
+        for ms in ticks_ms:
+            frac = ms / (duration_sec * 1000.0)
+            x = frac * (w - 1)
+            canvas.create_line(x, plot_h - 3, x, plot_h, fill=axis_color, tags="grid")
+            canvas.create_text(
+                x, h - 2, text=f"{ms}", anchor="s",
+                fill=axis_color, font=("DejaVu Sans Mono", 8), tags="grid",
+            )
+        canvas.create_text(
+            w - 2, h - 2, text="ms", anchor="se",
+            fill=axis_color, font=("DejaVu Sans Mono", 8), tags="grid",
+        )
+    elif x_label:
+        canvas.create_text(
+            w // 2, h - 2, text=x_label, anchor="s",
+            fill=axis_color, font=("DejaVu Sans Mono", 9), tags="grid",
+        )
+
+
+def blank_waveform_on_canvas(canvas: "tk.Canvas") -> None:
+    """Clear the trace immediately (leave the CRT grid) so stale waves don't linger."""
+    try:
+        canvas.delete("wave")
+    except Exception:
+        pass
+
+
 def draw_waveform_on_canvas(
     canvas: "tk.Canvas",
     samples: np.ndarray,
     *,
-    color: str = "#83a598",
-    grid_color: str = "#3c3836",
+    color: str = SCOPE_CRT_WAVE,
+    grid_color: str = SCOPE_CRT_GRID,
+    axis_color: str = SCOPE_CRT_AXIS,
+    duration_sec: Optional[float] = None,
+    x_label: Optional[str] = None,
+    redraw_grid: bool = False,
 ) -> None:
-    """Paint a normalized polyline waveform into a Tk canvas."""
+    """Paint a CRT-green scope. Grid is cached; only the trace is rewritten."""
     try:
         canvas.delete("wave")
         w = int(canvas.winfo_width())
@@ -682,21 +757,33 @@ def draw_waveform_on_canvas(
         return
     if w < 8 or h < 8:
         return
-    # Midline
-    mid = h * 0.5
-    canvas.create_line(0, mid, w, mid, fill=grid_color, tags="wave")
+
+    if redraw_grid or not canvas.find_withtag("grid"):
+        draw_scope_grid(
+            canvas,
+            grid_color=grid_color,
+            axis_color=axis_color,
+            duration_sec=duration_sec,
+            x_label=x_label,
+        )
+
+    axis_h = 16 if duration_sec is not None or x_label else 0
+    plot_h = max(8, h - axis_h)
+    mid = plot_h * 0.5
+
     if samples is None or len(samples) < 2:
         return
-    pts = downsample_waveform(samples, max(32, w // 2))
+    # Fewer points = much cheaper Tk polyline on Pi 2
+    pts = downsample_waveform(samples, max(48, w // 3))
     peak = float(np.max(np.abs(pts))) or 1.0
-    y_scale = (h * 0.42) / peak
+    y_scale = (plot_h * 0.40) / peak
     coords: List[float] = []
     n = len(pts)
     for i, v in enumerate(pts):
         x = (i / max(1, n - 1)) * (w - 1)
         y = mid - float(v) * y_scale
         coords.extend((x, y))
-    canvas.create_line(*coords, fill=color, width=2, smooth=True, tags="wave")
+    canvas.create_line(*coords, fill=color, width=2, smooth=False, tags="wave")
 
 
 def synthesize_drum(
@@ -2219,10 +2306,6 @@ PHRASE_VOICE_LOCKED = "locked"
 PHRASE_VOICE_MODES = (PHRASE_VOICE_FOLLOW, PHRASE_VOICE_LOCKED)
 # out_channel -1 = use each event's recorded channel; 0..15 = force MIDI ch 1..16
 PHRASE_OUT_AS_RECORDED = -1
-SCOPE_CRT_BG = "#031a08"
-SCOPE_CRT_WAVE = "#39ff14"  # phosphor green
-SCOPE_CRT_GRID = "#14532d"
-SCOPE_CRT_AXIS = "#4ade80"
 
 PHRASE_GAIN_MIN = 0.10
 PHRASE_GAIN_MAX = 2.00
@@ -3919,7 +4002,7 @@ class MidiToneApp:
         self._main.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
 
         header = tk.Frame(self._main, bg="#111111")
-        header.pack(fill=tk.X, padx=8, pady=(8, 2))
+        header.pack(fill=tk.X, padx=8, pady=(6, 2))
         tk.Label(
             header, text="Synth", font=("DejaVu Sans", 18, "bold"),
             fg="#fbf1c7", bg="#111111",
@@ -3929,49 +4012,52 @@ class MidiToneApp:
             fg="#8ec07c", bg="#111111",
         ).pack(side=tk.RIGHT)
 
+        # CRT morph-cycle scope — pack early with a reserved height so the
+        # chunky touch bar never collapses it on 480p kiosk screens.
+        self._wave_caption = tk.Label(
+            self._main,
+            text="Morph",
+            font=("DejaVu Sans", 11),
+            fg="#4ade80",
+            bg="#111111",
+            anchor="w",
+        )
+        self._wave_caption.pack(fill=tk.X, padx=8, pady=(2, 0))
+        self._wave_canvas = tk.Canvas(
+            self._main,
+            height=150,
+            bg=SCOPE_CRT_BG,
+            highlightthickness=1,
+            highlightbackground="#14532d",
+            bd=0,
+        )
+        self._wave_canvas.pack(fill=tk.X, padx=8, pady=(2, 4))
+        self._wave_canvas.pack_propagate(False)
+        self._wave_canvas.bind(
+            "<Configure>", lambda _e: self._paint_synth_waveform(force=True)
+        )
+
         self.last_var = tk.StringVar(value="Waiting for MIDI…")
         last_lbl = tk.Label(
             self._main, textvariable=self.last_var,
-            font=("DejaVu Sans Mono", 15, "bold"), fg="#fabd2f", bg="#111111",
+            font=("DejaVu Sans Mono", 13, "bold"), fg="#fabd2f", bg="#111111",
             wraplength=780, justify=tk.LEFT, anchor="w",
         )
-        last_lbl.pack(fill=tk.X, padx=8, pady=4)
+        last_lbl.pack(fill=tk.X, padx=8, pady=(2, 0))
 
         self.active_var = tk.StringVar(value="Active notes: —")
         active_lbl = tk.Label(
             self._main, textvariable=self.active_var,
-            font=("DejaVu Sans", 12), fg="#83a598", bg="#111111", anchor="w",
+            font=("DejaVu Sans", 11), fg="#83a598", bg="#111111", anchor="w",
         )
         active_lbl.pack(fill=tk.X, padx=8)
 
         self.mod_var = tk.StringVar(value=self._format_mod_line())
         mod_lbl = tk.Label(
             self._main, textvariable=self.mod_var,
-            font=("DejaVu Sans Mono", 11), fg="#d3869b", bg="#111111", anchor="w",
+            font=("DejaVu Sans Mono", 10), fg="#d3869b", bg="#111111", anchor="w",
         )
-        mod_lbl.pack(fill=tk.X, padx=8, pady=(2, 4))
-
-        self._wave_caption = tk.Label(
-            self._main,
-            text="Morph cycle",
-            font=("DejaVu Sans", 11),
-            fg="#a89984",
-            bg="#111111",
-            anchor="w",
-        )
-        self._wave_caption.pack(fill=tk.X, padx=8, pady=(4, 0))
-        self._wave_canvas = tk.Canvas(
-            self._main,
-            height=110,
-            bg="#1d2021",
-            highlightthickness=1,
-            highlightbackground="#3c3836",
-            bd=0,
-        )
-        self._wave_canvas.pack(fill=tk.BOTH, expand=True, padx=8, pady=(2, 8))
-        self._wave_canvas.bind(
-            "<Configure>", lambda _e: self._paint_synth_waveform(force=True)
-        )
+        mod_lbl.pack(fill=tk.X, padx=8, pady=(0, 2))
 
         self._active_notes: Dict[Tuple[int, int], int] = {}
         # Select first voice explicitly
@@ -4904,13 +4990,20 @@ class MidiToneApp:
             return
         try:
             samples = self.engine.morph_cycle_copy()
-            draw_waveform_on_canvas(canvas, samples, color="#83a598")
+            if SCOPE_MORPH_CYCLES > 1 and samples is not None and len(samples) > 0:
+                samples = np.tile(samples, SCOPE_MORPH_CYCLES)
+            draw_waveform_on_canvas(
+                canvas,
+                samples,
+                color=SCOPE_CRT_WAVE,
+                redraw_grid=force,
+            )
             if self._wave_caption is not None:
                 a, b, blend = self.engine.morph_neighbors()
                 if a == b:
-                    cap = f"Morph cycle · {a}"
+                    cap = f"Morph · {a}"
                 else:
-                    cap = f"Morph cycle · {a} → {b}  {int(blend * 100)}%"
+                    cap = f"Morph · {a} → {b}  {int(blend * 100)}%"
                 self._wave_caption.configure(text=cap)
         except Exception:
             if force:
@@ -4926,7 +5019,13 @@ class MidiToneApp:
         try:
             model = self._kit_model_selected()
             samples = self.engine.preview_drum_waveform(model)
-            draw_waveform_on_canvas(canvas, samples, color="#fabd2f")
+            draw_waveform_on_canvas(
+                canvas,
+                samples,
+                color="#fabd2f",
+                duration_sec=DRUM_SCOPE_SEC,
+                redraw_grid=force,
+            )
             pitch, decay, noise, tone = self.engine.drum_macros()
             label = phrase_pad_label(
                 max(0, min(15, self._kit_selected_note - PHRASE_PAD_BASE))
