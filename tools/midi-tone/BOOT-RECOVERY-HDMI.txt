@@ -1,0 +1,35 @@
+# Midi-pi blank-screen recovery (edit on the SD card from Windows)
+#
+# 1) Power OFF the Pi, pull the microSD, plug into your PC.
+# 2) Open the drive named "bootfs" (or "boot").
+# 3) Make a copy of config.txt → config.txt.bak
+# 4) Open config.txt in Notepad.
+# 5) DELETE any lines that contain: ads7846   OR   vc4-kms-dsi-7inch
+#    Also delete any block between:
+#      # --- midi-toolkit touch (ads7846) begin ---
+#      # --- midi-toolkit touch (ads7846) end ---
+#    and any block between:
+#      # --- midi-tone TFT70
+#      # --- end midi-tone TFT70
+# 6) At the END of config.txt, paste the block below (no spaces around =).
+# 7) Also create an empty file named "ssh" (no extension) on bootfs to guarantee SSH.
+# 8) Eject the card, insert in Pi, reconnect OLD HDMI panel (HDMI + USB touch + backlight ON),
+#    plug Ethernet, power on. Wait ~60s, then from PC: ping 192.168.1.225
+#
+# --- paste from here ---
+dtoverlay=vc4-kms-v3d
+hdmi_force_hotplug=1
+hdmi_group=2
+hdmi_mode=87
+hdmi_cvt=800 480 60 6 0 0 0
+hdmi_drive=1
+config_hdmi_boost=7
+# --- paste ends ---
+#
+# After you can SSH again (ray / midi), tell the agent — we can finish TFT70 DSI cleanly.
+#
+# Physical checklist for the OLD HDMI panel:
+# - HDMI cable fully seated on Pi and panel
+# - USB cable from panel → Pi (touch + often panel power)
+# - Backlight switch on the panel ON
+# - Pi ACT LED blinking during boot (if solid/off forever → not booting / power issue)

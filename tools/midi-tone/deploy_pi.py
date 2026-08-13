@@ -34,6 +34,10 @@ FILES = [
     "fix-audio-headphones.sh",
     "enable-gpio-touch.sh",
     "calibrate-touch-y.sh",
+    "prefer-tft70-display.sh",
+    "hide-touch-cursor.sh",
+    "enable-tft70-dsi.sh",
+    "BOOT-RECOVERY-HDMI.txt",
 ]
 
 # Extra trees copied recursively
