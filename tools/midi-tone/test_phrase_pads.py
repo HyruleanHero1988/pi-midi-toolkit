@@ -244,6 +244,62 @@ class PhrasePadTrimTest(unittest.TestCase):
         bank.stop_record()
         self.assertTrue(bank.cell(1).is_empty())
 
+    def test_load_from_events_drops_a_sequence_onto_a_pad(self) -> None:
+        mt = self.midi_tone
+        bank = self.make_bank()
+        events = [
+            mt.LoopEvent(t=0.00, on=True, channel=9, note=36, velocity=100),
+            mt.LoopEvent(t=0.05, on=False, channel=9, note=36, velocity=0),
+            mt.LoopEvent(t=0.25, on=True, channel=0, note=60, velocity=90),
+            mt.LoopEvent(t=0.40, on=False, channel=0, note=60, velocity=0),
+        ]
+        self.assertTrue(bank.load_from_events(3, events, 0.50))
+        cell = bank.cell(3)
+        self.assertFalse(cell.is_empty())
+        self.assertTrue(cell.is_loop())
+        self.assertAlmostEqual(cell.length, 0.50, places=3)
+        self.assertEqual(len(cell.events), 4)
+        self.assertFalse(bank.load_from_events(0, [], 1.0))
+        self.assertTrue(bank.cell(0).is_empty())
+
+    def test_drum_pad_handle_launches_a_filled_cell(self) -> None:
+        mt = self.midi_tone
+        engine = FakeEngine()
+        bank = self.make_bank(engine)
+        events = [
+            mt.LoopEvent(t=0.00, on=True, channel=0, note=64, velocity=100),
+            mt.LoopEvent(t=0.05, on=False, channel=0, note=64, velocity=0),
+        ]
+        bank.load_from_events(0, events, 0.10, trigger_mode=mt.PHRASE_TRIG_ONESHOT)
+        action = bank.handle_pad(0, from_touch=False, allow_record=False)
+        self.assertEqual(action, "launch")
+        deadline = time.monotonic() + 0.5
+        while time.monotonic() < deadline and not engine.ons:
+            time.sleep(0.01)
+        self.assertEqual(engine.ons[0], (0, 64, 100))
+        bank.stop_all()
+
+    def test_drum_pad_still_launches_while_another_cell_records(self) -> None:
+        """Touch could fire a filled clip during REC; MPK pads used to be ignored."""
+        mt = self.midi_tone
+        engine = FakeEngine()
+        bank = self.make_bank(engine)
+        events = [
+            mt.LoopEvent(t=0.00, on=True, channel=0, note=64, velocity=100),
+            mt.LoopEvent(t=0.05, on=False, channel=0, note=64, velocity=0),
+        ]
+        bank.load_from_events(0, events, 0.10, trigger_mode=mt.PHRASE_TRIG_ONESHOT)
+        bank.arm_record(1)
+        self.assertTrue(bank.is_recording())
+        self.assertEqual(bank.handle_pad(0, from_touch=False), "launch")
+        self.assertEqual(bank.handle_pad(1, from_touch=False), "ignore")
+        self.assertEqual(bank.handle_pad(2, from_touch=False), "ignore")
+        deadline = time.monotonic() + 0.5
+        while time.monotonic() < deadline and not engine.ons:
+            time.sleep(0.01)
+        self.assertEqual(engine.ons[0], (0, 64, 100))
+        bank.stop_all()
+
 
 if __name__ == "__main__":
     sys.exit(unittest.main())
