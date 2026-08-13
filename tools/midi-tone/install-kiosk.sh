@@ -204,18 +204,32 @@ EOF
 as_user chmod +x "$USER_HOME/.xsession"
 
 # 6) Passwordless shutdown/reboot from the kiosk POWER button
-echo "    sudoers: allow $USER_NAME pi-power.sh (escalating reboot/poweroff)"
+echo "    sudoers: allow $USER_NAME pi-power.sh + systemctl poweroff/reboot"
 POWER_SH="$DIR/pi-power.sh"
 sed -i 's/\r$//' "$POWER_SH" 2>/dev/null || true
 chmod +x "$POWER_SH" 2>/dev/null || true
 SUDOERS_DST="/etc/sudoers.d/midi-tone-power"
 TMP_S="$(mktemp)"
 # Keep this file simple — complex systemctl flag lines fail visudo and the
-# installer would delete the whole drop-in.
-cat >"$TMP_S" <<EOF
-# midi-tone kiosk POWER button — installed by install-kiosk.sh
-$USER_NAME ALL=(root) NOPASSWD: $POWER_SH reboot, $POWER_SH poweroff
-EOF
+# installer would delete the whole drop-in. Plain poweroff/reboot only.
+# Resolve real paths so sudo -n matches exactly.
+SYSTEMCTL_BIN="$(command -v systemctl || true)"
+POWEROFF_BIN="$(command -v poweroff || true)"
+REBOOT_BIN="$(command -v reboot || true)"
+{
+  echo "# midi-tone kiosk POWER button — installed by install-kiosk.sh"
+  echo "$USER_NAME ALL=(root) NOPASSWD: $POWER_SH reboot, $POWER_SH poweroff"
+  if [[ -n "$SYSTEMCTL_BIN" ]]; then
+    echo "$USER_NAME ALL=(root) NOPASSWD: $SYSTEMCTL_BIN poweroff, $SYSTEMCTL_BIN reboot"
+  fi
+  if [[ -n "$POWEROFF_BIN" && -n "$REBOOT_BIN" ]]; then
+    echo "$USER_NAME ALL=(root) NOPASSWD: $POWEROFF_BIN, $REBOOT_BIN"
+  elif [[ -n "$POWEROFF_BIN" ]]; then
+    echo "$USER_NAME ALL=(root) NOPASSWD: $POWEROFF_BIN"
+  elif [[ -n "$REBOOT_BIN" ]]; then
+    echo "$USER_NAME ALL=(root) NOPASSWD: $REBOOT_BIN"
+  fi
+} >"$TMP_S"
 sudo_run install -m 440 "$TMP_S" "$SUDOERS_DST"
 rm -f "$TMP_S"
 if command -v visudo >/dev/null 2>&1; then

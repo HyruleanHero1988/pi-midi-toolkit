@@ -8744,7 +8744,7 @@ class MidiToneApp:
             self._switch_mode(prev if prev in ("synth", "seq", "pads", "songs", "log", "presets") else "synth")
 
     def _pi_power(self, action: str) -> None:
-        """Reboot/poweroff via pi-power.sh (escalates; plain systemctl can hang on Pi)."""
+        """Reboot/poweroff via pi-power.sh / systemctl — never just quit the app."""
         action = "reboot" if action == "reboot" else "poweroff"
         self._append_log(f"Power → {action}…")
         self.last_var.set(f"Powering {action}…")
@@ -8762,14 +8762,16 @@ class MidiToneApp:
         power_sh = str(pathlib.Path(__file__).resolve().parent / "pi-power.sh")
 
         def _run() -> None:
+            # Only commands covered by /etc/sudoers.d/midi-tone-power (plain
+            # poweroff/reboot — flag variants need a password and must not be
+            # used here). Never treat app exit as shutdown.
             cmds = [
                 ["sudo", "-n", power_sh, action],
-                ["sudo", "-n", "systemctl", action, "--ignore-inhibitors"],
-                ["sudo", "-n", "systemctl", action, "--force"],
+                ["sudo", "-n", "systemctl", action],
                 (
-                    ["sudo", "-n", "/sbin/shutdown", "-h", "now"]
+                    ["sudo", "-n", "poweroff"]
                     if action == "poweroff"
-                    else ["sudo", "-n", "/sbin/reboot", "-f"]
+                    else ["sudo", "-n", "reboot"]
                 ),
             ]
             last_err = ""
@@ -8779,7 +8781,7 @@ class MidiToneApp:
                         cmd,
                         capture_output=True,
                         text=True,
-                        timeout=20,
+                        timeout=25,
                         check=False,
                     )
                     if r.returncode == 0:

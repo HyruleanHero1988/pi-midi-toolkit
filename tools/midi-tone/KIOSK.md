@@ -125,8 +125,16 @@ Why both? LightDM loads the **main** `lightdm.conf` *after* `conf.d/`.
 `raspi-config` B4 writes `autologin-session=LXDE-pi-x` into the main file, which
 would otherwise override a drop-in-only install and land you on the gray desktop.
 
-Also installs a small sudoers snippet so POWER → shut down / reboot works from
-the UI without a password.
+Also installs `/etc/sudoers.d/midi-tone-power` so POWER → shut down / reboot
+works without a password. That drop-in allows passwordless:
+
+- `pi-power.sh reboot` / `pi-power.sh poweroff` (preferred; force watchdog)
+- `systemctl poweroff` / `systemctl reboot`
+- `poweroff` / `reboot` binaries
+
+`pi-power.sh` queues `systemctl` **before** stopping the app and does **not**
+kill `kiosk.sh` (killing the session drops the LightDM greeter if shutdown
+fails).
 
 **Flags:**
 
@@ -236,7 +244,8 @@ Logs: `/tmp/midi-tone-kiosk.log`, `/tmp/midi-tone.log`.
 | Boots to **gray Pi desktop** | LightDM still on `LXDE-pi-x` | Re-run `./install-kiosk.sh --boot-only` and confirm **main** `lightdm.conf` sessions; reboot |
 | Blank / solid dark screen, process running | Idle burn-in guard, or duplicate app instances | Tap the panel (MIDI will not wake it); `pkill -f midi_tone.py`; check a single `kiosk.sh`; reboot once |
 | `couldn't connect to display ":0"` | X/LightDM not up yet or crashed | `systemctl status lightdm`; `sudo systemctl start lightdm` |
-| POWER shut down fails | Missing sudoers | Re-run `install-kiosk.sh` (writes `/etc/sudoers.d/midi-tone-power`) |
+| POWER shut down fails | Missing sudoers | Re-run `install-kiosk.sh` (writes `/etc/sudoers.d/midi-tone-power`); check `sudo -n systemctl poweroff --dry-run` and `sudo -l` |
+| POWER → login greeter instead of off | Session killed before poweroff, or sudo poweroff failed | Re-run `install-kiosk.sh`; recover with `sudo systemctl restart lightdm` (or reboot). Confirm `/etc/sudoers.d/midi-tone-power` lists `systemctl poweroff`/`reboot` |
 | No sound | HDMI vs jack / mute | `./fix-audio-headphones.sh`; check `alsamixer` |
 
 If LightDM hangs on stop/restart over SSH:
