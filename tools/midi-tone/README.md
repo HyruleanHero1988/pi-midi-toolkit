@@ -255,6 +255,8 @@ loop if it crashes). No wallpaper / panel / file manager / labwc.
 **Display target:** BigTreeTech **Pi TFT70 V2.1** (7″ DSI, 800×480, capacitive GT911).
 Legacy resistive HDMI/ADS7846 helpers (`enable-gpio-touch.sh` / `calibrate-touch-y.sh`) are for the old panel only.
 
+The kiosk **blanks the TFT after 3 minutes** of no touch and no MIDI (sequencer/songs keep playing). Tap the panel or play a note to wake. **POWER** has **SCREEN OFF** (blank now) and **BLANK 3 MIN** (cycle 1 / 3 / 10 min / off). Override with `MIDI_TONE_SCREENSAVER_SEC` (seconds; `0` disables auto-blank).
+
 **New TFT70 bring-up (DSI):**
 ```bash
 cd ~/midi-tone
