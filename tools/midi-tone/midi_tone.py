@@ -7018,9 +7018,11 @@ class MidiToneApp:
         wrap.pack(fill=tk.BOTH, expand=True)
 
         drag: Dict[str, object] = {
+            "start_x": 0,
             "start_y": 0,
-            "last_y": 0,
             "dragging": False,
+            "scanning": False,
+            "grabber": None,
         }
 
         if show_rail:
@@ -7053,6 +7055,7 @@ class MidiToneApp:
 
         canvas = tk.Canvas(mid, bg="#111111", highlightthickness=0, bd=0)
         canvas.pack(fill=tk.BOTH, expand=True)
+        drag["canvas"] = canvas
 
         inner = tk.Frame(canvas, bg="#111111")
         window_id = canvas.create_window((0, 0), window=inner, anchor="nw")
@@ -7066,40 +7069,76 @@ class MidiToneApp:
         inner.bind("<Configure>", _on_inner_configure)
         canvas.bind("<Configure>", _on_canvas_configure)
 
+        def _canvas_xy(event: tk.Event) -> Tuple[int, int]:  # type: ignore[name-defined]
+            return (
+                int(event.x_root) - int(canvas.winfo_rootx()),
+                int(event.y_root) - int(canvas.winfo_rooty()),
+            )
+
+        def _release_grab() -> None:
+            grabber = drag.get("grabber")
+            drag["grabber"] = None
+            if grabber is None:
+                return
+            try:
+                grabber.grab_release()  # type: ignore[union-attr]
+            except tk.TclError:
+                pass
+
         def _drag_start(event: tk.Event) -> str:  # type: ignore[name-defined]
+            # Grab so B1-Motion keeps arriving after the finger leaves the
+            # pressed voice button (Tk otherwise drops Motion on Buttons).
+            _release_grab()
+            drag["start_x"] = int(event.x_root)
             drag["start_y"] = int(event.y_root)
-            drag["last_y"] = int(event.y_root)
             drag["dragging"] = False
+            drag["scanning"] = False
+            try:
+                event.widget.grab_set()
+                drag["grabber"] = event.widget
+            except tk.TclError:
+                drag["grabber"] = None
             return "break"
 
         def _drag_move(event: tk.Event) -> str:  # type: ignore[name-defined]
             y = int(event.y_root)
             start_y = int(drag["start_y"])  # type: ignore[arg-type]
-            last_y = int(drag["last_y"])  # type: ignore[arg-type]
             if abs(y - start_y) >= TOUCH_SCROLL_THRESH_PX:
                 drag["dragging"] = True
-            if drag["dragging"]:
-                dy = y - last_y
-                if dy != 0:
-                    bbox = canvas.bbox("all")
-                    view_h = max(1, canvas.winfo_height())
-                    content_h = (bbox[3] - bbox[1]) if bbox else view_h
-                    if content_h > view_h:
-                        top, _bot = canvas.yview()
-                        canvas.yview_moveto(
-                            max(0.0, min(1.0, top - (dy / float(content_h))))
-                        )
-                    drag["last_y"] = y
+            if not drag["dragging"]:
+                return "break"
+            bbox = canvas.bbox("all")
+            view_h = max(1, int(canvas.winfo_height()))
+            content_h = (bbox[3] - bbox[1]) if bbox else view_h
+            if content_h <= view_h:
+                return "break"
+            cx, cy = _canvas_xy(event)
+            if not drag["scanning"]:
+                # Anchor at the press point so the first dragto doesn't jump.
+                sx = int(drag["start_x"]) - int(canvas.winfo_rootx())  # type: ignore[arg-type]
+                sy = int(drag["start_y"]) - int(canvas.winfo_rooty())  # type: ignore[arg-type]
+                canvas.scan_mark(sx, sy)
+                drag["scanning"] = True
+            canvas.scan_dragto(cx, cy, gain=1)
+            return "break"
+
+        def _drag_end(event: tk.Event) -> str:  # type: ignore[name-defined]
+            del event
+            _release_grab()
+            drag["scanning"] = False
             return "break"
 
         def _bind_empty_drag(widget: tk.Misc) -> None:
             widget.bind("<ButtonPress-1>", _drag_start)
             widget.bind("<B1-Motion>", _drag_move)
+            widget.bind("<ButtonRelease-1>", _drag_end)
 
         _bind_empty_drag(canvas)
         _bind_empty_drag(inner)
         drag["_move"] = _drag_move
         drag["_start"] = _drag_start
+        drag["_end"] = _drag_end
+        drag["_release_grab"] = _release_grab
         return wrap, canvas, inner, drag
 
     def _mk_scroll_select_btn(
@@ -7120,9 +7159,9 @@ class MidiToneApp:
         )
 
         def _press(event: tk.Event) -> str:  # type: ignore[name-defined]
-            drag["start_y"] = int(event.y_root)
-            drag["last_y"] = int(event.y_root)
-            drag["dragging"] = False
+            starter = drag.get("_start")
+            if callable(starter):
+                return starter(event)  # type: ignore[misc]
             return "break"
 
         def _move(event: tk.Event) -> str:  # type: ignore[name-defined]
@@ -7131,8 +7170,16 @@ class MidiToneApp:
                 return mover(event)  # type: ignore[misc]
             return "break"
 
-        def _release(_event: object = None) -> str:
-            if drag.get("dragging"):
+        def _release(event: tk.Event) -> str:  # type: ignore[name-defined]
+            was_drag = bool(drag.get("dragging"))
+            ender = drag.get("_end")
+            if callable(ender):
+                ender(event)  # type: ignore[misc]
+            else:
+                releaser = drag.get("_release_grab")
+                if callable(releaser):
+                    releaser()  # type: ignore[misc]
+            if was_drag:
                 return "break"
             now = time.monotonic()
             last = getattr(btn, "_last_fire", 0.0)

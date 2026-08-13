@@ -149,8 +149,10 @@ def deploy(restart: bool) -> None:
         run(
             client,
             f"sed -i 's/\\r$//' {remote_dir}/*.sh {remote_dir}/*.desktop "
-            f"{remote_dir}/kiosk/*.desktop {remote_dir}/kiosk/openbox/* 2>/dev/null; "
-            f"chmod +x {remote_dir}/*.sh {remote_dir}/fetch_akwf.py "
+            f"{remote_dir}/kiosk/*.sh {remote_dir}/kiosk/*.desktop "
+            f"{remote_dir}/kiosk/openbox/* 2>/dev/null; "
+            f"chmod +x {remote_dir}/*.sh {remote_dir}/kiosk/*.sh "
+            f"{remote_dir}/fetch_akwf.py "
             f"{remote_dir}/splash-x11.py 2>/dev/null || true",
         )
         # Refresh menu/desktop launchers so they keep using the venv via run.sh
