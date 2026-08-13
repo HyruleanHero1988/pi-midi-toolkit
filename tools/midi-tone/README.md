@@ -306,6 +306,16 @@ Files:
 - `install-kiosk.sh` / `disable-kiosk.sh` — enable / restore desktop
 
 
+## Screen reference
+
+Open [docs/index.html](docs/index.html) in a browser for labeled 800×480 captures of every mode (SYNTH, SEQ, PADS, SONGS, PRESETS, LOG) and the VOICES / MORPH / KIT / POWER / SAVE AS overlays.
+
+Re-capture after UI changes (needs Tk + an 800×480 X display, or the script starts Xvfb itself):
+
+`ash
+python capture_ui_docs.py
+`
+
 ## On Windows (optional host test)
 
 ```powershell
