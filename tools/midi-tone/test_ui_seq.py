@@ -257,6 +257,34 @@ class SeqScreenTest(unittest.TestCase):
         self.pump()
         self.assertEqual(mt.phrase_cell_for_note(36), 0)
 
+    def test_drum_pad_launches_a_filled_clip_while_edit_is_recording(self) -> None:
+        """Regression: EDIT REC used to turn every MPK pad into a drum."""
+        app = self.app
+        mt = self.midi_tone
+        events = [
+            mt.LoopEvent(t=0.00, on=True, channel=0, note=64, velocity=110),
+            mt.LoopEvent(t=0.08, on=False, channel=0, note=64, velocity=0),
+        ]
+        app._phrases.load_from_events(
+            0, events, 0.12, trigger_mode=mt.PHRASE_TRIG_LOOP
+        )
+        app._switch_mode("pads")
+        app._pads_view = "edit"
+        app._build_pads_mode()
+        self.pump()
+        app._phrases.arm_record(1)
+        self.assertTrue(app._phrases.is_recording())
+
+        # Pad A1 (note 36) is filled — must launch, not fall through as a kick
+        self.play(36)
+        self.pump(0.2)
+        self.assertTrue(app._phrases.is_playing(0))
+        self.assertTrue(app._phrases.is_recording(), "A2 rec should still be armed")
+        app._phrase_stop_all()
+        app._phrases.stop_record()
+        app._phrases.clear_cell(0)
+        self.pump()
+
 
 if __name__ == "__main__":
     sys.exit(unittest.main())

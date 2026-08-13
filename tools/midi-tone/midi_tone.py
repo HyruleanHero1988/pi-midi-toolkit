@@ -3309,10 +3309,12 @@ class PhrasePadBank:
         self, idx: int, *, from_touch: bool = False, allow_record: bool = True
     ) -> str:
         """
-        Touch square or MPK pad hit (when not recording drums).
+        Touch square or MPK pad hit.
         Empty → arm record (EDIT); filled → launch/toggle; touch on armed cell → stop record.
         PLAY view passes allow_record=False so empty pads only select.
-        Returns a short action tag for the UI/log.
+        While a cell is recording, MPK pads on *that* cell (and other empty
+        cells) stay drums for the take — but a filled cell still launches,
+        matching the touch grid. Returns a short action tag for the UI/log.
         """
         if not (0 <= idx < PHRASE_PAD_COUNT):
             return "ignore"
@@ -3323,8 +3325,10 @@ class PhrasePadBank:
         if rec is not None and rec == idx and from_touch:
             self.stop_record()
             return "stop_rec"
-        if rec is not None and not from_touch:
-            # Hardware pad while recording is handled by MIDI path as drums
+        if rec is not None and rec == idx and not from_touch:
+            return "ignore"
+        if rec is not None and not from_touch and empty:
+            # Other empty pads also record as drums while a take is armed
             return "ignore"
         if empty:
             if not allow_record:
@@ -6613,6 +6617,49 @@ class MidiToneApp:
         )
         self._paint_phrase_pads()
 
+    def _drum_pad_is_phrase_control(self, cell: int) -> bool:
+        """True when a ch10 pad should launch/arm a phrase instead of playing a drum.
+
+        EDIT used to swallow *every* MPK pad while any cell was recording, so the
+        only way to fire a filled clip was the touch square. Filled cells still
+        launch from hardware; the recording cell (and other empties) stay drums.
+        """
+        if not (0 <= cell < PHRASE_PAD_COUNT):
+            return False
+        rec = self._phrases.recording_cell()
+        if rec is not None and rec == cell:
+            return False
+        if rec is not None and self._phrases.cell(cell).is_empty():
+            return False
+        return True
+
+    def _on_pad_midi(self, cell: int, note: int, velocity: int) -> None:
+        """UI-thread handler for an MPK pad that is acting as a phrase trigger."""
+        edit_view = self._pads_view == "edit"
+        if edit_view and self._phrase_mode_armed:
+            mode = self._phrases.toggle_trigger_mode(cell)
+            self._phrase_mode_armed = False
+            self._paint_phrase_pads()
+            self._append_log(
+                f"Pad→MODE {phrase_pad_label(cell)} → "
+                f"{'LOOP' if mode == PHRASE_TRIG_LOOP else 'ONE-SHOT'}"
+            )
+            return
+        if edit_view and self._phrase_clear_armed:
+            self._phrases.clear_cell(cell)
+            self._phrase_clear_armed = False
+            self._paint_phrase_pads()
+            self._append_log(f"Pad→CLEAR {phrase_pad_label(cell)}  note {note}")
+            return
+        action = self._phrases.handle_pad(
+            cell, from_touch=False, allow_record=edit_view
+        )
+        self._paint_phrase_pads()
+        self._append_log(
+            f"Pad→Phrase {phrase_pad_label(cell)} ({action})  "
+            f"note {note}  vel {velocity}"
+        )
+
     def _phrase_stop_rec(self) -> None:
         self._phrase_clear_armed = False
         self._phrase_mode_armed = False
@@ -8286,49 +8333,13 @@ class MidiToneApp:
                         )
                     )
                     return
-            # PADS mode: MPK pads launch/arm phrases — unless recording (then drums)
-            # or CLEAR/MODE is armed.
-            if pads_mode and is_drum and not phrase_recording:
+            # PADS mode: MPK pads launch/arm phrases. While a take is recording,
+            # the armed cell (and other empty pads) stay drums; filled pads still
+            # launch — same as tapping the grid. Run on the UI thread.
+            if pads_mode and is_drum:
                 cell = phrase_cell_for_note(msg.note)
-                if cell is not None:
-                    edit_view = self._pads_view == "edit"
-                    if edit_view and self._phrase_mode_armed:
-                        mode = self._phrases.toggle_trigger_mode(cell)
-                        self._phrase_mode_armed = False
-                        self._q_put(("phrase",))
-                        self._q_put(
-                            (
-                                "log",
-                                f"Pad→MODE {phrase_pad_label(cell)} → "
-                                f"{'LOOP' if mode == PHRASE_TRIG_LOOP else 'ONE-SHOT'}",
-                                False,
-                            )
-                        )
-                        return
-                    if edit_view and self._phrase_clear_armed:
-                        self._phrases.clear_cell(cell)
-                        self._phrase_clear_armed = False
-                        self._q_put(("phrase",))
-                        self._q_put(
-                            (
-                                "log",
-                                f"Pad→CLEAR {phrase_pad_label(cell)}  note {msg.note}",
-                                False,
-                            )
-                        )
-                        return
-                    action = self._phrases.handle_pad(
-                        cell, from_touch=False, allow_record=edit_view
-                    )
-                    self._q_put(("phrase",))
-                    self._q_put(
-                        (
-                            "log",
-                            f"Pad→Phrase {phrase_pad_label(cell)} ({action})  "
-                            f"note {msg.note}  vel {msg.velocity}",
-                            False,
-                        )
-                    )
+                if cell is not None and self._drum_pad_is_phrase_control(cell):
+                    self._q_put(("pad_midi", cell, msg.note, msg.velocity))
                     return
             # KIT explorer: hitting an MPK pad selects that voice for the scope
             if self._kit_ui_open and is_drum and phrase_cell_for_note(msg.note) is not None:
@@ -8362,12 +8373,9 @@ class MidiToneApp:
             self._q_put(("log", line, False))
         elif msg.type == "note_off" or (msg.type == "note_on" and msg.velocity == 0):
             # Phrase-launch pads have no held note — but drum takes while recording do
-            if (
-                pads_mode
-                and msg.channel == DRUM_CHANNEL
-                and not self._phrases.is_recording()
-            ):
-                if phrase_cell_for_note(msg.note) is not None:
+            if pads_mode and msg.channel == DRUM_CHANNEL:
+                cell = phrase_cell_for_note(msg.note)
+                if cell is not None and self._drum_pad_is_phrase_control(cell):
                     return
             self.engine.note_off(msg.channel, msg.note)
             self._seq.record_note(False, msg.channel, msg.note, 0)
@@ -8378,12 +8386,10 @@ class MidiToneApp:
                 self._q_put(("seq",))
             self._put_continuous_log(format_message(msg))
         elif msg.type == "polytouch":
-            if (
-                pads_mode
-                and msg.channel == DRUM_CHANNEL
-                and not self._phrases.is_recording()
-            ):
-                return
+            if pads_mode and msg.channel == DRUM_CHANNEL:
+                cell = phrase_cell_for_note(msg.note)
+                if cell is not None and self._drum_pad_is_phrase_control(cell):
+                    return
             self.engine.set_pad_pressure(msg.channel, msg.note, msg.value)
             if msg.channel == DRUM_CHANNEL:
                 self._put_continuous_log(
@@ -8474,6 +8480,8 @@ class MidiToneApp:
                     self._refresh_phrase_status()
                 elif kind == "seq_to_pad":
                     self._finish_seq_to_pad(int(item[1]))
+                elif kind == "pad_midi":
+                    self._on_pad_midi(int(item[1]), int(item[2]), int(item[3]))
                 elif kind == "song":
                     self._refresh_song_status()
                 elif kind == "kit_sel":

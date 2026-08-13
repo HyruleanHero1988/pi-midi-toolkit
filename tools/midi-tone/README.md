@@ -201,7 +201,7 @@ Two views (top-right of PADS): **EDIT** (record / fine-tune) and **PLAY** (perfo
 - Launch / stop filled pads only (empty pads do not arm record)
 - **STOP ALL** + **OUT** — minimal chrome for performance
 
-While a phrase is **recording**, MPK pads play/record **drum voices** (not launch). When not recording, those pads launch/arm phrases (EDIT) or launch only (PLAY). Synth mode still always plays the 16-pad drum kit. Locked pads show a `·` mark next to the trigger icon.
+While a phrase is **recording**, MPK pads on the **armed cell** (and other empty pads) play/record **drum voices**. A **filled** pad still launches from the MPK — same as tapping its square — so you do not need the touch screen to fire clips. When nothing is recording, pads launch/arm phrases (EDIT) or launch only (PLAY). Synth mode still always plays the 16-pad drum kit. Locked pads show a `·` mark next to the trigger icon.
 
 A sequence built in **SEQ** can land on a pad without re-recording it: **SEQ → PAD**, then tap the cell (touch or drum pad). That pad becomes a LOOP clip you trigger from PADS PLAY with the same drum pad.
 
