@@ -43,6 +43,8 @@ FILES = [
     "BOOT-RECOVERY-HDMI.txt",
     "fix-touch-x11.sh",
     "set-touch-overlay.sh",
+    "splash-x11.py",
+    "install-pidi-splash.sh",
 ]
 
 # Extra trees copied recursively
@@ -50,6 +52,7 @@ DIRS = [
     "wavetables",
     "kiosk",
     "demo-songs",  # offline Mutopia demos; seeded into songs/ on first launch
+    "branding",
 ]
 
 
@@ -145,7 +148,8 @@ def deploy(restart: bool) -> None:
             client,
             f"sed -i 's/\\r$//' {remote_dir}/*.sh {remote_dir}/*.desktop "
             f"{remote_dir}/kiosk/*.desktop {remote_dir}/kiosk/openbox/* 2>/dev/null; "
-            f"chmod +x {remote_dir}/*.sh {remote_dir}/fetch_akwf.py 2>/dev/null || true",
+            f"chmod +x {remote_dir}/*.sh {remote_dir}/fetch_akwf.py "
+            f"{remote_dir}/splash-x11.py 2>/dev/null || true",
         )
         # Refresh menu/desktop launchers so they keep using the venv via run.sh
         run(client, f"bash {remote_dir}/install-desktop-shortcut.sh", check=False)

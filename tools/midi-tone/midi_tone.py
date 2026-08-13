@@ -3751,7 +3751,7 @@ class MidiToneApp:
         print("ui: creating Tk root", flush=True)
         self.root = tk.Tk()
         print("ui: Tk root ok", flush=True)
-        self.root.title("midi-tone")
+        self.root.title("PiDI")
         # TFT70 / Pi panel target is 800×480 (older builds used 800×420 and left a gap)
         self.root.geometry("800x480")
         self.root.configure(bg="#111111")
@@ -3765,16 +3765,46 @@ class MidiToneApp:
                 except Exception:
                     self.root.state("zoomed")
             print("ui: fullscreen", flush=True)
-        # Paint something immediately so a slow UI build never looks like a
-        # dead gray panel (desktop wallpaper + empty Tk root).
-        self._boot_splash = tk.Label(
-            self.root,
-            text="midi-tone starting…",
-            font=("DejaVu Sans", 22, "bold"),
-            fg="#fbf1c7",
-            bg="#111111",
-        )
-        self._boot_splash.pack(fill=tk.BOTH, expand=True)
+        # PiDI branded splash while audio + UI chrome build
+        self._boot_splash_photo = None
+        splash_path = pathlib.Path(__file__).resolve().parent / "branding" / "pidi-splash.png"
+        splash = tk.Frame(self.root, bg="#000000")
+        splash.pack(fill=tk.BOTH, expand=True)
+        if splash_path.is_file():
+            try:
+                self._boot_splash_photo = tk.PhotoImage(file=str(splash_path))
+            except Exception:
+                try:
+                    from PIL import Image, ImageTk  # type: ignore
+
+                    im = Image.open(splash_path)
+                    self._boot_splash_photo = ImageTk.PhotoImage(im)
+                except Exception:
+                    self._boot_splash_photo = None
+        if self._boot_splash_photo is not None:
+            tk.Label(
+                splash,
+                image=self._boot_splash_photo,
+                bg="#000000",
+                borderwidth=0,
+                highlightthickness=0,
+            ).place(relx=0.5, rely=0.5, anchor="center")
+        else:
+            tk.Label(
+                splash,
+                text="PiDI",
+                font=("DejaVu Sans", 42, "bold"),
+                fg="#00d4ff",
+                bg="#000000",
+            ).place(relx=0.5, rely=0.44, anchor="center")
+            tk.Label(
+                splash,
+                text="Raspberry Pi MIDI Toolkit",
+                font=("DejaVu Sans", 14),
+                fg="#00d4ff",
+                bg="#000000",
+            ).place(relx=0.5, rely=0.56, anchor="center")
+        self._boot_splash = splash
         try:
             self.root.deiconify()
             self.root.lift()
@@ -3900,8 +3930,8 @@ class MidiToneApp:
         self._nav = tk.Frame(self.root, bg="#1d2021")
         self._nav.pack(side=tk.TOP, fill=tk.X, padx=0, pady=0)
         tk.Label(
-            self._nav, text="midi-tone", font=("DejaVu Sans", 14, "bold"),
-            fg="#fbf1c7", bg="#1d2021", padx=10, pady=8,
+            self._nav, text="PiDI", font=("DejaVu Sans", 14, "bold"),
+            fg="#00d4ff", bg="#1d2021", padx=10, pady=8,
         ).pack(side=tk.LEFT)
         # Always-available power control (kiosk has no desktop shutdown UI)
         power_btn = self._mk_touch_btn(

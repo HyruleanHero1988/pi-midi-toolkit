@@ -216,6 +216,8 @@ fi
 echo
 echo "Kiosk boot enabled for user: $USER_NAME"
 echo "  Session: MIDI Tone Kiosk (Openbox + midi-tone --fullscreen)"
+echo "  Optional PiDI boot splash (Plymouth, from power-on):"
+echo "    $DIR/install-pidi-splash.sh && sudo reboot"
 echo "  Reboot to apply:  sudo reboot"
 echo
 echo "Manual test now (from a graphical login / SSH with DISPLAY):"

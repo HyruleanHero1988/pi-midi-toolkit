@@ -64,6 +64,16 @@ fi
 amixer -c 1 set PCM 100% unmute >/dev/null 2>&1 || true
 amixer set Master 100% unmute >/dev/null 2>&1 || true
 
+# PiDI splash while Python / audio engine come up (killed when app starts)
+SPLASH_PID=""
+if [[ -f "$DIR/branding/pidi-splash.png" && -f "$DIR/splash-x11.py" ]]; then
+  if command -v python3 >/dev/null 2>&1; then
+    python3 "$DIR/splash-x11.py" >>"$LOG" 2>&1 &
+    SPLASH_PID=$!
+    echo "pidi splash pid=$SPLASH_PID" >>"$LOG"
+  fi
+fi
+
 # Prefer MPK when present; always fullscreen in kiosk
 ARGS=("$@")
 if [[ ${#ARGS[@]} -eq 0 ]]; then
@@ -104,6 +114,10 @@ if [[ "$need_wm" -eq 1 ]]; then
 fi
 
 cleanup() {
+  if [[ -n "${SPLASH_PID}" ]] && kill -0 "$SPLASH_PID" 2>/dev/null; then
+    kill "$SPLASH_PID" 2>/dev/null || true
+  fi
+  pkill -f '[s]plash-x11.py' >/dev/null 2>&1 || true
   pkill -f '[m]idi_tone.py' >/dev/null 2>&1 || true
   if [[ -n "${WM_PID}" ]] && kill -0 "$WM_PID" 2>/dev/null; then
     kill "$WM_PID" 2>/dev/null || true
@@ -119,7 +133,18 @@ while true; do
     sleep 5
     continue
   fi
+  # Hand off to the in-app splash (same art) once Python is launching
+  if [[ -n "${SPLASH_PID}" ]] && kill -0 "$SPLASH_PID" 2>/dev/null; then
+    kill "$SPLASH_PID" 2>/dev/null || true
+    SPLASH_PID=""
+  fi
+  pkill -f '[s]plash-x11.py' >/dev/null 2>&1 || true
   ./run.sh "${ARGS[@]}" >>"$LOG" 2>&1 || true
   echo "midi-tone exited; restarting in 3s" >>"$LOG"
+  # Brief splash again while restarting
+  if [[ -f "$DIR/branding/pidi-splash.png" && -f "$DIR/splash-x11.py" ]]; then
+    python3 "$DIR/splash-x11.py" >>"$LOG" 2>&1 &
+    SPLASH_PID=$!
+  fi
   sleep 3
 done

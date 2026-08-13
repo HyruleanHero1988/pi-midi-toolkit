@@ -1,0 +1,23 @@
+# PiDI static boot splash (black + centered branding art).
+Window.SetBackgroundTopColor(0.00, 0.00, 0.00);
+Window.SetBackgroundBottomColor(0.00, 0.00, 0.00);
+
+splash_image = Image("splash.png");
+iw = splash_image.GetWidth();
+ih = splash_image.GetHeight();
+ww = Window.GetWidth();
+wh = Window.GetHeight();
+
+# Fit panel without letterboxing when sizes match; otherwise scale to cover width.
+if (ww != iw || wh != ih) {
+  # Prefer filling the width (TFT70 is 800x480)
+  scale = ww / iw;
+  splash_image = splash_image.Scale(ww, ih * scale);
+  iw = splash_image.GetWidth();
+  ih = splash_image.GetHeight();
+}
+
+splash.sprite = Sprite(splash_image);
+splash.sprite.SetX(ww / 2 - iw / 2);
+splash.sprite.SetY(wh / 2 - ih / 2);
+splash.sprite.SetZ(100);

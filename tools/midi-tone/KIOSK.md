@@ -18,6 +18,7 @@ This matches the setup used on the lab unit (`midi-pi`) after
 | Session `midi-tone-kiosk` | Runs `kiosk.sh` instead of LXDE |
 | Openbox (optional) | Minimal WM; kiosk can also run Tk fullscreen alone |
 | `kiosk.sh` | Starts `midi_tone.py --fullscreen`, restarts if it exits |
+| PiDI splash | Plymouth (power-on) + X splash + in-app splash |
 | Audio + MIDI | Local soft-synth; USB controller when present |
 
 **Display:** UI is laid out for **800×480**. Lab hardware is a 5″ HDMI GPIO
@@ -102,8 +103,11 @@ or `pkill -f midi_tone.py` over SSH.
 
 ```bash
 cd ~/midi-tone
-chmod +x install-kiosk.sh disable-kiosk.sh kiosk.sh run.sh launch-desktop.sh
+chmod +x install-kiosk.sh disable-kiosk.sh kiosk.sh run.sh launch-desktop.sh \
+  splash-x11.py install-pidi-splash.sh
 ./install-kiosk.sh
+# Optional: PiDI logo from the earliest boot frames
+./install-pidi-splash.sh
 sudo reboot
 ```
 
@@ -133,9 +137,23 @@ the UI without a password.
 
 ---
 
+## 3b. PiDI splash (power-on branding)
+
+Matches the cyan-on-black mockup (overlapping squares + **PiDI** + subtitle).
+
+| Stage | When | How |
+| --- | --- | --- |
+| Plymouth | Kernel / initramfs, before login | `install-pidi-splash.sh` |
+| X splash | Right after LightDM starts X | `kiosk.sh` → `splash-x11.py` |
+| App splash | Until UI chrome is ready | `midi_tone.py` boot splash |
+
+Art lives in `branding/pidi-splash.png` (see `branding/README.md`).
+
+---
+
 ## 4. Verify after reboot
 
-On the panel you should see **midi-tone** fullscreen (SYNTH / LOOPER / …), not
+On the panel you should see **PiDI** fullscreen (SYNTH / SEQ / …), not
 the Pi desktop.
 
 Over SSH:
