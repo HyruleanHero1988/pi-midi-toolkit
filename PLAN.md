@@ -88,7 +88,8 @@ Power on → Openbox kiosk → modes. The soft-synth path started as a Phase 0 h
 | **Map / Thru** | Remap | Channel / CC / velocity remap; ports; learn → Rust engine |
 | **Log** | Both | Event history / commissioning |
 
-Boot path: `install-kiosk.sh` + X11 Openbox session (already started). No normal Pi desktop shell.
+Boot path: `install-kiosk.sh` enables X11 + Desktop Autologin + **MIDI Tone Kiosk**
+session (Openbox + fullscreen app). No normal Pi desktop shell. Undo with `disable-kiosk.sh`.
 
 ### Architecture rule (still true — and it helps the jambox)
 

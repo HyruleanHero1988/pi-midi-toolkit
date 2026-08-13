@@ -28,10 +28,12 @@ FILES = [
     "launch-desktop.sh",
     "kiosk.sh",
     "install-kiosk.sh",
+    "disable-kiosk.sh",
     "setup-venv.sh",
     "install-desktop-shortcut.sh",
     "midi-tone.desktop",
     "README.md",
+    "KIOSK.md",
     "fix-audio-headphones.sh",
     "enable-gpio-touch.sh",
     "calibrate-touch-y.sh",
@@ -39,6 +41,8 @@ FILES = [
     "hide-touch-cursor.sh",
     "enable-tft70-dsi.sh",
     "BOOT-RECOVERY-HDMI.txt",
+    "fix-touch-x11.sh",
+    "set-touch-overlay.sh",
 ]
 
 # Extra trees copied recursively
@@ -72,7 +76,9 @@ def connect(creds: dict[str, str]) -> paramiko.SSHClient:
         creds["PI_HOST"],
         username=creds["PI_USER"],
         password=creds["PI_PASSWORD"],
-        timeout=15,
+        timeout=60,
+        banner_timeout=60,
+        auth_timeout=60,
         allow_agent=False,
         look_for_keys=False,
     )
@@ -145,16 +151,35 @@ def deploy(restart: bool) -> None:
         run(client, f"bash {remote_dir}/install-desktop-shortcut.sh", check=False)
 
         if restart:
-            run(client, "pkill -f '[m]idi_tone.py' || true", check=False)
-            time.sleep(0.5)
-            start = (
-                f"bash -lc 'export DISPLAY=:0 XDG_RUNTIME_DIR=/run/user/$(id -u); "
-                f"cd {remote_dir}; "
-                f"./launch-desktop.sh'"
+            # Under kiosk, only poke midi_tone — the session loop restarts it.
+            # Double-launch (kiosk + launch-desktop) pegs two cores and crunchs audio.
+            kiosk_out = run(
+                client,
+                "pgrep -af 'kiosk\\.sh|midi-tone-kiosk' || true",
+                check=False,
             )
-            run(client, start)
-            time.sleep(1.5)
+            run(client, "pkill -f '[m]idi_tone.py' || true", check=False)
+            time.sleep(1.0)
+            if kiosk_out.strip():
+                print("kiosk session detected — waiting for restart loop")
+                time.sleep(5.0)
+                run(client, "pgrep -a midi_tone || true", check=False)
+                # Confirm new audio line landed in kiosk log
+                run(
+                    client,
+                    "grep 'audio: wavetable' /tmp/midi-tone-kiosk.log | tail -2 || true",
+                    check=False,
+                )
+            else:
+                start = (
+                    f"bash -lc 'export DISPLAY=:0 XDG_RUNTIME_DIR=/run/user/$(id -u); "
+                    f"cd {remote_dir}; "
+                    f"./launch-desktop.sh'"
+                )
+                run(client, start)
+                time.sleep(1.5)
             run(client, "tail -n 40 /tmp/midi-tone.log || true", check=False)
+            run(client, "tail -n 20 /tmp/midi-tone-kiosk.log || true", check=False)
         print("Deploy OK")
     finally:
         client.close()

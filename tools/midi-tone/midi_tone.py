@@ -10,12 +10,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import math
 import pathlib
 import queue
 import re
 import shutil
 import sys
+import subprocess
 import threading
 import time
 import tkinter as tk
@@ -53,8 +55,13 @@ from sequencer import (  # noqa: E402  (local module, imported after the hard de
 
 
 SAMPLE_RATE = 44100
-BLOCKSIZE = 1024
-LATENCY_SEC = 0.08
+# Larger default block / latency = fewer xruns on Pi (crunchy / robotic audio).
+# Override for lower latency if the machine can take it:
+#   MIDI_TONE_BLOCKSIZE=512 MIDI_TONE_LATENCY=0.03
+# Or bump further on a loaded Pi:
+#   MIDI_TONE_BLOCKSIZE=1024 MIDI_TONE_LATENCY=0.08
+BLOCKSIZE = max(64, int(os.environ.get("MIDI_TONE_BLOCKSIZE", "1536")))
+LATENCY_SEC = max(0.005, float(os.environ.get("MIDI_TONE_LATENCY", "0.10")))
 DEFAULT_MAX_VOICES = 12
 TABLE_SIZE = 2048
 TABLE_MASK = TABLE_SIZE - 1
@@ -187,6 +194,18 @@ class MixBusFx:
         self._rev_lp = 0.0
         self._tmp = np.zeros(BLOCKSIZE * 2, dtype=np.float32)
         self._wet = np.zeros(BLOCKSIZE * 2, dtype=np.float32)
+        self._idx = np.zeros(BLOCKSIZE * 2, dtype=np.int32)
+        self._write_idx = np.zeros(BLOCKSIZE * 2, dtype=np.int32)
+        self._arange_i = np.arange(BLOCKSIZE * 2, dtype=np.int32)
+
+    def _ensure_work_bufs(self, n: int) -> None:
+        if n > self._tmp.shape[0]:
+            self._tmp = np.zeros(n, dtype=np.float32)
+            self._wet = np.zeros(n, dtype=np.float32)
+            self._idx = np.zeros(n, dtype=np.int32)
+            self._write_idx = np.zeros(n, dtype=np.int32)
+        if n > self._arange_i.shape[0]:
+            self._arange_i = np.arange(n, dtype=np.int32)
 
     def snapshot(self) -> Dict[str, float]:
         return {
@@ -214,13 +233,35 @@ class MixBusFx:
         self.reverb_size = _f("fx_reverb_size", self.reverb_size)
         self.reverb_mix = _f("fx_reverb_mix", self.reverb_mix)
 
+    def is_dry(self) -> bool:
+        """True when process() would be a no-op (skip in the audio callback)."""
+        return (
+            float(self.drive) <= 0.001
+            and float(self.delay_mix) <= 0.001
+            and float(self.delay_fb) <= 0.001
+            and float(self.reverb_mix) <= 0.001
+        )
+
+    def reset_to_defaults(self) -> None:
+        """Hard reset params + clear delay/reverb memory (kills leftover echo)."""
+        self.drive = 0.0
+        self.delay_time = 0.28
+        self.delay_fb = 0.35
+        self.delay_mix = 0.0
+        self.reverb_size = 0.45
+        self.reverb_mix = 0.0
+        self._delay.fill(0.0)
+        self._reverb.fill(0.0)
+        self._dpos = 0
+        self._rpos = 0
+        self._rev_lp = 0.0
+
     def process(self, buf: np.ndarray) -> None:
         n = len(buf)
         if n == 0:
             return
-        if n > self._tmp.shape[0]:
-            self._tmp = np.zeros(n, dtype=np.float32)
-            self._wet = np.zeros(n, dtype=np.float32)
+        self._ensure_work_bufs(n)
+        arange_i = self._arange_i[:n]
         # --- Drive (waveshape) ---
         drive = float(self.drive)
         if drive > 0.001:
@@ -243,11 +284,13 @@ class MixBusFx:
             fb = max(0.0, min(0.92, float(self.delay_fb)))
             pos = self._dpos
             wet = self._wet[:n]
-            # Vectorized circular read
-            idx = (pos - ds + np.arange(n, dtype=np.int32)) % dlen
+            idx = self._idx[:n]
+            write_idx = self._write_idx[:n]
+            np.add(np.int32(pos - ds), arange_i, out=idx)
+            np.remainder(idx, dlen, out=idx)
             np.take(dbuf, idx, out=wet)
-            # Write input + feedback * delayed
-            write_idx = (pos + np.arange(n, dtype=np.int32)) % dlen
+            np.add(np.int32(pos), arange_i, out=write_idx)
+            np.remainder(write_idx, dlen, out=write_idx)
             dbuf[write_idx] = buf + wet * np.float32(fb)
             self._dpos = (pos + n) % dlen
             if dmix > 0.001:
@@ -272,18 +315,25 @@ class MixBusFx:
             gains = (0.55, 0.40, 0.30, 0.22)
             pos = self._rpos
             wet = self._wet[:n]
+            idx = self._idx[:n]
             wet.fill(0.0)
             for tap, g in zip(taps, gains):
                 tap = min(tap, rlen - 1)
-                idx = (pos - tap + np.arange(n, dtype=np.int32)) % rlen
+                np.add(np.int32(pos - tap), arange_i, out=idx)
+                np.remainder(idx, rlen, out=idx)
                 wet += np.take(rbuf, idx) * np.float32(g)
-            # Soften highs with a short moving average (size → darker)
-            win = max(1, int(1 + size * 12))
-            if win > 1:
-                kernel = np.ones(win, dtype=np.float32) / np.float32(win)
-                wet[:] = np.convolve(wet, kernel, mode="same")
+            # Soften highs with a cheap 2-tap blur (size → darker)
+            if size > 0.05:
+                soft = self._tmp[:n]
+                soft[0] = wet[0]
+                soft[1:] = 0.5 * (wet[1:] + wet[:-1])
+                blend = np.float32(max(0.0, min(1.0, size)))
+                wet *= np.float32(1.0 - blend)
+                wet += soft * blend
             fb = 0.25 + 0.45 * size
-            write_idx = (pos + np.arange(n, dtype=np.int32)) % rlen
+            write_idx = self._write_idx[:n]
+            np.add(np.int32(pos), arange_i, out=write_idx)
+            np.remainder(write_idx, rlen, out=write_idx)
             rbuf[write_idx] = buf * np.float32(0.7) + wet * np.float32(fb)
             self._rpos = (pos + n) % rlen
             dry = 1.0 - rmix
@@ -854,7 +904,7 @@ class SineEngine:
     ATTACK_SEC_MAX = 0.400
     RELEASE_SEC_MIN = 0.010
     RELEASE_SEC_MAX = 0.800
-    MAX_DRUM_HITS = 16  # full MPK A+B pad bank polyphony
+    MAX_DRUM_HITS = 8  # enough for grooves; 16 + keys blew the Pi audio budget
     MAX_LOCKED_TIMBRES = 4  # concurrent locked pad tables (Pi 2 budget)
 
     def __init__(
@@ -923,6 +973,14 @@ class SineEngine:
         self._key_bus = np.zeros(BLOCKSIZE * 2, dtype=np.float32)
         self._drum_bus = np.zeros(BLOCKSIZE * 2, dtype=np.float32)
         self._fx_tmp = np.zeros(BLOCKSIZE * 2, dtype=np.float32)
+        # Pre-baked noise for drums (np.random every block was a major xrun source)
+        self._noise_ring = (
+            np.random.RandomState(0xC0FFEE).rand(65536).astype(np.float32) * np.float32(2.0)
+            - np.float32(1.0)
+        )
+        self._noise_pos = 0
+        self._noise_wrap = np.zeros(BLOCKSIZE * 2, dtype=np.float32)
+        self._noise_soft = np.zeros(BLOCKSIZE * 2, dtype=np.float32)
         # Reused per-callback accumulators keyed by wavetable / drum model name
         self._voice_fx_buckets: Dict[str, np.ndarray] = {}
         self._rebuild_morph_table_unlocked()
@@ -1952,10 +2010,18 @@ class SineEngine:
         with self._lock:
             for fx_key, bucket in groups.items():
                 fx = self._ensure_voice_fx_unlocked(fx_key)
-                fx.process(bucket)
+                if not fx.is_dry():
+                    fx.process(bucket)
                 key_bus += bucket
 
-        # Procedural ch10 drums — per-model FX, then shared kit-group FX
+        # Procedural ch10 drums — per-model FX only when a slot is actually wet
+        drum_fx_wet = False
+        if drum_hits:
+            models = {str(h.model) for h in drum_hits}
+            with self._lock:
+                drum_fx_wet = any(
+                    not self._ensure_drum_fx_unlocked(m).is_dry() for m in models
+                )
         dead_drums = self._render_drums(
             drum_bus,
             frames,
@@ -1966,25 +2032,27 @@ class SineEngine:
             decay=drum_decay,
             noise_amt=drum_noise,
             tone=drum_tone,
-            apply_model_fx=True,
+            apply_model_fx=drum_fx_wet,
         )
         if frames > 0:
             with self._lock:
                 drum_group_fx = self._drum_group_fx
-            drum_group_fx.process(drum_bus)
+            if not drum_group_fx.is_dry():
+                drum_group_fx.process(drum_bus)
 
-        # Tone filter on keys only (drums keep their own tone macro)
+        # Tone filter on keys only (drums keep their own tone macro).
+        # Cheap O(n) brightness: blend dry with a 2-tap blur (no convolve).
         if tone < 0.999 and frames > 0:
-            win = max(1, int(round((1.0 - tone) * 48.0)))
-            if win > 1:
-                kernel = np.ones(win, dtype=np.float32) / np.float32(win)
-                pad_left = np.full(win - 1, self._filter_state, dtype=np.float32)
-                padded = np.concatenate([pad_left, key_bus])
-                filtered = np.convolve(padded, kernel, mode="valid")
-                key_bus[:] = filtered[:frames]
-                self._filter_state = float(key_bus[-1])
+            blend = float(tone * tone)
+            soft = np.empty_like(key_bus)
+            soft[0] = 0.5 * (key_bus[0] + np.float32(self._filter_state))
+            soft[1:] = 0.5 * (key_bus[1:] + key_bus[:-1])
+            if blend <= 0.001:
+                key_bus[:] = soft
             else:
-                self._filter_state = float(key_bus[-1]) if frames else self._filter_state
+                key_bus *= np.float32(blend)
+                key_bus += soft * np.float32(1.0 - blend)
+            self._filter_state = float(key_bus[-1])
         elif frames > 0:
             self._filter_state = float(key_bus[-1])
 
@@ -1995,7 +2063,8 @@ class SineEngine:
         if frames > 0:
             with self._lock:
                 bus_fx = self._bus_fx
-            bus_fx.process(buf)
+            if not bus_fx.is_dry():
+                bus_fx.process(buf)
 
         if level < 0.999:
             buf *= np.float32(level)
@@ -2011,6 +2080,24 @@ class SineEngine:
                     self._voices.pop(k, None)
                 for n in dead_drums:
                     self._drums.pop(n, None)
+
+    def _next_noise(self, n: int) -> np.ndarray:
+        """Slice a pre-baked noise ring (no per-block RNG allocation)."""
+        ring = self._noise_ring
+        pos = self._noise_pos
+        rlen = len(ring)
+        if pos + n <= rlen:
+            out = ring[pos : pos + n]
+            self._noise_pos = pos + n
+            return out
+        if n > self._noise_wrap.shape[0]:
+            self._noise_wrap = np.zeros(n, dtype=np.float32)
+        out = self._noise_wrap[:n]
+        first = rlen - pos
+        out[:first] = ring[pos:]
+        out[first:] = ring[: n - first]
+        self._noise_pos = (pos + n) % rlen
+        return out
 
     def _render_drums(
         self,
@@ -2036,6 +2123,24 @@ class SineEngine:
             return dead
         two_pi = 2.0 * math.pi
         inv_sr = 1.0 / sr
+        # One shared noise block for all hits this callback
+        white = self._next_noise(frames)
+        if tone >= 0.92:
+            noise = white
+        else:
+            # Cheap brightness: blend dry noise with a 2-tap blur
+            if frames > self._noise_soft.shape[0]:
+                self._noise_soft = np.zeros(frames, dtype=np.float32)
+            soft = self._noise_soft[:frames]
+            soft[0] = 0.5 * (white[0] + np.float32(hits[0].noise_state))
+            soft[1:] = 0.5 * (white[1:] + white[:-1])
+            blend = float(tone * tone)
+            if blend <= 0.001:
+                noise = soft
+            else:
+                noise = white * np.float32(blend) + soft * np.float32(1.0 - blend)
+            for hit in hits:
+                hit.noise_state = float(noise[-1] if hasattr(noise, "__len__") else soft[-1])
 
         def _synth_hit(hit: DrumHit) -> Tuple[np.ndarray, float]:
             # Keep hit snapshot in sync so UI/debug stay honest; audio uses live macros
@@ -2044,16 +2149,6 @@ class SineEngine:
             hit.noise = noise_amt
             hit.tone = tone
             t = (hit.pos + arange) * np.float32(inv_sr)
-            white = (np.random.random(frames).astype(np.float32) * 2.0 - 1.0)
-            win = max(1, int(round((1.0 - tone) * 16.0)))
-            if win <= 1:
-                noise = white
-                hit.noise_state = float(white[-1])
-            else:
-                kernel = np.ones(win, dtype=np.float32) / np.float32(win)
-                pad = np.full(win - 1, hit.noise_state, dtype=np.float32)
-                noise = np.convolve(np.concatenate([pad, white]), kernel, mode="valid")[:frames]
-                hit.noise_state = float(noise[-1])
 
             audio, dur, new_phase = synthesize_drum(
                 hit.model,
@@ -2095,7 +2190,8 @@ class SineEngine:
                 scratch += audio * np.float32(DRUM_BUS_GAIN)
             with self._lock:
                 fx = self._ensure_drum_fx_unlocked(model)
-            fx.process(scratch)
+            if not fx.is_dry():
+                fx.process(scratch)
             buf += scratch
         return dead
 
@@ -2123,6 +2219,11 @@ PHRASE_VOICE_LOCKED = "locked"
 PHRASE_VOICE_MODES = (PHRASE_VOICE_FOLLOW, PHRASE_VOICE_LOCKED)
 # out_channel -1 = use each event's recorded channel; 0..15 = force MIDI ch 1..16
 PHRASE_OUT_AS_RECORDED = -1
+SCOPE_CRT_BG = "#031a08"
+SCOPE_CRT_WAVE = "#39ff14"  # phosphor green
+SCOPE_CRT_GRID = "#14532d"
+SCOPE_CRT_AXIS = "#4ade80"
+
 PHRASE_GAIN_MIN = 0.10
 PHRASE_GAIN_MAX = 2.00
 PHRASE_GAIN_STEP = 0.10
@@ -3572,6 +3673,31 @@ class MidiToneApp:
         self.root.geometry("800x480")
         self.root.configure(bg="#111111")
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+        if self._fullscreen:
+            try:
+                self.root.attributes("-fullscreen", True)
+            except Exception:
+                try:
+                    self.root.attributes("-zoomed", True)
+                except Exception:
+                    self.root.state("zoomed")
+            print("ui: fullscreen", flush=True)
+        # Paint something immediately so a slow UI build never looks like a
+        # dead gray panel (desktop wallpaper + empty Tk root).
+        self._boot_splash = tk.Label(
+            self.root,
+            text="midi-tone starting…",
+            font=("DejaVu Sans", 22, "bold"),
+            fg="#fbf1c7",
+            bg="#111111",
+        )
+        self._boot_splash.pack(fill=tk.BOTH, expand=True)
+        try:
+            self.root.deiconify()
+            self.root.lift()
+            self.root.update()
+        except Exception:
+            self.root.update_idletasks()
         self.root.update_idletasks()
         self._apply_display_geometry()
         self.root.update_idletasks()
@@ -3615,6 +3741,8 @@ class MidiToneApp:
         self._save_voice_drive_btn: Optional[tk.Button] = None
         self._save_voice_keys: Optional[tk.Frame] = None
         self._save_voice_keys_digits = False
+        self._power_ui_open = False
+        self._power_frame: Optional[tk.Frame] = None
         self._mode = "synth"  # synth | seq | pads | songs | log | presets
         self._mode_btns: Dict[str, tk.Button] = {}
         self._seq = OverdubSequencer(self.engine, self._q_put)
@@ -3676,6 +3804,15 @@ class MidiToneApp:
         self._settings_dirty = False
         self._suppress_autosave = False
 
+        # Drop boot splash before packing real chrome
+        splash = getattr(self, "_boot_splash", None)
+        if splash is not None:
+            try:
+                splash.destroy()
+            except Exception:
+                pass
+            self._boot_splash = None
+
         # Persistent mode navigation (always visible)
         self._nav = tk.Frame(self.root, bg="#1d2021")
         self._nav.pack(side=tk.TOP, fill=tk.X, padx=0, pady=0)
@@ -3683,6 +3820,12 @@ class MidiToneApp:
             self._nav, text="midi-tone", font=("DejaVu Sans", 14, "bold"),
             fg="#fbf1c7", bg="#1d2021", padx=10, pady=8,
         ).pack(side=tk.LEFT)
+        # Always-available power control (kiosk has no desktop shutdown UI)
+        power_btn = self._mk_touch_btn(
+            self._nav, "POWER", self._open_power_menu, bg="#9d0006"
+        )
+        power_btn.configure(font=("DejaVu Sans", 10, "bold"), pady=8, padx=8)
+        power_btn.pack(side=tk.LEFT, padx=(0, 4))
         nav_modes = tk.Frame(self._nav, bg="#1d2021")
         nav_modes.pack(side=tk.RIGHT, padx=4, pady=4)
         for key, label in (
@@ -3937,7 +4080,8 @@ class MidiToneApp:
 
     def _overlay_busy(self) -> bool:
         return (
-            self._grid_open
+            self._power_ui_open
+            or self._grid_open
             or self._morph_ui_open
             or self._kit_ui_open
             or self._save_voice_open
@@ -5728,6 +5872,171 @@ class MidiToneApp:
         self._seq.clear()
         self._refresh_seq_status()
 
+    def _pack_screen_regions(
+        self,
+        parent: tk.Misc,
+        *,
+        bg: str = "#111111",
+        header_padx: int = 8,
+        header_pady: Tuple[int, int] = (8, 2),
+        body_padx: int = 6,
+        body_pady: int = 2,
+        footer_padx: int = 8,
+        footer_pady: int = 8,
+    ) -> Tuple[tk.Frame, tk.Frame, tk.Frame]:
+        """Return (header, body, footer) packed so chrome never falls off-screen.
+
+        Pack order matters on short displays:
+          1) footer (BOTTOM) — reserved first, always visible
+          2) header (TOP)
+          3) body (TOP, expand) — absorbs leftover height only
+
+        Put all action buttons in ``footer`` (or nested frames inside it).
+        Put scrollable / expanding content only in ``body``.
+        """
+        footer = tk.Frame(parent, bg=bg)
+        footer.pack(side=tk.BOTTOM, fill=tk.X, padx=footer_padx, pady=footer_pady)
+
+        header = tk.Frame(parent, bg=bg)
+        header.pack(side=tk.TOP, fill=tk.X, padx=header_padx, pady=header_pady)
+
+        body = tk.Frame(parent, bg=bg)
+        body.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=body_padx, pady=body_pady)
+        return header, body, footer
+
+    def _build_touch_scroll_area(
+        self, parent: tk.Misc
+    ) -> Tuple[tk.Frame, tk.Canvas, tk.Frame, Dict[str, object]]:
+        """Scroll canvas with a side ▲/▼ rail (stays on-screen on short displays)."""
+        wrap = tk.Frame(parent, bg="#111111")
+        wrap.pack(fill=tk.BOTH, expand=True)
+
+        drag: Dict[str, object] = {
+            "start_y": 0,
+            "last_y": 0,
+            "dragging": False,
+        }
+
+        # Right rail packed first so it never loses height to the expanding grid
+        rail = tk.Frame(wrap, bg="#111111", width=88)
+        rail.pack(side=tk.RIGHT, fill=tk.Y, padx=(4, 0))
+        rail.pack_propagate(False)
+
+        def _scroll_step(direction: int) -> None:
+            """Move by ~one viewport (fraction), not opaque 'pages' units."""
+            canvas.update_idletasks()
+            top, bot = canvas.yview()
+            visible = max(0.12, bot - top)
+            step = visible * 0.9
+            canvas.yview_moveto(max(0.0, min(1.0, top + direction * step)))
+
+        up = self._mk_touch_btn(rail, "▲\nUP", lambda: _scroll_step(-1), bg="#504945")
+        up.configure(font=("DejaVu Sans", 14, "bold"), pady=6)
+        up.pack(side=tk.TOP, fill=tk.BOTH, expand=True, pady=(0, 3), ipady=10)
+
+        down = self._mk_touch_btn(rail, "▼\nDOWN", lambda: _scroll_step(1), bg="#504945")
+        down.configure(font=("DejaVu Sans", 14, "bold"), pady=6)
+        down.pack(side=tk.BOTTOM, fill=tk.BOTH, expand=True, pady=(3, 0), ipady=10)
+
+        mid = tk.Frame(wrap, bg="#111111")
+        mid.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        canvas = tk.Canvas(mid, bg="#111111", highlightthickness=0, bd=0)
+        canvas.pack(fill=tk.BOTH, expand=True)
+
+        inner = tk.Frame(canvas, bg="#111111")
+        window_id = canvas.create_window((0, 0), window=inner, anchor="nw")
+
+        def _on_inner_configure(_event: object = None) -> None:
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        def _on_canvas_configure(event: tk.Event) -> None:  # type: ignore[name-defined]
+            canvas.itemconfigure(window_id, width=event.width)
+
+        inner.bind("<Configure>", _on_inner_configure)
+        canvas.bind("<Configure>", _on_canvas_configure)
+
+        def _drag_start(event: tk.Event) -> str:  # type: ignore[name-defined]
+            drag["start_y"] = int(event.y_root)
+            drag["last_y"] = int(event.y_root)
+            drag["dragging"] = False
+            return "break"
+
+        def _drag_move(event: tk.Event) -> str:  # type: ignore[name-defined]
+            y = int(event.y_root)
+            start_y = int(drag["start_y"])  # type: ignore[arg-type]
+            last_y = int(drag["last_y"])  # type: ignore[arg-type]
+            if abs(y - start_y) >= TOUCH_SCROLL_THRESH_PX:
+                drag["dragging"] = True
+            if drag["dragging"]:
+                dy = y - last_y
+                if dy != 0:
+                    bbox = canvas.bbox("all")
+                    view_h = max(1, canvas.winfo_height())
+                    content_h = (bbox[3] - bbox[1]) if bbox else view_h
+                    if content_h > view_h:
+                        top, _bot = canvas.yview()
+                        canvas.yview_moveto(
+                            max(0.0, min(1.0, top - (dy / float(content_h))))
+                        )
+                    drag["last_y"] = y
+            return "break"
+
+        def _bind_empty_drag(widget: tk.Misc) -> None:
+            widget.bind("<ButtonPress-1>", _drag_start)
+            widget.bind("<B1-Motion>", _drag_move)
+
+        _bind_empty_drag(canvas)
+        _bind_empty_drag(inner)
+        drag["_move"] = _drag_move
+        drag["_start"] = _drag_start
+        return wrap, canvas, inner, drag
+
+    def _mk_scroll_select_btn(
+        self,
+        parent: tk.Misc,
+        text: str,
+        command,
+        drag: Dict[str, object],
+        bg: str = "#3c3836",
+    ) -> tk.Button:
+        """Grid button: short tap selects; finger drag scrolls the parent canvas."""
+        btn = tk.Button(
+            parent, text=text,
+            font=("DejaVu Sans", 14, "bold"), fg="#fbf1c7", bg=bg,
+            activeforeground="#fbf1c7", activebackground=bg,
+            relief=tk.FLAT, bd=0, padx=8, pady=12, cursor="hand2",
+            takefocus=0,
+        )
+
+        def _press(event: tk.Event) -> str:  # type: ignore[name-defined]
+            drag["start_y"] = int(event.y_root)
+            drag["last_y"] = int(event.y_root)
+            drag["dragging"] = False
+            return "break"
+
+        def _move(event: tk.Event) -> str:  # type: ignore[name-defined]
+            mover = drag.get("_move")
+            if callable(mover):
+                return mover(event)  # type: ignore[misc]
+            return "break"
+
+        def _release(_event: object = None) -> str:
+            if drag.get("dragging"):
+                return "break"
+            now = time.monotonic()
+            last = getattr(btn, "_last_fire", 0.0)
+            if now - last < 0.18:
+                return "break"
+            btn._last_fire = now  # type: ignore[attr-defined]
+            command()
+            return "break"
+
+        btn.bind("<ButtonPress-1>", _press)
+        btn.bind("<B1-Motion>", _move)
+        btn.bind("<ButtonRelease-1>", _release)
+        return btn
+
     def _mk_touch_btn(self, parent: tk.Misc, text: str, command, bg: str = "#3c3836") -> tk.Button:
         """Touch-friendly button: fire on press (resistive panels often miss click)."""
         btn = tk.Button(
@@ -6727,7 +7036,7 @@ class MidiToneApp:
             self._q_put(("off", msg.channel, msg.note))
             if self._seq.is_recording():
                 self._q_put(("seq",))
-            self._q_put(("log", format_message(msg), False))
+            self._put_continuous_log(format_message(msg))
         elif msg.type == "polytouch":
             if (
                 pads_mode
@@ -6937,6 +7246,165 @@ class MidiToneApp:
         self.root.geometry(f"{sw}x{sh}+0+0")
         print(f"ui: geometry {sw}x{sh}", flush=True)
 
+    def _open_power_menu(self) -> None:
+        """Confirm screen for safe Pi shutdown / reboot (kiosk has no desktop power UI)."""
+        if self._power_ui_open:
+            return
+        # Close other overlays so POWER is always reachable
+        if self._grid_open:
+            self._close_voice_grid(restore_main=False)
+        if self._kit_ui_open:
+            self._close_kit_explorer(restore_main=False)
+        if self._save_voice_open:
+            self._close_save_voice(restore_main=False)
+
+        self._power_ui_open = True
+        prev = self._mode
+        for shell in (
+            self._synth_shell,
+            self._seq_shell,
+            self._pads_shell,
+            self._songs_shell,
+            self._presets_shell,
+            self._log_shell,
+        ):
+            try:
+                shell.pack_forget()
+            except Exception:
+                pass
+
+        self._power_frame = tk.Frame(self._mode_host, bg="#111111")
+        self._power_frame.pack(fill=tk.BOTH, expand=True)
+        self._power_frame._prev_mode = prev  # type: ignore[attr-defined]
+
+        header, body, footer = self._pack_screen_regions(
+            self._power_frame,
+            header_padx=10,
+            header_pady=(16, 8),
+            body_padx=10,
+            body_pady=6,
+            footer_padx=10,
+            footer_pady=12,
+        )
+        tk.Label(
+            header,
+            text="POWER",
+            font=("DejaVu Sans", 22, "bold"),
+            fg="#fbf1c7",
+            bg="#111111",
+        ).pack(side=tk.LEFT)
+        tk.Label(
+            header,
+            text="safe shutdown for kiosk",
+            font=("DejaVu Sans", 12),
+            fg="#a89984",
+            bg="#111111",
+        ).pack(side=tk.RIGHT)
+
+        self._mk_touch_btn(
+            footer, "CANCEL", self._close_power_menu, bg="#504945"
+        ).pack(fill=tk.X, ipady=18)
+
+        tk.Label(
+            body,
+            text="Shut down cleanly before unplugging. Reboot restarts into kiosk.",
+            font=("DejaVu Sans", 13),
+            fg="#ebdbb2",
+            bg="#111111",
+            wraplength=740,
+            justify=tk.LEFT,
+            anchor="w",
+        ).pack(side=tk.TOP, fill=tk.X, padx=2, pady=(4, 16))
+
+        # Equal-height actions — pack(expand) alone gives the first button the leftover
+        actions = tk.Frame(body, bg="#111111")
+        actions.pack(fill=tk.BOTH, expand=True)
+        actions.rowconfigure(0, weight=1, uniform="power")
+        actions.rowconfigure(1, weight=1, uniform="power")
+        actions.columnconfigure(0, weight=1)
+        shut = self._mk_touch_btn(
+            actions, "SHUT DOWN", lambda: self._pi_power("poweroff"), bg="#9d0006"
+        )
+        shut.configure(font=("DejaVu Sans", 18, "bold"))
+        shut.grid(row=0, column=0, sticky="nsew", pady=(0, 6), ipady=12)
+        reboot = self._mk_touch_btn(
+            actions, "REBOOT", lambda: self._pi_power("reboot"), bg="#d79921"
+        )
+        reboot.configure(font=("DejaVu Sans", 18, "bold"))
+        reboot.grid(row=1, column=0, sticky="nsew", pady=(6, 0), ipady=12)
+
+    def _close_power_menu(self, restore_main: bool = True) -> None:
+        if not self._power_ui_open:
+            return
+        prev = "synth"
+        if self._power_frame is not None:
+            prev = getattr(self._power_frame, "_prev_mode", "synth")
+            self._power_frame.destroy()
+            self._power_frame = None
+        self._power_ui_open = False
+        if restore_main:
+            self._switch_mode(prev if prev in ("synth", "seq", "pads", "songs", "log", "presets") else "synth")
+
+    def _pi_power(self, action: str) -> None:
+        """Run systemctl poweroff/reboot (passwordless via install-kiosk sudoers)."""
+        action = "reboot" if action == "reboot" else "poweroff"
+        self._append_log(f"Power → {action}…")
+        self.last_var.set(f"Powering {action}…")
+        try:
+            self._panic()
+        except Exception:
+            pass
+        try:
+            self._save_settings_file(SETTINGS_PATH, quiet=True)
+        except Exception:
+            pass
+        # Give the UI a moment to flush logs / audio stop
+        self.root.update_idletasks()
+
+        def _run() -> None:
+            cmds = [
+                ["sudo", "-n", "systemctl", action],
+                (
+                    ["sudo", "-n", "/sbin/shutdown", "-h", "now"]
+                    if action == "poweroff"
+                    else ["sudo", "-n", "/sbin/reboot"]
+                ),
+                ["systemctl", action],
+            ]
+            last_err = ""
+            for cmd in cmds:
+                try:
+                    r = subprocess.run(
+                        cmd,
+                        capture_output=True,
+                        text=True,
+                        timeout=15,
+                        check=False,
+                    )
+                    if r.returncode == 0:
+                        return
+                    last_err = (r.stderr or r.stdout or f"exit {r.returncode}").strip()
+                except Exception as exc:
+                    last_err = str(exc)
+            self._q_put(
+                (
+                    "log",
+                    f"Power {action} failed: {last_err or 'no permission'} — "
+                    f"run ./install-kiosk.sh (adds sudoers) or: sudo systemctl {action}",
+                    False,
+                )
+            )
+        threading.Thread(target=_run, daemon=True).start()
+        # Also show immediate feedback on the confirm screen
+        if self._power_frame is not None:
+            tk.Label(
+                self._power_frame,
+                text=f"Sending {action}… screen will go dark.",
+                font=("DejaVu Sans", 14, "bold"),
+                fg="#fabd2f",
+                bg="#111111",
+            ).pack(fill=tk.X, padx=12, pady=8)
+
     def _on_close(self) -> None:
         self._stop.set()
         try:
@@ -6968,6 +7436,31 @@ class MidiToneApp:
         self.root.mainloop()
 
 
+def _acquire_singleton_lock() -> Optional[Any]:
+    """Prevent two midi-tone GUIs (kiosk restart + deploy launch) fighting for CPU/audio."""
+    try:
+        import fcntl  # Unix / Pi only
+    except ImportError:
+        return None
+    path = pathlib.Path(os.environ.get("MIDI_TONE_LOCK", "/tmp/midi-tone.lock"))
+    try:
+        fp = open(path, "a+", encoding="utf-8")
+        fcntl.flock(fp.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        print(
+            "midi-tone: already running (singleton lock) — exiting this instance",
+            flush=True,
+        )
+        sys.exit(0)
+    try:
+        fp.seek(0)
+        fp.truncate()
+        fp.write(f"{os.getpid()}\n")
+        fp.flush()
+    except Exception:
+        pass
+    return fp
+
 def main() -> None:
     import faulthandler
 
@@ -6994,6 +7487,10 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    lock_fp = None
+    if not args.list:
+        lock_fp = _acquire_singleton_lock()
+
     try:
         mido.set_backend("mido.backends.rtmidi")
     except Exception:
@@ -7009,7 +7506,14 @@ def main() -> None:
     )
     if not args.list:
         print("midi-tone: entering mainloop", flush=True)
-        app.run()
+        try:
+            app.run()
+        finally:
+            if lock_fp is not None:
+                try:
+                    lock_fp.close()
+                except Exception:
+                    pass
         print("midi-tone: mainloop exited", flush=True)
 
 

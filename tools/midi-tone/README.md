@@ -249,7 +249,8 @@ Then double-click **MIDI Tone** on the desktop. If needed: right-click → **All
 
 ### Kiosk mode (no Pi desktop shell)
 
-Boots a minimal **X11 + Openbox** session that only runs midi-tone fullscreen (restart loop if it crashes). No wallpaper / panel / file manager.
+Boots a minimal **X11** session that only runs midi-tone fullscreen (restart
+loop if it crashes). No wallpaper / panel / file manager / labwc.
 
 **Display target:** BigTreeTech **Pi TFT70 V2.1** (7″ DSI, 800×480, capacitive GT911).
 Legacy resistive HDMI/ADS7846 helpers (`enable-gpio-touch.sh` / `calibrate-touch-y.sh`) are for the old panel only.
@@ -265,27 +266,35 @@ sudo reboot
 After reboot expect `800x480` on DSI and a Goodix/GT911 (or bridge) touch device in `libinput list-devices`.
 If SSH is up but the screen is still blank, confirm the DSI ribbon orientation and that HDMI is no longer required.
 
+**Full bring-up guide (new Pi → same state as the lab unit):** see
+[`KIOSK.md`](KIOSK.md).
+
 ```bash
 cd ~/midi-tone
-sed -i 's/\r$//' *.sh kiosk/openbox/* kiosk/*.desktop
-chmod +x install-kiosk.sh kiosk.sh
-./install-kiosk.sh
+sed -i 's/\r$//' *.sh kiosk/openbox/* kiosk/*.desktop kiosk/lightdm/* 2>/dev/null
+chmod +x install-kiosk.sh disable-kiosk.sh kiosk.sh
+./install-kiosk.sh          # packages + session + enable boot (needs sudo)
+sudo reboot
 ```
 
-Then:
-1. `sudo raspi-config` → **Advanced Options → Wayland → X11**
-2. `sudo raspi-config` → **System Options → Boot / Auto Login → Desktop Autologin**
-3. Choose session **MIDI Tone Kiosk** (install writes `~/.dmrc`)
-4. Reboot
+Restore the normal desktop later:
+
+```bash
+./disable-kiosk.sh
+sudo reboot
+```
 
 Manual test: `./kiosk.sh`  
-Logs: `/tmp/midi-tone-kiosk.log`
+Logs: `/tmp/midi-tone-kiosk.log` and `/tmp/midi-tone.log`.
 
 Files:
-- `kiosk.sh` — session entry (Openbox + app restart loop + `--fullscreen`)
+- `kiosk.sh` — session entry (display prefer + cursor hide + app restart loop + `--fullscreen`)
+- `prefer-tft70-display.sh` / `hide-touch-cursor.sh` / `enable-tft70-dsi.sh` — TFT70 helpers
 - `kiosk/openbox/rc.xml` — undecorated maximized windows
 - `kiosk/midi-tone-kiosk.desktop` — X session definition
-- `install-kiosk.sh` — packages + session install
+- `kiosk/lightdm/99-midi-tone-kiosk.conf` — LightDM seat defaults
+- `install-kiosk.sh` / `disable-kiosk.sh` — enable / restore desktop
+
 
 ## On Windows (optional host test)
 
