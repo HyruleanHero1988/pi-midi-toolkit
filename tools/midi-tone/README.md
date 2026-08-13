@@ -217,6 +217,20 @@ Then double-click **MIDI Tone** on the desktop. If needed: right-click → **All
 
 Boots a minimal **X11 + Openbox** session that only runs midi-tone fullscreen (restart loop if it crashes). No wallpaper / panel / file manager.
 
+**Display target:** BigTreeTech **Pi TFT70 V2.1** (7″ DSI, 800×480, capacitive GT911).
+Legacy resistive HDMI/ADS7846 helpers (`enable-gpio-touch.sh` / `calibrate-touch-y.sh`) are for the old panel only.
+
+**New TFT70 bring-up (DSI):**
+```bash
+cd ~/midi-tone
+sed -i 's/\r$//' enable-tft70-dsi.sh
+chmod +x enable-tft70-dsi.sh
+./enable-tft70-dsi.sh    # removes ads7846 overlay, enables vc4-kms-dsi-7inch
+sudo reboot
+```
+After reboot expect `800x480` on DSI and a Goodix/GT911 (or bridge) touch device in `libinput list-devices`.
+If SSH is up but the screen is still blank, confirm the DSI ribbon orientation and that HDMI is no longer required.
+
 ```bash
 cd ~/midi-tone
 sed -i 's/\r$//' *.sh kiosk/openbox/* kiosk/*.desktop

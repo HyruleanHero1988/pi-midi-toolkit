@@ -50,6 +50,9 @@ todos:
   - id: rust-jambox-engine
     content: "Rust jambox engine: audio + sample-accurate sequencer clock; Tk UI becomes thin client (timing integrity)"
     status: pending
+  - id: tft70-display
+    content: "Migrate kiosk to BigTreeTech Pi TFT70 V2.1 (7\" DSI, capacitive GT911); retire ADS7846 resistive path"
+    status: pending
   - id: arp
     content: "Phase 4 (optional distinct mode): key-relative step pattern transposed by held root"
     status: pending
@@ -408,7 +411,7 @@ flowchart TB
 1. Flash **stock** Raspberry Pi OS (Imager) onto the SD card.
 2. Enable SSH, join Wi‑Fi/Ethernet, note the Pi’s IP.
 3. Run a **setup script** (packages, RT limits, systemd units, autologin/fullscreen UI).
-4. Plug in controller / MIDI interface / synth / 5" display.
+4. Plug in controller / MIDI interface / synth / display (TFT70 when available).
 
 ### Daily loop (painful path avoided)
 1. **Edit on your PC** in Cursor — same as any other repo.
@@ -451,7 +454,27 @@ Not building this yet. Capture the ladder so we don’t overbuild or forget it w
 
 ## OS / hardware
 
-**Current target: Raspberry Pi 2 Model B v1.1 + touchscreen already on the desk.** MIDI itself is tiny (1980s-era bandwidth); the Pi 2 is enough **if we stay disciplined**. If the board becomes a real ceiling later, move the same software to a Pi 4/5 — architecture should not assume Pi 2 forever, just run well on it now.
+**Compute (today):** Raspberry Pi 2 Model B v1.1. MIDI itself is tiny; the Pi 2 is enough **if we stay disciplined**. Architecture must not assume Pi 2 forever — if audio/FX/sequencer or DSI bring-up hits a wall, same software moves to Pi 4/5.
+
+**Display (ordered → target):** [BigTreeTech Pi TFT70 V2.1](https://kb-3d.com/store/controllers-displays-drivers/2677-bigtreetech-pi-tft43-tft50-tft70-v21-touchscreen-panel-for-raspberry-pi-pi-2-1734017888380.html) — 7″ DSI panel, **800×480**, **5-point capacitive** (GT911). This replaces the current scrap/resistive HDMI+ADS7846 setup (dropped taps, outdated feel). Investing in the panel is intentional: the jambox is a real instrument surface, not a temporary diagnostic.
+
+| | Current (desk) | Target (TFT70 V2.1) |
+|--|----------------|---------------------|
+| Size | ~5″ class | **7″** |
+| Resolution | ~800×480-ish | **800×480** native (UI already ~800×420 + fullscreen) |
+| Video | HDMI (GPIO LCD common) | **DSI** ribbon |
+| Touch | Resistive **ADS7846** (SPI) — bouncey, needs calibrate | **Capacitive GT911** — multi-touch capable, no stylus scrape |
+| Power | Panel-dependent | From Pi DSI (no separate PSU for panel) |
+
+### Display / touch bring-up (when the TFT70 arrives)
+
+1. **Physical:** DSI cable seated; Pi mounting holes on panel back if using short cable; keep USB MIDI + (optional) powered hub clear of the ribbon.
+2. **OS:** Confirm Raspberry Pi OS sees DSI framebuffer + `GT911` (or equivalent) in `libinput list-devices` / `/proc/bus/input/devices`. Prefer **X11** kiosk path we already use (`raspi-config` → X11) until Wayland touch is proven.
+3. **Touch path:** Stop requiring `enable-gpio-touch.sh` / `calibrate-touch-y.sh` (ADS7846-specific). Capacitance should need little/no libinput matrix; keep those scripts as **legacy** for the old panel only.
+4. **UI:** Keep designing for **800×480 fullscreen**. 7″ at the same pixel grid means **larger physical hit targets** — good for music. Don’t invent a second layout; optional later: slightly larger fonts / pad cells if 7″ feels sparse.
+5. **Tk touch code:** `_mk_touch_btn` currently debounces for ADS7846 bounce (press-only, 180 ms). On GT911, re-tune (likely shorter debounce; still press-to-fire, not click). Do **not** depend on multi-touch gestures for v1 — 5-point is a bonus, not a UX requirement.
+6. **Pi 2 risk:** DSI+GT911 is widely used on Pi 3/4/BTT Pi; **verify on Pi 2 on day one**. If DSI/touch is flaky only on Pi 2, that becomes a hardware-upgrade trigger (same app → Pi 4/5), not a product rethink.
+7. **Kiosk:** `kiosk.sh --fullscreen` should fill 800×480 with no letterboxing surprises; fix geometry default `800x420` → `800x480` when we cut over.
 
 ### First use case (concrete I/O)
 
@@ -495,6 +518,7 @@ flowchart LR
 - Record a phrase, loop it, launch pads, save/load `.mid` songs; LOCAL and/or USB→DIN when needed
 - FX (when added) survive the stress test above without turning the box into a science project
 - Stays obvious vs. gear you already own but don’t use because of learning cost
+- Touch is reliable under performance (capacitive TFT70 target; no fighting resistive dropouts)
 
 **Remap pillar**
 - Map mode configures thru without a second app

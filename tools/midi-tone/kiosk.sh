@@ -39,6 +39,16 @@ if command -v xset >/dev/null 2>&1; then
   xset s noblank >/dev/null 2>&1 || true
 fi
 
+# Prefer TFT70 DSI as the only 800x480 kiosk surface (HDMI off if also plugged)
+if [[ -x "$DIR/prefer-tft70-display.sh" ]]; then
+  bash "$DIR/prefer-tft70-display.sh" >>"$LOG" 2>&1 || true
+fi
+
+# Hide cursor for touch; mouse motion brings it back
+if [[ -x "$DIR/hide-touch-cursor.sh" ]]; then
+  bash "$DIR/hide-touch-cursor.sh" >>"$LOG" 2>&1 || true
+fi
+
 # Keep analog jack unmuted (HDMI panels often mute PCM)
 amixer -c 1 set PCM 100% unmute >/dev/null 2>&1 || true
 

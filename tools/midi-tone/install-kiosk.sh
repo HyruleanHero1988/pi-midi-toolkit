@@ -8,14 +8,15 @@ if [[ ! -f "$DIR/midi_tone.py" ]]; then
   exit 1
 fi
 
-chmod +x "$DIR/kiosk.sh" "$DIR/run.sh" "$DIR/launch-desktop.sh" 2>/dev/null || true
+chmod +x "$DIR/kiosk.sh" "$DIR/run.sh" "$DIR/launch-desktop.sh" \
+  "$DIR/hide-touch-cursor.sh" 2>/dev/null || true
 sed -i 's/\r$//' "$DIR/kiosk.sh" "$DIR/install-kiosk.sh" \
-  "$DIR/kiosk/openbox/autostart" 2>/dev/null || true
+  "$DIR/hide-touch-cursor.sh" "$DIR/kiosk/openbox/autostart" 2>/dev/null || true
 
 echo "==> Installing packages (openbox + X11 bits)…"
 sudo apt-get update
 sudo apt-get install -y --no-install-recommends \
-  openbox xserver-xorg xinit x11-xserver-utils
+  openbox xserver-xorg xinit x11-xserver-utils unclutter-xfixes
 
 if [[ ! -x "$DIR/.venv/bin/python" ]]; then
   echo "==> Creating Python venv…"

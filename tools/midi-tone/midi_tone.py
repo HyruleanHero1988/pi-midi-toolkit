@@ -3065,19 +3065,12 @@ class MidiToneApp:
         self.root = tk.Tk()
         print("ui: Tk root ok", flush=True)
         self.root.title("midi-tone")
-        self.root.geometry("800x420")
+        # TFT70 / Pi panel target is 800×480 (older builds used 800×420 and left a gap)
+        self.root.geometry("800x480")
         self.root.configure(bg="#111111")
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
-        if self._fullscreen:
-            # Kiosk: fill the screen (Openbox also forces maximize/fullscreen)
-            try:
-                self.root.attributes("-fullscreen", True)
-            except Exception:
-                try:
-                    self.root.attributes("-zoomed", True)
-                except Exception:
-                    self.root.state("zoomed")
-            print("ui: fullscreen", flush=True)
+        self.root.update_idletasks()
+        self._apply_display_geometry()
         self.root.update_idletasks()
 
         self.engine.start()
@@ -5815,6 +5808,35 @@ class MidiToneApp:
         self._refresh_phrase_status()
         self._refresh_song_status()
         self._append_log("All Notes Off")
+
+    def _apply_display_geometry(self) -> None:
+        """Fill the active X screen (TFT70 is 800×480; older default was 800×420)."""
+        try:
+            sw = int(self.root.winfo_screenwidth())
+            sh = int(self.root.winfo_screenheight())
+        except Exception:
+            sw, sh = 800, 480
+        if sw < 320 or sh < 240:
+            sw, sh = 800, 480
+
+        if self._fullscreen:
+            # Kiosk: true fullscreen when the WM supports it; always size to screen too
+            try:
+                self.root.attributes("-fullscreen", True)
+            except Exception:
+                try:
+                    self.root.attributes("-zoomed", True)
+                except Exception:
+                    try:
+                        self.root.state("zoomed")
+                    except Exception:
+                        pass
+            self.root.geometry(f"{sw}x{sh}+0+0")
+            print(f"ui: fullscreen {sw}x{sh}", flush=True)
+            return
+
+        self.root.geometry(f"{sw}x{sh}+0+0")
+        print(f"ui: geometry {sw}x{sh}", flush=True)
 
     def _on_close(self) -> None:
         self._stop.set()

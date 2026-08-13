@@ -26,13 +26,14 @@ Modes today in `tools/midi-tone`:
 
 **Design law (jambox):** stay obvious under the hands. Winning vs gear you already own (picotracker, EP-class boxes) is *learning cost*, not feature count.
 
-**Jambox FX track (planned):** mix-bus distortion → echo/delay → careful reverb; prove each with Pi 2 CPU/xrun stress tests (see PLAN).
+**Jambox FX:** mix-bus drive / delay / light reverb via **FX MODE** (Python `midi-tone` now).
 
-**Next (architecture):** Rust jambox engine for audio + sample-accurate sequencing; Tk becomes a thin client. FX land in Python first so you can play with the sound before the refactor.
+**Next (architecture):** Rust jambox engine for audio + sample-accurate sequencing; Tk becomes a thin client. Jam on FX in Python first so the rewrite targets a known sound.
 
 ## Hardware
 
-- **Pi 2 Model B** + touchscreen
+- **Pi 2 Model B** (today) — upgrade path to Pi 4/5 if DSI/audio ceiling hits
+- **Display (ordered):** BigTreeTech **Pi TFT70 V2.1** — 7″, 800×480, DSI, capacitive GT911 (replaces resistive ADS7846 HDMI panel). See PLAN “Display / touch bring-up”
 - **In:** MPK mini mk3 USB
 - **Out (mapper / song / pad emit):** USB-MIDI-to-DIN → hardware synth (when you have it)
 - Powered hub if USB devices brown out
