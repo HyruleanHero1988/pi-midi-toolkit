@@ -279,6 +279,27 @@ class PhrasePadTrimTest(unittest.TestCase):
         self.assertEqual(engine.ons[0], (0, 64, 100))
         bank.stop_all()
 
+    def test_drum_pad_still_launches_while_another_cell_records(self) -> None:
+        """Touch could fire a filled clip during REC; MPK pads used to be ignored."""
+        mt = self.midi_tone
+        engine = FakeEngine()
+        bank = self.make_bank(engine)
+        events = [
+            mt.LoopEvent(t=0.00, on=True, channel=0, note=64, velocity=100),
+            mt.LoopEvent(t=0.05, on=False, channel=0, note=64, velocity=0),
+        ]
+        bank.load_from_events(0, events, 0.10, trigger_mode=mt.PHRASE_TRIG_ONESHOT)
+        bank.arm_record(1)
+        self.assertTrue(bank.is_recording())
+        self.assertEqual(bank.handle_pad(0, from_touch=False), "launch")
+        self.assertEqual(bank.handle_pad(1, from_touch=False), "ignore")
+        self.assertEqual(bank.handle_pad(2, from_touch=False), "ignore")
+        deadline = time.monotonic() + 0.5
+        while time.monotonic() < deadline and not engine.ons:
+            time.sleep(0.01)
+        self.assertEqual(engine.ons[0], (0, 64, 100))
+        bank.stop_all()
+
 
 if __name__ == "__main__":
     sys.exit(unittest.main())
