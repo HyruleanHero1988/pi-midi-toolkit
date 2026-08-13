@@ -12,6 +12,10 @@ Used in three places so the same look covers power-on → UI:
 2. **X session** (`../splash-x11.py`) — while `kiosk.sh` starts Python
 3. **App** (`midi_tone.py` boot splash) — until SYNTH chrome is ready
 
+`install-pidi-splash.sh` also hides the panel text login (`getty@tty1` masked,
+`console=tty1` removed) and quits Plymouth with `--retain-splash` so the logo
+stays until X paints. Use SSH for a shell on the device.
+
 ## Install boot splash on the Pi
 
 ```bash

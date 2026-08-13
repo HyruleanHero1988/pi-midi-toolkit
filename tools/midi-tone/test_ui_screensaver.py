@@ -163,6 +163,16 @@ class ScreensaverUiTest(unittest.TestCase):
         self.assertIsNone(app._saver_canvas)
         self.assertFalse(app._idle.active)
 
+    def test_global_pointer_also_wakes(self) -> None:
+        app = self.app
+        app._show_screensaver(force=True)
+        self.pump()
+        self.assertIsNotNone(app._saver_canvas)
+        app._on_pointer_activity()
+        self.pump()
+        self.assertIsNone(app._saver_canvas)
+        self.assertFalse(app._idle.active)
+
     def test_midi_does_not_postpone_blanking(self) -> None:
         import mido
 

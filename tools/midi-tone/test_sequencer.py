@@ -414,5 +414,42 @@ class TransportTest(unittest.TestCase):
         self.assertIn(("off", 0, 60), engine.calls)
 
 
+class SnapshotTest(unittest.TestCase):
+    def test_export_import_roundtrip_keeps_layers(self) -> None:
+        engine = FakeEngine()
+        seq = OverdubSequencer(engine, lambda _m: None, autoplay=False)
+        seq._seq.set_backbone(
+            [
+                LoopEvent(t=0.0, on=True, channel=9, note=36, velocity=100),
+                LoopEvent(t=0.02, on=False, channel=9, note=36, velocity=0),
+            ],
+            1.0,
+        )
+        pending = SeqLayer(
+            events=[
+                LoopEvent(t=0.25, on=True, channel=0, note=60, velocity=90),
+                LoopEvent(t=0.40, on=False, channel=0, note=60, velocity=0),
+            ],
+            span=1,
+        )
+        pending.set_vib(0.4, 5.0, 0.8)
+        seq._seq.pending = pending
+        seq._seq.keep_pending()
+        seq._extend = True
+        seq._state = SEQ_STOPPED
+
+        blob = seq.export_state()
+        other = OverdubSequencer(FakeEngine(), lambda _m: None, autoplay=False)
+        other.import_state(blob)
+        st = other.status()
+        self.assertEqual(st["layers"], 2)
+        self.assertEqual(st["state"], SEQ_STOPPED)
+        self.assertTrue(other._extend)
+        self.assertAlmostEqual(float(st["length"]), 1.0, places=5)
+        vib = other._seq.layers[1]
+        self.assertAlmostEqual(vib.vib_depth, 0.4, places=5)
+        self.assertAlmostEqual(vib.vib_amount, 0.8, places=5)
+
+
 if __name__ == "__main__":
     unittest.main()

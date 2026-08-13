@@ -182,8 +182,15 @@ if [[ -d /etc/lightdm ]]; then
   fi
   CONF_SRC="$DIR/kiosk/lightdm/99-midi-tone-kiosk.conf"
   CONF_DST="/etc/lightdm/lightdm.conf.d/99-midi-tone-kiosk.conf"
+  DISPLAY_SETUP="$DIR/kiosk/display-setup.sh"
+  if [[ -f "$DISPLAY_SETUP" ]]; then
+    sed -i 's/\r$//' "$DISPLAY_SETUP" 2>/dev/null || true
+    chmod +x "$DISPLAY_SETUP" 2>/dev/null || true
+  fi
   TMP_L="$(mktemp)"
-  sed "s|REPLACE_USER|$USER_NAME|g" "$CONF_SRC" >"$TMP_L"
+  sed -e "s|REPLACE_USER|$USER_NAME|g" \
+      -e "s|REPLACE_DISPLAY_SETUP|$DISPLAY_SETUP|g" \
+      "$CONF_SRC" >"$TMP_L"
   sudo_run mkdir -p /etc/lightdm/lightdm.conf.d
   sudo_run install -m 644 "$TMP_L" "$CONF_DST"
   rm -f "$TMP_L"
@@ -197,12 +204,17 @@ EOF
 as_user chmod +x "$USER_HOME/.xsession"
 
 # 6) Passwordless shutdown/reboot from the kiosk POWER button
-echo "    sudoers: allow $USER_NAME systemctl poweroff/reboot (NOPASSWD)"
+echo "    sudoers: allow $USER_NAME pi-power.sh (escalating reboot/poweroff)"
+POWER_SH="$DIR/pi-power.sh"
+sed -i 's/\r$//' "$POWER_SH" 2>/dev/null || true
+chmod +x "$POWER_SH" 2>/dev/null || true
 SUDOERS_DST="/etc/sudoers.d/midi-tone-power"
 TMP_S="$(mktemp)"
+# Keep this file simple — complex systemctl flag lines fail visudo and the
+# installer would delete the whole drop-in.
 cat >"$TMP_S" <<EOF
 # midi-tone kiosk POWER button — installed by install-kiosk.sh
-$USER_NAME ALL=(root) NOPASSWD: /bin/systemctl poweroff, /bin/systemctl reboot, /usr/bin/systemctl poweroff, /usr/bin/systemctl reboot, /sbin/shutdown, /usr/sbin/shutdown, /sbin/reboot, /usr/sbin/reboot
+$USER_NAME ALL=(root) NOPASSWD: $POWER_SH reboot, $POWER_SH poweroff
 EOF
 sudo_run install -m 440 "$TMP_S" "$SUDOERS_DST"
 rm -f "$TMP_S"

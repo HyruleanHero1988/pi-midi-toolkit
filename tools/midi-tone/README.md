@@ -53,7 +53,7 @@ Factory **Prog Select → Pad 1** (MPC program) maps knobs to CC70–77:
 | 4 | 73 | Release |
 | 5 | 74 | Vibrato depth |
 | 6 | 75 | Vibrato rate |
-| 8 | 77 | Level |
+| 8 | 77 | Synth bus level |
 
 Joystick Y still sends **CC1** = vibrato amount. PREV/NEXT jumps morph to a voice; Knob 1 sweeps continuously between them.
 
@@ -91,7 +91,7 @@ Factory MPC program (`Prog Select` → Pad 1): **Bank A = notes 36–43**, **Ban
 | 2 | 71 | Noise brightness (tone) |
 | 3 | 72 | Stretch / decay length |
 | 4 | 73 | Noise amount |
-| 8 | 77 | Master level (always) |
+| 8 | 77 | Drum bus level |
 
 Hitting pads does **not** steal morph knobs. With DRUM MODE off, Knob 1 stays morph. Opening **MORPH** turns DRUM MODE / FX MODE / BUS FX off. Session-only (not saved across restart).
 
@@ -112,11 +112,11 @@ Hitting pads does **not** steal morph knobs. With DRUM MODE off, Knob 1 stays mo
 | 4 | 73 | Delay mix |
 | 5 | 74 | Reverb size |
 | 6 | 75 | Reverb mix |
-| 8 | 77 | Master level (always) |
+| 8 | 77 | Synth bus level |
 
-Amounts persist in `settings.json` / presets (`voice_fx` / `drum_fx` / `drum_group_fx` / `bus_fx`); the mode toggles themselves do not.
+Amounts persist in `settings.json` / presets (`voice_fx` / `drum_fx` / `drum_group_fx` / `bus_fx`). FX MODE / BUS FX / DRUM MODE toggles are restored with the session too.
 
-**Waveforms:** SYNTH shows a live **morph-cycle** scope that redraws as Knob 1 / voice changes. Tap **KIT** for a drum drill-down — pick a pad (touch or MPK), watch its one-shot reshape with pitch / stretch / noise / tone knobs (DRUM MODE turns on while KIT is open). Keeps the main synth screen uncluttered.
+**Waveforms:** SYNTH shows a live **morph-cycle** scope that redraws as Knob 1 / voice changes. Tap **KIT** for a drum pad grid (ALL DRUMS / WAVE / CLOSE). **WAVE** opens a full CRT scope for the selected one-shot; knobs reshape it live. **FX MODE** / **BUS FX** open a dedicated live knob readout panel.
 
 **SAVE AS…** (from **VOICES** or **MORPH**) writes a user voice under `user-wavetables/`:
 
@@ -135,11 +135,18 @@ Top-right tabs stay visible:
 - **SEQ** — record a backbone loop, overdub layers over it, KEEP / DROP / UNDO (free timing; notes only)
 - **PADS** — 4×4 phrase clip launcher (MPK Bank A+B); touch or drum pads
 - **SONGS** — lists every `.mid` / `.midi` in `songs/`; big ▲ UP / ▼ DOWN to scroll; tempo; LOCAL/USB out
-- **PRESETS** — 8 touch slots: SAVE / LOAD / DELETE current sound + full-velocity
+- **PRESETS** — 8 touch slots: SAVE (name it) / LOAD / DELETE a **full session** snapshot; **FACTORY** resets morph/tone/drums/levels/FX to baked-in defaults (autosaved as the session)
 - **LOG** — full event history (also has CLEAR / panic)
 
 Last session autosaves to `settings.json` (gitignored) every few seconds and on quit.
-Named presets live in `user-presets/slot-01.json` … `slot-08.json`.
+Named presets live in `user-presets/slot-01.json` … `slot-08.json`. Each file is the same payload as the session autosave, plus a display `name`:
+
+- synth sound (morph pair, tone, ADSR-ish, vibrato, drum macros, voice/drum/bus FX)
+- FULL VEL, DRUM / FX / BUS FX mode toggles, active screen (SYNTH/SEQ/…)
+- sequencer layers + loop length
+- all 16 phrase pads (and writes through to `phrases/pad-NN.json` on load)
+- songs selection, BPM, loop, LOCAL/USB out
+- screensaver timeout
 User-saved morph wavetables live in `user-wavetables/*.wav` (+ `*.fx.json` for delay/reverb, gitignored).
 Song files live as whatever you put in `songs/` (any `.mid` name).
 Phrase pads persist as `phrases/pad-01.json` … `pad-16.json` (gitignored).
@@ -253,6 +260,7 @@ Boots a minimal **X11** session that only runs midi-tone fullscreen (restart
 loop if it crashes). No wallpaper / panel / file manager / labwc.
 
 **Display target:** BigTreeTech **Pi TFT70 V2.1** (7″ DSI, 800×480, capacitive GT911).
+Voice/morph grids scroll with a finger drag (tap selects; drag past ~10px scrolls).
 Legacy resistive HDMI/ADS7846 helpers (`enable-gpio-touch.sh` / `calibrate-touch-y.sh`) are for the old panel only.
 
 The kiosk **blanks the TFT after 3 minutes of no touch** (playing MIDI does not keep it awake; sequencer/songs keep playing). **Tap the panel** to wake. While the UI is showing, chrome slowly pixel-shifts by 2px so bold labels and boxes cannot sit on the same cells. **POWER** has **SCREEN OFF** (blank now) and **BLANK 3 MIN** (cycle 1 / 3 / 10 min / off). Override with `MIDI_TONE_SCREENSAVER_SEC` (seconds; `0` disables auto-blank).
@@ -297,6 +305,16 @@ Files:
 - `kiosk/lightdm/99-midi-tone-kiosk.conf` — LightDM seat defaults
 - `install-kiosk.sh` / `disable-kiosk.sh` — enable / restore desktop
 
+
+## Screen reference
+
+Open [docs/index.html](docs/index.html) in a browser for labeled 800×480 captures of every mode (SYNTH, SEQ, PADS, SONGS, PRESETS, LOG) and the VOICES / MORPH / KIT / POWER / SAVE AS overlays.
+
+Re-capture after UI changes (needs Tk + an 800×480 X display, or the script starts Xvfb itself):
+
+`ash
+python capture_ui_docs.py
+`
 
 ## On Windows (optional host test)
 
