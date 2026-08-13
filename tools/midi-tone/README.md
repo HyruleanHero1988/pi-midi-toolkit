@@ -161,6 +161,9 @@ The backbone is the only take that sets length; everything after it is measured 
 - **LEN ×2 / ÷2** grows or shrinks the sequence in whole cycles. The groove tiles underneath, so a doubled sequence lets you overdub a fill that only happens the second time around. ÷2 refuses to cut a layer that is longer than the target.
 - **OVERDUB: WRAP** (default) folds a long take back onto the same cycle, the way a drum machine does. **OVERDUB: EXTEND** instead stretches the sequence to as many whole backbone cycles as the take needs (up to 8).
 - Layers are a stack, not one flat list, so UNDO works layer by layer. **SONGS → SAVE SEQ** exports the flattened result as `.mid`.
+- **→ PAD** copies the flattened sequence onto a phrase cell as a **LOOP**. Tap it, then tap a square or hit the matching **MPK drum pad**. PLAY view comes up so that same pad now launches the clip.
+
+On stop, every free-timing take is **auto-trimmed**: leading silence before the first hit is removed, and trailing silence after the last hit is capped to the largest gap between note-ons (so lag hitting REC doesn’t leave a dead bar at the loop point). The same trim runs on phrase-pad recordings.
 
 On stop, every free-timing take is **auto-trimmed**: leading silence before the first hit is removed, and trailing silence after the last hit is capped to the largest gap between note-ons (so lag hitting REC doesn’t leave a dead bar at the loop point). The same trim runs on phrase-pad recordings.
 
@@ -192,6 +195,8 @@ Two views (top-right of PADS): **EDIT** (record / fine-tune) and **PLAY** (perfo
 - **STOP ALL** + **OUT** — minimal chrome for performance
 
 While a phrase is **recording**, MPK pads play/record **drum voices** (not launch). When not recording, those pads launch/arm phrases (EDIT) or launch only (PLAY). Synth mode still always plays the 16-pad drum kit. Locked pads show a `·` mark next to the trigger icon.
+
+A sequence built in **SEQ** can land on a pad without re-recording it: **SEQ → PAD**, then tap the cell (touch or drum pad). That pad becomes a LOOP clip you trigger from PADS PLAY with the same drum pad.
 
 ### Songs
 
