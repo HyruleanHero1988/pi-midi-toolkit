@@ -15,11 +15,21 @@ def main() -> int:
     root = tk.Tk()
     root.title("PiDI")
     root.configure(bg=BG)
+    # Overrideredirect maps faster and avoids WM decorate flash
+    try:
+        root.overrideredirect(True)
+    except Exception:
+        pass
     root.attributes("-fullscreen", True)
     root.configure(cursor="none")
     root.lift()
     try:
         root.attributes("-topmost", True)
+    except Exception:
+        pass
+    try:
+        root.update_idletasks()
+        root.update()
     except Exception:
         pass
 
@@ -60,6 +70,7 @@ def main() -> int:
             bg=BG,
         ).place(relx=0.5, rely=0.55, anchor="center")
 
+    root.update_idletasks()
     root.update()
     root.mainloop()
     return 0

@@ -246,6 +246,35 @@ class SeqLayer:
             return "none"
         return f"{self.vib_depth:.1f}st"
 
+    def to_dict(self) -> Dict[str, object]:
+        return {
+            "events": events_to_dicts(self.events),
+            "span": int(self.span),
+            "label": str(self.label),
+            "vib_baked": bool(self.vib_baked),
+            "vib_depth": float(self.vib_depth),
+            "vib_rate": float(self.vib_rate),
+            "vib_amount": float(self.vib_amount),
+        }
+
+    @staticmethod
+    def from_dict(data: Dict[str, object]) -> "SeqLayer":
+        layer = SeqLayer(
+            events=events_from_dicts(data.get("events")),
+            span=max(1, int(data.get("span", 1) or 1)),
+            label=str(data.get("label", "") or ""),
+        )
+        if bool(data.get("vib_baked", False)):
+            try:
+                layer.set_vib(
+                    float(data.get("vib_depth", 0.0) or 0.0),
+                    float(data.get("vib_rate", 5.0) or 5.0),
+                    float(data.get("vib_amount", 0.0) or 0.0),
+                )
+            except (TypeError, ValueError):
+                pass
+        return layer
+
 
 class Sequence:
     """Backbone + flattened layers + the pending take, with no notion of time."""
@@ -334,6 +363,42 @@ class Sequence:
         self.cycles = 1
         self.layers = []
         self.pending = None
+
+    def to_dict(self) -> Dict[str, object]:
+        return {
+            "cycle_len": float(self.cycle_len),
+            "cycles": int(self.cycles),
+            "layers": [layer.to_dict() for layer in self.layers],
+            "pending": self.pending.to_dict() if self.pending is not None else None,
+        }
+
+    def from_dict(self, data: Dict[str, object]) -> None:
+        self.clear()
+        try:
+            self.cycle_len = max(0.0, float(data.get("cycle_len", 0.0) or 0.0))
+        except (TypeError, ValueError):
+            self.cycle_len = 0.0
+        try:
+            self.cycles = max(1, min(MAX_CYCLES, int(data.get("cycles", 1) or 1)))
+        except (TypeError, ValueError):
+            self.cycles = 1
+        layers_raw = data.get("layers")
+        if isinstance(layers_raw, list):
+            for item in layers_raw:
+                if isinstance(item, dict):
+                    layer = SeqLayer.from_dict(item)
+                    if not layer.is_empty():
+                        self.layers.append(layer)
+        pending_raw = data.get("pending")
+        if isinstance(pending_raw, dict):
+            pending = SeqLayer.from_dict(pending_raw)
+            self.pending = pending if not pending.is_empty() else None
+        if self.layers:
+            self.cycles = max(1, min(MAX_CYCLES, max(self.cycles, self.max_span())))
+        else:
+            self.cycle_len = 0.0
+            self.cycles = 1
+            self.pending = None
 
     def schedule(self, *, include_pending: bool = True) -> List[ScheduledNote]:
         """Every layer tiled onto one pass of the sequence, in play order."""
@@ -757,6 +822,34 @@ class OverdubSequencer:
         self._emit(("log", "SEQ cleared", False))
         self._emit(("seq",))
 
+    def export_state(self) -> Dict[str, object]:
+        """Full sequencer snapshot for presets / session restore."""
+        # Don't capture mid-record scratch — finish or discard first for a clean take.
+        with self._lock:
+            state = self._state
+        if state in (SEQ_REC_BACKBONE, SEQ_OVERDUB):
+            self.stop_record()
+        with self._lock:
+            return {
+                "sequence": self._seq.to_dict(),
+                "extend": bool(self._extend),
+            }
+
+    def import_state(self, data: Dict[str, object]) -> None:
+        """Replace the live sequence from export_state() / preset JSON."""
+        self.stop_playback()
+        with self._lock:
+            if self._state in (SEQ_REC_BACKBONE, SEQ_OVERDUB, SEQ_REVIEW):
+                self._rec_events = []
+            seq_data = data.get("sequence") if isinstance(data, dict) else None
+            if isinstance(seq_data, dict):
+                self._seq.from_dict(seq_data)
+            else:
+                self._seq.clear()
+            self._extend = bool(data.get("extend", False)) if isinstance(data, dict) else False
+            self._state = SEQ_EMPTY if self._seq.is_empty() else SEQ_STOPPED
+        self._emit(("seq",))
+
     # ------------------------------------------------------------- playback
 
     def start_playback(self) -> bool:
@@ -899,3 +992,25 @@ def events_to_dicts(events: Seq[LoopEvent]) -> List[Dict[str, object]]:
         }
         for e in events
     ]
+
+
+def events_from_dicts(raw: object) -> List[LoopEvent]:
+    out: List[LoopEvent] = []
+    if not isinstance(raw, list):
+        return out
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        try:
+            out.append(
+                LoopEvent(
+                    t=float(item.get("t", 0.0)),
+                    on=bool(item.get("on", True)),
+                    channel=int(item.get("channel", 0)) & 0x0F,
+                    note=int(item.get("note", 60)) & 0x7F,
+                    velocity=max(0, min(127, int(item.get("velocity", 100)))),
+                )
+            )
+        except (TypeError, ValueError):
+            continue
+    return out

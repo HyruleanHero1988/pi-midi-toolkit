@@ -46,6 +46,7 @@ FILES = [
     "set-touch-overlay.sh",
     "splash-x11.py",
     "install-pidi-splash.sh",
+    "pi-power.sh",
 ]
 
 # Extra trees copied recursively

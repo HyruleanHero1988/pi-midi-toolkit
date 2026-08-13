@@ -13,12 +13,13 @@ if ! command -v xrandr >/dev/null 2>&1; then
   exit 0
 fi
 
-# Wait briefly for DRM connectors after X starts
-for _ in 1 2 3 4 5 6 7 8; do
+# Wait briefly for DRM connectors after X starts (keep this short — splash
+# should already be covering the panel while we poll).
+for _ in 1 2 3 4 5; do
   if xrandr --query 2>/dev/null | grep -q 'DSI-1 connected'; then
     break
   fi
-  sleep 0.4
+  sleep 0.2
 done
 
 if ! xrandr --query 2>/dev/null | grep -q 'DSI-1 connected'; then

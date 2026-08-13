@@ -144,6 +144,7 @@ Matches the cyan-on-black mockup (overlapping squares + **PiDI** + subtitle).
 | Stage | When | How |
 | --- | --- | --- |
 | Plymouth | Kernel / initramfs, before login | `install-pidi-splash.sh` |
+| (no text login) | Between Plymouth and X | mask `getty@tty1`, drop `console=tty1`, `--retain-splash` |
 | X splash | Right after LightDM starts X | `kiosk.sh` → `splash-x11.py` |
 | App splash | Until UI chrome is ready | `midi_tone.py` boot splash |
 
