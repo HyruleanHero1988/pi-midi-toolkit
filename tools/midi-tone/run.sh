@@ -11,9 +11,10 @@ if [[ -z "${DISPLAY:-}" ]]; then
   exit 1
 fi
 
-# Common Debian/Pi stutter fix: give Pulse/PipeWire more buffering
-export PULSE_LATENCY_MSEC="${PULSE_LATENCY_MSEC:-80}"
-export PIPEWIRE_LATENCY="${PIPEWIRE_LATENCY:-1024/44100}"
+# Common Debian/Pi stutter fix: give Pulse/PipeWire modest buffering.
+# Match midi_tone defaults (1024 @ 44.1k ≈ 23ms/block, ~80ms device latency).
+export PULSE_LATENCY_MSEC="${PULSE_LATENCY_MSEC:-100}"
+export PIPEWIRE_LATENCY="${PIPEWIRE_LATENCY:-1536/44100}"
 # Prefer X11/Xwayland for Tk (labwc)
 export GDK_BACKEND="${GDK_BACKEND:-x11}"
 

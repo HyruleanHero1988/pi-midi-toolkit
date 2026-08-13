@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Minimal Openbox config for midi-tone kiosk: no desktop icons, no panel. -->
+<openbox_config xmlns="http://openbox.org/3.4/rc"
+                 xmlns:xi="http://www.w3.org/2001/XInclude">
+
+  <resistance>
+    <strength>10</strength>
+    <screen_edge_strength>20</screen_edge_strength>
+  </resistance>
+
+  <focus>
+    <focusNew>yes</focusNew>
+    <followMouse>no</followMouse>
+    <focusLast>yes</focusLast>
+    <underMouse>no</underMouse>
+  </focus>
+
+  <placement>
+    <policy>Smart</policy>
+    <center>yes</center>
+    <monitor>Mouse</monitor>
+  </placement>
+
+  <theme>
+    <name>Clearlooks</name>
+    <!-- Hide titlebar decorations for a cleaner kiosk look -->
+    <titleLayout></titleLayout>
+    <keepBorder>no</keepBorder>
+    <animateIconify>no</animateIconify>
+  </theme>
+
+  <desktops>
+    <number>1</number>
+    <firstdesk>1</firstdesk>
+  </desktops>
+
+  <resize>
+    <drawContents>yes</drawContents>
+  </resize>
+
+  <keyboard>
+    <!-- Escape is intentionally unbound for panic-proof kiosk; use SSH to recover -->
+    <keybind key="A-F4">
+      <action name="Close"/>
+    </keybind>
+  </keyboard>
+
+  <mouse>
+    <context name="Frame">
+      <mousebind button="Left" action="Press">
+        <action name="Focus"/>
+        <action name="Raise"/>
+      </mousebind>
+    </context>
+  </mouse>
+
+  <applications>
+    <!-- Any midi-tone window: maximize + no decorations -->
+    <application class="*">
+      <decor>no</decor>
+      <maximized>true</maximized>
+      <fullscreen>true</fullscreen>
+    </application>
+    <application name="midi-tone">
+      <decor>no</decor>
+      <maximized>true</maximized>
+      <fullscreen>true</fullscreen>
+    </application>
+  </applications>
+
+</openbox_config>

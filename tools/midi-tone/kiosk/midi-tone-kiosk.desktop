@@ -1,0 +1,8 @@
+[Desktop Entry]
+Name=MIDI Tone Kiosk
+Comment=midi-tone soft-synth only (Openbox, no desktop shell)
+Exec=REPLACE_KIOSK_SH
+TryExec=REPLACE_KIOSK_SH
+Type=Application
+DesktopNames=Openbox
+X-GDM-SessionRegisters=true

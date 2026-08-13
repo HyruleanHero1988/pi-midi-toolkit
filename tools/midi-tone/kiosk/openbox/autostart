@@ -1,0 +1,4 @@
+# Openbox autostart for midi-tone kiosk.
+# Intentionally empty: kiosk.sh starts midi-tone itself (with a restart loop).
+# Keeping this file prevents Openbox from looking for a missing autostart.
+true

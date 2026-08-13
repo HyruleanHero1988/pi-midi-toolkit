@@ -20,16 +20,36 @@ CREDS = HERE / ".pi-credentials"
 
 FILES = [
     "midi_tone.py",
+    "sequencer.py",  # imported by midi_tone.py — the app won't start without it
+    "fetch_akwf.py",
+    "fetch_songs.py",
     "requirements.txt",
     "run.sh",
     "launch-desktop.sh",
+    "kiosk.sh",
+    "install-kiosk.sh",
+    "disable-kiosk.sh",
     "setup-venv.sh",
     "install-desktop-shortcut.sh",
     "midi-tone.desktop",
     "README.md",
+    "KIOSK.md",
     "fix-audio-headphones.sh",
     "enable-gpio-touch.sh",
     "calibrate-touch-y.sh",
+    "prefer-tft70-display.sh",
+    "hide-touch-cursor.sh",
+    "enable-tft70-dsi.sh",
+    "BOOT-RECOVERY-HDMI.txt",
+    "fix-touch-x11.sh",
+    "set-touch-overlay.sh",
+]
+
+# Extra trees copied recursively
+DIRS = [
+    "wavetables",
+    "kiosk",
+    "demo-songs",  # offline Mutopia demos; seeded into songs/ on first launch
 ]
 
 
@@ -56,7 +76,9 @@ def connect(creds: dict[str, str]) -> paramiko.SSHClient:
         creds["PI_HOST"],
         username=creds["PI_USER"],
         password=creds["PI_PASSWORD"],
-        timeout=15,
+        timeout=60,
+        banner_timeout=60,
+        auth_timeout=60,
         allow_agent=False,
         look_for_keys=False,
     )
@@ -99,28 +121,65 @@ def deploy(restart: bool) -> None:
                 remote = f"{remote_dir}/{name}"
                 print(f"put {name} -> {remote}")
                 sftp.put(str(local), remote)
+
+            for dirname in DIRS:
+                local_dir = HERE / dirname
+                if not local_dir.is_dir():
+                    print(f"skip missing dir {dirname}")
+                    continue
+                # Create the whole tree once, then upload files
+                run(client, f"mkdir -p {remote_dir}/{dirname}")
+                for path in sorted(local_dir.rglob("*")):
+                    if path.is_dir():
+                        rel_dir = path.relative_to(HERE).as_posix()
+                        run(client, f"mkdir -p {remote_dir}/{rel_dir}", check=False)
+                        continue
+                    rel = path.relative_to(HERE).as_posix()
+                    remote_path = f"{remote_dir}/{rel}"
+                    print(f"put {rel} -> {remote_path}")
+                    sftp.put(str(path), remote_path)
         finally:
             sftp.close()
 
         run(
             client,
-            f"sed -i 's/\\r$//' {remote_dir}/*.sh {remote_dir}/*.desktop 2>/dev/null; "
-            f"chmod +x {remote_dir}/*.sh",
+            f"sed -i 's/\\r$//' {remote_dir}/*.sh {remote_dir}/*.desktop "
+            f"{remote_dir}/kiosk/*.desktop {remote_dir}/kiosk/openbox/* 2>/dev/null; "
+            f"chmod +x {remote_dir}/*.sh {remote_dir}/fetch_akwf.py 2>/dev/null || true",
         )
         # Refresh menu/desktop launchers so they keep using the venv via run.sh
         run(client, f"bash {remote_dir}/install-desktop-shortcut.sh", check=False)
 
         if restart:
-            run(client, "pkill -f '[m]idi_tone.py' || true", check=False)
-            time.sleep(0.5)
-            start = (
-                f"bash -lc 'export DISPLAY=:0 XDG_RUNTIME_DIR=/run/user/$(id -u); "
-                f"cd {remote_dir}; "
-                f"./launch-desktop.sh'"
+            # Under kiosk, only poke midi_tone — the session loop restarts it.
+            # Double-launch (kiosk + launch-desktop) pegs two cores and crunchs audio.
+            kiosk_out = run(
+                client,
+                "pgrep -af 'kiosk\\.sh|midi-tone-kiosk' || true",
+                check=False,
             )
-            run(client, start)
-            time.sleep(1.5)
+            run(client, "pkill -f '[m]idi_tone.py' || true", check=False)
+            time.sleep(1.0)
+            if kiosk_out.strip():
+                print("kiosk session detected — waiting for restart loop")
+                time.sleep(5.0)
+                run(client, "pgrep -a midi_tone || true", check=False)
+                # Confirm new audio line landed in kiosk log
+                run(
+                    client,
+                    "grep 'audio: wavetable' /tmp/midi-tone-kiosk.log | tail -2 || true",
+                    check=False,
+                )
+            else:
+                start = (
+                    f"bash -lc 'export DISPLAY=:0 XDG_RUNTIME_DIR=/run/user/$(id -u); "
+                    f"cd {remote_dir}; "
+                    f"./launch-desktop.sh'"
+                )
+                run(client, start)
+                time.sleep(1.5)
             run(client, "tail -n 40 /tmp/midi-tone.log || true", check=False)
+            run(client, "tail -n 20 /tmp/midi-tone-kiosk.log || true", check=False)
         print("Deploy OK")
     finally:
         client.close()
