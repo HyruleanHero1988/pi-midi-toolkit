@@ -8428,7 +8428,12 @@ class MidiToneApp:
 
     def _on_pointer_activity(self, _event: object = None) -> None:
         idle = getattr(self, "_idle", None)
-        if idle is None or idle.active:
+        if idle is None:
+            return
+        # While blanked, ANY pointer event must wake — the overlay canvas can
+        # miss capacitive events (dual ADS7846+ft5x06, grab failures, etc.).
+        if idle.active or self._saver_canvas is not None:
+            self._hide_screensaver()
             return
         idle.poke()
 
@@ -8493,20 +8498,29 @@ class MidiToneApp:
         canvas.place(x=0, y=0, relwidth=1, relheight=1)
         try:
             canvas.lift()
+            canvas.focus_set()
         except Exception:
             pass
         try:
-            canvas.grab_set()
+            # Prefer global grab so a stray ADS7846/ft5x06 mapping still
+            # delivers the wake tap to this overlay.
+            canvas.grab_set_global()
         except Exception:
-            pass
+            try:
+                canvas.grab_set()
+            except Exception:
+                pass
+        # Capacitive panels sometimes emit release-only or motion-only bursts.
         canvas.bind("<ButtonPress>", self._on_screensaver_tap)
-        canvas.bind("<ButtonRelease>", lambda _e: "break")
+        canvas.bind("<ButtonRelease>", self._on_screensaver_tap)
+        canvas.bind("<Motion>", self._on_screensaver_motion)
+        canvas.bind("<B1-Motion>", self._on_screensaver_tap)
         self._saver_canvas = canvas
         self._saver_hint = canvas.create_text(
             40,
             40,
             text="tap to wake",
-            fill="#2a2a2a",
+            fill="#4a4a4a",
             font=("DejaVu Sans", 18, "bold"),
             anchor="nw",
         )
@@ -8514,7 +8528,7 @@ class MidiToneApp:
             40,
             72,
             text=time.strftime("%H:%M"),
-            fill="#1a1a1a",
+            fill="#3a3a3a",
             font=("DejaVu Sans", 14),
             anchor="nw",
         )
@@ -8566,6 +8580,14 @@ class MidiToneApp:
         self._hide_screensaver()
         return "break"
 
+    def _on_screensaver_motion(self, event: tk.Event) -> Optional[str]:  # type: ignore[name-defined]
+        # Ignore pure hover; only wake when a button is held (touch drag).
+        state = int(getattr(event, "state", 0) or 0)
+        if state & 0x0100:  # Button1Mask
+            self._hide_screensaver()
+            return "break"
+        return None
+
     def _hide_screensaver(self) -> None:
         idle = getattr(self, "_idle", None)
         if idle is not None:
@@ -8584,7 +8606,18 @@ class MidiToneApp:
             except Exception:
                 pass
             print("ui: screensaver off", flush=True)
-        self._backlight.restore()
+        restored = self._backlight.restore()
+        if not restored:
+            # Last-resort unblank if PanelBacklight had no saved state
+            try:
+                path = pathlib.Path("/sys/class/backlight/10-0045/brightness")
+                if path.is_file():
+                    path.write_text("128\n", encoding="ascii")
+                power = pathlib.Path("/sys/class/backlight/10-0045/bl_power")
+                if power.is_file():
+                    power.write_text("0\n", encoding="ascii")
+            except OSError:
+                pass
         self._apply_pixel_shift()
 
     def _blank_screen_now(self) -> None:

@@ -162,6 +162,13 @@ class PanelBacklight:
         return self._path
 
     def dim(self) -> bool:
+        """Drop brightness to 0, but do NOT power the panel down.
+
+        Writing ``bl_power=4`` (FB_BLANK_POWERDOWN) on the Pi TFT70 DSI
+        path often stops the capacitive touch controller from delivering
+        events — so tap-to-wake can never fire. Brightness 0 is dark enough
+        for burn-in duty and keeps input alive.
+        """
         path = self._find()
         if path is None:
             return False
@@ -171,6 +178,8 @@ class PanelBacklight:
             return False
         if self._saved is None:
             self._saved = current
+        # Remember power state so restore() can put it back if a previous
+        # build left the panel powered down — but never blank it here.
         if self._power_path is not None and self._saved_power is None:
             try:
                 self._saved_power = int(
@@ -178,39 +187,37 @@ class PanelBacklight:
                 )
             except (OSError, ValueError):
                 self._saved_power = None
-        ok = False
         try:
             path.write_text("0\n", encoding="ascii")
-            ok = True
+            return True
         except OSError:
-            pass
-        if self._power_path is not None:
-            try:
-                # 4 = FB_BLANK_POWERDOWN
-                self._power_path.write_text("4\n", encoding="ascii")
-                ok = True
-            except OSError:
-                pass
-        return ok
+            return False
 
     def restore(self) -> bool:
-        path = self._path
+        path = self._path if self._path is not None else self._find()
         if path is None:
             return False
         ok = False
         if self._power_path is not None:
-            value = 0 if self._saved_power is None else int(self._saved_power)
+            # Always unblank (0). A stuck POWERDOWN from older builds is why
+            # some sessions needed a reboot to get touch back.
             try:
-                self._power_path.write_text(f"{value}\n", encoding="ascii")
+                self._power_path.write_text("0\n", encoding="ascii")
                 ok = True
             except OSError:
                 pass
-        if self._saved is not None:
+        value = self._saved
+        if value is None:
             try:
-                path.write_text(f"{int(self._saved)}\n", encoding="ascii")
-                ok = True
-            except OSError:
-                pass
+                max_path = path.parent / "max_brightness"
+                value = int(max_path.read_text(encoding="ascii").strip() or "1")
+            except (OSError, ValueError):
+                value = 1
+        try:
+            path.write_text(f"{int(value)}\n", encoding="ascii")
+            ok = True
+        except OSError:
+            pass
         self._saved = None
         self._saved_power = None
         return ok

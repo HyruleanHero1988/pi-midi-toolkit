@@ -112,7 +112,8 @@ class PanelBacklightTest(unittest.TestCase):
             panel = screensaver.PanelBacklight(root)
             self.assertTrue(panel.dim())
             self.assertEqual(brightness.read_text(encoding="ascii").strip(), "0")
-            self.assertEqual(power.read_text(encoding="ascii").strip(), "4")
+            # Must NOT power the panel down — that kills capacitive wake taps.
+            self.assertEqual(power.read_text(encoding="ascii").strip(), "0")
             self.assertTrue(panel.restore())
             self.assertEqual(brightness.read_text(encoding="ascii").strip(), "128")
             self.assertEqual(power.read_text(encoding="ascii").strip(), "0")
