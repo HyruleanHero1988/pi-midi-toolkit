@@ -39,6 +39,21 @@
       max-width: 46rem;
       color: var(--muted);
     }
+    .repo-link {
+      display: inline-block;
+      margin-top: 1.1rem;
+      padding: 0.65rem 1rem;
+      color: #08110f;
+      background: #9ed8cf;
+      border: 1px solid #c9e4df;
+      font-weight: 700;
+      text-decoration: none;
+    }
+    .repo-link:hover {
+      color: #000;
+      background: #c9e4df;
+      border-color: #fff;
+    }
     nav.toc {
       display: flex;
       flex-wrap: wrap;
@@ -147,6 +162,9 @@
       Global nav is always along the top: <strong>SYNTH · SEQ · PADS · SONGS · PRESETS · LOG</strong>,
       plus <strong>POWER</strong>.
     </p>
+    <a class="repo-link" href="https://github.com/HyruleanHero1988/pi-midi-toolkit">
+      View pi-midi-toolkit on GitHub ↗
+    </a>
   </header>
 
   <nav class="toc" aria-label="Screens">
@@ -184,7 +202,7 @@
 
     <section class="screen" id="synth">
       <h2>SYNTH</h2>
-      <p class="lede">Main performance surface: morphing wavetable voice, CRT scope, and transport / mode buttons.</p>
+      <p class="lede">Main performance surface: morphing wavetable voice, CRT scope, panic / velocity controls, and voice, drum, and FX modes.</p>
       <figure>
         <img src="screens/01-synth.png" alt="SYNTH screen with CRT morph scope" width="800" height="480" />
         <figcaption>01 — SYNTH (CRT morph scope shows three periods of the current wavetable blend)</figcaption>
@@ -192,7 +210,6 @@
       <table>
         <tr><th>CRT scope</th><td>Live picture of the current morph wavetable (tiled to three periods). Updates when morph / voice changes.</td></tr>
         <tr><th>Morph caption</th><td>Shows endpoints and blend, e.g. <code>Morph · sine → square 0%</code>.</td></tr>
-        <tr><th>Status lines</th><td>Show the last MIDI or UI event, active notes, and a summary that follows the current knob mode.</td></tr>
         <tr><th>ALL NOTES OFF</th><td>Panic — silence all sounding notes immediately.</td></tr>
         <tr><th>FULL VEL</th><td>Toggle: force velocity 127 on note-ons (easier on a light touch), or use real velocity.</td></tr>
         <tr><th>FX MODE</th><td>Remaps MPK knobs to the current insert FX target (per-voice or per-drum). Highlighted when on.</td></tr>
