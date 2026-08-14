@@ -220,25 +220,18 @@ def main() -> int:
 
     try:
         shot("01-synth")
-        shot("02-seq", lambda: app._switch_mode("seq"))
         shot(
-            "03-pads-edit",
-            lambda: (app._switch_mode("pads"), app._phrase_set_view("edit")),
-        )
-        shot("04-pads-play", lambda: app._phrase_set_view("play"))
-        shot("05-songs", lambda: app._switch_mode("songs"))
-        shot("06-presets", lambda: app._switch_mode("presets"))
-        shot("07-log", lambda: app._switch_mode("log"))
-        shot(
-            "08-voices",
+            "02-voices",
             lambda: (
                 close_overlays(app),
                 app._switch_mode("synth"),
                 app._open_voice_grid(),
             ),
         )
+        if hasattr(app, "_open_save_voice"):
+            shot("03-save-as", app._open_save_voice)
         shot(
-            "09-morph",
+            "04-morph",
             lambda: (
                 close_overlays(app),
                 app._switch_mode("synth"),
@@ -246,27 +239,30 @@ def main() -> int:
             ),
         )
         shot(
-            "10-kit",
+            "05-kit",
             lambda: (
                 close_overlays(app),
                 app._switch_mode("synth"),
                 app._open_kit_explorer(),
             ),
         )
+        shot("06-seq", lambda: (close_overlays(app), app._switch_mode("seq")))
         shot(
-            "11-power",
+            "07-pads-edit",
+            lambda: (app._switch_mode("pads"), app._phrase_set_view("edit")),
+        )
+        shot("08-pads-play", lambda: app._phrase_set_view("play"))
+        shot("09-songs", lambda: app._switch_mode("songs"))
+        shot("10-presets", lambda: app._switch_mode("presets"))
+        shot("11-log", lambda: app._switch_mode("log"))
+        shot(
+            "12-power",
             lambda: (
                 close_overlays(app),
                 app._switch_mode("synth"),
                 app._open_power_menu(),
             ),
         )
-        close_overlays(app)
-        app._switch_mode("synth")
-        app._open_voice_grid()
-        _pump(root, 0.25)
-        if hasattr(app, "_open_save_voice"):
-            shot("12-save-as", app._open_save_voice)
         close_overlays(app)
         app._switch_mode("synth")
     finally:
