@@ -19,8 +19,10 @@ git commit -m "Rebuild Pi armv7 engines"
 ```
 
 Needs `gcc-arm-linux-gnueabihf`, `libasound2-dev:armhf` (both engines link
-ALSA via midir/cpal), and `rustup target add armv7-unknown-linux-gnueabihf`.
-The script installs those with passwordless sudo when it can.
+ALSA via midir/cpal), `rustup target add armv7-unknown-linux-gnueabihf`,
+and rustc **1.85+** (clap 4.6 in the lockfile). The script installs the
+armhf toolchain with passwordless sudo when it can. On Ubuntu it also
+pins `archive.ubuntu.com` to amd64 and adds `ports.ubuntu.com` for armhf.
 
 Do **not** put these files in Git LFS. GitHub archive downloads used by
 UPDATE would then contain pointer files instead of real ELFs.
