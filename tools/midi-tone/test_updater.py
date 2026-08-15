@@ -145,6 +145,8 @@ class OverlayTest(unittest.TestCase):
             (src / "settings.json").write_text('{"wipe": true}\n', encoding="utf-8")
             (src / "songs").mkdir()
             (src / "songs" / "demo.mid").write_bytes(b"MThd")
+            (src / "phrases").mkdir()
+            (src / "phrases" / "pad-01.json").write_text('{"wipe":true}\n', encoding="utf-8")
 
             dest.mkdir()
             (dest / "midi_tone.py").write_text("OLD_APP\n", encoding="utf-8")
@@ -152,7 +154,9 @@ class OverlayTest(unittest.TestCase):
             (dest / "songs").mkdir()
             (dest / "songs" / "take-001.mid").write_bytes(b"USER")
             (dest / "phrases").mkdir()
-            (dest / "phrases" / "pad-01.json").write_text("{}\n", encoding="utf-8")
+            (dest / "phrases" / "pad-01.json").write_text(
+                '{"name":"live-phrase"}\n', encoding="utf-8"
+            )
             (dest / "user-presets").mkdir()
             (dest / "user-presets" / "slot-01.json").write_text("{}\n", encoding="utf-8")
             (dest / ".venv").mkdir()
@@ -163,6 +167,7 @@ class OverlayTest(unittest.TestCase):
             self.assertIn("wavetables/saw.wav", written)
             self.assertNotIn("settings.json", written)
             self.assertNotIn("songs/demo.mid", written)
+            self.assertNotIn("phrases/pad-01.json", written)
 
             self.assertEqual((dest / "midi_tone.py").read_text(encoding="utf-8"), "NEW_APP\n")
             self.assertEqual(
@@ -171,7 +176,10 @@ class OverlayTest(unittest.TestCase):
             )
             self.assertEqual((dest / "songs" / "take-001.mid").read_bytes(), b"USER")
             self.assertFalse((dest / "songs" / "demo.mid").exists())
-            self.assertTrue((dest / "phrases" / "pad-01.json").is_file())
+            self.assertEqual(
+                (dest / "phrases" / "pad-01.json").read_text(encoding="utf-8"),
+                '{"name":"live-phrase"}\n',
+            )
             self.assertTrue((dest / "user-presets" / "slot-01.json").is_file())
             self.assertEqual((dest / ".venv" / "marker").read_text(encoding="utf-8"), "venv\n")
             self.assertTrue((dest / "wavetables" / "saw.wav").is_file())
@@ -189,6 +197,12 @@ class OverlayTest(unittest.TestCase):
             (src / "crates" / "midi-core" / "src" / "lib.rs").write_text("// new\n", encoding="utf-8")
             (src / "tools" / "midi-tone" / "midi_tone.py").write_text("NEW\n", encoding="utf-8")
             (src / "tools" / "midi-tone" / "settings.json").write_text('{"wipe":1}\n', encoding="utf-8")
+            (src / "tools" / "midi-tone" / "phrases").mkdir()
+            (src / "tools" / "midi-tone" / "phrases" / "pad-01.json").write_text(
+                '{"wipe":true}\n', encoding="utf-8"
+            )
+            (src / "tools" / "midi-tone" / "songs").mkdir()
+            (src / "tools" / "midi-tone" / "songs" / "demo.mid").write_bytes(b"WIPE")
             (src / "presets" / "example.json").write_text("{}\n", encoding="utf-8")
             (src / "presets" / "active.json").write_text('{"wipe":true}\n', encoding="utf-8")
             (src / "deploy" / "midi-engine.service").write_text("[Unit]\n", encoding="utf-8")
@@ -198,6 +212,12 @@ class OverlayTest(unittest.TestCase):
             (dest / "bin").mkdir()
             (dest / "tools" / "midi-tone" / "midi_tone.py").write_text("OLD\n", encoding="utf-8")
             (dest / "tools" / "midi-tone" / "settings.json").write_text('{"keep":1}\n', encoding="utf-8")
+            (dest / "tools" / "midi-tone" / "phrases").mkdir()
+            (dest / "tools" / "midi-tone" / "phrases" / "pad-01.json").write_text(
+                '{"name":"my-groove"}\n', encoding="utf-8"
+            )
+            (dest / "tools" / "midi-tone" / "songs").mkdir()
+            (dest / "tools" / "midi-tone" / "songs" / "take-001.mid").write_bytes(b"USER")
             (dest / "presets" / "active.json").write_text('{"live":true}\n', encoding="utf-8")
             (dest / "bin" / "midi-engine").write_bytes(b"OLDELF")
 
@@ -208,11 +228,22 @@ class OverlayTest(unittest.TestCase):
             self.assertIn("deploy/midi-engine.service", written)
             self.assertNotIn("presets/active.json", written)
             self.assertNotIn("tools/midi-tone/settings.json", written)
+            self.assertNotIn("tools/midi-tone/phrases/pad-01.json", written)
+            self.assertNotIn("tools/midi-tone/songs/demo.mid", written)
             self.assertEqual((dest / "tools" / "midi-tone" / "midi_tone.py").read_text(encoding="utf-8"), "NEW\n")
             self.assertEqual(
                 (dest / "tools" / "midi-tone" / "settings.json").read_text(encoding="utf-8"),
                 '{"keep":1}\n',
             )
+            self.assertEqual(
+                (dest / "tools" / "midi-tone" / "phrases" / "pad-01.json").read_text(encoding="utf-8"),
+                '{"name":"my-groove"}\n',
+            )
+            self.assertEqual(
+                (dest / "tools" / "midi-tone" / "songs" / "take-001.mid").read_bytes(),
+                b"USER",
+            )
+            self.assertFalse((dest / "tools" / "midi-tone" / "songs" / "demo.mid").exists())
             self.assertEqual(
                 (dest / "presets" / "active.json").read_text(encoding="utf-8"),
                 '{"live":true}\n',
@@ -239,10 +270,16 @@ class OverlayTest(unittest.TestCase):
             (repo / "tools" / "midi-tone" / "midi_tone.py").write_text("NEW\n", encoding="utf-8")
             (kiosk / "midi_tone.py").write_text("OLD\n", encoding="utf-8")
             (kiosk / "settings.json").write_text('{"keep":1}\n', encoding="utf-8")
+            (kiosk / "phrases").mkdir()
+            (kiosk / "phrases" / "pad-07.json").write_text('{"keep":"phrase"}\n', encoding="utf-8")
             notes: list[str] = []
             updater._sync_kiosk_from_repo(repo, kiosk, notes.append)
             self.assertEqual((kiosk / "midi_tone.py").read_text(encoding="utf-8"), "NEW\n")
             self.assertEqual((kiosk / "settings.json").read_text(encoding="utf-8"), '{"keep":1}\n')
+            self.assertEqual(
+                (kiosk / "phrases" / "pad-07.json").read_text(encoding="utf-8"),
+                '{"keep":"phrase"}\n',
+            )
             self.assertTrue(any("kiosk" in n.lower() for n in notes))
 
 
@@ -418,8 +455,8 @@ class StatusTextTest(unittest.TestCase):
     def test_format_status_mentions_user_data(self) -> None:
         text = updater.format_status_lines(None, pathlib.Path("/tmp/does-not-exist-midi-tone"))
         self.assertIn("Running:", text)
-        self.assertIn("songs", text)
-        self.assertIn("Full deploy", text)
+        self.assertIn("phrases", text)
+        self.assertIn("SSH deploy", text)
 
 
 if __name__ == "__main__":

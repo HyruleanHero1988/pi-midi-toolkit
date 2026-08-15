@@ -5375,9 +5375,9 @@ class MidiToneApp:
         tk.Label(
             body,
             text=(
-                "CHECK looks at GitHub master. UPDATE deploys the whole repo "
-                "(kiosk, crates, presets) like SSH, then restarts. "
-                "Songs, phrases, and settings.json stay. Rust binaries are not rebuilt on the Pi."
+                "CHECK looks at GitHub master. UPDATE deploys new code like SSH, "
+                "then restarts. Phrases, songs, presets, and settings.json stay "
+                "on this box. Rust binaries are not rebuilt on the Pi."
             ),
             font=("DejaVu Sans", 11),
             fg="#a89984",
@@ -5480,8 +5480,9 @@ class MidiToneApp:
                 return
             self._update_confirming = True
             self._settings_status_var.set(
-                "This deploys the whole repo from GitHub, then restarts.\n"
-                "Songs, presets, phrases, and settings.json stay.\n"
+                "This deploys new code from GitHub, then restarts.\n"
+                "Phrases, songs, presets, and settings.json are not touched "
+                "(same as SSH deploy).\n"
                 "Tap INSTALL NOW to continue, or CANCEL."
             )
             self._paint_settings_buttons()
@@ -7679,8 +7680,9 @@ class MidiToneApp:
                     if extra == "confirm" and result is not None and result.available:
                         self._update_confirming = True
                         self._settings_status_var.set(
-                            "This deploys the whole repo from GitHub, then restarts.\n"
-                            "Songs, presets, phrases, and settings.json stay.\n"
+                            "This deploys new code from GitHub, then restarts.\n"
+                            "Phrases, songs, presets, and settings.json are not touched "
+                            "(same as SSH deploy).\n"
                             "Tap INSTALL NOW to continue, or CANCEL."
                         )
                         self._paint_settings_buttons()
