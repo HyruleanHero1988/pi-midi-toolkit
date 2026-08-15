@@ -132,7 +132,7 @@
     <h1>midi-tone screen reference</h1>
     <p>
       Touch-first soft-synth / phrase / sequencer UI for the Raspberry Pi panel (800×480).
-      Global nav is always along the top: <strong>SYNTH · SEQ · PADS · SONGS · PRESETS · LOG</strong>,
+      Global nav is always along the top: <strong>SYNTH · SEQ · PADS · SONGS · PRESETS · LOG · SET</strong>,
       plus <strong>POWER</strong>.
     </p>
   </header>
@@ -146,6 +146,7 @@
     <a href="#songs">SONGS</a>
     <a href="#presets">PRESETS</a>
     <a href="#log">LOG</a>
+    <a href="#settings">SET</a>
     <a href="#voices">VOICES</a>
     <a href="#morph">MORPH</a>
     <a href="#kit">KIT</a>
@@ -167,6 +168,7 @@
         <tr><th>SONGS</th><td>Play Standard MIDI Files locally and/or out USB→DIN; BPM and loop controls.</td></tr>
         <tr><th>PRESETS</th><td>Eight named slots for a <strong>full session</strong> snapshot (synth, seq, phrases, songs prefs, screensaver, …), plus FACTORY reset.</td></tr>
         <tr><th>LOG</th><td>Scrolling MIDI / UI event log with CLEAR and panic.</td></tr>
+        <tr><th>SET</th><td>Software update: show the running commit, CHECK GitHub, UPDATE &amp; restart. Songs / presets / phrases stay.</td></tr>
       </table>
     </section>
 
@@ -303,6 +305,22 @@
         <tr><th>CLEAR LOG</th><td>Wipe the on-screen log.</td></tr>
         <tr><th>ALL NOTES OFF</th><td>Panic.</td></tr>
       </table>
+    </section>
+
+    <section class="screen" id="settings">
+      <h2>SET (Settings)</h2>
+      <p class="lede">Opt-in software update from GitHub <code>master</code>. The instrument stays offline until you tap CHECK / UPDATE.</p>
+      <figure>
+        <img src="screens/13-settings.png" alt="SET settings and update screen" width="800" height="480" />
+        <figcaption>13 — SET</figcaption>
+      </figure>
+      <table>
+        <tr><th>Running / remote</th><td>Local commit (from git or <code>version.json</code>) and, after CHECK, the tip of <code>master</code>.</td></tr>
+        <tr><th>CHECK</th><td>Ask GitHub whether <code>master</code> is ahead. Does not install.</td></tr>
+        <tr><th>UPDATE</th><td>If behind: confirm, overlay kiosk files, pip-install requirements if needed, restart. Second tap is INSTALL NOW.</td></tr>
+        <tr><th>TOKEN</th><td>Store a GitHub PAT on the box (private repo). Written to <code>.update-credentials</code>.</td></tr>
+      </table>
+      <p class="note">Never overwrites <code>settings.json</code>, <code>songs/</code>, <code>phrases/</code>, <code>user-presets/</code>, or <code>user-wavetables/</code>. Rust engines are not rebuilt on the Pi.</p>
     </section>
 
     <section class="screen" id="voices">

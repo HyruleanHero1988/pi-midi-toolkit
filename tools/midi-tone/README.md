@@ -4,12 +4,13 @@ Hear and see MIDI from the **Akai MPK mini** on the Pi **without** USB-DIN or a 
 
 - Opens a MIDI input (prefers a port name containing `MPK`)
 - Note-on → wavetable tone through the Pi audio jack / HDMI
-- **Modes** (top right): **SYNTH**, **SEQ**, **PADS**, **SONGS**, **PRESETS**, **LOG** — fully separate UIs
+- **Modes** (top right): **SYNTH**, **SEQ**, **PADS**, **SONGS**, **PRESETS**, **LOG**, **SET** — fully separate UIs
 - Synth: voices, A/B morph, knobs, live morph-cycle scope; **MPK pads (ch10) = analog drum voices**; **KIT** drill-down scopes a selected drum
 - Sequencer: record a backbone loop, then overdub layers of drums and keys over it
 - Pads: 16 phrase clips (Bank A+B); record from keys, launch from touch squares **or** MPK pads
 - Songs: scrolling list of every `.mid` in `songs/`, tempo, play local and/or USB→DIN
 - Presets: 8 save slots + autosave last session (`settings.json`)
+- Set: check GitHub `master`, install if the box is behind, restart into the new kiosk
 - Log: full scrolling MIDI/event history
 - Bundled [Adventure Kid (AKWF)](https://github.com/KristofferKarlAxelEkstrand/AKWF-FREE) single-cycles (**CC0**) plus built-in sine/square/saw/triangle
 
@@ -137,6 +138,7 @@ Top-right tabs stay visible:
 - **SONGS** — lists every `.mid` / `.midi` in `songs/`; big ▲ UP / ▼ DOWN to scroll; tempo; LOCAL/USB out
 - **PRESETS** — 8 touch slots: SAVE (name it) / LOAD / DELETE a **full session** snapshot; **FACTORY** resets morph/tone/drums/levels/FX to baked-in defaults (autosaved as the session)
 - **LOG** — full event history (also has CLEAR / panic)
+- **SET** — running version, CHECK GitHub `master`, UPDATE & restart (songs/presets kept)
 
 Last session autosaves to `settings.json` (gitignored) every few seconds and on quit.
 Named presets live in `user-presets/slot-01.json` … `slot-08.json`. Each file is the same payload as the session autosave, plus a display `name`:
@@ -150,6 +152,21 @@ Named presets live in `user-presets/slot-01.json` … `slot-08.json`. Each file 
 User-saved morph wavetables live in `user-wavetables/*.wav` (+ `*.fx.json` for delay/reverb, gitignored).
 Song files live as whatever you put in `songs/` (any `.mid` name).
 Phrase pads persist as `phrases/pad-01.json` … `pad-16.json` (gitignored).
+
+### Settings / update (SET)
+
+The box can pull a newer kiosk from GitHub without a PC deploy. **SET** shows the
+running commit, **CHECK** looks at `master`, and **UPDATE** overlays `tools/midi-tone`
+then restarts (`kiosk.sh` comes back on its own). Songs, presets, phrases,
+`settings.json`, and `.venv` are left alone.
+
+The repo is private, so CHECK needs a GitHub token with Contents: Read:
+
+- On the panel: **SET → TOKEN** (saved as `.update-credentials`, gitignored)
+- Or via SSH: `GITHUB_TOKEN=…` in `~/midi-tone/.update-credentials`
+
+`deploy_pi.py` still works and writes `version.json` so CHECK has a local SHA to
+compare. Rust engines are not rebuilt on the Pi — this path updates the kiosk UI.
 
 ### Sequencer (SEQ)
 

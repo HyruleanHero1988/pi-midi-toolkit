@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import pathlib
+import subprocess
 import sys
 import time
 
@@ -47,6 +49,7 @@ FILES = [
     "splash-x11.py",
     "install-pidi-splash.sh",
     "pi-power.sh",
+    "updater.py",
 ]
 
 # Extra trees copied recursively
@@ -155,6 +158,31 @@ def deploy(restart: bool) -> None:
             f"{remote_dir}/fetch_akwf.py "
             f"{remote_dir}/splash-x11.py 2>/dev/null || true",
         )
+        # Stamp the SHA this copy came from so SET → CHECK can compare to GitHub.
+        try:
+            sha = subprocess.check_output(
+                ["git", "rev-parse", "HEAD"],
+                cwd=str(HERE.parent.parent),
+                text=True,
+                timeout=8,
+            ).strip()
+        except Exception:
+            sha = ""
+        if sha:
+            payload = json.dumps(
+                {
+                    "sha": sha,
+                    "branch": "master",
+                    "source": "deploy",
+                    "repo_url": "https://github.com/HyruleanHero1988/pi-midi-toolkit.git",
+                },
+                indent=2,
+            )
+            run(
+                client,
+                f"cat > {remote_dir}/version.json <<'EOF'\n{payload}\nEOF",
+                check=False,
+            )
         # Refresh menu/desktop launchers so they keep using the venv via run.sh
         run(client, f"bash {remote_dir}/install-desktop-shortcut.sh", check=False)
 
