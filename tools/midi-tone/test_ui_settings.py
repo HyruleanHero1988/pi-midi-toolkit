@@ -72,7 +72,13 @@ class SettingsScreenTest(unittest.TestCase):
 
     def test_settings_mode_has_check_and_update(self) -> None:
         app = self.app
-        self.assertIn("settings", app._mode_btns)
+        self.assertIn("home", app._mode_btns)
+        app._switch_mode("home")
+        self.pump()
+        self.assertEqual(app._mode, "home")
+        self.assertTrue(app._home_shell.winfo_ismapped())
+        self.assertFalse(app._jam_btns["synth"].winfo_ismapped())
+
         app._switch_mode("settings")
         self.pump()
         self.assertEqual(app._mode, "settings")
@@ -80,6 +86,23 @@ class SettingsScreenTest(unittest.TestCase):
         self.assertIsNotNone(app._settings_update_btn)
         self.assertIn("Running:", app._settings_status_var.get())
         self.assertTrue(app._settings_shell.winfo_ismapped())
+        self.assertNotIn("songs", app._mode_btns)
+        self.assertNotIn("settings", app._mode_btns)
+
+    def test_jam_shortcuts_only_on_synth_seq_pads(self) -> None:
+        app = self.app
+        app._switch_mode("synth")
+        self.pump()
+        for key in ("synth", "seq", "pads"):
+            self.assertTrue(app._jam_btns[key].winfo_ismapped(), key)
+        app._switch_mode("songs")
+        self.pump()
+        for key in ("synth", "seq", "pads"):
+            self.assertFalse(app._jam_btns[key].winfo_ismapped(), key)
+        app._switch_mode("pads")
+        self.pump()
+        self.assertTrue(app._jam_btns["pads"].winfo_ismapped())
+        self.assertEqual(app._jam_btns["pads"].cget("bg"), "#458588")
 
     def test_check_posts_update_available_without_installing(self) -> None:
         app = self.app

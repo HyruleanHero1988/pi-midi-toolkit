@@ -4,13 +4,13 @@ Hear and see MIDI from the **Akai MPK mini** on the Pi **without** USB-DIN or a 
 
 - Opens a MIDI input (prefers a port name containing `MPK`)
 - Note-on → wavetable tone through the Pi audio jack / HDMI
-- **Modes** (top right): **SYNTH**, **SEQ**, **PADS**, **SONGS**, **PRESETS**, **LOG**, **SET** — fully separate UIs
+- **Modes:** **HOME** launcher tiles; jam shortcuts **SYNTH / SEQ / PADS** stay in the top bar while you are in those modes; **SONGS / PRESETS / LOG / SET** open from HOME
 - Synth: voices, A/B morph, knobs, live morph-cycle scope; **MPK pads (ch10) = analog drum voices**; **KIT** drill-down scopes a selected drum
 - Sequencer: record a backbone loop, then overdub layers of drums and keys over it
 - Pads: 16 phrase clips (Bank A+B); record from keys, launch from touch squares **or** MPK pads
 - Songs: scrolling list of every `.mid` in `songs/`, tempo, play local and/or USB→DIN
 - Presets: 8 save slots + autosave last session (`settings.json`)
-- Set: check GitHub `master`, install if the box is behind, restart into the new kiosk
+- Set: check GitHub `master`, full-repo deploy if the box is behind, restart into the new kiosk
 - Log: full scrolling MIDI/event history
 - Bundled [Adventure Kid (AKWF)](https://github.com/KristofferKarlAxelEkstrand/AKWF-FREE) single-cycles (**CC0**) plus built-in sine/square/saw/triangle
 
@@ -138,7 +138,7 @@ Top-right tabs stay visible:
 - **SONGS** — lists every `.mid` / `.midi` in `songs/`; big ▲ UP / ▼ DOWN to scroll; tempo; LOCAL/USB out
 - **PRESETS** — 8 touch slots: SAVE / LOAD / DELETE current sound + full-velocity
 - **LOG** — full event history (also has CLEAR / panic)
-- **SET** — running version, CHECK GitHub `master`, UPDATE & restart (songs/presets kept)
+- **SET** — running version, CHECK GitHub `master`, full-repo UPDATE & restart (songs/presets kept)
 
 Last session autosaves to `settings.json` (gitignored) every few seconds and on quit.
 Named presets live in `user-presets/slot-01.json` … `slot-08.json`.
@@ -148,10 +148,15 @@ Phrase pads persist as `phrases/pad-01.json` … `pad-16.json` (gitignored).
 
 ### Settings / update (SET)
 
-The box can pull a newer kiosk from GitHub without a PC deploy. **SET** shows the
-running commit, **CHECK** looks at `master`, and **UPDATE** overlays `tools/midi-tone`
-then restarts (`kiosk.sh` comes back on its own). Songs, presets, phrases,
-`settings.json`, and `.venv` are left alone.
+The box can pull a newer build from GitHub without a PC deploy. **HOME → SET** shows the
+running commit, **CHECK** looks at `master`, and **UPDATE** deploys the **whole repo**
+(kiosk, crates, deploy scripts, shipped presets) then restarts — the same tree SSH
+deploy updates. Songs, presets, phrases, `settings.json`, `presets/active.json`,
+and existing `bin/` engine binaries are left alone. `midi-engine` / `jambox-engine`
+restart if those units are already installed.
+
+This does **not** cargo-build on the Pi (too slow on a Pi 2). New Rust binaries still
+come from a host cross-compile / `deploy/deploy.sh`.
 
 The repo is private, so CHECK needs a GitHub token with Contents: Read:
 

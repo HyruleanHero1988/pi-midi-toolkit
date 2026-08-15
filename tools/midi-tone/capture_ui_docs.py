@@ -221,7 +221,8 @@ def main() -> int:
         grab(root, OUT / f"{name}.png")
 
     try:
-        shot("01-synth")
+        shot("00-home", lambda: app._switch_mode("home"))
+        shot("01-synth", lambda: app._switch_mode("synth"))
         shot("02-seq", lambda: app._switch_mode("seq"))
         shot(
             "03-pads-edit",
