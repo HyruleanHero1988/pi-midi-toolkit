@@ -57,7 +57,8 @@ CHECK_TIMEOUT_SEC = 25
 DOWNLOAD_TIMEOUT_SEC = 180
 PIP_TIMEOUT_SEC = 300
 
-# Names / relative prefixes an overlay must never replace or delete.
+# User content deploy_pi.py never uploads. Overlay is copy-only (like scp) and
+# skips these paths so SET→UPDATE cannot wipe a live box.
 KEEP_KIOSK = frozenset(
     {
         "settings.json",
@@ -83,16 +84,7 @@ KEEP_REPO = frozenset(
         "bin",  # SSH-deployed midi-engine / jambox-engine binaries
         "takes",
         "presets/active.json",
-        "tools/midi-tone/settings.json",
-        "tools/midi-tone/songs",
-        "tools/midi-tone/phrases",
-        "tools/midi-tone/user-presets",
-        "tools/midi-tone/user-wavetables",
-        "tools/midi-tone/.venv",
-        "tools/midi-tone/.pi-credentials",
-        "tools/midi-tone/.update-credentials",
-        "tools/midi-tone/version.json",
-        "tools/midi-tone/__pycache__",
+        *(f"tools/midi-tone/{name}" for name in KEEP_KIOSK if name not in {".git", ".gitignore"}),
     }
 )
 
@@ -511,9 +503,10 @@ def overlay_tree(
 ) -> List[str]:
     """Copy files from ``src`` onto ``dest``, skipping keep prefixes.
 
-    ``keep`` is a set of relative paths (file or directory). ``songs`` skips
-    the whole songs tree; ``presets/active.json`` skips only that file.
-    Returns the relative paths that were written.
+    Copy-only, like ``deploy_pi.py`` sftp.put: never deletes destination
+    files. ``keep`` is a set of relative paths (file or directory).
+    ``phrases`` skips the whole phrase-pad tree; ``presets/active.json``
+    skips only that file.
     """
     if not src.is_dir():
         raise UpdateError(f"update tree missing: {src}")
@@ -885,7 +878,9 @@ def format_status_lines(check: Optional[UpdateCheck] = None, install: pathlib.Pa
         )
     if not has_token and (check is None or check.error):
         lines.append("Private repo: add a GitHub token (TOKEN) if CHECK fails.")
-    lines.append("Full deploy: kiosk + crates + presets. Keeps songs / phrases / settings.")
+    lines.append(
+        "Same as SSH deploy: phrases, songs, presets, and settings stay on this box."
+    )
     return "\n".join(lines)
 
 

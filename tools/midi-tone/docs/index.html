@@ -333,7 +333,7 @@
         <tr><th>UPDATE</th><td>If behind: confirm, deploy the whole repo (kiosk + crates + presets), restart kiosk and any midi-engine / jambox-engine units. Second tap is INSTALL NOW.</td></tr>
         <tr><th>TOKEN</th><td>Store a GitHub PAT on the box (private repo). Written to <code>.update-credentials</code>.</td></tr>
       </table>
-      <p class="note">Never overwrites <code>settings.json</code>, <code>songs/</code>, <code>phrases/</code>, <code>user-presets/</code>, <code>user-wavetables/</code>, or <code>presets/active.json</code>. Does not cargo-build on the Pi — new Rust binaries still come from SSH/cross-compile.</p>
+      <p class="note">Same as SSH deploy: never overwrites <code>settings.json</code>, <code>songs/</code>, <code>phrases/</code> (pad recordings), <code>user-presets/</code>, <code>user-wavetables/</code>, or <code>presets/active.json</code>. Does not cargo-build on the Pi — new Rust binaries still come from SSH/cross-compile.</p>
     </section>
 
     <section class="screen" id="voices">
