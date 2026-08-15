@@ -87,6 +87,7 @@ Power on → Openbox kiosk → modes. The soft-synth path started as a Phase 0 h
 | **Presets** | Jambox | Synth slots + session autosave |
 | **Map / Thru** | Remap | Channel / CC / velocity remap; ports; learn → Rust engine |
 | **Log** | Both | Event history / commissioning |
+| **Set** | Both | Opt-in GitHub update (CHECK `master` / UPDATE & restart) |
 
 Boot path: `install-kiosk.sh` enables X11 + Desktop Autologin + **MIDI Tone Kiosk**
 session (Openbox + fullscreen app). No normal Pi desktop shell. Undo with `disable-kiosk.sh`.
@@ -485,6 +486,7 @@ Not building this yet. Capture the ladder so we don’t overbuild or forget it w
 | Approach | When | Notes |
 |----------|------|-------|
 | **SSH push (now)** | 1 unit, home LAN | Keep. Highest leverage. |
+| **Kiosk SET → UPDATE (now)** | 1 unit, when online | Opt-in from the panel: CHECK `master`, overlay `tools/midi-tone`, restart. Preserves user data. Needs a GitHub token because the repo is private. |
 | **Multi-host deploy list** | 2+ units on LAN | Same script, host list / `.pi-credentials` variants. Small change. |
 | **Golden SD image** | Cloning a box for someone else | Flash once → boots kiosk. Best “gift a unit” path. Not the daily loop. |
 | **Pull-on-boot / timer from Releases** | Hands-off updates when online | Tag release → Pi checks version → download tarball → swap app dir → restart kiosk. Preserve user data. |
@@ -496,7 +498,7 @@ Not building this yet. Capture the ladder so we don’t overbuild or forget it w
 - Optional version stamp in the UI so you know what’s running
 - Updates are opt-in / occasional; offline play stays first-class
 
-**High-leverage slice later (still small):** host list in deploy + a version file + “update from release” script that won’t touch user data. Full fleet OTA waits until there are more than two units.
+**High-leverage slice (shipped):** SET mode in the kiosk checks GitHub `master`, overlays the midi-tone tree without touching user data, and restarts. Host-list deploy + tagged Releases OTA can still wait until there is more than one unit. Full fleet OTA waits until there are more than two units.
 
 ## OS / hardware
 
