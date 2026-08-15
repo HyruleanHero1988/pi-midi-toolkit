@@ -68,6 +68,8 @@ Still needs hardware / machine:
 
 Rust toolchain on PATH for engine work. midi-tone is Python venv on the Pi.
 
+When crates change, compile Pi binaries **before commit** (PC Linux/WSL or cloud-agent VM): `./deploy/build-pi-bins.sh` then `git add dist/armv7`. SET→UPDATE copies those files onto `bin/` on the box. Do not use Git LFS for them (archive downloads would get pointer files).
+
 ## Not related to play-my-synth
 
 Standalone project; no shared code with play-my-synth.

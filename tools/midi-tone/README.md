@@ -152,11 +152,23 @@ The box can pull a newer build from GitHub without a PC deploy. **HOME → SET**
 running commit, **CHECK** looks at `master`, and **UPDATE** deploys the **whole repo**
 (kiosk, crates, deploy scripts, shipped presets) then restarts — the same tree SSH
 deploy updates. Songs, presets, phrases, `settings.json`, `presets/active.json`,
-and existing `bin/` engine binaries are left alone. `midi-engine` / `jambox-engine`
-restart if those units are already installed.
+and live `bin/` is not overlay-copied. After the tree lands, committed
+`dist/armv7/{midi-engine,jambox-engine}` are copied onto `bin/` (the systemd
+paths) and `midi-engine` / `jambox-engine` restart if those units exist.
 
-This does **not** cargo-build on the Pi (too slow on a Pi 2). New Rust binaries still
-come from a host cross-compile / `deploy/deploy.sh`.
+This does **not** cargo-build on the Pi (too slow on a Pi 2). When crates
+change, rebuild on a PC or cloud-agent VM **before commit**:
+
+```bash
+./deploy/build-pi-bins.sh
+git add dist/armv7
+git commit -m "Rebuild Pi armv7 engines"
+```
+
+Skipping that step means SET→UPDATE ships new Rust source but the box keeps
+the old engines. `deploy_pi.py` still writes `version.json` so CHECK has a
+local SHA; SSH `deploy/deploy.sh` also stages `dist/armv7` when `TARGET` is
+armv7.
 
 The repo is private, so CHECK needs a GitHub token with Contents: Read:
 
@@ -164,7 +176,7 @@ The repo is private, so CHECK needs a GitHub token with Contents: Read:
 - Or via SSH: `GITHUB_TOKEN=…` in `~/midi-tone/.update-credentials`
 
 `deploy_pi.py` still works and writes `version.json` so CHECK has a local SHA to
-compare. Rust engines are not rebuilt on the Pi — this path updates the kiosk UI.
+compare. Rust engines are installed from `dist/armv7` (not cargo-built on the Pi).
 
 ### Sequencer (SEQ)
 

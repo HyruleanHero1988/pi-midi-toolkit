@@ -33,6 +33,13 @@ if (-not (Test-Path $Bin)) {
     throw "binary not found: $Bin (cross-compile needs a linker; see .cargo/config.toml.example)"
 }
 
+if ($Target -eq "armv7-unknown-linux-gnueabihf") {
+    $Stage = Join-Path $Root "dist\armv7"
+    New-Item -ItemType Directory -Force -Path $Stage | Out-Null
+    Copy-Item $Bin (Join-Path $Stage "midi-engine") -Force
+    Write-Host "staged dist/armv7/midi-engine (commit dist/armv7 so SET->UPDATE can install it)"
+}
+
 ssh $PiHost "mkdir -p '$RemoteDir/bin' '$RemoteDir/presets'"
 scp $Bin "${PiHost}:$RemoteDir/bin/midi-engine"
 scp (Join-Path $Root "presets\example.json") "${PiHost}:$RemoteDir/presets/"

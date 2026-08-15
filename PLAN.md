@@ -466,7 +466,7 @@ flowchart TB
 2. **Test logic on the PC** without the Pi:
    - Pure Rust unit tests for remap, velocity tables, sequencer math, retrigger timing (fake clock).
    - Optional: run the engine on the PC with your USB MIDI devices (`midir` on Windows) to feel channel/CC/velocity; ALSA RT tuning is Linux-only, so this is functional, not final latency sign-off.
-3. **Push to the Pi over the network** — **cross-compile on the PC** strongly preferred on Pi 2 (`armv7-unknown-linux-gnueabihf`); on-device `cargo build` is painfully slow. `scp` the binary; restart `midi-engine` via SSH.
+3. **Push to the Pi over the network** — **cross-compile on the PC or cloud-agent VM** (`./deploy/build-pi-bins.sh`) and **commit `dist/armv7/`** so SET→UPDATE can install the engines. SSH `deploy/deploy.sh` still scps `bin/` for LAN deploys. On-device `cargo build` is painfully slow on Pi 2.
 4. **On-Pi checks** for what the PC can’t prove: ALSA port names, realtime scheduling, later touch UI / fullscreen.
 
 Optional comfort: **Cursor/VS Code Remote SSH** into the Pi so the editor runs against the device; still no imaging.
@@ -487,7 +487,7 @@ Not building this yet. Capture the ladder so we don’t overbuild or forget it w
 | Approach | When | Notes |
 |----------|------|-------|
 | **SSH push (now)** | 1 unit, home LAN | Keep. Highest leverage. |
-| **Kiosk SET → UPDATE (now)** | 1 unit, when online | Opt-in from HOME → SET: CHECK `master`, deploy the whole repo (kiosk + crates + presets), restart kiosk and engine units. Preserves user data. Needs a GitHub token because the repo is private. Does not cargo-build on the Pi. |
+| **Kiosk SET → UPDATE (now)** | 1 unit, when online | Opt-in from HOME → SET: CHECK `master`, deploy the whole repo (kiosk + crates + presets + committed `dist/armv7` engines into `bin/`), restart kiosk and engine units. Preserves user data. Needs a GitHub token because the repo is private. Does not cargo-build on the Pi — rebuild engines with `./deploy/build-pi-bins.sh` on the PC or cloud-agent VM **before commit**. |
 | **Multi-host deploy list** | 2+ units on LAN | Same script, host list / `.pi-credentials` variants. Small change. |
 | **Golden SD image** | Cloning a box for someone else | Flash once → boots kiosk. Best “gift a unit” path. Not the daily loop. |
 | **Pull-on-boot / timer from Releases** | Hands-off updates when online | Tag release → Pi checks version → download tarball → swap app dir → restart kiosk. Preserve user data. |

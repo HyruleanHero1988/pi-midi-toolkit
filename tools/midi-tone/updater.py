@@ -17,10 +17,13 @@ Two layouts are supported:
 
 Never touches user data: ``settings.json``, ``songs/``, ``phrases/``,
 ``user-presets/``, ``user-wavetables/``, ``.venv/``, credentials,
-``presets/active.json``, or existing ``bin/`` engine binaries.
+``presets/active.json``. Live ``bin/`` is not overlay-copied; after the
+tree is in place, committed ``dist/armv7/{midi-engine,jambox-engine}``
+are copied onto ``bin/`` (same paths systemd uses).
 
-Does **not** cargo-build on the Pi (Pi 2 is too slow). New Rust binaries
-still come from a host cross-compile / SSH deploy.
+Does **not** cargo-build on the Pi (Pi 2 is too slow). Rebuild those
+ELFs on a PC or cloud-agent VM with ``./deploy/build-pi-bins.sh`` and
+commit ``dist/armv7/`` before pushing.
 
 The GitHub repo is private, so CHECK/UPDATE need a token (or a git remote
 that already has credentials).
@@ -76,12 +79,14 @@ KEEP_KIOSK = frozenset(
     }
 )
 KEEP_NAMES = KEEP_KIOSK  # alias used by tests / kiosk-only overlay
+PI_ENGINE_BINS = ("midi-engine", "jambox-engine")
+STAGED_BIN_DIR = pathlib.Path("dist") / "armv7"
 KEEP_REPO = frozenset(
     {
         ".git",
         ".venv",
         "target",
-        "bin",  # SSH-deployed midi-engine / jambox-engine binaries
+        "bin",  # live engines; installed from dist/armv7 after overlay
         "takes",
         "presets/active.json",
         *(f"tools/midi-tone/{name}" for name in KEEP_KIOSK if name not in {".git", ".gitignore"}),
@@ -584,6 +589,38 @@ def _sync_kiosk_from_repo(
     overlay_tree(src, install, keep=KEEP_KIOSK)
 
 
+def install_pi_binaries(
+    repo_root: pathlib.Path,
+    progress: ProgressCb = _noop_progress,
+) -> List[str]:
+    """Copy committed ``dist/armv7`` engines onto live ``bin/``.
+
+    Overlay never writes ``bin/`` (KEEP_REPO) so a half-applied update
+    cannot clobber the running systemd paths with a host-arch file.
+    Missing staged files leave the existing binary in place — same as
+    SSH deploy when you only rebuilt one crate.
+    """
+    src_dir = repo_root / STAGED_BIN_DIR
+    dest_dir = repo_root / "bin"
+    if not src_dir.is_dir():
+        progress("No dist/armv7 engines in this build — leaving existing bin/.")
+        return []
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    installed: List[str] = []
+    for name in PI_ENGINE_BINS:
+        src = src_dir / name
+        if not src.is_file():
+            continue
+        dest = dest_dir / name
+        shutil.copy2(src, dest)
+        dest.chmod(dest.stat().st_mode | 0o111)
+        installed.append(name)
+        progress(f"Installed {name} → bin/")
+    if not installed:
+        progress("dist/armv7 has no engine binaries — leaving existing bin/.")
+    return installed
+
+
 def _ensure_active_preset(repo_root: pathlib.Path) -> None:
     presets = repo_root / "presets"
     active = presets / "active.json"
@@ -834,6 +871,7 @@ def apply_update(
     _chmod_scripts(dest_root / MIDI_TONE_REL)
     _pip_install(install, log)
     _ensure_active_preset(dest_root)
+    install_pi_binaries(dest_root, log)
     _restart_engines(log)
     write_version_file(install, remote)
     try:
@@ -879,7 +917,8 @@ def format_status_lines(check: Optional[UpdateCheck] = None, install: pathlib.Pa
     if not has_token and (check is None or check.error):
         lines.append("Private repo: add a GitHub token (TOKEN) if CHECK fails.")
     lines.append(
-        "Same as SSH deploy: phrases, songs, presets, and settings stay on this box."
+        "Same as SSH deploy: phrases, songs, presets, and settings stay on this box. "
+        "Pi engines come from committed dist/armv7 (not cargo-build on this box)."
     )
     return "\n".join(lines)
 
