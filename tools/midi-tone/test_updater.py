@@ -206,6 +206,9 @@ class OverlayTest(unittest.TestCase):
             (src / "presets" / "example.json").write_text("{}\n", encoding="utf-8")
             (src / "presets" / "active.json").write_text('{"wipe":true}\n', encoding="utf-8")
             (src / "deploy" / "midi-engine.service").write_text("[Unit]\n", encoding="utf-8")
+            (src / "dist" / "armv7").mkdir(parents=True)
+            (src / "dist" / "armv7" / "midi-engine").write_bytes(b"NEWELF")
+            (src / "dist" / "armv7" / "jambox-engine").write_bytes(b"NEWJAM")
 
             (dest / "tools" / "midi-tone").mkdir(parents=True)
             (dest / "presets").mkdir()
@@ -226,6 +229,8 @@ class OverlayTest(unittest.TestCase):
             self.assertIn("tools/midi-tone/midi_tone.py", written)
             self.assertIn("presets/example.json", written)
             self.assertIn("deploy/midi-engine.service", written)
+            self.assertIn("dist/armv7/midi-engine", written)
+            self.assertIn("dist/armv7/jambox-engine", written)
             self.assertNotIn("presets/active.json", written)
             self.assertNotIn("tools/midi-tone/settings.json", written)
             self.assertNotIn("tools/midi-tone/phrases/pad-01.json", written)
@@ -250,6 +255,16 @@ class OverlayTest(unittest.TestCase):
             )
             self.assertEqual((dest / "bin" / "midi-engine").read_bytes(), b"OLDELF")
             self.assertTrue((dest / "presets" / "example.json").is_file())
+            self.assertEqual((dest / "dist" / "armv7" / "midi-engine").read_bytes(), b"NEWELF")
+            self.assertEqual((dest / "dist" / "armv7" / "jambox-engine").read_bytes(), b"NEWJAM")
+
+            notes: list[str] = []
+            installed = updater.install_pi_binaries(dest, notes.append)
+            self.assertEqual(installed, ["midi-engine", "jambox-engine"])
+            self.assertEqual((dest / "bin" / "midi-engine").read_bytes(), b"NEWELF")
+            self.assertEqual((dest / "bin" / "jambox-engine").read_bytes(), b"NEWJAM")
+            self.assertTrue((dest / "bin" / "midi-engine").stat().st_mode & 0o111)
+            self.assertTrue(any("midi-engine" in n for n in notes))
 
     def test_finds_repo_root_in_github_layout(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -438,6 +453,8 @@ class ApplyUpdateTest(unittest.TestCase):
             ), mock.patch.object(
                 updater, "apply_from_archive", side_effect=fake_archive
             ), mock.patch.object(updater, "_pip_install"), mock.patch.object(
+                updater, "install_pi_binaries"
+            ), mock.patch.object(
                 updater, "_restart_engines"
             ):
                 info = updater.apply_update(install)
@@ -451,12 +468,39 @@ class ApplyUpdateTest(unittest.TestCase):
             self.assertEqual(stamped.sha, "fff9999aaaa")
 
 
+class InstallPiBinariesTest(unittest.TestCase):
+    def test_missing_dist_leaves_existing_bin(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            (root / "bin").mkdir()
+            (root / "bin" / "midi-engine").write_bytes(b"KEEP")
+            notes: list[str] = []
+            installed = updater.install_pi_binaries(root, notes.append)
+            self.assertEqual(installed, [])
+            self.assertEqual((root / "bin" / "midi-engine").read_bytes(), b"KEEP")
+            self.assertTrue(any("leaving existing" in n.lower() for n in notes))
+
+    def test_partial_stage_replaces_only_present_engines(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            (root / "bin").mkdir()
+            (root / "dist" / "armv7").mkdir(parents=True)
+            (root / "bin" / "midi-engine").write_bytes(b"OLD_MIDI")
+            (root / "bin" / "jambox-engine").write_bytes(b"OLD_JAM")
+            (root / "dist" / "armv7" / "midi-engine").write_bytes(b"NEW_MIDI")
+            installed = updater.install_pi_binaries(root)
+            self.assertEqual(installed, ["midi-engine"])
+            self.assertEqual((root / "bin" / "midi-engine").read_bytes(), b"NEW_MIDI")
+            self.assertEqual((root / "bin" / "jambox-engine").read_bytes(), b"OLD_JAM")
+
+
 class StatusTextTest(unittest.TestCase):
     def test_format_status_mentions_user_data(self) -> None:
         text = updater.format_status_lines(None, pathlib.Path("/tmp/does-not-exist-midi-tone"))
         self.assertIn("Running:", text)
         self.assertIn("phrases", text)
         self.assertIn("SSH deploy", text)
+        self.assertIn("dist/armv7", text)
 
 
 if __name__ == "__main__":

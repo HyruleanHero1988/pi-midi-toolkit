@@ -114,11 +114,25 @@ sudo bash deploy/setup-pi.sh
 
 ### From the PC (daily)
 
-Cross-compile is preferred for Pi 2. Easiest path is often [cross](https://github.com/cross-rs/cross) or a Linux/WSL linker — see [`.cargo/config.toml.example`](.cargo/config.toml.example).
+Cross-compile is preferred for Pi 2. **Standard procedure:** build the Pi
+ELFs on the PC (or a Cursor cloud-agent VM) *before* committing crate
+changes, so SET→UPDATE can install them:
 
 ```bash
-# Bash (Git Bash / WSL / Linux)
+./deploy/build-pi-bins.sh          # stages dist/armv7/{midi-engine,jambox-engine}
+git add dist/armv7 && git commit   # required for SET→UPDATE
+```
+
+SSH deploy still works the same way. Easiest linker path is often Debian/WSL
+`gcc-arm-linux-gnueabihf` (the script installs it when sudo is available) or
+[cross](https://github.com/cross-rs/cross) — see [`.cargo/config.toml.example`](.cargo/config.toml.example).
+
+```bash
+# Bash (Git Bash / WSL / Linux) — also stages dist/armv7 when TARGET is armv7
 TARGET=armv7-unknown-linux-gnueabihf ./deploy/deploy.sh pi@<pi-ip>
+
+# Or scp already-committed engines (no cargo):
+USE_STAGED=1 WITH_JAMBOX=1 ./deploy/deploy.sh pi@<pi-ip>
 
 # PowerShell
 .\deploy\deploy.ps1 -PiHost pi@<pi-ip> -Target armv7-unknown-linux-gnueabihf

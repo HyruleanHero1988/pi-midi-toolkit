@@ -17,8 +17,10 @@ Thumbs.db
 !/presets/mpk-mini-ch3.json
 /takes/
 
-# Deploy artifacts
-/dist/
+# Deploy scratch. Committed Pi engines live in dist/armv7/ (see deploy/build-pi-bins.sh).
+/dist/*
+!/dist/armv7/
+!/dist/armv7/**
 .cargo/config.toml
 
 # Python

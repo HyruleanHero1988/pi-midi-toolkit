@@ -6544,6 +6544,7 @@ class MidiToneApp:
                 "This deploys new code from GitHub, then restarts.\n"
                 "Phrases, songs, presets, and settings.json are not touched "
                 "(same as SSH deploy).\n"
+                "Rust engines come from committed dist/armv7 — not built on this Pi.\n"
                 "Tap INSTALL NOW to continue, or CANCEL."
             )
             self._paint_settings_buttons()
@@ -8932,6 +8933,7 @@ class MidiToneApp:
                             "This deploys new code from GitHub, then restarts.\n"
                             "Phrases, songs, presets, and settings.json are not touched "
                             "(same as SSH deploy).\n"
+                            "Rust engines come from committed dist/armv7 — not built on this Pi.\n"
                             "Tap INSTALL NOW to continue, or CANCEL."
                         )
                         self._paint_settings_buttons()
