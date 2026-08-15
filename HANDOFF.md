@@ -21,7 +21,7 @@ One kiosk UI. Soft-synth started as a Phase 0 hear-test; that framing is obsolet
 
 Modes today in `tools/midi-tone`:
 
-- **Synth / Seq / Pads / Songs / Presets / Log**
+- **Home / Synth / Seq / Pads / Songs / Presets / Log / Set**
 - **Map / Thru** — not in the kiosk yet; Rust `midi-engine` already does remap via CLI/JSON
 
 **Design law (jambox):** stay obvious under the hands. Winning vs gear you already own (picotracker, EP-class boxes) is *learning cost*, not feature count.
@@ -67,6 +67,8 @@ Still needs hardware / machine:
 ## Host setup
 
 Rust toolchain on PATH for engine work. midi-tone is Python venv on the Pi.
+
+When crates change, compile Pi binaries **before commit** (PC Linux/WSL or cloud-agent VM): `./deploy/build-pi-bins.sh` then `git add dist/armv7`. SET→UPDATE copies those files onto `bin/` on the box. Do not use Git LFS for them (archive downloads would get pointer files).
 
 ## Not related to play-my-synth
 

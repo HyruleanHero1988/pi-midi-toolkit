@@ -162,6 +162,8 @@ def grab(root, path: pathlib.Path) -> None:
 def close_overlays(app) -> None:
     if getattr(app, "_power_ui_open", False):
         app._close_power_menu(restore_main=True)
+    if getattr(app, "_token_ui_open", False):
+        app._close_update_token(restore_main=True)
     if app._grid_open:
         app._close_voice_grid(restore_main=True)
     if app._morph_ui_open:
@@ -219,7 +221,8 @@ def main() -> int:
         grab(root, OUT / f"{name}.png")
 
     try:
-        shot("01-synth")
+        shot("00-home", lambda: app._switch_mode("home"))
+        shot("01-synth", lambda: app._switch_mode("synth"))
         shot("02-seq", lambda: app._switch_mode("seq"))
         shot(
             "03-pads-edit",
@@ -267,6 +270,8 @@ def main() -> int:
         _pump(root, 0.25)
         if hasattr(app, "_open_save_voice"):
             shot("12-save-as", app._open_save_voice)
+        close_overlays(app)
+        shot("13-settings", lambda: app._switch_mode("settings"))
         close_overlays(app)
         app._switch_mode("synth")
     finally:

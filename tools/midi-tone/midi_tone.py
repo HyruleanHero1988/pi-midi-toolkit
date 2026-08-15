@@ -52,6 +52,7 @@ from sequencer import (  # noqa: E402  (local module, imported after the hard de
     OverdubSequencer,
     trim_loop_take,
 )
+import updater  # noqa: E402  (local module; SET screen software update)
 
 
 SAMPLE_RATE = 44100
@@ -98,6 +99,17 @@ MAX_PHRASE_PLAYERS = 8
 SETTINGS_VERSION = 1
 BUILTIN_VOICE_NAMES = ("sine", "square", "saw", "triangle")
 VOICE_NAME_MAX = 24
+UI_MODES = ("home", "synth", "seq", "pads", "songs", "presets", "log", "settings")
+JAM_NAV_MODES = ("synth", "seq", "pads")
+HOME_TILES = (
+    ("synth", "SYNTH", "soft-synth", "#458588"),
+    ("seq", "SEQ", "overdub", "#b16286"),
+    ("pads", "PADS", "phrases", "#d79921"),
+    ("songs", "SONGS", ".mid files", "#689d6a"),
+    ("presets", "PRESETS", "8 slots", "#83a598"),
+    ("log", "LOG", "history", "#504945"),
+    ("settings", "SET", "update", "#665c54"),
+)
 
 
 def list_song_files(directory: pathlib.Path = SONGS_DIR) -> List[pathlib.Path]:
@@ -3826,7 +3838,7 @@ class MidiToneApp:
         self._save_voice_keys_digits = False
         self._power_ui_open = False
         self._power_frame: Optional[tk.Frame] = None
-        self._mode = "synth"  # synth | seq | pads | songs | log | presets
+        self._mode = "synth"  # home | synth | seq | pads | songs | log | presets | settings
         self._mode_btns: Dict[str, tk.Button] = {}
         self._seq = OverdubSequencer(self.engine, self._q_put)
         self._phrases = PhrasePadBank(self.engine, self._q_put, PHRASES_DIR)
@@ -3886,6 +3898,17 @@ class MidiToneApp:
         self._song_down_btn: Optional[tk.Button] = None
         self._settings_dirty = False
         self._suppress_autosave = False
+        self._update_check: Optional[updater.UpdateCheck] = None
+        self._update_busy = False
+        self._update_confirming = False
+        self._settings_status_var = tk.StringVar(value=updater.format_status_lines())
+        self._settings_check_btn: Optional[tk.Button] = None
+        self._settings_update_btn: Optional[tk.Button] = None
+        self._token_ui_open = False
+        self._token_frame: Optional[tk.Frame] = None
+        self._token_entry: Optional[tk.Entry] = None
+        self._token_keys: Optional[tk.Frame] = None
+        self._token_keys_digits = False
 
         # Drop boot splash before packing real chrome
         splash = getattr(self, "_boot_splash", None)
@@ -3896,14 +3919,21 @@ class MidiToneApp:
                 pass
             self._boot_splash = None
 
-        # Persistent mode navigation (always visible)
+        # Persistent chrome: title, HOME, POWER. Jam modes keep SYNTH/SEQ/PADS
+        # on the right; every other screen is reached from HOME tiles.
         self._nav = tk.Frame(self.root, bg="#1d2021")
         self._nav.pack(side=tk.TOP, fill=tk.X, padx=0, pady=0)
         tk.Label(
             self._nav, text="midi-tone", font=("DejaVu Sans", 14, "bold"),
             fg="#fbf1c7", bg="#1d2021", padx=10, pady=8,
         ).pack(side=tk.LEFT)
-        # Always-available power control (kiosk has no desktop shutdown UI)
+        home_btn = self._mk_touch_btn(
+            self._nav, "HOME", lambda: self._switch_mode("home"), bg="#3c3836"
+        )
+        home_btn.configure(font=("DejaVu Sans", 10, "bold"), pady=8, padx=8)
+        home_btn.pack(side=tk.LEFT, padx=(0, 4))
+        self._mode_btns["home"] = home_btn
+        self._home_btn = home_btn
         power_btn = self._mk_touch_btn(
             self._nav, "POWER", self._open_power_menu, bg="#9d0006"
         )
@@ -3911,19 +3941,17 @@ class MidiToneApp:
         power_btn.pack(side=tk.LEFT, padx=(0, 4))
         nav_modes = tk.Frame(self._nav, bg="#1d2021")
         nav_modes.pack(side=tk.RIGHT, padx=4, pady=4)
+        self._jam_btns: Dict[str, tk.Button] = {}
         for key, label in (
             ("synth", "SYNTH"),
             ("seq", "SEQ"),
             ("pads", "PADS"),
-            ("songs", "SONGS"),
-            ("presets", "PRESETS"),
-            ("log", "LOG"),
         ):
             btn = self._mk_touch_btn(
                 nav_modes, label, lambda m=key: self._switch_mode(m), bg="#3c3836"
             )
-            btn.configure(font=("DejaVu Sans", 10, "bold"), pady=8, padx=4)
-            btn.pack(side=tk.LEFT, padx=1)
+            btn.configure(font=("DejaVu Sans", 10, "bold"), pady=8, padx=8)
+            self._jam_btns[key] = btn
             self._mode_btns[key] = btn
 
         # Mode content host
@@ -3937,6 +3965,8 @@ class MidiToneApp:
         self._songs_shell = tk.Frame(self._mode_host, bg="#111111")
         self._presets_shell = tk.Frame(self._mode_host, bg="#111111")
         self._log_shell = tk.Frame(self._mode_host, bg="#111111")
+        self._settings_shell = tk.Frame(self._mode_host, bg="#111111")
+        self._home_shell = tk.Frame(self._mode_host, bg="#111111")
 
         # Bottom touch bar packed first so it never gets crushed / lost
         self._touch = tk.Frame(self._synth_shell, bg="#111111")
@@ -4078,6 +4108,8 @@ class MidiToneApp:
         self._build_songs_mode()
         self._build_presets_mode()
         self._build_log_mode()
+        self._build_settings_mode()
+        self._build_home_mode()
         self._switch_mode("synth")
 
         # Restore last session (full vel, morph pair, knob-shaped tone, etc.)
@@ -4104,7 +4136,7 @@ class MidiToneApp:
             "Pads = analog drum voices. After a pad (or DRUM LOCK): knobs → "
             "pitch / stretch / noise / drum-tone / — / — / — / level"
         )
-        self._append_log("Modes: SYNTH / SEQ / PADS / SONGS / PRESETS / LOG (top right).")
+        self._append_log("HOME opens every mode. Jam cluster: SYNTH / SEQ / PADS stay in the top bar.")
         if seeded:
             self._append_log(
                 f"Added {seeded} demo song(s) from demo-songs/ (offline classical pack)."
@@ -4171,6 +4203,7 @@ class MidiToneApp:
             or self._morph_ui_open
             or self._kit_ui_open
             or self._save_voice_open
+            or self._token_ui_open
         )
 
     def _session_dict(self) -> Dict[str, Any]:
@@ -5276,6 +5309,393 @@ class MidiToneApp:
             side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=16
         )
 
+    def _build_home_mode(self) -> None:
+        shell = self._home_shell
+        for w in shell.winfo_children():
+            w.destroy()
+
+        header = tk.Frame(shell, bg="#111111")
+        header.pack(fill=tk.X, padx=8, pady=(10, 4))
+        tk.Label(
+            header, text="Home", font=("DejaVu Sans", 18, "bold"),
+            fg="#fbf1c7", bg="#111111",
+        ).pack(side=tk.LEFT)
+        tk.Label(
+            header, text="tap a mode",
+            font=("DejaVu Sans", 11), fg="#a89984", bg="#111111",
+        ).pack(side=tk.RIGHT)
+
+        body = tk.Frame(shell, bg="#111111")
+        body.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+        rows = (HOME_TILES[:4], HOME_TILES[4:])
+        for spec in rows:
+            row = tk.Frame(body, bg="#111111")
+            row.pack(fill=tk.BOTH, expand=True, pady=4)
+            for key, title, subtitle, color in spec:
+                btn = self._mk_touch_btn(
+                    row,
+                    f"{title}\n{subtitle}",
+                    lambda m=key: self._switch_mode(m),
+                    bg=color,
+                )
+                btn.configure(font=("DejaVu Sans", 18, "bold"), pady=22, justify=tk.CENTER)
+                btn.pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=4)
+
+    def _build_settings_mode(self) -> None:
+        shell = self._settings_shell
+        for w in shell.winfo_children():
+            w.destroy()
+
+        header, body, footer = self._pack_screen_regions(
+            shell,
+            header_padx=8,
+            header_pady=(10, 4),
+            body_padx=10,
+            body_pady=4,
+            footer_padx=8,
+            footer_pady=8,
+        )
+        tk.Label(
+            header, text="Settings", font=("DejaVu Sans", 18, "bold"),
+            fg="#fbf1c7", bg="#111111",
+        ).pack(side=tk.LEFT)
+        tk.Label(
+            header, text="software update",
+            font=("DejaVu Sans", 11), fg="#a89984", bg="#111111",
+        ).pack(side=tk.RIGHT)
+
+        tk.Label(
+            body,
+            textvariable=self._settings_status_var,
+            font=("DejaVu Sans", 13, "bold"),
+            fg="#fabd2f", bg="#111111",
+            wraplength=760, justify=tk.LEFT, anchor="nw",
+        ).pack(fill=tk.BOTH, expand=True, pady=(4, 8))
+
+        tk.Label(
+            body,
+            text=(
+                "CHECK looks at GitHub master. UPDATE deploys new code like SSH, "
+                "then restarts. Phrases, songs, presets, and settings.json stay "
+                "on this box. Rust binaries are not rebuilt on the Pi."
+            ),
+            font=("DejaVu Sans", 11),
+            fg="#a89984",
+            bg="#111111",
+            wraplength=760,
+            justify=tk.LEFT,
+            anchor="w",
+        ).pack(fill=tk.X, pady=(0, 4))
+
+        row = tk.Frame(footer, bg="#111111")
+        row.pack(fill=tk.X, pady=(0, 6))
+        self._settings_check_btn = self._mk_touch_btn(
+            row, "CHECK", self._settings_check, bg="#458588"
+        )
+        self._settings_check_btn.pack(
+            side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=14
+        )
+        self._settings_update_btn = self._mk_touch_btn(
+            row, "UPDATE", self._settings_update, bg="#689d6a"
+        )
+        self._settings_update_btn.pack(
+            side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=14
+        )
+        self._mk_touch_btn(footer, "TOKEN", self._open_update_token, bg="#504945").pack(
+            fill=tk.X, ipady=10
+        )
+        self._paint_settings_buttons()
+
+    def _paint_settings_buttons(self) -> None:
+        check_btn = self._settings_check_btn
+        update_btn = self._settings_update_btn
+        if check_btn is None or update_btn is None:
+            return
+        if self._update_busy:
+            check_btn.configure(text="WORKING…", bg="#3c3836", activebackground="#3c3836")
+            update_btn.configure(text="WORKING…", bg="#3c3836", activebackground="#3c3836")
+            return
+        check_btn.configure(text="CHECK", bg="#458588", activebackground="#458588")
+        if self._update_confirming:
+            update_btn.configure(
+                text="INSTALL NOW", bg="#9d0006", activebackground="#9d0006"
+            )
+            check_btn.configure(text="CANCEL", bg="#504945", activebackground="#504945")
+            return
+        available = bool(self._update_check and self._update_check.available)
+        color = "#689d6a" if available or self._update_check is None else "#3c3836"
+        update_btn.configure(text="UPDATE", bg=color, activebackground=color)
+
+    def _refresh_settings_status(self) -> None:
+        self._settings_status_var.set(
+            updater.format_status_lines(self._update_check)
+        )
+        self._paint_settings_buttons()
+
+    def _settings_check(self) -> None:
+        if self._token_ui_open:
+            return
+        if self._update_confirming:
+            self._update_confirming = False
+            self._refresh_settings_status()
+            return
+        if self._update_busy:
+            return
+        self._update_busy = True
+        self._settings_status_var.set("Checking GitHub for the latest master…")
+        self._paint_settings_buttons()
+        threading.Thread(target=self._settings_check_worker, daemon=True).start()
+
+    def _settings_check_worker(self) -> None:
+        try:
+            result = updater.check_for_update()
+            self._q_put(("update", result, None))
+        except Exception as exc:
+            self._q_put(("update", None, str(exc)))
+
+    def _settings_update(self) -> None:
+        if self._token_ui_open or self._update_busy:
+            return
+        if not self._update_confirming:
+            # CHECK first if we have not looked yet, then ask for a second tap.
+            if self._update_check is None:
+                self._settings_status_var.set("Checking before install…")
+                self._update_busy = True
+                self._paint_settings_buttons()
+
+                def _check_then_confirm() -> None:
+                    try:
+                        result = updater.check_for_update()
+                        self._q_put(("update", result, "confirm" if result.available else None))
+                    except Exception as exc:
+                        self._q_put(("update", None, str(exc)))
+
+                threading.Thread(target=_check_then_confirm, daemon=True).start()
+                return
+            if self._update_check.error:
+                self._settings_status_var.set(self._update_check.error)
+                return
+            if not self._update_check.available:
+                self._settings_status_var.set(self._update_check.message or "Already on latest.")
+                return
+            self._update_confirming = True
+            self._settings_status_var.set(
+                "This deploys new code from GitHub, then restarts.\n"
+                "Phrases, songs, presets, and settings.json are not touched "
+                "(same as SSH deploy).\n"
+                "Rust engines come from committed dist/armv7 — not built on this Pi.\n"
+                "Tap INSTALL NOW to continue, or CANCEL."
+            )
+            self._paint_settings_buttons()
+            return
+        self._update_confirming = False
+        self._update_busy = True
+        self._settings_status_var.set("Installing update…")
+        self._paint_settings_buttons()
+        threading.Thread(target=self._settings_apply_worker, daemon=True).start()
+
+    def _settings_apply_worker(self) -> None:
+        expected = ""
+        if self._update_check and self._update_check.remote.sha:
+            expected = self._update_check.remote.sha
+
+        def progress(msg: str) -> None:
+            self._q_put(("update_progress", msg))
+
+        try:
+            info = updater.apply_update(progress=progress, expected_sha=expected)
+            self._q_put(("update_done", info, None))
+        except Exception as exc:
+            self._q_put(("update_done", None, str(exc)))
+
+    def _restart_after_update(self) -> None:
+        """Stop audio, keep the singleton lock, exec the new midi_tone.py."""
+        self._append_log("Update installed — restarting…")
+        try:
+            self._panic()
+        except Exception:
+            pass
+        try:
+            self._seq.stop()
+        except Exception:
+            pass
+        try:
+            self._phrases.stop_all()
+        except Exception:
+            pass
+        try:
+            self._songs.stop()
+            self._songs.close_outport()
+        except Exception:
+            pass
+        try:
+            self._save_settings_file(SETTINGS_PATH, quiet=True)
+        except Exception:
+            pass
+        if self._inport is not None:
+            try:
+                self._inport.close()
+            except Exception:
+                pass
+        try:
+            self.engine.stop()
+        except Exception:
+            pass
+        try:
+            self.root.update_idletasks()
+        except Exception:
+            pass
+        try:
+            self.root.destroy()
+        except Exception:
+            pass
+        try:
+            updater.restart_current_process()
+        except Exception as exc:
+            print(f"re-exec failed ({exc}); exiting for kiosk restart", flush=True)
+            sys.exit(0)
+
+    def _open_update_token(self) -> None:
+        if self._token_ui_open or self._update_busy:
+            return
+        if self._mode != "settings":
+            self._switch_mode("settings")
+        self._token_ui_open = True
+        self._token_keys_digits = False
+        self._settings_shell.pack_forget()
+        self._token_frame = tk.Frame(self._mode_host, bg="#111111")
+        self._token_frame.pack(fill=tk.BOTH, expand=True)
+        header, body, footer = self._pack_screen_regions(
+            self._token_frame,
+            header_padx=8,
+            header_pady=(8, 2),
+            body_padx=8,
+            body_pady=4,
+            footer_padx=8,
+            footer_pady=8,
+        )
+        tk.Label(
+            header,
+            text="GITHUB TOKEN",
+            font=("DejaVu Sans", 16, "bold"),
+            fg="#fbf1c7",
+            bg="#111111",
+        ).pack(side=tk.LEFT)
+        tk.Label(
+            header,
+            text="private repo access",
+            font=("DejaVu Sans", 11),
+            fg="#a89984",
+            bg="#111111",
+        ).pack(side=tk.RIGHT)
+        tk.Label(
+            body,
+            text="Fine-grained PAT with Contents: Read on this repo. Stored only on this box.",
+            font=("DejaVu Sans", 11),
+            fg="#a89984",
+            bg="#111111",
+            wraplength=760,
+            justify=tk.LEFT,
+            anchor="w",
+        ).pack(fill=tk.X, pady=(0, 4))
+        self._token_entry = tk.Entry(
+            body,
+            font=("DejaVu Sans Mono", 16),
+            bg="#1d2021",
+            fg="#fbf1c7",
+            insertbackground="#fbf1c7",
+            relief=tk.FLAT,
+            show="•",
+        )
+        self._token_entry.pack(fill=tk.X, ipady=10, pady=(0, 6))
+        self._token_entry.focus_set()
+        self._token_keys = tk.Frame(body, bg="#111111")
+        self._token_keys.pack(fill=tk.BOTH, expand=True)
+        self._paint_token_keyboard()
+        self._mk_touch_btn(footer, "SAVE", self._save_update_token, bg="#689d6a").pack(
+            side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=10
+        )
+        self._mk_touch_btn(footer, "CANCEL", self._close_update_token, bg="#9d0006").pack(
+            side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=10
+        )
+
+    def _paint_token_keyboard(self) -> None:
+        keys = self._token_keys
+        if keys is None:
+            return
+        for w in keys.winfo_children():
+            w.destroy()
+        if self._token_keys_digits:
+            rows = ("1234567890", "-_./")
+            toggle_label = "ABC"
+        else:
+            rows = ("qwertyuiop", "asdfghjkl", "zxcvbnm")
+            toggle_label = "123"
+        for row in rows:
+            fr = tk.Frame(keys, bg="#111111")
+            fr.pack(fill=tk.BOTH, expand=True, pady=1)
+            for ch in row:
+                self._mk_touch_btn(
+                    fr,
+                    ch.upper() if ch.isalpha() else ch,
+                    lambda c=ch: self._token_type(c),
+                    bg="#3c3836",
+                ).pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=1, ipady=4)
+        fr = tk.Frame(keys, bg="#111111")
+        fr.pack(fill=tk.BOTH, expand=True, pady=1)
+        self._mk_touch_btn(fr, toggle_label, self._toggle_token_keys, bg="#504945").pack(
+            side=tk.LEFT, expand=True, fill=tk.BOTH, padx=1, ipady=4
+        )
+        self._mk_touch_btn(fr, "⌫", lambda: self._token_type("\b"), bg="#504945").pack(
+            side=tk.LEFT, expand=True, fill=tk.BOTH, padx=1, ipady=4
+        )
+
+    def _toggle_token_keys(self) -> None:
+        self._token_keys_digits = not self._token_keys_digits
+        self._paint_token_keyboard()
+
+    def _token_type(self, ch: str) -> None:
+        entry = self._token_entry
+        if entry is None:
+            return
+        if ch == "\b":
+            cur = entry.get()
+            entry.delete(0, tk.END)
+            entry.insert(0, cur[:-1])
+        else:
+            entry.insert(tk.END, ch)
+
+    def _save_update_token(self) -> None:
+        entry = self._token_entry
+        token = (entry.get() if entry is not None else "").strip()
+        if not token:
+            self._settings_status_var.set("Token was empty — cancelled.")
+            self._close_update_token()
+            return
+        try:
+            updater.save_token(token)
+        except Exception as exc:
+            self._settings_status_var.set(f"Could not save token: {exc}")
+            self._close_update_token()
+            return
+        self._close_update_token()
+        self._append_log("GitHub token saved for SET → UPDATE")
+        self._settings_status_var.set("Token saved. Tap CHECK to look at GitHub.")
+        self._update_check = None
+        self._paint_settings_buttons()
+
+    def _close_update_token(self, restore_main: bool = True) -> None:
+        if not self._token_ui_open:
+            return
+        if self._token_frame is not None:
+            self._token_frame.destroy()
+            self._token_frame = None
+        self._token_entry = None
+        self._token_keys = None
+        self._token_ui_open = False
+        if restore_main:
+            self._switch_mode("settings")
+
     def _build_seq_mode(self) -> None:
         shell = self._seq_shell
         for w in shell.winfo_children():
@@ -5797,7 +6217,7 @@ class MidiToneApp:
             )
 
     def _switch_mode(self, mode: str) -> None:
-        mode = mode if mode in ("synth", "seq", "pads", "songs", "log", "presets") else "synth"
+        mode = mode if mode in UI_MODES else "synth"
         # Close synth-only overlays before swapping shells
         if self._grid_open:
             self._close_voice_grid(restore_main=False)
@@ -5807,6 +6227,8 @@ class MidiToneApp:
             self._close_kit_explorer(restore_main=False)
         if self._save_voice_open:
             self._close_save_voice(restore_main=False)
+        if self._token_ui_open:
+            self._close_update_token(restore_main=False)
 
         # Leaving pads while recording: keep the take
         if self._mode == "pads" and mode != "pads":
@@ -5816,12 +6238,14 @@ class MidiToneApp:
             self._phrase_mode_armed = False
 
         self._mode = mode
+        self._home_shell.pack_forget()
         self._synth_shell.pack_forget()
         self._seq_shell.pack_forget()
         self._pads_shell.pack_forget()
         self._songs_shell.pack_forget()
         self._presets_shell.pack_forget()
         self._log_shell.pack_forget()
+        self._settings_shell.pack_forget()
         if self._grid_frame is not None:
             self._grid_frame.pack_forget()
         if self._morph_frame is not None:
@@ -5829,7 +6253,9 @@ class MidiToneApp:
         if self._kit_frame is not None:
             self._kit_frame.pack_forget()
 
-        if mode == "seq":
+        if mode == "home":
+            self._home_shell.pack(fill=tk.BOTH, expand=True)
+        elif mode == "seq":
             self._seq_shell.pack(fill=tk.BOTH, expand=True)
             self._refresh_seq_status()
         elif mode == "pads":
@@ -5849,6 +6275,9 @@ class MidiToneApp:
                 self.log.see(tk.END)
             except Exception:
                 pass
+        elif mode == "settings":
+            self._settings_shell.pack(fill=tk.BOTH, expand=True)
+            self._refresh_settings_status()
         else:
             self._synth_shell.pack(fill=tk.BOTH, expand=True)
             # Ensure synth children are packed (overlays may have forgotten them)
@@ -5864,10 +6293,20 @@ class MidiToneApp:
         self._paint_mode_btns()
 
     def _paint_mode_btns(self) -> None:
-        for key, btn in self._mode_btns.items():
-            on = key == self._mode
+        jam = self._mode in JAM_NAV_MODES
+        for key, btn in self._jam_btns.items():
+            if jam:
+                if not btn.winfo_ismapped():
+                    btn.pack(side=tk.LEFT, padx=1)
+            else:
+                btn.pack_forget()
+            on = jam and key == self._mode
             color = "#458588" if on else "#3c3836"
             btn.configure(bg=color, activebackground=color)
+        home = self._mode_btns.get("home")
+        if home is not None:
+            color = "#458588" if self._mode == "home" else "#3c3836"
+            home.configure(bg=color, activebackground=color)
 
     def _refresh_seq_status(self) -> None:
         self._seq_status_var.set(self._seq.status_line())
@@ -7233,6 +7672,45 @@ class MidiToneApp:
                     self._refresh_phrase_status()
                 elif kind == "song":
                     self._refresh_song_status()
+                elif kind == "update":
+                    self._update_busy = False
+                    result = item[1]
+                    extra = item[2]
+                    if result is not None:
+                        self._update_check = result
+                    if extra == "confirm" and result is not None and result.available:
+                        self._update_confirming = True
+                        self._settings_status_var.set(
+                            "This deploys new code from GitHub, then restarts.\n"
+                            "Phrases, songs, presets, and settings.json are not touched "
+                            "(same as SSH deploy).\n"
+                            "Rust engines come from committed dist/armv7 — not built on this Pi.\n"
+                            "Tap INSTALL NOW to continue, or CANCEL."
+                        )
+                        self._paint_settings_buttons()
+                    elif extra and extra != "confirm":
+                        self._settings_status_var.set(str(extra))
+                        self._paint_settings_buttons()
+                    else:
+                        self._refresh_settings_status()
+                    if result is not None and result.message:
+                        self._append_log(result.message)
+                elif kind == "update_progress":
+                    self._settings_status_var.set(str(item[1]))
+                    self.last_var.set(str(item[1]))
+                elif kind == "update_done":
+                    self._update_busy = False
+                    info, err = item[1], item[2]
+                    if err:
+                        self._update_confirming = False
+                        self._settings_status_var.set(f"Update failed: {err}")
+                        self._paint_settings_buttons()
+                        self._append_log(f"Update failed: {err}")
+                    else:
+                        short = getattr(info, "short", "latest")
+                        self._settings_status_var.set(f"Installed {short} — restarting…")
+                        self._append_log(f"Update installed {short}")
+                        self.root.after(250, self._restart_after_update)
                 elif kind == "kit_sel":
                     self._select_kit_note(int(item[1]), audition=False)
         except queue.Empty:
@@ -7356,6 +7834,8 @@ class MidiToneApp:
             self._close_kit_explorer(restore_main=False)
         if self._save_voice_open:
             self._close_save_voice(restore_main=False)
+        if self._token_ui_open:
+            self._close_update_token(restore_main=False)
 
         self._power_ui_open = True
         prev = self._mode
@@ -7366,6 +7846,8 @@ class MidiToneApp:
             self._songs_shell,
             self._presets_shell,
             self._log_shell,
+            self._settings_shell,
+            self._home_shell,
         ):
             try:
                 shell.pack_forget()
@@ -7442,7 +7924,7 @@ class MidiToneApp:
             self._power_frame = None
         self._power_ui_open = False
         if restore_main:
-            self._switch_mode(prev if prev in ("synth", "seq", "pads", "songs", "log", "presets") else "synth")
+            self._switch_mode(prev if prev in UI_MODES else "synth")
 
     def _pi_power(self, action: str) -> None:
         """Run systemctl poweroff/reboot (passwordless via install-kiosk sudoers)."""

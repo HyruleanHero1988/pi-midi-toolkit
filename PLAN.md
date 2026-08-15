@@ -80,6 +80,7 @@ Power on → Openbox kiosk → modes. The soft-synth path started as a Phase 0 h
 
 | Mode (UI) | Pillar | Job |
 |-----------|--------|-----|
+| **Home** | Both | Tile launcher for every mode (top-bar HOME); jam shortcuts stay SYNTH/SEQ/PADS |
 | **Synth** | Jambox | Wavetable morph synth + drum kit + scopes |
 | **Seq** | Jambox | Free-timing backbone loop + 808-style overdub layers (drums and keys) |
 | **Phrases / Pads** | Jambox (+ MIDI out) | 16 clip-launch cells; touch **and** MPK pads |
@@ -87,6 +88,7 @@ Power on → Openbox kiosk → modes. The soft-synth path started as a Phase 0 h
 | **Presets** | Jambox | Synth slots + session autosave |
 | **Map / Thru** | Remap | Channel / CC / velocity remap; ports; learn → Rust engine |
 | **Log** | Both | Event history / commissioning |
+| **Set** | Both | Opt-in GitHub update (CHECK `master` / UPDATE & restart) |
 
 Boot path: `install-kiosk.sh` enables X11 + Desktop Autologin + **MIDI Tone Kiosk**
 session (Openbox + fullscreen app). No normal Pi desktop shell. Undo with `disable-kiosk.sh`.
@@ -464,7 +466,7 @@ flowchart TB
 2. **Test logic on the PC** without the Pi:
    - Pure Rust unit tests for remap, velocity tables, sequencer math, retrigger timing (fake clock).
    - Optional: run the engine on the PC with your USB MIDI devices (`midir` on Windows) to feel channel/CC/velocity; ALSA RT tuning is Linux-only, so this is functional, not final latency sign-off.
-3. **Push to the Pi over the network** — **cross-compile on the PC** strongly preferred on Pi 2 (`armv7-unknown-linux-gnueabihf`); on-device `cargo build` is painfully slow. `scp` the binary; restart `midi-engine` via SSH.
+3. **Push to the Pi over the network** — **cross-compile on the PC or cloud-agent VM** (`./deploy/build-pi-bins.sh`) and **commit `dist/armv7/`** so SET→UPDATE can install the engines. SSH `deploy/deploy.sh` still scps `bin/` for LAN deploys. On-device `cargo build` is painfully slow on Pi 2.
 4. **On-Pi checks** for what the PC can’t prove: ALSA port names, realtime scheduling, later touch UI / fullscreen.
 
 Optional comfort: **Cursor/VS Code Remote SSH** into the Pi so the editor runs against the device; still no imaging.
@@ -485,6 +487,7 @@ Not building this yet. Capture the ladder so we don’t overbuild or forget it w
 | Approach | When | Notes |
 |----------|------|-------|
 | **SSH push (now)** | 1 unit, home LAN | Keep. Highest leverage. |
+| **Kiosk SET → UPDATE (now)** | 1 unit, when online | Opt-in from HOME → SET: CHECK `master`, deploy the whole repo (kiosk + crates + presets + committed `dist/armv7` engines into `bin/`), restart kiosk and engine units. Preserves user data. Needs a GitHub token because the repo is private. Does not cargo-build on the Pi — rebuild engines with `./deploy/build-pi-bins.sh` on the PC or cloud-agent VM **before commit**. |
 | **Multi-host deploy list** | 2+ units on LAN | Same script, host list / `.pi-credentials` variants. Small change. |
 | **Golden SD image** | Cloning a box for someone else | Flash once → boots kiosk. Best “gift a unit” path. Not the daily loop. |
 | **Pull-on-boot / timer from Releases** | Hands-off updates when online | Tag release → Pi checks version → download tarball → swap app dir → restart kiosk. Preserve user data. |
@@ -496,7 +499,7 @@ Not building this yet. Capture the ladder so we don’t overbuild or forget it w
 - Optional version stamp in the UI so you know what’s running
 - Updates are opt-in / occasional; offline play stays first-class
 
-**High-leverage slice later (still small):** host list in deploy + a version file + “update from release” script that won’t touch user data. Full fleet OTA waits until there are more than two units.
+**High-leverage slice (shipped):** SET mode in the kiosk checks GitHub `master`, overlays the midi-tone tree without touching user data, and restarts. Host-list deploy + tagged Releases OTA can still wait until there is more than one unit. Full fleet OTA waits until there are more than two units.
 
 ## OS / hardware
 
