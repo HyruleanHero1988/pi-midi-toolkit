@@ -110,6 +110,17 @@ SETTINGS_VERSION = 2
 BUILTIN_VOICE_NAMES = ("sine", "square", "saw", "triangle")
 VOICE_NAME_MAX = 24
 TOUCH_SCROLL_THRESH_PX = 10  # press→drag before a grid tap counts as scroll (capacitive)
+UI_MODES = ("home", "synth", "seq", "pads", "songs", "presets", "log", "settings")
+JAM_NAV_MODES = ("synth", "seq", "pads")
+HOME_TILES = (
+    ("synth", "SYNTH", "soft-synth", "#458588"),
+    ("seq", "SEQ", "overdub", "#b16286"),
+    ("pads", "PADS", "phrases", "#d79921"),
+    ("songs", "SONGS", ".mid files", "#689d6a"),
+    ("presets", "PRESETS", "8 slots", "#83a598"),
+    ("log", "LOG", "history", "#504945"),
+    ("settings", "SET", "update", "#665c54"),
+)
 
 
 def list_song_files(directory: pathlib.Path = SONGS_DIR) -> List[pathlib.Path]:
@@ -4102,7 +4113,7 @@ class MidiToneApp:
         self._save_voice_keys_digits = False
         self._power_ui_open = False
         self._power_frame: Optional[tk.Frame] = None
-        self._mode = "synth"  # synth | seq | pads | songs | log | presets | settings
+        self._mode = "synth"  # home | synth | seq | pads | songs | log | presets | settings
         self._mode_btns: Dict[str, tk.Button] = {}
         self._seq = OverdubSequencer(self.engine, self._q_put)
         self._phrases = PhrasePadBank(self.engine, self._q_put, PHRASES_DIR)
@@ -4191,14 +4202,21 @@ class MidiToneApp:
             except Exception:
                 pass
 
-        # Persistent mode navigation (always visible)
+        # Persistent chrome: title, HOME, POWER. Jam modes keep SYNTH/SEQ/PADS
+        # on the right; every other screen is reached from HOME tiles.
         self._nav = tk.Frame(self.root, bg="#1d2021")
         self._nav.pack(side=tk.TOP, fill=tk.X, padx=0, pady=0)
         tk.Label(
             self._nav, text="PiDI", font=("DejaVu Sans", 14, "bold"),
             fg="#00d4ff", bg="#1d2021", padx=10, pady=8,
         ).pack(side=tk.LEFT)
-        # Always-available power control (kiosk has no desktop shutdown UI)
+        home_btn = self._mk_touch_btn(
+            self._nav, "HOME", lambda: self._switch_mode("home"), bg="#3c3836"
+        )
+        home_btn.configure(font=("DejaVu Sans", 10, "bold"), pady=8, padx=8)
+        home_btn.pack(side=tk.LEFT, padx=(0, 4))
+        self._mode_btns["home"] = home_btn
+        self._home_btn = home_btn
         power_btn = self._mk_touch_btn(
             self._nav, "POWER", self._open_power_menu, bg="#9d0006"
         )
@@ -4206,20 +4224,17 @@ class MidiToneApp:
         power_btn.pack(side=tk.LEFT, padx=(0, 4))
         nav_modes = tk.Frame(self._nav, bg="#1d2021")
         nav_modes.pack(side=tk.RIGHT, padx=4, pady=4)
+        self._jam_btns: Dict[str, tk.Button] = {}
         for key, label in (
             ("synth", "SYNTH"),
             ("seq", "SEQ"),
             ("pads", "PADS"),
-            ("songs", "SONGS"),
-            ("presets", "PRESETS"),
-            ("log", "LOG"),
-            ("settings", "SET"),
         ):
             btn = self._mk_touch_btn(
                 nav_modes, label, lambda m=key: self._switch_mode(m), bg="#3c3836"
             )
-            btn.configure(font=("DejaVu Sans", 10, "bold"), pady=8, padx=3)
-            btn.pack(side=tk.LEFT, padx=1)
+            btn.configure(font=("DejaVu Sans", 10, "bold"), pady=8, padx=8)
+            self._jam_btns[key] = btn
             self._mode_btns[key] = btn
 
         # Mode content host
@@ -4234,6 +4249,7 @@ class MidiToneApp:
         self._presets_shell = tk.Frame(self._mode_host, bg="#111111")
         self._log_shell = tk.Frame(self._mode_host, bg="#111111")
         self._settings_shell = tk.Frame(self._mode_host, bg="#111111")
+        self._home_shell = tk.Frame(self._mode_host, bg="#111111")
 
         # Bottom touch bar packed first so it never gets crushed / lost
         self._touch = tk.Frame(self._synth_shell, bg="#111111")
@@ -4374,6 +4390,7 @@ class MidiToneApp:
         self._build_presets_mode()
         self._build_log_mode()
         self._build_settings_mode()
+        self._build_home_mode()
         self._switch_mode("synth")
 
         # Restore last session (full vel, morph, seq, phrases, UI mode, …)
@@ -4389,7 +4406,7 @@ class MidiToneApp:
             "Pads = analog drum voices. After a pad (or DRUM LOCK): knobs → "
             "pitch / stretch / noise / drum-tone / — / — / — / drum lvl"
         )
-        self._append_log("Modes: SYNTH / SEQ / PADS / SONGS / PRESETS / LOG / SET (top right).")
+        self._append_log("HOME opens every mode. Jam cluster: SYNTH / SEQ / PADS stay in the top bar.")
         if seeded:
             self._append_log(
                 f"Added {seeded} demo song(s) from demo-songs/ (offline classical pack)."
@@ -6355,6 +6372,38 @@ class MidiToneApp:
             side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=16
         )
 
+    def _build_home_mode(self) -> None:
+        shell = self._home_shell
+        for w in shell.winfo_children():
+            w.destroy()
+
+        header = tk.Frame(shell, bg="#111111")
+        header.pack(fill=tk.X, padx=8, pady=(10, 4))
+        tk.Label(
+            header, text="Home", font=("DejaVu Sans", 18, "bold"),
+            fg="#fbf1c7", bg="#111111",
+        ).pack(side=tk.LEFT)
+        tk.Label(
+            header, text="tap a mode",
+            font=("DejaVu Sans", 11), fg="#a89984", bg="#111111",
+        ).pack(side=tk.RIGHT)
+
+        body = tk.Frame(shell, bg="#111111")
+        body.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+        rows = (HOME_TILES[:4], HOME_TILES[4:])
+        for spec in rows:
+            row = tk.Frame(body, bg="#111111")
+            row.pack(fill=tk.BOTH, expand=True, pady=4)
+            for key, title, subtitle, color in spec:
+                btn = self._mk_touch_btn(
+                    row,
+                    f"{title}\n{subtitle}",
+                    lambda m=key: self._switch_mode(m),
+                    bg=color,
+                )
+                btn.configure(font=("DejaVu Sans", 18, "bold"), pady=22, justify=tk.CENTER)
+                btn.pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=4)
+
     def _build_settings_mode(self) -> None:
         shell = self._settings_shell
         for w in shell.winfo_children():
@@ -6389,9 +6438,9 @@ class MidiToneApp:
         tk.Label(
             body,
             text=(
-                "CHECK looks at the repo’s default branch (master). "
-                "UPDATE downloads it, installs the kiosk, and restarts. "
-                "Offline play is unchanged until you tap UPDATE."
+                "CHECK looks at GitHub master. UPDATE deploys the whole repo "
+                "(kiosk, crates, presets) like SSH, then restarts. "
+                "Songs, phrases, and settings.json stay. Rust binaries are not rebuilt on the Pi."
             ),
             font=("DejaVu Sans", 11),
             fg="#a89984",
@@ -6494,7 +6543,7 @@ class MidiToneApp:
                 return
             self._update_confirming = True
             self._settings_status_var.set(
-                "This replaces app files from GitHub, then restarts.\n"
+                "This deploys the whole repo from GitHub, then restarts.\n"
                 "Songs, presets, phrases, and settings.json stay.\n"
                 "Tap INSTALL NOW to continue, or CANCEL."
             )
@@ -7287,7 +7336,7 @@ class MidiToneApp:
             )
 
     def _switch_mode(self, mode: str) -> None:
-        mode = mode if mode in ("synth", "seq", "pads", "songs", "log", "presets", "settings") else "synth"
+        mode = mode if mode in UI_MODES else "synth"
         # Close synth-only overlays before swapping shells
         if self._fx_ui_open:
             self._close_fx_panel(restore_main=False)
@@ -7316,6 +7365,7 @@ class MidiToneApp:
             self._seq_to_pad_armed = False
 
         self._mode = mode
+        self._home_shell.pack_forget()
         self._synth_shell.pack_forget()
         self._seq_shell.pack_forget()
         self._pads_shell.pack_forget()
@@ -7345,7 +7395,9 @@ class MidiToneApp:
             except Exception:
                 pass
 
-        if mode == "seq":
+        if mode == "home":
+            self._home_shell.pack(fill=tk.BOTH, expand=True)
+        elif mode == "seq":
             self._seq_shell.pack(fill=tk.BOTH, expand=True)
             self._refresh_seq_status()
         elif mode == "pads":
@@ -7383,10 +7435,20 @@ class MidiToneApp:
         self._paint_mode_btns()
 
     def _paint_mode_btns(self) -> None:
-        for key, btn in self._mode_btns.items():
-            on = key == self._mode
+        jam = self._mode in JAM_NAV_MODES
+        for key, btn in self._jam_btns.items():
+            if jam:
+                if not btn.winfo_ismapped():
+                    btn.pack(side=tk.LEFT, padx=1)
+            else:
+                btn.pack_forget()
+            on = jam and key == self._mode
             color = "#458588" if on else "#3c3836"
             btn.configure(bg=color, activebackground=color)
+        home = self._mode_btns.get("home")
+        if home is not None:
+            color = "#458588" if self._mode == "home" else "#3c3836"
+            home.configure(bg=color, activebackground=color)
 
     def _refresh_seq_status(self) -> None:
         self._seq_status_var.set(self._seq.status_line())
@@ -8868,7 +8930,7 @@ class MidiToneApp:
                     if extra == "confirm" and result is not None and result.available:
                         self._update_confirming = True
                         self._settings_status_var.set(
-                            "This replaces app files from GitHub, then restarts.\n"
+                            "This deploys the whole repo from GitHub, then restarts.\n"
                             "Songs, presets, phrases, and settings.json stay.\n"
                             "Tap INSTALL NOW to continue, or CANCEL."
                         )
@@ -9249,6 +9311,7 @@ class MidiToneApp:
             self._presets_shell,
             self._log_shell,
             self._settings_shell,
+            self._home_shell,
         ):
             try:
                 shell.pack_forget()
@@ -9333,7 +9396,7 @@ class MidiToneApp:
             self._power_frame = None
         self._power_ui_open = False
         if restore_main:
-            self._switch_mode(prev if prev in ("synth", "seq", "pads", "songs", "log", "presets", "settings") else "synth")
+            self._switch_mode(prev if prev in UI_MODES else "synth")
 
     def _pi_power(self, action: str) -> None:
         """Reboot/poweroff via pi-power.sh / systemctl — never just quit the app."""

@@ -132,13 +132,15 @@
     <h1>midi-tone screen reference</h1>
     <p>
       Touch-first soft-synth / phrase / sequencer UI for the Raspberry Pi panel (800×480).
-      Global nav is always along the top: <strong>SYNTH · SEQ · PADS · SONGS · PRESETS · LOG · SET</strong>,
-      plus <strong>POWER</strong>.
+      Global nav is always along the top: <strong>HOME</strong> and <strong>POWER</strong>.
+      While jamming, <strong>SYNTH · SEQ · PADS</strong> stay as shortcuts.
+      Every other screen is a tile on HOME.
     </p>
   </header>
 
   <nav class="toc" aria-label="Screens">
     <a href="#global">Global</a>
+    <a href="#home">HOME</a>
     <a href="#synth">SYNTH</a>
     <a href="#seq">SEQ</a>
     <a href="#pads-edit">PADS EDIT</a>
@@ -161,12 +163,23 @@
       <p class="lede">Always visible on every primary mode.</p>
       <table>
         <tr><th>midi-tone</th><td>App title (not a button).</td></tr>
+        <tr><th>HOME</th><td>Launcher tiles for every mode. Always in the top bar.</td></tr>
         <tr><th>POWER</th><td>Shutdown / reboot, SCREEN OFF, and blanking-timeout cycle (kiosk-safe — no desktop power UI).</td></tr>
-        <tr><th>SYNTH</th><td>Wavetable morph synth, CRT scope, voice / morph / kit / drum &amp; FX modes.</td></tr>
-        <tr><th>SEQ</th><td>Free-timing overdub sequencer (drums + keys, layered takes).</td></tr>
-        <tr><th>PADS</th><td>16 phrase pads with PLAY and EDIT views.</td></tr>
+        <tr><th>SYNTH / SEQ / PADS</th><td>Jam shortcuts — visible only while you are in those three modes.</td></tr>
+      </table>
+    </section>
+
+    <section class="screen" id="home">
+      <h2>HOME</h2>
+      <p class="lede">Launcher for every mode. New screens get a tile here instead of another persistent tab.</p>
+      <figure>
+        <img src="screens/00-home.png" alt="HOME launcher tiles" width="800" height="480" />
+        <figcaption>00 — HOME</figcaption>
+      </figure>
+      <table>
+        <tr><th>SYNTH / SEQ / PADS</th><td>Jam cluster. Those three also stay as top-bar shortcuts while you are in them.</td></tr>
         <tr><th>SONGS</th><td>Play Standard MIDI Files locally and/or out USB→DIN; BPM and loop controls.</td></tr>
-        <tr><th>PRESETS</th><td>Eight named slots for a <strong>full session</strong> snapshot (synth, seq, phrases, songs prefs, screensaver, …), plus FACTORY reset.</td></tr>
+        <tr><th>PRESETS</th><td>Eight named slots for a <strong>full session</strong> snapshot, plus FACTORY reset.</td></tr>
         <tr><th>LOG</th><td>Scrolling MIDI / UI event log with CLEAR and panic.</td></tr>
         <tr><th>SET</th><td>Software update: show the running commit, CHECK GitHub, UPDATE &amp; restart. Songs / presets / phrases stay.</td></tr>
       </table>
@@ -317,10 +330,10 @@
       <table>
         <tr><th>Running / remote</th><td>Local commit (from git or <code>version.json</code>) and, after CHECK, the tip of <code>master</code>.</td></tr>
         <tr><th>CHECK</th><td>Ask GitHub whether <code>master</code> is ahead. Does not install.</td></tr>
-        <tr><th>UPDATE</th><td>If behind: confirm, overlay kiosk files, pip-install requirements if needed, restart. Second tap is INSTALL NOW.</td></tr>
+        <tr><th>UPDATE</th><td>If behind: confirm, deploy the whole repo (kiosk + crates + presets), restart kiosk and any midi-engine / jambox-engine units. Second tap is INSTALL NOW.</td></tr>
         <tr><th>TOKEN</th><td>Store a GitHub PAT on the box (private repo). Written to <code>.update-credentials</code>.</td></tr>
       </table>
-      <p class="note">Never overwrites <code>settings.json</code>, <code>songs/</code>, <code>phrases/</code>, <code>user-presets/</code>, or <code>user-wavetables/</code>. Rust engines are not rebuilt on the Pi.</p>
+      <p class="note">Never overwrites <code>settings.json</code>, <code>songs/</code>, <code>phrases/</code>, <code>user-presets/</code>, <code>user-wavetables/</code>, or <code>presets/active.json</code>. Does not cargo-build on the Pi — new Rust binaries still come from SSH/cross-compile.</p>
     </section>
 
     <section class="screen" id="voices">

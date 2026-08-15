@@ -80,6 +80,7 @@ Power on → Openbox kiosk → modes. The soft-synth path started as a Phase 0 h
 
 | Mode (UI) | Pillar | Job |
 |-----------|--------|-----|
+| **Home** | Both | Tile launcher for every mode (top-bar HOME); jam shortcuts stay SYNTH/SEQ/PADS |
 | **Synth** | Jambox | Wavetable morph synth + drum kit + scopes |
 | **Seq** | Jambox | Free-timing backbone loop + 808-style overdub layers (drums and keys) |
 | **Phrases / Pads** | Jambox (+ MIDI out) | 16 clip-launch cells; touch **and** MPK pads |
@@ -486,7 +487,7 @@ Not building this yet. Capture the ladder so we don’t overbuild or forget it w
 | Approach | When | Notes |
 |----------|------|-------|
 | **SSH push (now)** | 1 unit, home LAN | Keep. Highest leverage. |
-| **Kiosk SET → UPDATE (now)** | 1 unit, when online | Opt-in from the panel: CHECK `master`, overlay `tools/midi-tone`, restart. Preserves user data. Needs a GitHub token because the repo is private. |
+| **Kiosk SET → UPDATE (now)** | 1 unit, when online | Opt-in from HOME → SET: CHECK `master`, deploy the whole repo (kiosk + crates + presets), restart kiosk and engine units. Preserves user data. Needs a GitHub token because the repo is private. Does not cargo-build on the Pi. |
 | **Multi-host deploy list** | 2+ units on LAN | Same script, host list / `.pi-credentials` variants. Small change. |
 | **Golden SD image** | Cloning a box for someone else | Flash once → boots kiosk. Best “gift a unit” path. Not the daily loop. |
 | **Pull-on-boot / timer from Releases** | Hands-off updates when online | Tag release → Pi checks version → download tarball → swap app dir → restart kiosk. Preserve user data. |

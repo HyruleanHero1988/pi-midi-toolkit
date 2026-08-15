@@ -1,20 +1,29 @@
 #!/usr/bin/env python3
-"""Opt-in software update for the midi-tone kiosk.
+"""Opt-in software update for the Pi MIDI box.
 
-Checks the repo's default branch (master, then main), and if the running
-copy is behind, installs the new kiosk files and asks the UI to restart.
+Checks the repo's default branch (master, then main). If the running copy
+is behind, installs the **whole repo** the same way SSH deploy does:
+
+* kiosk (``tools/midi-tone``)
+* crates, deploy scripts, shipped presets
+* restart ``midi-engine`` / ``jambox-engine`` when those units exist
 
 Two layouts are supported:
 
 * Full git clone of pi-midi-toolkit (``git fetch`` + fast-forward).
-* File-copy install (``~/midi-tone`` from deploy_pi.py): download the
-  branch archive and overlay ``tools/midi-tone/``.
+* Split install (``~/midi-tone`` kiosk + ``~/pi-midi-toolkit`` engines):
+  download the branch archive, overlay the repo root, then overlay the
+  running kiosk copy.
 
 Never touches user data: ``settings.json``, ``songs/``, ``phrases/``,
-``user-presets/``, ``user-wavetables/``, ``.venv/``, credentials.
+``user-presets/``, ``user-wavetables/``, ``.venv/``, credentials,
+``presets/active.json``, or existing ``bin/`` engine binaries.
+
+Does **not** cargo-build on the Pi (Pi 2 is too slow). New Rust binaries
+still come from a host cross-compile / SSH deploy.
 
 The GitHub repo is private, so CHECK/UPDATE need a token (or a git remote
-that already has credentials). See ``.update-credentials.example``.
+that already has credentials).
 """
 
 from __future__ import annotations
@@ -48,8 +57,8 @@ CHECK_TIMEOUT_SEC = 25
 DOWNLOAD_TIMEOUT_SEC = 180
 PIP_TIMEOUT_SEC = 300
 
-# Names that an overlay must never replace or delete.
-KEEP_NAMES = frozenset(
+# Names / relative prefixes an overlay must never replace or delete.
+KEEP_KIOSK = frozenset(
     {
         "settings.json",
         "songs",
@@ -63,6 +72,27 @@ KEEP_NAMES = frozenset(
         "__pycache__",
         ".git",
         ".gitignore",
+    }
+)
+KEEP_NAMES = KEEP_KIOSK  # alias used by tests / kiosk-only overlay
+KEEP_REPO = frozenset(
+    {
+        ".git",
+        ".venv",
+        "target",
+        "bin",  # SSH-deployed midi-engine / jambox-engine binaries
+        "takes",
+        "presets/active.json",
+        "tools/midi-tone/settings.json",
+        "tools/midi-tone/songs",
+        "tools/midi-tone/phrases",
+        "tools/midi-tone/user-presets",
+        "tools/midi-tone/user-wavetables",
+        "tools/midi-tone/.venv",
+        "tools/midi-tone/.pi-credentials",
+        "tools/midi-tone/.update-credentials",
+        "tools/midi-tone/version.json",
+        "tools/midi-tone/__pycache__",
     }
 )
 
@@ -474,13 +504,20 @@ def check_for_update(install: pathlib.Path = HERE) -> UpdateCheck:
     )
 
 
-def overlay_tree(src: pathlib.Path, dest: pathlib.Path) -> List[str]:
-    """Copy kiosk files from ``src`` onto ``dest``, skipping user data.
+def overlay_tree(
+    src: pathlib.Path,
+    dest: pathlib.Path,
+    keep: Optional[Iterable[str]] = None,
+) -> List[str]:
+    """Copy files from ``src`` onto ``dest``, skipping keep prefixes.
 
+    ``keep`` is a set of relative paths (file or directory). ``songs`` skips
+    the whole songs tree; ``presets/active.json`` skips only that file.
     Returns the relative paths that were written.
     """
     if not src.is_dir():
         raise UpdateError(f"update tree missing: {src}")
+    skip = {str(item).strip("/") for item in (keep if keep is not None else KEEP_KIOSK)}
     dest.mkdir(parents=True, exist_ok=True)
     written: List[str] = []
     for path in sorted(src.rglob("*")):
@@ -488,7 +525,8 @@ def overlay_tree(src: pathlib.Path, dest: pathlib.Path) -> List[str]:
         parts = rel.parts
         if not parts:
             continue
-        if parts[0] in KEEP_NAMES:
+        posix = rel.as_posix()
+        if any(posix == item or posix.startswith(item + "/") for item in skip):
             continue
         if any(part == "__pycache__" or part.endswith(".pyc") for part in parts):
             continue
@@ -498,8 +536,103 @@ def overlay_tree(src: pathlib.Path, dest: pathlib.Path) -> List[str]:
             continue
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(path, target)
-        written.append(rel.as_posix())
+        written.append(posix)
     return written
+
+
+def looks_like_repo_root(path: pathlib.Path) -> bool:
+    return (path / "Cargo.toml").is_file() and (path / MIDI_TONE_REL / "midi_tone.py").is_file()
+
+
+def repo_root_for(install: pathlib.Path = HERE) -> pathlib.Path:
+    """Directory that should receive the full pi-midi-toolkit tree."""
+    env = os.environ.get("MIDI_TONE_REPO_ROOT", "").strip()
+    if env:
+        return pathlib.Path(env).expanduser().resolve()
+    git = git_root(install)
+    if git is not None:
+        return git
+    nested = install.parent.parent
+    if looks_like_repo_root(nested):
+        return nested
+    home_repo = pathlib.Path.home() / "pi-midi-toolkit"
+    if looks_like_repo_root(home_repo) or home_repo.is_dir():
+        return home_repo
+    sibling = install.parent / "pi-midi-toolkit"
+    if looks_like_repo_root(sibling) or sibling.is_dir():
+        return sibling
+    return home_repo
+
+
+def _find_repo_root(extracted: pathlib.Path) -> pathlib.Path:
+    if looks_like_repo_root(extracted):
+        return extracted
+    for cargo in extracted.glob("*/Cargo.toml"):
+        root = cargo.parent
+        if looks_like_repo_root(root):
+            return root
+    raise UpdateError("downloaded archive was not a full pi-midi-toolkit tree")
+
+
+def _sync_kiosk_from_repo(
+    repo_root: pathlib.Path,
+    install: pathlib.Path,
+    progress: ProgressCb,
+) -> None:
+    src = repo_root / MIDI_TONE_REL
+    if not (src / "midi_tone.py").is_file():
+        return
+    try:
+        if src.resolve() == install.resolve():
+            return
+    except OSError:
+        pass
+    progress("Updating kiosk copy…")
+    overlay_tree(src, install, keep=KEEP_KIOSK)
+
+
+def _ensure_active_preset(repo_root: pathlib.Path) -> None:
+    presets = repo_root / "presets"
+    active = presets / "active.json"
+    if active.is_file() or not presets.is_dir():
+        return
+    for name in ("mpk-mini-ch3.json", "example.json"):
+        src = presets / name
+        if src.is_file():
+            shutil.copy2(src, active)
+            return
+
+
+def _restart_engines(progress: ProgressCb) -> None:
+    """Restart mapper / jambox daemons if this box already has them.
+
+    Matches SSH deploy's ``systemctl restart``. Fails soft: kiosk sudoers
+    may only allow poweroff/reboot, and a unit may not be installed yet.
+    """
+    for unit in ("midi-engine", "jambox-engine"):
+        try:
+            enabled = subprocess.run(
+                ["systemctl", "is-enabled", unit],
+                capture_output=True,
+                text=True,
+                timeout=8,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return
+        if enabled.returncode != 0:
+            continue
+        progress(f"Restarting {unit}…")
+        try:
+            subprocess.run(
+                ["sudo", "-n", "systemctl", "restart", unit],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            continue
 
 
 def _chmod_scripts(install: pathlib.Path) -> None:
@@ -646,6 +779,7 @@ def apply_from_archive(
     branch: str,
     token: str,
     progress: ProgressCb,
+    repo_root: Optional[pathlib.Path] = None,
 ) -> str:
     with tempfile.TemporaryDirectory(prefix="midi-tone-update-") as tmp:
         tmp_path = pathlib.Path(tmp)
@@ -654,10 +788,12 @@ def apply_from_archive(
         progress("Unpacking…")
         extract_dir = tmp_path / "src"
         _safe_extract_tar(tar_path, extract_dir)
-        src = _find_midi_tone_dir(extract_dir)
-        progress("Installing kiosk files…")
-        overlay_tree(src, install)
-        # SHA is the remote branch tip we just fetched.
+        src_root = _find_repo_root(extract_dir)
+        dest_root = repo_root or repo_root_for(install)
+        progress("Installing full repo…")
+        overlay_tree(src_root, dest_root, keep=KEEP_REPO)
+        _ensure_active_preset(dest_root)
+        _sync_kiosk_from_repo(dest_root, install, progress)
         return ""
 
 
@@ -667,7 +803,7 @@ def apply_update(
     progress: Optional[ProgressCb] = None,
     expected_sha: str = "",
 ) -> VersionInfo:
-    """Install the remote branch into ``install``. Returns the new version."""
+    """Install the remote branch into the repo + running kiosk. Returns the new version."""
     log = progress or _noop_progress
     creds = load_credentials(install)
     repo_url = creds.repo_url or DEFAULT_REPO_URL
@@ -681,25 +817,37 @@ def apply_update(
         log("Already on latest.")
         return remote
 
-    root = git_root(install)
+    dest_root = repo_root_for(install)
+    git = git_root(dest_root) or git_root(install)
     used_git = False
-    if root is not None:
+    if git is not None:
         try:
-            sha = _git_fast_forward(root, branch, repo_url, creds.token, log)
+            sha = _git_fast_forward(git, branch, repo_url, creds.token, log)
             used_git = True
             remote.sha = sha
             remote.source = "git"
+            dest_root = git
+            _sync_kiosk_from_repo(git, install, log)
         except UpdateError as exc:
             log(f"git pull skipped ({exc}); downloading archive…")
 
     if not used_git:
-        apply_from_archive(install, repo_url, branch, creds.token, log)
+        apply_from_archive(
+            install, repo_url, branch, creds.token, log, repo_root=dest_root
+        )
         remote.source = "archive"
 
     _chmod_scripts(install)
+    _chmod_scripts(dest_root / MIDI_TONE_REL)
     _pip_install(install, log)
+    _ensure_active_preset(dest_root)
+    _restart_engines(log)
     write_version_file(install, remote)
-    log(f"Installed {branch} {remote.short}")
+    try:
+        write_version_file(dest_root / MIDI_TONE_REL, remote)
+    except OSError:
+        pass
+    log(f"Installed {branch} {remote.short} (full repo)")
     return remote
 
 
@@ -737,7 +885,7 @@ def format_status_lines(check: Optional[UpdateCheck] = None, install: pathlib.Pa
         )
     if not has_token and (check is None or check.error):
         lines.append("Private repo: add a GitHub token (TOKEN) if CHECK fails.")
-    lines.append("Keeps songs, presets, phrases, and settings.json.")
+    lines.append("Full deploy: kiosk + crates + presets. Keeps songs / phrases / settings.")
     return "\n".join(lines)
 
 

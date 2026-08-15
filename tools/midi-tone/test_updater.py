@@ -176,6 +176,75 @@ class OverlayTest(unittest.TestCase):
             self.assertEqual((dest / ".venv" / "marker").read_text(encoding="utf-8"), "venv\n")
             self.assertTrue((dest / "wavetables" / "saw.wav").is_file())
 
+    def test_full_repo_overlay_updates_crates_and_keeps_live_preset(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            src = root / "src"
+            dest = root / "dest"
+            (src / "crates" / "midi-core" / "src").mkdir(parents=True)
+            (src / "tools" / "midi-tone").mkdir(parents=True)
+            (src / "presets").mkdir()
+            (src / "deploy").mkdir()
+            (src / "Cargo.toml").write_text("[workspace]\n", encoding="utf-8")
+            (src / "crates" / "midi-core" / "src" / "lib.rs").write_text("// new\n", encoding="utf-8")
+            (src / "tools" / "midi-tone" / "midi_tone.py").write_text("NEW\n", encoding="utf-8")
+            (src / "tools" / "midi-tone" / "settings.json").write_text('{"wipe":1}\n', encoding="utf-8")
+            (src / "presets" / "example.json").write_text("{}\n", encoding="utf-8")
+            (src / "presets" / "active.json").write_text('{"wipe":true}\n', encoding="utf-8")
+            (src / "deploy" / "midi-engine.service").write_text("[Unit]\n", encoding="utf-8")
+
+            (dest / "tools" / "midi-tone").mkdir(parents=True)
+            (dest / "presets").mkdir()
+            (dest / "bin").mkdir()
+            (dest / "tools" / "midi-tone" / "midi_tone.py").write_text("OLD\n", encoding="utf-8")
+            (dest / "tools" / "midi-tone" / "settings.json").write_text('{"keep":1}\n', encoding="utf-8")
+            (dest / "presets" / "active.json").write_text('{"live":true}\n', encoding="utf-8")
+            (dest / "bin" / "midi-engine").write_bytes(b"OLDELF")
+
+            written = updater.overlay_tree(src, dest, keep=updater.KEEP_REPO)
+            self.assertIn("crates/midi-core/src/lib.rs", written)
+            self.assertIn("tools/midi-tone/midi_tone.py", written)
+            self.assertIn("presets/example.json", written)
+            self.assertIn("deploy/midi-engine.service", written)
+            self.assertNotIn("presets/active.json", written)
+            self.assertNotIn("tools/midi-tone/settings.json", written)
+            self.assertEqual((dest / "tools" / "midi-tone" / "midi_tone.py").read_text(encoding="utf-8"), "NEW\n")
+            self.assertEqual(
+                (dest / "tools" / "midi-tone" / "settings.json").read_text(encoding="utf-8"),
+                '{"keep":1}\n',
+            )
+            self.assertEqual(
+                (dest / "presets" / "active.json").read_text(encoding="utf-8"),
+                '{"live":true}\n',
+            )
+            self.assertEqual((dest / "bin" / "midi-engine").read_bytes(), b"OLDELF")
+            self.assertTrue((dest / "presets" / "example.json").is_file())
+
+    def test_finds_repo_root_in_github_layout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            inner = root / "pi-midi-toolkit-master"
+            (inner / "tools" / "midi-tone").mkdir(parents=True)
+            (inner / "Cargo.toml").write_text("[workspace]\n", encoding="utf-8")
+            (inner / "tools" / "midi-tone" / "midi_tone.py").write_text("# app\n", encoding="utf-8")
+            found = updater._find_repo_root(root)
+            self.assertEqual(found, inner)
+
+    def test_sync_kiosk_copy_when_install_is_not_inside_repo(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = pathlib.Path(tmp) / "pi-midi-toolkit"
+            kiosk = pathlib.Path(tmp) / "midi-tone"
+            (repo / "tools" / "midi-tone").mkdir(parents=True)
+            kiosk.mkdir()
+            (repo / "tools" / "midi-tone" / "midi_tone.py").write_text("NEW\n", encoding="utf-8")
+            (kiosk / "midi_tone.py").write_text("OLD\n", encoding="utf-8")
+            (kiosk / "settings.json").write_text('{"keep":1}\n', encoding="utf-8")
+            notes: list[str] = []
+            updater._sync_kiosk_from_repo(repo, kiosk, notes.append)
+            self.assertEqual((kiosk / "midi_tone.py").read_text(encoding="utf-8"), "NEW\n")
+            self.assertEqual((kiosk / "settings.json").read_text(encoding="utf-8"), '{"keep":1}\n')
+            self.assertTrue(any("kiosk" in n.lower() for n in notes))
+
 
 class CheckUpdateTest(unittest.TestCase):
     def test_same_sha_is_not_available(self) -> None:
@@ -317,7 +386,7 @@ class ApplyUpdateTest(unittest.TestCase):
                 sha="fff9999aaaa", branch="master", source="remote"
             )
 
-            def fake_archive(dest, repo_url, branch, token, progress) -> str:
+            def fake_archive(dest, repo_url, branch, token, progress, **_kwargs) -> str:
                 src = pathlib.Path(tmp) / "incoming"
                 src.mkdir()
                 (src / "midi_tone.py").write_text("NEW\n", encoding="utf-8")
@@ -331,7 +400,9 @@ class ApplyUpdateTest(unittest.TestCase):
                 updater, "git_root", return_value=None
             ), mock.patch.object(
                 updater, "apply_from_archive", side_effect=fake_archive
-            ), mock.patch.object(updater, "_pip_install"):
+            ), mock.patch.object(updater, "_pip_install"), mock.patch.object(
+                updater, "_restart_engines"
+            ):
                 info = updater.apply_update(install)
             self.assertEqual(info.sha, "fff9999aaaa")
             self.assertEqual((install / "midi_tone.py").read_text(encoding="utf-8"), "NEW\n")
@@ -348,6 +419,7 @@ class StatusTextTest(unittest.TestCase):
         text = updater.format_status_lines(None, pathlib.Path("/tmp/does-not-exist-midi-tone"))
         self.assertIn("Running:", text)
         self.assertIn("songs", text)
+        self.assertIn("Full deploy", text)
 
 
 if __name__ == "__main__":

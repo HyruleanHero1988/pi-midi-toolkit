@@ -21,7 +21,7 @@ One kiosk UI. Soft-synth started as a Phase 0 hear-test; that framing is obsolet
 
 Modes today in `tools/midi-tone`:
 
-- **Synth / Seq / Pads / Songs / Presets / Log / Set**
+- **Home / Synth / Seq / Pads / Songs / Presets / Log / Set**
 - **Map / Thru** — not in the kiosk yet; Rust `midi-engine` already does remap via CLI/JSON
 
 **Design law (jambox):** stay obvious under the hands. Winning vs gear you already own (picotracker, EP-class boxes) is *learning cost*, not feature count.
