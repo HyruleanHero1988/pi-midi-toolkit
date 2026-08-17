@@ -113,6 +113,7 @@ class KaossScreenTest(unittest.TestCase):
             cls.app._stop.set()
             cls.app._kaoss_cancel_tick()
             cls.app._kaoss_cancel_viz()
+            cls.app._close_kaoss_scale_grid(restore_main=False)
             cls.app._seq.stop()
             cls.app.engine.stop()
             cls.app.root.destroy()
@@ -127,6 +128,9 @@ class KaossScreenTest(unittest.TestCase):
         app._kaoss.hold = False
         app._kaoss.program_id = "lead"
         app._kaoss.gate_id = "off"
+        app._kaoss.scale_id = "ionian"
+        if app._kaoss_scale_open:
+            app._close_kaoss_scale_grid(restore_main=False)
         app.engine.all_notes_off()
 
     def pump(self, seconds: float = 0.05) -> None:
@@ -220,6 +224,34 @@ class KaossScreenTest(unittest.TestCase):
         self.assertIn("KAOSS: ALL", app._preset_kaoss_all_btn.cget("text"))
         app._kaoss_toggle_show_all()
         self.assertFalse(app._kaoss.show_all)
+
+    def test_scale_button_opens_named_grid(self) -> None:
+        app = self.app
+        app._switch_mode("kaoss")
+        self.pump()
+        app._open_kaoss_scale_grid()
+        self.pump()
+        self.assertTrue(app._kaoss_scale_open)
+        names = [btn.cget("text") for btn in app._kaoss_scale_btns.values()]
+        self.assertIn("MAJOR", names)
+        self.assertIn("DORIAN", names)
+        self.assertNotIn("DOR", names)
+        self.assertNotIn("ION", names)
+        app._kaoss_pick_scale("aeolian")
+        self.pump()
+        self.assertFalse(app._kaoss_scale_open)
+        self.assertEqual(app._kaoss.scale_id, "aeolian")
+        self.assertEqual(app._kaoss_scale_btn.cget("text"), "MINOR")
+
+        app._kaoss_toggle_show_all()
+        app._open_kaoss_scale_grid()
+        self.pump()
+        all_names = [btn.cget("text") for btn in app._kaoss_scale_btns.values()]
+        self.assertIn("MIYAKOBUSHI", all_names)
+        self.assertIn("GAMANASRAMA", all_names)
+        self.assertNotIn("JPN", all_names)
+        app._close_kaoss_scale_grid()
+        app._kaoss_toggle_show_all()
 
     def test_led_field_follows_finger(self) -> None:
         app = self.app

@@ -180,7 +180,7 @@ the onboard wavetable engine **and** a hardware synth on USB→DIN.
 | Slide | Legato to the next scale degree; Y keeps sculpting |
 | Lift | Note-off — unless **HOLD** is on (last XY stays sounding) |
 | **PROG** | `LEAD` / `MORPH` / `VIB` play notes; `FILTER` / `ECHO` / `DRIVE` / `SPACE` are Kaoss-Pad FX (momentary unless HOLD) |
-| **SCALE** / **KEY** / **OCT** | Constrain X to a key over 1–4 octaves. Default list is a short starter set |
+| **SCALE** / **KEY** / **OCT** | **SCALE** opens a VOICES-style grid of full names (Major, Mixolydian, Miyakobushi, …) — not the 3-letter Korg codes. KEY / OCT still cycle. Default list is a short starter set |
 | **SHOW ALL** | PRESETS → **KAOSS: ALL**, or the **SHOW ALL** button on the pad — unlocks every factory Kaossilator scale (31 + PRO+ extras) and every XY program the engine can drive |
 | **GATE** | Off, 1/8, 1/16, or triplet retrigger while the pad is down (BPM − / +) |
 | **OUT** | `LOCAL` / `USB` / `BOTH` — same USB port as Songs / Pads |
@@ -324,7 +324,7 @@ Files:
 
 ## Screen reference
 
-Open [`docs/index.html`](docs/index.html) in a browser for labeled 800×480 captures of every mode (SYNTH, SEQ, PADS, KAOSS, SONGS, PRESETS, LOG) and the VOICES / MORPH / KIT / POWER / SAVE AS overlays.
+Open [`docs/index.html`](docs/index.html) in a browser for labeled 800×480 captures of every mode (SYNTH, SEQ, PADS, KAOSS, SONGS, PRESETS, LOG) and the VOICES / MORPH / KIT / POWER / SAVE AS / KAOSS scales overlays.
 
 Re-capture after UI changes (needs Tk + an 800×480 X display, or the script starts Xvfb itself):
 

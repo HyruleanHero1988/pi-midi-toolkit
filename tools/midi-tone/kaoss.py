@@ -47,41 +47,41 @@ class KaossScale:
 # (chromatic — MIDI notes can't go microtonal).
 _SCALE_DEFS: Tuple[KaossScale, ...] = (
     KaossScale("off", "OFF", "OFF", (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11)),
-    KaossScale("chromatic", "CHROM", "CHR", (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11), True),
+    KaossScale("chromatic", "CHROMATIC", "CHR", (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11), True),
     KaossScale("ionian", "MAJOR", "ION", (0, 2, 4, 5, 7, 9, 11), True),
     KaossScale("dorian", "DORIAN", "DOR", (0, 2, 3, 5, 7, 9, 10), True),
-    KaossScale("phrygian", "PHRYG", "PHR", (0, 1, 3, 5, 7, 8, 10)),
+    KaossScale("phrygian", "PHRYGIAN", "PHR", (0, 1, 3, 5, 7, 8, 10)),
     KaossScale("lydian", "LYDIAN", "LYD", (0, 2, 4, 6, 7, 9, 11)),
-    KaossScale("mixolydian", "MIXO", "MXL", (0, 2, 4, 5, 7, 9, 10), True),
+    KaossScale("mixolydian", "MIXOLYDIAN", "MXL", (0, 2, 4, 5, 7, 9, 10), True),
     KaossScale("aeolian", "MINOR", "AEO", (0, 2, 3, 5, 7, 8, 10), True),
-    KaossScale("locrian", "LOCR", "LOC", (0, 1, 3, 5, 6, 8, 10)),
-    KaossScale("harmonic", "H.MIN", "HMI", (0, 2, 3, 5, 7, 8, 11), True),
-    KaossScale("melodic", "M.MIN", "MMI", (0, 2, 3, 5, 7, 9, 11)),
-    KaossScale("major_blues", "M.BLU", "MAB", (0, 3, 4, 7, 9, 10)),
+    KaossScale("locrian", "LOCRIAN", "LOC", (0, 1, 3, 5, 6, 8, 10)),
+    KaossScale("harmonic", "HARM MINOR", "HMI", (0, 2, 3, 5, 7, 8, 11), True),
+    KaossScale("melodic", "MEL MINOR", "MMI", (0, 2, 3, 5, 7, 9, 11)),
+    KaossScale("major_blues", "MAJ BLUES", "MAB", (0, 3, 4, 7, 9, 10)),
     KaossScale("blues", "BLUES", "MIB", (0, 3, 5, 6, 7, 10), True),
-    KaossScale("diminish", "DIM", "DIM", (0, 2, 3, 5, 6, 8, 9, 11)),
-    KaossScale("combo_dim", "C.DIM", "CDM", (0, 1, 3, 4, 6, 7, 9, 10)),
-    KaossScale("major_pent", "PENT+", "MAP", (0, 2, 4, 7, 9), True),
-    KaossScale("minor_pent", "PENT−", "MIP", (0, 3, 5, 7, 10), True),
-    KaossScale("raga_bhairav", "BHAIR", "RG1", (0, 1, 4, 5, 7, 8, 11)),
-    KaossScale("raga_gamanasrama", "GAMAN", "RG2", (0, 1, 4, 6, 7, 9, 11)),
+    KaossScale("diminish", "DIMINISH", "DIM", (0, 2, 3, 5, 6, 8, 9, 11)),
+    KaossScale("combo_dim", "COMBO DIM", "CDM", (0, 1, 3, 4, 6, 7, 9, 10)),
+    KaossScale("major_pent", "MAJ PENT", "MAP", (0, 2, 4, 7, 9), True),
+    KaossScale("minor_pent", "MIN PENT", "MIP", (0, 3, 5, 7, 10), True),
+    KaossScale("raga_bhairav", "BHAIRAV", "RG1", (0, 1, 4, 5, 7, 8, 11)),
+    KaossScale("raga_gamanasrama", "GAMANASRAMA", "RG2", (0, 1, 4, 6, 7, 9, 11)),
     KaossScale("raga_todi", "TODI", "RG3", (0, 1, 3, 6, 7, 8, 11)),
     KaossScale("spanish", "SPANISH", "SPN", (0, 1, 3, 4, 5, 7, 8, 10), True),
     KaossScale("gypsy", "GYPSY", "GYP", (0, 2, 3, 6, 7, 8, 11)),
-    KaossScale("arabian", "ARAB", "ARB", (0, 2, 4, 5, 6, 8, 10)),
-    KaossScale("egyptian", "EGYPT", "EGY", (0, 2, 5, 7, 10)),
-    KaossScale("hawaiian", "HAWAI", "HWI", (0, 2, 3, 7, 9)),
+    KaossScale("arabian", "ARABIAN", "ARB", (0, 2, 4, 5, 6, 8, 10)),
+    KaossScale("egyptian", "EGYPTIAN", "EGY", (0, 2, 5, 7, 10)),
+    KaossScale("hawaiian", "HAWAIIAN", "HWI", (0, 2, 3, 7, 9)),
     KaossScale("pelog", "PELOG", "PLG", (0, 1, 3, 7, 8)),
-    KaossScale("miyakobushi", "MIYAKO", "JPN", (0, 1, 5, 7, 8)),
+    KaossScale("miyakobushi", "MIYAKOBUSHI", "JPN", (0, 1, 5, 7, 8)),
     KaossScale("ryukyu", "RYUKYU", "RKY", (0, 4, 5, 7, 11), True),
-    KaossScale("chinese", "CHINA", "CHN", (0, 4, 6, 7, 11)),
-    KaossScale("bassline", "BASS", "BAS", (0, 7, 10)),
-    KaossScale("whole", "WHOLE", "WHL", (0, 2, 4, 6, 8, 10), True),
-    KaossScale("min3", "MIN3", "MI3", (0, 3, 6, 9)),
-    KaossScale("maj3", "3RD", "3RD", (0, 4, 8)),
-    KaossScale("fourth", "4TH", "4TH", (0, 5, 10)),
-    KaossScale("fifth", "5TH", "5TH", (0, 7)),
-    KaossScale("octave", "OCT", "OCT", (0,)),
+    KaossScale("chinese", "CHINESE", "CHN", (0, 4, 6, 7, 11)),
+    KaossScale("bassline", "BASS LINE", "BAS", (0, 7, 10)),
+    KaossScale("whole", "WHOLE TONE", "WHL", (0, 2, 4, 6, 8, 10), True),
+    KaossScale("min3", "MIN 3RDS", "MI3", (0, 3, 6, 9)),
+    KaossScale("maj3", "MAJ 3RDS", "3RD", (0, 4, 8)),
+    KaossScale("fourth", "4THS", "4TH", (0, 5, 10)),
+    KaossScale("fifth", "5THS", "5TH", (0, 7)),
+    KaossScale("octave", "OCTAVE", "OCT", (0,)),
 )
 
 SCALES: Dict[str, Tuple[int, ...]] = {s.id: s.degrees for s in _SCALE_DEFS}
@@ -361,8 +361,8 @@ class KaossPad:
         return PROGRAM_IDS_ALL if self.show_all else PROGRAM_IDS
 
     def scale_label(self) -> str:
-        spec = self.scale()
-        return spec.short if self.show_all else spec.label
+        """Full name for the SCALE button / picker. Never the 3-letter Korg code."""
+        return self.scale().label
 
     def gate(self) -> GatePattern:
         return GATE_BY_ID.get(self.gate_id, GATE_PATTERNS[0])
@@ -461,6 +461,12 @@ class KaossPad:
         except ValueError:
             idx = 0
         self.scale_id = ids[(idx + int(step)) % len(ids)]
+        return self.scale_id
+
+    def set_scale(self, scale_id: str) -> str:
+        sid = str(scale_id)
+        if sid in SCALES:
+            self.scale_id = sid
         return self.scale_id
 
     def set_show_all(self, enabled: bool) -> bool:

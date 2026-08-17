@@ -170,6 +170,8 @@ def close_overlays(app) -> None:
         app._close_kit_explorer(restore_main=True)
     if getattr(app, "_save_voice_open", False):
         app._close_save_voice(restore_main=True)
+    if getattr(app, "_kaoss_scale_open", False):
+        app._close_kaoss_scale_grid(restore_main=True)
 
 
 def main() -> int:
@@ -227,7 +229,11 @@ def main() -> int:
         )
         shot("04-pads-play", lambda: app._phrase_set_view("play"))
         shot("13-kaoss", lambda: app._kaoss_docs_pose())
-        shot("05-songs", lambda: app._switch_mode("songs"))
+        shot("14-kaoss-scales", lambda: app._kaoss_docs_scale_grid())
+        shot(
+            "05-songs",
+            lambda: (app._kaoss.set_show_all(False), app._switch_mode("songs")),
+        )
         shot("06-presets", lambda: app._switch_mode("presets"))
         shot("07-log", lambda: app._switch_mode("log"))
         shot(

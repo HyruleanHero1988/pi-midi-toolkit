@@ -55,6 +55,7 @@ from sequencer import (  # noqa: E402  (local module, imported after the hard de
 from kaoss import (  # noqa: E402
     LED_COLS,
     LED_ROWS,
+    SCALE_BY_ID,
     KaossEvent,
     KaossPad,
     hsv_to_rgb,
@@ -3911,6 +3912,13 @@ class MidiToneApp:
         self._kaoss_ch_btn: Optional[tk.Button] = None
         self._kaoss_all_btn: Optional[tk.Button] = None
         self._preset_kaoss_all_btn: Optional[tk.Button] = None
+        self._kaoss_scale_open = False
+        self._kaoss_scale_frame: Optional[tk.Frame] = None
+        self._kaoss_scale_btns: Dict[str, tk.Button] = {}
+        self._kaoss_scale_inner: Optional[tk.Frame] = None
+        self._kaoss_scale_drag: Optional[Dict[str, object]] = None
+        self._kaoss_scale_count_var = tk.StringVar(value="")
+        self._kaoss_scale_grid_all_btn: Optional[tk.Button] = None
         self._pads_view = "edit"  # play | edit
         self._phrase_out_mode = "local"  # local | usb | both (shares Songs USB port)
         self._phrases.set_output_hooks(
@@ -5953,8 +5961,9 @@ class MidiToneApp:
             row_a, "LEAD", self._kaoss_cycle_program, bg="#b16286"
         )
         self._kaoss_scale_btn = self._mk_touch_btn(
-            row_a, "MAJOR", self._kaoss_cycle_scale, bg="#458588"
+            row_a, "MAJOR", self._open_kaoss_scale_grid, bg="#458588"
         )
+        self._kaoss_scale_btn.configure(font=("DejaVu Sans", 12, "bold"))
         self._kaoss_key_btn = self._mk_touch_btn(
             row_a, "KEY C", self._kaoss_cycle_key, bg="#3c3836"
         )
@@ -6235,12 +6244,132 @@ class MidiToneApp:
         self._kaoss_draw_grid()
         self._mark_settings_dirty()
 
-    def _kaoss_cycle_scale(self) -> None:
-        self._kaoss.cycle_scale()
+    def _open_kaoss_scale_grid(self) -> None:
+        """VOICES-style picker: full scale names, not the 3-letter Korg codes."""
+        if self._kaoss_scale_open:
+            return
+        if self._mode != "kaoss":
+            self._switch_mode("kaoss")
+        self._kaoss_scale_open = True
+        self._kaoss_cancel_viz()
+        self._kaoss_shell.pack_forget()
+
+        self._kaoss_scale_frame = tk.Frame(self._mode_host, bg="#111111")
+        self._kaoss_scale_frame.pack(fill=tk.BOTH, expand=True)
+        header, body, footer = self._pack_screen_regions(
+            self._kaoss_scale_frame,
+            header_padx=8,
+            header_pady=(6, 4),
+            body_padx=4,
+            body_pady=2,
+            footer_padx=6,
+            footer_pady=6,
+        )
+        tk.Label(
+            header,
+            text="SCALES — tap one",
+            font=("DejaVu Sans", 16, "bold"),
+            fg="#fbf1c7",
+            bg="#111111",
+        ).pack(side=tk.LEFT)
+        tk.Label(
+            header,
+            textvariable=self._kaoss_scale_count_var,
+            font=("DejaVu Sans", 12),
+            fg="#a89984",
+            bg="#111111",
+        ).pack(side=tk.RIGHT)
+
+        _wrap, _canvas, inner, drag = self._build_touch_scroll_area(body)
+        self._kaoss_scale_inner = inner
+        self._kaoss_scale_drag = drag
+        self._kaoss_fill_scale_grid()
+
+        self._kaoss_scale_grid_all_btn = self._mk_touch_btn(
+            footer, "SHOW ALL", self._kaoss_toggle_show_all, bg="#3c3836"
+        )
+        self._kaoss_scale_grid_all_btn.configure(font=("DejaVu Sans", 13, "bold"))
+        self._kaoss_scale_grid_all_btn.pack(
+            side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=14
+        )
+        self._mk_touch_btn(
+            footer, "CLOSE", self._close_kaoss_scale_grid, bg="#9d0006"
+        ).pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=14)
+        self._paint_kaoss_show_all()
+
+    def _kaoss_fill_scale_grid(self) -> None:
+        inner = self._kaoss_scale_inner
+        drag = self._kaoss_scale_drag
+        if inner is None or drag is None:
+            return
+        for child in inner.winfo_children():
+            child.destroy()
+        self._kaoss_scale_btns = {}
+        ids = self._kaoss.scale_ids()
+        cols = 3
+        for i, sid in enumerate(ids):
+            spec = SCALE_BY_ID.get(sid)
+            if spec is None:
+                continue
+            row, col = divmod(i, cols)
+            btn = self._mk_scroll_select_btn(
+                inner,
+                spec.label,
+                lambda scale=sid: self._kaoss_pick_scale(scale),
+                drag,
+                bg="#3c3836",
+            )
+            btn.configure(font=("DejaVu Sans", 13, "bold"), pady=16)
+            btn.grid(row=row, column=col, sticky="nsew", padx=3, pady=3, ipadx=4, ipady=8)
+            self._kaoss_scale_btns[sid] = btn
+        for col in range(cols):
+            inner.grid_columnconfigure(col, weight=1)
+        n = len(self._kaoss_scale_btns)
+        kind = "all factory" if self._kaoss.show_all else "starter"
+        self._kaoss_scale_count_var.set(f"{n} {kind}")
+        self._paint_kaoss_scale_grid()
+
+    def _paint_kaoss_scale_grid(self) -> None:
+        current = self._kaoss.scale_id
+        for sid, btn in self._kaoss_scale_btns.items():
+            on = sid == current
+            color = "#458588" if on else "#3c3836"
+            try:
+                btn.configure(bg=color, activebackground=color)
+            except tk.TclError:
+                pass
+
+    def _kaoss_pick_scale(self, scale_id: str) -> None:
+        self._kaoss.set_scale(scale_id)
         self._kaoss_apply(self._kaoss.retune())
+        self._close_kaoss_scale_grid()
         self._paint_kaoss()
         self._kaoss_draw_grid()
         self._mark_settings_dirty()
+        self._append_log(f"KAOSS scale → {self._kaoss.scale_label()}")
+
+    def _close_kaoss_scale_grid(self, restore_main: bool = True) -> None:
+        if not self._kaoss_scale_open:
+            return
+        if self._kaoss_scale_frame is not None:
+            self._kaoss_scale_frame.destroy()
+            self._kaoss_scale_frame = None
+        self._kaoss_scale_btns = {}
+        self._kaoss_scale_inner = None
+        self._kaoss_scale_drag = None
+        self._kaoss_scale_grid_all_btn = None
+        self._kaoss_scale_open = False
+        if restore_main and self._mode == "kaoss":
+            self._kaoss_shell.pack(fill=tk.BOTH, expand=True)
+            self._paint_kaoss()
+            self._kaoss_draw_grid()
+            self._kaoss_arm_tick()
+            self._kaoss_arm_viz()
+
+    def _kaoss_docs_scale_grid(self) -> None:
+        """Open the full factory list so the docs shot shows readable names."""
+        self._kaoss.set_show_all(True)
+        self._open_kaoss_scale_grid()
 
     def _kaoss_cycle_key(self) -> None:
         self._kaoss.cycle_key()
@@ -6300,6 +6429,8 @@ class MidiToneApp:
         self._paint_kaoss()
         self._paint_kaoss_show_all()
         self._kaoss_draw_grid()
+        if self._kaoss_scale_open:
+            self._kaoss_fill_scale_grid()
         self._mark_settings_dirty()
         n_scale = len(self._kaoss.scale_ids())
         n_prog = len(self._kaoss.program_ids())
@@ -6329,6 +6460,12 @@ class MidiToneApp:
         if self._preset_kaoss_all_btn is not None:
             self._preset_kaoss_all_btn.configure(
                 text="KAOSS: ALL" if on else "KAOSS: CURATED",
+                bg=color,
+                activebackground=color,
+            )
+        if self._kaoss_scale_grid_all_btn is not None:
+            self._kaoss_scale_grid_all_btn.configure(
+                text="ALL: ON" if on else "SHOW ALL",
                 bg=color,
                 activebackground=color,
             )
@@ -6619,6 +6756,8 @@ class MidiToneApp:
             self._close_kit_explorer(restore_main=False)
         if self._save_voice_open:
             self._close_save_voice(restore_main=False)
+        if self._kaoss_scale_open:
+            self._close_kaoss_scale_grid(restore_main=False)
 
         # Leaving pads while recording: keep the take
         if self._mode == "pads" and mode != "pads":
@@ -8192,6 +8331,8 @@ class MidiToneApp:
             self._close_kit_explorer(restore_main=False)
         if self._save_voice_open:
             self._close_save_voice(restore_main=False)
+        if self._kaoss_scale_open:
+            self._close_kaoss_scale_grid(restore_main=False)
 
         self._power_ui_open = True
         prev = self._mode
