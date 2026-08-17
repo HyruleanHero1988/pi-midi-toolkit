@@ -133,7 +133,7 @@
     <p>
       Touch-first soft-synth / phrase / sequencer UI for the Raspberry Pi panel (800×480).
       Screenshots captured from the live Tk app at the 800×480 kiosk size (no window chrome).
-      Global nav is always along the top: <strong>SYNTH · SEQ · PADS · SONGS · PRESETS · LOG</strong>,
+      Global nav is always along the top: <strong>SYNTH · SEQ · PADS · KAOSS · SONGS · PRESETS · LOG</strong>,
       plus <strong>POWER</strong>.
     </p>
   </header>
@@ -144,6 +144,7 @@
     <a href="#seq">SEQ</a>
     <a href="#pads-edit">PADS EDIT</a>
     <a href="#pads-play">PADS PLAY</a>
+    <a href="#kaoss">KAOSS</a>
     <a href="#songs">SONGS</a>
     <a href="#presets">PRESETS</a>
     <a href="#log">LOG</a>
@@ -165,6 +166,7 @@
         <tr><th>SYNTH</th><td>Wavetable morph synth, CRT scope, voice / morph / kit / drum &amp; FX modes.</td></tr>
         <tr><th>SEQ</th><td>Free-timing overdub sequencer (drums + keys, layered takes).</td></tr>
         <tr><th>PADS</th><td>16 phrase pads with PLAY and EDIT views.</td></tr>
+        <tr><th>KAOSS</th><td>Full-screen XY pad: scale notes + factory Kaoss MIDI CCs, local and/or USB→DIN.</td></tr>
         <tr><th>SONGS</th><td>Play Standard MIDI Files locally and/or out USB→DIN; BPM and loop controls.</td></tr>
         <tr><th>PRESETS</th><td>Eight slots for saving / loading synth sound + full-velocity preference.</td></tr>
         <tr><th>LOG</th><td>Scrolling MIDI / UI event log and panic / power shortcuts.</td></tr>
@@ -249,6 +251,24 @@
         <tr><th>STOP ALL</th><td>Stop every playing phrase.</td></tr>
         <tr><th>OUT</th><td>LOCAL / USB / BOTH routing for phrase MIDI.</td></tr>
       </table>
+    </section>
+
+    <section class="screen" id="kaoss">
+      <h2>KAOSS</h2>
+      <p class="lede">XY touch pad in the Kaossilator / Kaoss Pad tradition — play scale notes on the onboard synth and/or send notes + factory CCs to a hardware synth.</p>
+      <figure>
+        <img src="screens/13-kaoss.png" alt="KAOSS XY pad screen" width="800" height="480" />
+        <figcaption>13 — KAOSS (X = pitch or FX, Y = tone / morph / FX; finger cursor on the pad)</figcaption>
+      </figure>
+      <table>
+        <tr><th>XY pad</th><td>Press / slide / lift. X is scale pitch on note programs; Y sculpts tone, morph, vibrato, or an FX pair. Grid lines mark scale degrees (roots are brighter).</td></tr>
+        <tr><th>PROG</th><td>LEAD / MORPH / VIB play notes. FILTER / ECHO / DRIVE / SPACE are momentary mix-bus FX (restore on lift unless HOLD).</td></tr>
+        <tr><th>SCALE / KEY / OCT</th><td>Constrain X to a key over 1–4 octaves (Major, minor, pentatonic, blues, Ryukyu, …).</td></tr>
+        <tr><th>HOLD</th><td>Freeze the last XY after you lift — same idea as Kaossilator SHIFT+hold.</td></tr>
+        <tr><th>GATE + BPM</th><td>Retrigger the held note on 1/8, 1/16, or triplets. Off = sustain while down.</td></tr>
+        <tr><th>OUT / CH</th><td>LOCAL / USB / BOTH (shares the Songs USB port). Notes + CC#12 (X) / CC#13 (Y) / CC#92 (touch) on the chosen channel.</td></tr>
+      </table>
+      <p class="note">Factory MIDI matches the original Kaoss Pad manual so a DIN synth can treat the Pi as a Kaoss controller. Playing while SEQ is recording captures the pad notes.</p>
     </section>
 
     <section class="screen" id="songs">
