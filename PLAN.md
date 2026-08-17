@@ -433,7 +433,7 @@ Korg manuals set the rules (not a 100-program dump):
 | Piece | Behavior |
 |-------|----------|
 | **PROG** | `LEAD` / `MORPH` / `VIB` play notes (Y = tone / morph / vibrato). `FILTER` / `ECHO` / `DRIVE` / `SPACE` are momentary mix-bus FX (restore on lift unless HOLD) |
-| **SCALE / KEY / OCT** | Major, minor, modes, pentatonic, blues, Ryukyu, Spanish, chromatic; 1–4 octaves from C3 |
+| **SCALE / KEY / OCT** | Curated starter set by default; **SHOW ALL** (PRESETS or KAOSS header) unlocks the factory Kaossilator PRO list + PRO+ extras |
 | **OUT / CH** | `LOCAL` / `USB` / `BOTH` (shares Songs USB port); notes + CCs on ch 1–16 |
 | **SEQ** | Pad notes record into a running backbone / overdub take |
 

@@ -224,7 +224,8 @@ the onboard wavetable engine **and** a hardware synth on USB→DIN.
 | Slide | Legato to the next scale degree; Y keeps sculpting |
 | Lift | Note-off — unless **HOLD** is on (last XY stays sounding) |
 | **PROG** | `LEAD` / `MORPH` / `VIB` play notes; `FILTER` / `ECHO` / `DRIVE` / `SPACE` are Kaoss-Pad FX (momentary unless HOLD) |
-| **SCALE** / **KEY** / **OCT** | Constrain X to a key (Major, minor, pentatonic, blues, Ryukyu, …) over 1–4 octaves |
+| **SCALE** / **KEY** / **OCT** | Constrain X to a key over 1–4 octaves. Default list is a short starter set |
+| **SHOW ALL** | PRESETS → **KAOSS: ALL**, or the **SHOW ALL** button on the pad — unlocks every factory Kaossilator scale (31 + PRO+ extras) and every XY program the engine can drive |
 | **GATE** | Off, 1/8, 1/16, or triplet retrigger while the pad is down (BPM − / +) |
 | **OUT** | `LOCAL` / `USB` / `BOTH` — same USB port as Songs / Pads |
 | **CH** | MIDI channel 1–16 for notes + CCs |

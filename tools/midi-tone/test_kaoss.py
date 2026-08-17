@@ -13,6 +13,10 @@ from kaoss import (
     KAOSS_CC_TOUCH,
     KAOSS_CC_X,
     KAOSS_CC_Y,
+    PROGRAM_IDS,
+    PROGRAM_IDS_ALL,
+    SCALE_ORDER,
+    SCALE_ORDER_ALL,
     KaossPad,
     midi_cc,
     note_at_x,
@@ -130,10 +134,54 @@ class PadPlayTest(unittest.TestCase):
         self.pad.bpm = 140
         self.pad.out_mode = "both"
         self.pad.channel = 2
+        self.pad.show_all = True
         snap = self.pad.snapshot()
         other = KaossPad()
         other.apply(snap)
         self.assertEqual(other.snapshot(), snap)
+
+
+class ShowAllCatalogTest(unittest.TestCase):
+    def test_factory_lists_are_larger_than_curated(self) -> None:
+        self.assertGreater(len(SCALE_ORDER_ALL), len(SCALE_ORDER))
+        self.assertGreater(len(PROGRAM_IDS_ALL), len(PROGRAM_IDS))
+        self.assertIn("raga_bhairav", SCALE_ORDER_ALL)
+        self.assertIn("pelog", SCALE_ORDER_ALL)
+        self.assertIn("miyakobushi", SCALE_ORDER_ALL)
+        self.assertNotIn("raga_bhairav", SCALE_ORDER)
+        self.assertIn("octave", PROGRAM_IDS_ALL)
+        self.assertNotIn("octave", PROGRAM_IDS)
+
+    def test_curated_cycle_skips_factory_only_scales(self) -> None:
+        pad = KaossPad()
+        pad.show_all = False
+        seen = {pad.scale_id}
+        for _ in range(len(SCALE_ORDER) + 2):
+            seen.add(pad.cycle_scale())
+        self.assertEqual(seen, set(SCALE_ORDER))
+        self.assertNotIn("egyptian", seen)
+
+    def test_show_all_cycle_reaches_every_factory_scale(self) -> None:
+        pad = KaossPad()
+        pad.toggle_show_all()
+        seen = {pad.scale_id}
+        for _ in range(len(SCALE_ORDER_ALL) + 2):
+            seen.add(pad.cycle_scale())
+        self.assertEqual(seen, set(SCALE_ORDER_ALL))
+
+    def test_show_all_cycle_reaches_every_program(self) -> None:
+        pad = KaossPad()
+        pad.set_show_all(True)
+        seen = {pad.program_id}
+        for _ in range(len(PROGRAM_IDS_ALL) + 2):
+            seen.add(pad.cycle_program().id)
+        self.assertEqual(seen, set(PROGRAM_IDS_ALL))
+
+    def test_exotic_scale_still_quantizes(self) -> None:
+        notes = scale_notes("egyptian", 0, root_midi=48, octaves=1)
+        self.assertEqual(notes[0], 48)
+        self.assertIn(50, notes)  # D
+        self.assertNotIn(49, notes)  # C#
 
     def test_midi_cc_quantizes(self) -> None:
         self.assertEqual(midi_cc(0.0), 0)

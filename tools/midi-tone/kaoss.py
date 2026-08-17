@@ -30,52 +30,64 @@ DEFAULT_BPM = 120.0
 NOTE_NAMES = ("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
 
 
-# Scale degrees from the root. Names match the KO-1 / Kaossilator PRO lists
-# we actually use (a useful subset — not all 31/35 factory scales).
-SCALES: Dict[str, Tuple[int, ...]] = {
-    "chromatic": (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11),
-    "ionian": (0, 2, 4, 5, 7, 9, 11),          # major — KO-1 default
-    "aeolian": (0, 2, 3, 5, 7, 8, 10),         # natural minor
-    "dorian": (0, 2, 3, 5, 7, 9, 10),
-    "mixolydian": (0, 2, 4, 5, 7, 9, 10),
-    "harmonic": (0, 2, 3, 5, 7, 8, 11),
-    "major_pent": (0, 2, 4, 7, 9),
-    "minor_pent": (0, 3, 5, 7, 10),
-    "blues": (0, 3, 5, 6, 7, 10),
-    "whole": (0, 2, 4, 6, 8, 10),
-    "ryukyu": (0, 4, 5, 7, 11),                # Okinawan — Kaossilator special
-    "spanish": (0, 1, 4, 5, 7, 8, 10),
-}
+@dataclass(frozen=True)
+class KaossScale:
+    """One factory Kaossilator scale. ``short`` is the 3-letter Korg display code."""
 
-SCALE_ORDER: Tuple[str, ...] = (
-    "ionian",
-    "aeolian",
-    "dorian",
-    "mixolydian",
-    "harmonic",
-    "major_pent",
-    "minor_pent",
-    "blues",
-    "whole",
-    "ryukyu",
-    "spanish",
-    "chromatic",
+    id: str
+    label: str
+    short: str
+    degrees: Tuple[int, ...]
+    curated: bool = False
+
+
+# Official Kaossilator PRO SCALE LIST (p.99) plus PRO+ / KO-2 extras
+# (harmonic minor, melodic minor, Chinese, bass line). OFF = no diatonic lock
+# (chromatic — MIDI notes can't go microtonal).
+_SCALE_DEFS: Tuple[KaossScale, ...] = (
+    KaossScale("off", "OFF", "OFF", (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11)),
+    KaossScale("chromatic", "CHROM", "CHR", (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11), True),
+    KaossScale("ionian", "MAJOR", "ION", (0, 2, 4, 5, 7, 9, 11), True),
+    KaossScale("dorian", "DORIAN", "DOR", (0, 2, 3, 5, 7, 9, 10), True),
+    KaossScale("phrygian", "PHRYG", "PHR", (0, 1, 3, 5, 7, 8, 10)),
+    KaossScale("lydian", "LYDIAN", "LYD", (0, 2, 4, 6, 7, 9, 11)),
+    KaossScale("mixolydian", "MIXO", "MXL", (0, 2, 4, 5, 7, 9, 10), True),
+    KaossScale("aeolian", "MINOR", "AEO", (0, 2, 3, 5, 7, 8, 10), True),
+    KaossScale("locrian", "LOCR", "LOC", (0, 1, 3, 5, 6, 8, 10)),
+    KaossScale("harmonic", "H.MIN", "HMI", (0, 2, 3, 5, 7, 8, 11), True),
+    KaossScale("melodic", "M.MIN", "MMI", (0, 2, 3, 5, 7, 9, 11)),
+    KaossScale("major_blues", "M.BLU", "MAB", (0, 3, 4, 7, 9, 10)),
+    KaossScale("blues", "BLUES", "MIB", (0, 3, 5, 6, 7, 10), True),
+    KaossScale("diminish", "DIM", "DIM", (0, 2, 3, 5, 6, 8, 9, 11)),
+    KaossScale("combo_dim", "C.DIM", "CDM", (0, 1, 3, 4, 6, 7, 9, 10)),
+    KaossScale("major_pent", "PENT+", "MAP", (0, 2, 4, 7, 9), True),
+    KaossScale("minor_pent", "PENT−", "MIP", (0, 3, 5, 7, 10), True),
+    KaossScale("raga_bhairav", "BHAIR", "RG1", (0, 1, 4, 5, 7, 8, 11)),
+    KaossScale("raga_gamanasrama", "GAMAN", "RG2", (0, 1, 4, 6, 7, 9, 11)),
+    KaossScale("raga_todi", "TODI", "RG3", (0, 1, 3, 6, 7, 8, 11)),
+    KaossScale("spanish", "SPANISH", "SPN", (0, 1, 3, 4, 5, 7, 8, 10), True),
+    KaossScale("gypsy", "GYPSY", "GYP", (0, 2, 3, 6, 7, 8, 11)),
+    KaossScale("arabian", "ARAB", "ARB", (0, 2, 4, 5, 6, 8, 10)),
+    KaossScale("egyptian", "EGYPT", "EGY", (0, 2, 5, 7, 10)),
+    KaossScale("hawaiian", "HAWAI", "HWI", (0, 2, 3, 7, 9)),
+    KaossScale("pelog", "PELOG", "PLG", (0, 1, 3, 7, 8)),
+    KaossScale("miyakobushi", "MIYAKO", "JPN", (0, 1, 5, 7, 8)),
+    KaossScale("ryukyu", "RYUKYU", "RKY", (0, 4, 5, 7, 11), True),
+    KaossScale("chinese", "CHINA", "CHN", (0, 4, 6, 7, 11)),
+    KaossScale("bassline", "BASS", "BAS", (0, 7, 10)),
+    KaossScale("whole", "WHOLE", "WHL", (0, 2, 4, 6, 8, 10), True),
+    KaossScale("min3", "MIN3", "MI3", (0, 3, 6, 9)),
+    KaossScale("maj3", "3RD", "3RD", (0, 4, 8)),
+    KaossScale("fourth", "4TH", "4TH", (0, 5, 10)),
+    KaossScale("fifth", "5TH", "5TH", (0, 7)),
+    KaossScale("octave", "OCT", "OCT", (0,)),
 )
 
-SCALE_LABELS: Dict[str, str] = {
-    "chromatic": "CHROM",
-    "ionian": "MAJOR",
-    "aeolian": "MINOR",
-    "dorian": "DORIAN",
-    "mixolydian": "MIXO",
-    "harmonic": "H.MIN",
-    "major_pent": "PENT+",
-    "minor_pent": "PENT−",
-    "blues": "BLUES",
-    "whole": "WHOLE",
-    "ryukyu": "RYUKYU",
-    "spanish": "SPANISH",
-}
+SCALES: Dict[str, Tuple[int, ...]] = {s.id: s.degrees for s in _SCALE_DEFS}
+SCALE_BY_ID: Dict[str, KaossScale] = {s.id: s for s in _SCALE_DEFS}
+SCALE_ORDER: Tuple[str, ...] = tuple(s.id for s in _SCALE_DEFS if s.curated)
+SCALE_ORDER_ALL: Tuple[str, ...] = tuple(s.id for s in _SCALE_DEFS)
+SCALE_LABELS: Dict[str, str] = {s.id: s.label for s in _SCALE_DEFS}
 
 
 @dataclass(frozen=True)
@@ -89,19 +101,32 @@ class KaossProgram:
     y_param: Optional[str] = None      # local 0..1 param (Y always)
     x_axis: str = "PITCH"
     y_axis: str = "TONE"
+    curated: bool = False
 
 
-# Keep the list short and obvious — not a 100-program dump.
+# Curated = the obvious starter set. The rest are every XY mapping the
+# onboard engine can actually drive (Kaossilator-style Y targets).
 PROGRAMS: Tuple[KaossProgram, ...] = (
-    KaossProgram("lead", "LEAD", "note", y_param="tone", x_axis="PITCH", y_axis="TONE"),
-    KaossProgram("morph", "MORPH", "note", y_param="morph", x_axis="PITCH", y_axis="MORPH"),
-    KaossProgram("vib", "VIB", "note", y_param="vib", x_axis="PITCH", y_axis="VIB"),
-    KaossProgram("filter", "FILTER", "fx", x_param="tone", y_param="morph", x_axis="TONE", y_axis="MORPH"),
-    KaossProgram("echo", "ECHO", "fx", x_param="delay_time", y_param="delay_mix", x_axis="DLY T", y_axis="DLY MIX"),
-    KaossProgram("drive", "DRIVE", "fx", x_param="drive", y_param="reverb_mix", x_axis="DRIVE", y_axis="REVERB"),
-    KaossProgram("space", "SPACE", "fx", x_param="delay_mix", y_param="reverb_mix", x_axis="ECHO", y_axis="REVERB"),
+    KaossProgram("lead", "LEAD", "note", y_param="tone", x_axis="PITCH", y_axis="TONE", curated=True),
+    KaossProgram("morph", "MORPH", "note", y_param="morph", x_axis="PITCH", y_axis="MORPH", curated=True),
+    KaossProgram("vib", "VIB", "note", y_param="vib", x_axis="PITCH", y_axis="VIB", curated=True),
+    KaossProgram("level", "LEVEL", "note", y_param="level", x_axis="PITCH", y_axis="LEVEL"),
+    KaossProgram("decay", "DECAY", "note", y_param="release", x_axis="PITCH", y_axis="DECAY"),
+    KaossProgram("attack", "ATTACK", "note", y_param="attack", x_axis="PITCH", y_axis="ATTACK"),
+    KaossProgram("octave", "OCTAVE", "note", y_param="octave", x_axis="PITCH", y_axis="OCTAVE"),
+    KaossProgram("grit", "GRIT", "note", y_param="drive", x_axis="PITCH", y_axis="DRIVE"),
+    KaossProgram("delay", "DELAY", "note", y_param="delay_mix", x_axis="PITCH", y_axis="DLY MIX"),
+    KaossProgram("filter", "FILTER", "fx", x_param="tone", y_param="morph", x_axis="TONE", y_axis="MORPH", curated=True),
+    KaossProgram("echo", "ECHO", "fx", x_param="delay_time", y_param="delay_mix", x_axis="DLY T", y_axis="DLY MIX", curated=True),
+    KaossProgram("drive", "DRIVE", "fx", x_param="drive", y_param="reverb_mix", x_axis="DRIVE", y_axis="REVERB", curated=True),
+    KaossProgram("space", "SPACE", "fx", x_param="delay_mix", y_param="reverb_mix", x_axis="ECHO", y_axis="REVERB", curated=True),
+    KaossProgram("reso", "RESO", "fx", x_param="tone", y_param="delay_fb", x_axis="TONE", y_axis="FB"),
+    KaossProgram("wash", "WASH", "fx", x_param="reverb_size", y_param="reverb_mix", x_axis="SIZE", y_axis="REVERB"),
+    KaossProgram("crush", "CRUSH", "fx", x_param="drive", y_param="tone", x_axis="DRIVE", y_axis="TONE"),
+    KaossProgram("sweep", "SWEEP", "fx", x_param="tone", y_param="delay_time", x_axis="TONE", y_axis="DLY T"),
 )
-PROGRAM_IDS: Tuple[str, ...] = tuple(p.id for p in PROGRAMS)
+PROGRAM_IDS: Tuple[str, ...] = tuple(p.id for p in PROGRAMS if p.curated)
+PROGRAM_IDS_ALL: Tuple[str, ...] = tuple(p.id for p in PROGRAMS)
 PROGRAM_BY_ID: Dict[str, KaossProgram] = {p.id: p for p in PROGRAMS}
 
 
@@ -192,6 +217,7 @@ class KaossPad:
         self.gate_id: str = "off"
         self.bpm: float = DEFAULT_BPM
         self.hold: bool = False
+        self.show_all: bool = False
         self.out_mode: str = "local"
         self.channel: int = 0
         self.cc_x: int = KAOSS_CC_X
@@ -212,6 +238,19 @@ class KaossPad:
 
     def program(self) -> KaossProgram:
         return PROGRAM_BY_ID.get(self.program_id, PROGRAMS[0])
+
+    def scale(self) -> KaossScale:
+        return SCALE_BY_ID.get(self.scale_id, SCALE_BY_ID["ionian"])
+
+    def scale_ids(self) -> Tuple[str, ...]:
+        return SCALE_ORDER_ALL if self.show_all else SCALE_ORDER
+
+    def program_ids(self) -> Tuple[str, ...]:
+        return PROGRAM_IDS_ALL if self.show_all else PROGRAM_IDS
+
+    def scale_label(self) -> str:
+        spec = self.scale()
+        return spec.short if self.show_all else spec.label
 
     def gate(self) -> GatePattern:
         return GATE_BY_ID.get(self.gate_id, GATE_PATTERNS[0])
@@ -244,6 +283,7 @@ class KaossPad:
             "gate": self.gate_id,
             "bpm": float(self.bpm),
             "hold": bool(self.hold),
+            "show_all": bool(self.show_all),
             "out_mode": self.out_mode,
             "channel": int(self.channel),
             "cc_x": int(self.cc_x),
@@ -258,6 +298,8 @@ class KaossPad:
         self.program_id = prog if prog in PROGRAM_BY_ID else "lead"
         scale = str(data.get("scale", self.scale_id))
         self.scale_id = scale if scale in SCALES else "ionian"
+        if "show_all" in data:
+            self.show_all = bool(data.get("show_all"))
         self.key = int(data.get("key", self.key)) % 12
         self.octaves = max(1, min(4, int(data.get("octaves", self.octaves))))
         self.root_midi = max(0, min(96, int(data.get("root_midi", self.root_midi))))
@@ -276,17 +318,30 @@ class KaossPad:
         self.cc_touch = max(0, min(127, int(data.get("cc_touch", self.cc_touch))))
 
     def cycle_program(self, step: int = 1) -> KaossProgram:
-        idx = PROGRAM_IDS.index(self.program().id)
-        self.program_id = PROGRAM_IDS[(idx + int(step)) % len(PROGRAM_IDS)]
+        ids = self.program_ids()
+        current = self.program().id
+        try:
+            idx = ids.index(current)
+        except ValueError:
+            idx = 0
+        self.program_id = ids[(idx + int(step)) % len(ids)]
         return self.program()
 
     def cycle_scale(self, step: int = 1) -> str:
+        ids = self.scale_ids()
         try:
-            idx = SCALE_ORDER.index(self.scale_id)
+            idx = ids.index(self.scale_id)
         except ValueError:
             idx = 0
-        self.scale_id = SCALE_ORDER[(idx + int(step)) % len(SCALE_ORDER)]
+        self.scale_id = ids[(idx + int(step)) % len(ids)]
         return self.scale_id
+
+    def set_show_all(self, enabled: bool) -> bool:
+        self.show_all = bool(enabled)
+        return self.show_all
+
+    def toggle_show_all(self) -> bool:
+        return self.set_show_all(not self.show_all)
 
     def cycle_key(self, step: int = 1) -> int:
         self.key = (self.key + int(step)) % 12
@@ -408,7 +463,10 @@ class KaossPad:
     # --- internals --------------------------------------------------------
 
     def _current_note(self) -> int:
-        return note_at_x(self.x, self.notes())
+        note = note_at_x(self.x, self.notes())
+        if self.program().y_param == "octave":
+            note = max(0, min(127, note + int(round(self.y * 24.0))))
+        return note
 
     def _current_velocity(self) -> int:
         return velocity_at_y(self.y)
@@ -439,7 +497,7 @@ class KaossPad:
             events.append(
                 KaossEvent(kind="param", param=prog.x_param, param_value=self.x)
             )
-        if prog.y_param:
+        if prog.y_param and prog.y_param != "octave":
             events.append(
                 KaossEvent(kind="param", param=prog.y_param, param_value=self.y)
             )
@@ -478,7 +536,7 @@ class KaossPad:
     def status_line(self) -> str:
         prog = self.program()
         key = NOTE_NAMES[self.key % 12]
-        scale = SCALE_LABELS.get(self.scale_id, self.scale_id.upper())
+        scale = self.scale_label()
         hold = "HOLD" if self.hold else "lift=off"
         gate = self.gate().label
         out = self.out_mode.upper()
