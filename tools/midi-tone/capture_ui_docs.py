@@ -229,6 +229,7 @@ def main() -> int:
             lambda: (app._switch_mode("pads"), app._phrase_set_view("edit")),
         )
         shot("04-pads-play", lambda: app._phrase_set_view("play"))
+        shot("13-kaoss", lambda: app._switch_mode("kaoss"))
         shot("05-songs", lambda: app._switch_mode("songs"))
         shot("06-presets", lambda: app._switch_mode("presets"))
         shot("07-log", lambda: app._switch_mode("log"))

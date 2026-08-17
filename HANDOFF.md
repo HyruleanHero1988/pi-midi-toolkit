@@ -1,6 +1,6 @@
 ﻿# Handoff — pi-midi-toolkit
 
-Updated: 2026-08-11
+Updated: 2026-08-17
 
 Open this folder as the Cursor workspace.
 
@@ -21,7 +21,7 @@ One kiosk UI. Soft-synth started as a Phase 0 hear-test; that framing is obsolet
 
 Modes today in `tools/midi-tone`:
 
-- **Home / Synth / Seq / Pads / Songs / Presets / Log / Set**
+- **Home / Synth / Seq / Pads / Kaoss / Songs / Presets / Log / Set**
 - **Map / Thru** — not in the kiosk yet; Rust `midi-engine` already does remap via CLI/JSON
 
 **Design law (jambox):** stay obvious under the hands. Winning vs gear you already own (picotracker, EP-class boxes) is *learning cost*, not feature count.
@@ -29,6 +29,8 @@ Modes today in `tools/midi-tone`:
 **Jambox FX:** layered in Python `midi-tone` — **FX MODE** (per-wavetable / per-drum inserts + shared **ALL DRUMS** kit bus) and **BUS FX** (optional master mix wet).
 
 **Save voice:** VOICES / MORPH → **SAVE AS…** bakes morph + drive + tone into `.wav`, and keeps delay/reverb in a tiny `.fx.json` beside it.
+
+**Kaoss:** **KAOSS** is a full-screen XY pad (Kaossilator-style scale notes + original Kaoss Pad CC#12/13/92) for the onboard engine and/or USB→DIN. Model lives in `tools/midi-tone/kaoss.py`.
 
 **Sequencer:** **SEQ** replaced LOOPER. First take is the backbone (auto-trimmed; it locks the loop length), then REC again overdubs drums or keys over the running loop and KEEP / DROP / UNDO decide what survives. Model + transport live in `tools/midi-tone/sequencer.py` (no Tk / numpy / audio) so `test_sequencer.py`, `test_ui_seq.py`, and `test_phrase_pads.py` run headless.
 

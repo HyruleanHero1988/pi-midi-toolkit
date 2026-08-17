@@ -3,7 +3,7 @@
 Raspberry Pi **MIDI appliance**: one kiosk UI for local soft-synth play **and**
 low-latency MIDI thru/remap to a hardware synth. **Not** related to play-my-synth.
 
-**North star:** power on → kiosk → modes (Synth / Seq / Log / Map). See [PLAN.md](PLAN.md).
+**North star:** power on → kiosk → modes (Synth / Seq / Pads / Kaoss / Log / Map). See [PLAN.md](PLAN.md).
 
 - **Kiosk UI (active):** [`tools/midi-tone`](tools/midi-tone) — wavetable synth, morph, overdub sequencer, Openbox kiosk
 - **Thru engine:** Rust `midi-engine` — channel/CC/velocity remap via CLI + JSON presets (Map mode UI next)
@@ -51,8 +51,8 @@ systemd unit: [`deploy/jambox-engine.service`](deploy/jambox-engine.service).
 
 ```bash
 cd tools/midi-tone
-python3 -m unittest test_sequencer test_phrase_pads test_synth_vibrato test_jambox_client test_screensaver test_updater
-xvfb-run -a python3 -m unittest test_ui_seq test_ui_screensaver test_ui_settings     # builds the real Tk screen with stub audio/MIDI
+python3 -m unittest test_sequencer test_kaoss test_phrase_pads test_synth_vibrato test_jambox_client test_screensaver test_updater
+xvfb-run -a python3 -m unittest test_ui_seq test_ui_kaoss test_ui_screensaver test_ui_settings     # builds the real Tk screen with stub audio/MIDI
 ```
 
 ## Build & test (Windows / host)

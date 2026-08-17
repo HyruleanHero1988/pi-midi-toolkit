@@ -50,6 +50,7 @@ FILES = [
     "install-pidi-splash.sh",
     "pi-power.sh",
     "updater.py",
+    "kaoss.py",
 ]
 
 # Extra trees copied recursively

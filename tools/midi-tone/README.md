@@ -4,10 +4,11 @@ Hear and see MIDI from the **Akai MPK mini** on the Pi **without** USB-DIN or a 
 
 - Opens a MIDI input (prefers a port name containing `MPK`)
 - Note-on → wavetable tone through the Pi audio jack / HDMI
-- **Modes:** **HOME** launcher tiles; jam shortcuts **SYNTH / SEQ / PADS** stay in the top bar while you are in those modes; **SONGS / PRESETS / LOG / SET** open from HOME
+- **Modes:** **HOME** launcher tiles; jam shortcuts **SYNTH / SEQ / PADS / KAOSS** stay in the top bar while you are in those modes; **SONGS / PRESETS / LOG / SET** open from HOME
 - Synth: voices, A/B morph, knobs, live morph-cycle scope; **MPK pads (ch10) = analog drum voices**; **KIT** drill-down scopes a selected drum
 - Sequencer: record a backbone loop, then overdub layers of drums and keys over it
 - Pads: 16 phrase clips (Bank A+B); record from keys, launch from touch squares **or** MPK pads
+- Kaoss: full-screen XY pad (Kaossilator-style notes + original Kaoss Pad MIDI CCs) for the soft-synth and/or USB→DIN
 - Songs: scrolling list of every `.mid` in `songs/`, tempo, play local and/or USB→DIN
 - Presets: 8 save slots + autosave last session (`settings.json`)
 - Set: check GitHub `master`, full-repo deploy if the box is behind, restart into the new kiosk
@@ -135,6 +136,7 @@ Top-right tabs stay visible:
 - **SYNTH** — wavetable soft-synth, voice grid, morph pair
 - **SEQ** — record a backbone loop, overdub layers over it, KEEP / DROP / UNDO (free timing; notes only)
 - **PADS** — 4×4 phrase clip launcher (MPK Bank A+B); touch or drum pads
+- **KAOSS** — XY touch pad: play scale notes (local and/or USB MIDI) or sweep FX; HOLD / GATE ARP
 - **SONGS** — lists every `.mid` / `.midi` in `songs/`; big ▲ UP / ▼ DOWN to scroll; tempo; LOCAL/USB out
 - **PRESETS** — 8 touch slots: SAVE (name it) / LOAD / DELETE a **full session** snapshot; **FACTORY** resets morph/tone/drums/levels/FX to baked-in defaults (autosaved as the session)
 - **LOG** — full event history (also has CLEAR / panic)
@@ -209,6 +211,29 @@ On stop, every free-timing take is **auto-trimmed**: leading silence before the 
 On stop, every free-timing take is **auto-trimmed**: leading silence before the first hit is removed, and trailing silence after the last hit is capped to the largest gap between note-ons (so lag hitting REC doesn’t leave a dead bar at the loop point). The same trim runs on phrase-pad recordings.
 
 Live playing still works while the sequence runs. Voice/morph/knob settings from Synth apply to sequenced notes too. Recording keeps going if you switch modes — handy for changing voice mid-overdub.
+
+### Kaoss pad
+
+The 7″ capacitive panel is the instrument. **KAOSS** is a Kaossilator-style
+play pad plus the original Kaoss Pad’s factory MIDI, so the same finger drives
+the onboard wavetable engine **and** a hardware synth on USB→DIN.
+
+| Gesture / control | What it does |
+|-------------------|--------------|
+| Finger on the pad | Note-on (X = scale pitch, Y = tone / morph / vibrato — see PROG) |
+| Slide | Legato to the next scale degree; Y keeps sculpting |
+| Lift | Note-off — unless **HOLD** is on (last XY stays sounding) |
+| **PROG** | `LEAD` / `MORPH` / `VIB` play notes; `FILTER` / `ECHO` / `DRIVE` / `SPACE` are Kaoss-Pad FX (momentary unless HOLD) |
+| **SCALE** / **KEY** / **OCT** | Constrain X to a key (Major, minor, pentatonic, blues, Ryukyu, …) over 1–4 octaves |
+| **GATE** | Off, 1/8, 1/16, or triplet retrigger while the pad is down (BPM − / +) |
+| **OUT** | `LOCAL` / `USB` / `BOTH` — same USB port as Songs / Pads |
+| **CH** | MIDI channel 1–16 for notes + CCs |
+
+External synths see the original Kaoss Pad factory map: **CC#12 = X**, **CC#13 = Y**,
+**CC#92 = pad touch** (127 down / 0 up), plus note-on/off on the chosen channel.
+FX programs write the mix-bus insert while the finger is down and restore the
+previous bus on lift (HOLD freezes the wet). Playing into **SEQ** while it is
+recording captures the pad notes onto the take.
 
 ### Phrase Pads
 
@@ -347,13 +372,13 @@ Files:
 
 ## Screen reference
 
-Open [docs/index.html](docs/index.html) in a browser for labeled 800×480 captures of every mode (SYNTH, SEQ, PADS, SONGS, PRESETS, LOG) and the VOICES / MORPH / KIT / POWER / SAVE AS overlays.
+Open [docs/index.html](docs/index.html) in a browser for labeled 800×480 captures of every mode (HOME, SYNTH, SEQ, PADS, KAOSS, SONGS, PRESETS, LOG, SET) and the VOICES / MORPH / KIT / POWER / SAVE AS overlays.
 
 Re-capture after UI changes (needs Tk + an 800×480 X display, or the script starts Xvfb itself):
 
-`ash
+```bash
 python capture_ui_docs.py
-`
+```
 
 ## On Windows (optional host test)
 

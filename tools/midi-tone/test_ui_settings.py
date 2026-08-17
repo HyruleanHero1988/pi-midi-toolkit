@@ -89,15 +89,15 @@ class SettingsScreenTest(unittest.TestCase):
         self.assertNotIn("songs", app._mode_btns)
         self.assertNotIn("settings", app._mode_btns)
 
-    def test_jam_shortcuts_only_on_synth_seq_pads(self) -> None:
+    def test_jam_shortcuts_only_on_synth_seq_pads_kaoss(self) -> None:
         app = self.app
         app._switch_mode("synth")
         self.pump()
-        for key in ("synth", "seq", "pads"):
+        for key in ("synth", "seq", "pads", "kaoss"):
             self.assertTrue(app._jam_btns[key].winfo_ismapped(), key)
         app._switch_mode("songs")
         self.pump()
-        for key in ("synth", "seq", "pads"):
+        for key in ("synth", "seq", "pads", "kaoss"):
             self.assertFalse(app._jam_btns[key].winfo_ismapped(), key)
         app._switch_mode("pads")
         self.pump()
