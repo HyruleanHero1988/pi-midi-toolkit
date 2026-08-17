@@ -79,7 +79,6 @@ TABLE_SIZE = 2048
 TABLE_MASK = TABLE_SIZE - 1
 LOG_MAX = 60
 # Full-pad play mode: hold the top rail this long to get chrome back.
-# Not a Kaoss play stroke (those are press / slide / lift on the pad).
 KAOSS_PLAY_EXIT_MS = 700
 EVENT_Q_MAX = 200
 # MIDI channel 10 (1-based) = index 9 — MPK drum pads
