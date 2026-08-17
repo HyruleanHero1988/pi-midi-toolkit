@@ -136,7 +136,7 @@ Top-right tabs stay visible:
 - **SYNTH** — wavetable soft-synth, voice grid, morph pair
 - **SEQ** — record a backbone loop, overdub layers over it, KEEP / DROP / UNDO (free timing; notes only)
 - **PADS** — 4×4 phrase clip launcher (MPK Bank A+B); touch or drum pads
-- **KAOSS** — XY touch pad: play scale notes (local and/or USB MIDI) or sweep FX; HOLD / GATE ARP
+- **KAOSS** — XY touch pad with a Kaoss-style LED field: play scale notes (local and/or USB MIDI) or sweep FX; HOLD / GATE ARP
 - **SONGS** — lists every `.mid` / `.midi` in `songs/`; big ▲ UP / ▼ DOWN to scroll; tempo; LOCAL/USB out
 - **PRESETS** — 8 touch slots: SAVE (name it) / LOAD / DELETE a **full session** snapshot; **FACTORY** resets morph/tone/drums/levels/FX to baked-in defaults (autosaved as the session)
 - **LOG** — full event history (also has CLEAR / panic)
@@ -220,7 +220,7 @@ the onboard wavetable engine **and** a hardware synth on USB→DIN.
 
 | Gesture / control | What it does |
 |-------------------|--------------|
-| Finger on the pad | Note-on (X = scale pitch, Y = tone / morph / vibrato — see PROG) |
+| Finger on the pad | Note-on (X = scale pitch, Y = tone / morph / vibrato — see PROG). The pad is an LED field: hue follows X, a glow + trail sit under the finger, taps ripple, GATE / BPM pulse the rim |
 | Slide | Legato to the next scale degree; Y keeps sculpting |
 | Lift | Note-off — unless **HOLD** is on (last XY stays sounding) |
 | **PROG** | `LEAD` / `MORPH` / `VIB` play notes; `FILTER` / `ECHO` / `DRIVE` / `SPACE` are Kaoss-Pad FX (momentary unless HOLD) |

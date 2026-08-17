@@ -64,9 +64,15 @@ from screensaver import (  # noqa: E402
 )
 import updater  # noqa: E402  (local module; SET screen software update)
 from kaoss import (  # noqa: E402
+    LED_COLS,
+    LED_ROWS,
     KaossEvent,
     KaossPad,
+    hsv_to_rgb,
     note_name as kaoss_note_name,
+    pad_led_hex,
+    program_hue,
+    rgb_hex,
 )
 
 
@@ -4173,6 +4179,12 @@ class MidiToneApp:
         self._kaoss_fx_snap: Optional[Dict[str, Any]] = None
         self._kaoss_tick_armed = False
         self._kaoss_after_id: Optional[str] = None
+        self._kaoss_viz_after_id: Optional[str] = None
+        self._kaoss_leds: List[int] = []
+        self._kaoss_led_geom: Optional[Tuple[int, int, int, int]] = None
+        self._kaoss_ripple_items: List[int] = []
+        self._kaoss_ripples: List[Tuple[float, float, float]] = []
+        self._kaoss_trail: List[Tuple[float, float, float]] = []
         self._kaoss_canvas: Optional[tk.Canvas] = None
         self._kaoss_status_var = tk.StringVar(value="")
         self._kaoss_prog_btn: Optional[tk.Button] = None
@@ -7460,8 +7472,8 @@ class MidiToneApp:
         pad_wrap.pack(fill=tk.BOTH, expand=True)
         self._kaoss_canvas = tk.Canvas(
             pad_wrap,
-            bg="#140810",
-            highlightthickness=1,
+            bg="#08040a",
+            highlightthickness=3,
             highlightbackground="#9d2449",
             bd=0,
             cursor="none",
@@ -7554,11 +7566,14 @@ class MidiToneApp:
 
     def _kaoss_on_press(self, event: tk.Event) -> str:  # type: ignore[name-defined]
         x, y = self._kaoss_xy(event)
-        self._kaoss_apply(
-            self._kaoss.touch(x, y, now=time.monotonic()), began=True
-        )
+        now = time.monotonic()
+        self._kaoss_apply(self._kaoss.touch(x, y, now=now), began=True)
+        self._kaoss_push_ripple(x, y, now)
+        self._kaoss_push_trail(x, y, now)
         self._kaoss_draw_cursor(x, y, active=True)
+        self._kaoss_paint_leds(now)
         self._kaoss_arm_tick()
+        self._kaoss_arm_viz()
         return "break"
 
     def _kaoss_on_move(self, event: tk.Event) -> str:  # type: ignore[name-defined]
@@ -7566,12 +7581,14 @@ class MidiToneApp:
             return "break"
         x, y = self._kaoss_xy(event)
         self._kaoss_apply(self._kaoss.move(x, y))
+        self._kaoss_push_trail(x, y)
         self._kaoss_draw_cursor(x, y, active=True)
         return "break"
 
     def _kaoss_on_release(self, _event: object = None) -> str:
         self._kaoss_apply(self._kaoss.release(), ended=True)
         self._kaoss_draw_cursor(self._kaoss.x, self._kaoss.y, active=self._kaoss.is_active())
+        self._kaoss_paint_leds()
         return "break"
 
     def _kaoss_on_leave(self, event: tk.Event) -> str:  # type: ignore[name-defined]
@@ -7597,6 +7614,46 @@ class MidiToneApp:
                 self.root.after_cancel(aid)
             except Exception:
                 pass
+
+    def _kaoss_arm_viz(self) -> None:
+        if self._kaoss_viz_after_id is not None:
+            return
+        if self._mode != "kaoss" or self._stop.is_set():
+            return
+        self._kaoss_viz_after_id = self.root.after(80, self._kaoss_viz_tick)
+
+    def _kaoss_cancel_viz(self) -> None:
+        aid = self._kaoss_viz_after_id
+        self._kaoss_viz_after_id = None
+        if aid is not None:
+            try:
+                self.root.after_cancel(aid)
+            except Exception:
+                pass
+
+    def _kaoss_viz_tick(self) -> None:
+        self._kaoss_viz_after_id = None
+        if self._stop.is_set() or self._mode != "kaoss":
+            return
+        self._kaoss_paint_leds()
+        self._kaoss_arm_viz()
+
+    def _kaoss_push_trail(self, x: float, y: float, now: Optional[float] = None) -> None:
+        t = time.monotonic() if now is None else float(now)
+        if self._kaoss_trail:
+            lx, ly, _lt = self._kaoss_trail[-1]
+            if abs(lx - x) < 0.018 and abs(ly - y) < 0.018:
+                self._kaoss_trail[-1] = (x, y, t)
+                return
+        self._kaoss_trail.append((x, y, t))
+        if len(self._kaoss_trail) > 12:
+            del self._kaoss_trail[:-12]
+
+    def _kaoss_push_ripple(self, x: float, y: float, now: Optional[float] = None) -> None:
+        t = time.monotonic() if now is None else float(now)
+        self._kaoss_ripples.append((x, y, t))
+        if len(self._kaoss_ripples) > 4:
+            del self._kaoss_ripples[:-4]
 
     def _kaoss_tick(self) -> None:
         self._kaoss_tick_armed = False
@@ -7871,8 +7928,9 @@ class MidiToneApp:
         canvas.delete("axis")
         w = max(1, int(canvas.winfo_width()))
         h = max(1, int(canvas.winfo_height()))
+        self._kaoss_ensure_leds(w, h)
         prog = self._kaoss.program()
-        # Horizontal bands (Y)
+        # Faint overlay so scale degrees stay readable on top of the LEDs
         for frac, color in ((0.25, "#3a1528"), (0.5, "#5b203c"), (0.75, "#3a1528")):
             y = int(h * (1.0 - frac))
             canvas.create_line(0, y, w, y, fill=color, width=1, tags="grid")
@@ -7907,10 +7965,126 @@ class MidiToneApp:
             anchor="nw",
             tags="axis",
         )
+        self._kaoss_paint_leds()
         if self._kaoss.is_active() or self._kaoss.hold:
             self._kaoss_draw_cursor(self._kaoss.x, self._kaoss.y, active=True)
         else:
             canvas.delete("cursor")
+        canvas.tag_raise("grid")
+        canvas.tag_raise("ripple")
+        canvas.tag_raise("axis")
+        canvas.tag_raise("cursor")
+
+    def _kaoss_ensure_leds(self, w: int, h: int) -> None:
+        canvas = self._kaoss_canvas
+        if canvas is None or w < 40 or h < 40:
+            return
+        geom = (w, h, LED_COLS, LED_ROWS)
+        if self._kaoss_led_geom == geom and len(self._kaoss_leds) == LED_COLS * LED_ROWS:
+            return
+        canvas.delete("led")
+        canvas.delete("ripple")
+        self._kaoss_leds = []
+        self._kaoss_ripple_items = []
+        gap = 3
+        cell_w = max(2.0, (w - gap * (LED_COLS + 1)) / float(LED_COLS))
+        cell_h = max(2.0, (h - gap * (LED_ROWS + 1)) / float(LED_ROWS))
+        for row in range(LED_ROWS):
+            # row 0 is the bottom of the pad (Kaoss Y = 0)
+            top = gap + (LED_ROWS - 1 - row) * (cell_h + gap)
+            for col in range(LED_COLS):
+                left = gap + col * (cell_w + gap)
+                item = canvas.create_rectangle(
+                    left,
+                    top,
+                    left + cell_w,
+                    top + cell_h,
+                    fill="#12060e",
+                    outline="#1a0a14",
+                    width=1,
+                    tags="led",
+                )
+                self._kaoss_leds.append(item)
+        for _ in range(4):
+            self._kaoss_ripple_items.append(
+                canvas.create_oval(0, 0, 0, 0, outline="", width=2, tags="ripple")
+            )
+        canvas.tag_lower("led")
+        self._kaoss_led_geom = geom
+
+    def _kaoss_paint_leds(self, now: Optional[float] = None) -> None:
+        canvas = self._kaoss_canvas
+        if canvas is None or not self._kaoss_leds:
+            return
+        t = time.monotonic() if now is None else float(now)
+        finger = None
+        if self._kaoss.is_active() or self._kaoss.touching:
+            finger = (self._kaoss.x, self._kaoss.y)
+        trail: List[Tuple[float, float, float]] = []
+        live_trail: List[Tuple[float, float, float]] = []
+        for x, y, born in self._kaoss_trail:
+            age = 1.0 - (t - born) / 0.45
+            if age <= 0.0:
+                continue
+            live_trail.append((x, y, born))
+            trail.append((x, y, min(1.0, age)))
+        self._kaoss_trail = live_trail
+        ripples: List[Tuple[float, float, float]] = []
+        live_ripples: List[Tuple[float, float, float]] = []
+        for x, y, born in self._kaoss_ripples:
+            age = (t - born) / 0.55
+            if age >= 1.0:
+                continue
+            live_ripples.append((x, y, born))
+            ripples.append((x, y, max(0.0, age)))
+        self._kaoss_ripples = live_ripples
+        hue = program_hue(self._kaoss.program_id)
+        flash = self._kaoss.gate_flash()
+        pulse = self._kaoss.viz_pulse(t)
+        hold = bool(self._kaoss.hold and self._kaoss.is_active())
+        idx = 0
+        for row in range(LED_ROWS):
+            for col in range(LED_COLS):
+                color = pad_led_hex(
+                    col,
+                    row,
+                    t=t,
+                    finger=finger,
+                    trail=trail,
+                    ripples=ripples,
+                    hold=hold,
+                    gate_flash=flash,
+                    hue_shift=hue,
+                )
+                canvas.itemconfigure(self._kaoss_leds[idx], fill=color)
+                idx += 1
+        self._kaoss_paint_ripples(canvas, ripples, hue)
+        rim = rgb_hex(hsv_to_rgb(hue, 0.85, 0.28 + 0.55 * pulse))
+        try:
+            canvas.configure(highlightbackground=rim)
+        except tk.TclError:
+            pass
+
+    def _kaoss_paint_ripples(
+        self,
+        canvas: tk.Canvas,
+        ripples: List[Tuple[float, float, float]],
+        hue: float,
+    ) -> None:
+        w = max(1, int(canvas.winfo_width()))
+        h = max(1, int(canvas.winfo_height()))
+        for i, item in enumerate(self._kaoss_ripple_items):
+            if i >= len(ripples):
+                canvas.coords(item, 0, 0, 0, 0)
+                canvas.itemconfigure(item, outline="")
+                continue
+            x, y, age = ripples[i]
+            px = x * (w - 1)
+            py = (1.0 - y) * (h - 1)
+            radius = 10 + age * min(w, h) * 0.42
+            color = rgb_hex(hsv_to_rgb(hue, 0.35, 0.95 * (1.0 - age)))
+            canvas.coords(item, px - radius, py - radius, px + radius, py + radius)
+            canvas.itemconfigure(item, outline=color, width=2)
 
     def _kaoss_draw_cursor(self, x: float, y: float, *, active: bool) -> None:
         canvas = self._kaoss_canvas
@@ -7921,22 +8095,57 @@ class MidiToneApp:
         h = max(1, int(canvas.winfo_height()))
         px = int(round(max(0.0, min(1.0, x)) * (w - 1)))
         py = int(round((1.0 - max(0.0, min(1.0, y))) * (h - 1)))
-        color = "#fe8019" if active else "#665c54"
-        r = 16 if active else 10
-        canvas.create_oval(
-            px - r, py - r, px + r, py + r, outline=color, width=3, tags="cursor"
-        )
-        canvas.create_line(px - 22, py, px + 22, py, fill=color, width=2, tags="cursor")
-        canvas.create_line(px, py - 22, px, py + 22, fill=color, width=2, tags="cursor")
+        hue = (max(0.0, min(1.0, x)) * 0.70 + program_hue(self._kaoss.program_id)) % 1.0
+        if active:
+            outer = rgb_hex(hsv_to_rgb(hue, 0.90, 0.55))
+            mid = rgb_hex(hsv_to_rgb(hue, 0.85, 1.0))
+            core = rgb_hex(hsv_to_rgb(hue, 0.12, 1.0))
+            canvas.create_oval(
+                px - 34, py - 34, px + 34, py + 34, outline=outer, width=2, tags="cursor"
+            )
+            canvas.create_oval(
+                px - 20, py - 20, px + 20, py + 20, outline=mid, width=3, tags="cursor"
+            )
+            canvas.create_oval(
+                px - 7, py - 7, px + 7, py + 7, fill=core, outline=mid, width=1, tags="cursor"
+            )
+            canvas.create_line(px - 28, py, px + 28, py, fill=mid, width=2, tags="cursor")
+            canvas.create_line(px, py - 28, px, py + 28, fill=mid, width=2, tags="cursor")
+        else:
+            canvas.create_oval(
+                px - 10, py - 10, px + 10, py + 10, outline="#665c54", width=2, tags="cursor"
+            )
         if active and self._kaoss.program().kind == "note" and self._kaoss.sounding_note() is not None:
             canvas.create_text(
                 px,
-                max(18, py - 28),
+                max(18, py - 40),
                 text=kaoss_note_name(self._kaoss.sounding_note() or 60),
                 fill="#fbf1c7",
                 font=("DejaVu Sans", 14, "bold"),
                 tags="cursor",
             )
+        canvas.tag_raise("cursor")
+
+    def _kaoss_docs_pose(self) -> None:
+        """Fake a finger on the pad so docs screenshots show the LED field."""
+        self._switch_mode("kaoss")
+        try:
+            self.root.update_idletasks()
+        except tk.TclError:
+            pass
+        now = time.monotonic()
+        self._kaoss_apply(self._kaoss.touch(0.66, 0.70, now=now), began=True)
+        self._kaoss_ripples = [(0.42, 0.32, now - 0.22), (0.66, 0.70, now - 0.04)]
+        self._kaoss_trail = [
+            (0.34, 0.22, now - 0.36),
+            (0.44, 0.38, now - 0.24),
+            (0.54, 0.52, now - 0.12),
+            (0.66, 0.70, now),
+        ]
+        self._kaoss_draw_grid()
+        self._kaoss_draw_cursor(0.66, 0.70, active=True)
+        self._kaoss_arm_tick()
+        self._kaoss_arm_viz()
 
     def _switch_mode(self, mode: str) -> None:
         mode = mode if mode in UI_MODES else "synth"
@@ -7966,9 +8175,11 @@ class MidiToneApp:
                 self._seq_to_pad_armed = False
         if mode not in ("pads", "seq"):
             self._seq_to_pad_armed = False
-        # Leaving KAOSS: lift the pad unless HOLD is latched
-        if self._mode == "kaoss" and mode != "kaoss" and not self._kaoss.hold:
-            self._kaoss_apply(self._kaoss.release(), ended=True)
+        # Leaving KAOSS: lift the pad unless HOLD is latched; stop the LED tick
+        if self._mode == "kaoss" and mode != "kaoss":
+            self._kaoss_cancel_viz()
+            if not self._kaoss.hold:
+                self._kaoss_apply(self._kaoss.release(), ended=True)
 
         self._mode = mode
         self._home_shell.pack_forget()
@@ -8015,6 +8226,7 @@ class MidiToneApp:
             self._paint_kaoss()
             self._kaoss_draw_grid()
             self._kaoss_arm_tick()
+            self._kaoss_arm_viz()
         elif mode == "songs":
             self._songs_shell.pack(fill=tk.BOTH, expand=True)
             # Rescan directory each visit so dropped-in .mid files appear
@@ -9654,6 +9866,7 @@ class MidiToneApp:
             pass
         try:
             self._kaoss_cancel_tick()
+            self._kaoss_cancel_viz()
             self._kaoss_apply(self._kaoss.panic(), ended=True)
         except Exception:
             pass
@@ -9666,6 +9879,11 @@ class MidiToneApp:
         self._refresh_phrase_status()
         self._refresh_song_status()
         self._paint_kaoss()
+        if self._mode == "kaoss":
+            self._kaoss_trail.clear()
+            self._kaoss_ripples.clear()
+            self._kaoss_paint_leds()
+            self._kaoss_arm_viz()
         self._append_log("All Notes Off")
 
     def _apply_display_geometry(self) -> None:
@@ -10102,6 +10320,7 @@ class MidiToneApp:
             pass
         try:
             self._kaoss_cancel_tick()
+            self._kaoss_cancel_viz()
             self._kaoss_apply(self._kaoss.panic(), ended=True)
         except Exception:
             pass

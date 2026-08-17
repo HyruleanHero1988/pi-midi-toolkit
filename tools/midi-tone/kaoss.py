@@ -14,6 +14,7 @@ Behaviour follows the simplest Korg units:
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -129,6 +130,30 @@ PROGRAM_IDS: Tuple[str, ...] = tuple(p.id for p in PROGRAMS if p.curated)
 PROGRAM_IDS_ALL: Tuple[str, ...] = tuple(p.id for p in PROGRAMS)
 PROGRAM_BY_ID: Dict[str, KaossProgram] = {p.id: p for p in PROGRAMS}
 
+# LED field — Kaoss Quad / KP3 vibe. Wide TFT gets more columns than rows.
+LED_COLS = 12
+LED_ROWS = 7
+# Program tint so FILTER doesn't light up the same magenta as LEAD.
+PROGRAM_HUE: Dict[str, float] = {
+    "lead": 0.93,
+    "morph": 0.80,
+    "vib": 0.55,
+    "level": 0.12,
+    "decay": 0.08,
+    "attack": 0.18,
+    "octave": 0.45,
+    "grit": 0.02,
+    "delay": 0.62,
+    "filter": 0.72,
+    "echo": 0.58,
+    "drive": 0.04,
+    "space": 0.66,
+    "reso": 0.85,
+    "wash": 0.70,
+    "crush": 0.98,
+    "sweep": 0.50,
+}
+
 
 @dataclass(frozen=True)
 class GatePattern:
@@ -189,6 +214,93 @@ def scale_notes(
     top = min(127, root + span * 12)
     notes = [n for n in range(root, top + 1) if ((n - key) % 12) in degrees]
     return notes or [root]
+
+
+def hsv_to_rgb(h: float, s: float, v: float) -> Tuple[int, int, int]:
+    """HSV in 0..1 → 8-bit RGB. Cheap enough to run per LED on a Pi 2."""
+    h = h % 1.0
+    s = 0.0 if s < 0.0 else 1.0 if s > 1.0 else float(s)
+    v = 0.0 if v < 0.0 else 1.0 if v > 1.0 else float(v)
+    if s <= 0.0:
+        c = int(round(v * 255.0))
+        return (c, c, c)
+    sector = h * 6.0
+    i = int(sector)
+    f = sector - i
+    p = v * (1.0 - s)
+    q = v * (1.0 - f * s)
+    t = v * (1.0 - (1.0 - f) * s)
+    i = i % 6
+    if i == 0:
+        r, g, b = v, t, p
+    elif i == 1:
+        r, g, b = q, v, p
+    elif i == 2:
+        r, g, b = p, v, t
+    elif i == 3:
+        r, g, b = p, q, v
+    elif i == 4:
+        r, g, b = t, p, v
+    else:
+        r, g, b = v, p, q
+    return (int(round(r * 255.0)), int(round(g * 255.0)), int(round(b * 255.0)))
+
+
+def rgb_hex(rgb: Tuple[int, int, int]) -> str:
+    r, g, b = rgb
+    return f"#{max(0, min(255, r)):02x}{max(0, min(255, g)):02x}{max(0, min(255, b)):02x}"
+
+
+def program_hue(program_id: str) -> float:
+    return float(PROGRAM_HUE.get(program_id, 0.93))
+
+
+def pad_led_hex(
+    col: int,
+    row: int,
+    *,
+    cols: int = LED_COLS,
+    rows: int = LED_ROWS,
+    t: float = 0.0,
+    finger: Optional[Tuple[float, float]] = None,
+    trail: Sequence[Tuple[float, float, float]] = (),
+    ripples: Sequence[Tuple[float, float, float]] = (),
+    hold: bool = False,
+    gate_flash: float = 0.0,
+    hue_shift: float = 0.0,
+) -> str:
+    """One LED in the pad field. ``row`` 0 is the bottom (Kaoss Y = 0).
+
+    ``trail`` / ``ripples`` entries are ``(x, y, age)`` with age 1 = fresh, 0 = gone.
+    """
+    cols = max(2, int(cols))
+    rows = max(2, int(rows))
+    lx = float(col) / float(cols - 1)
+    ly = float(row) / float(rows - 1)
+    wave = 0.5 + 0.5 * math.sin(float(t) * 1.6 + col * 0.45 + row * 0.38)
+    hue = (lx * 0.70 + float(hue_shift) + float(t) * 0.035) % 1.0
+    sat = 0.82
+    val = 0.045 + 0.09 * wave
+    if hold:
+        val += 0.05
+    if finger is not None:
+        fx, fy = finger
+        dist = math.hypot(lx - fx, ly - fy)
+        glow = max(0.0, 1.0 - dist / 0.40) ** 1.45
+        val = min(1.0, val + glow * 0.92)
+        sat = min(1.0, 0.55 + glow * 0.45)
+        hue = (hue * (1.0 - glow * 0.55) + (fx * 0.70 + float(hue_shift)) * glow) % 1.0
+    for tx, ty, age in trail:
+        dist = math.hypot(lx - tx, ly - ty)
+        spark = max(0.0, 1.0 - dist / 0.22) ** 1.8 * clamp01(age) * 0.55
+        val = min(1.0, val + spark)
+    for rx, ry, age in ripples:
+        radius = 0.08 + clamp01(age) * 0.72
+        dist = math.hypot(lx - rx, ly - ry)
+        ring = max(0.0, 1.0 - abs(dist - radius) / 0.10)
+        val = min(1.0, val + ring * (1.0 - clamp01(age)) * 0.65)
+    val = min(1.0, val + clamp01(gate_flash) * 0.20)
+    return rgb_hex(hsv_to_rgb(hue, sat, val))
 
 
 def note_at_x(x: float, notes: Sequence[int]) -> int:
@@ -270,6 +382,21 @@ class KaossPad:
 
     def sounding_note(self) -> Optional[int]:
         return self._note
+
+    def gate_flash(self) -> float:
+        """1 while GATE ARP is in the on phase — drives the LED field pulse."""
+        if self.program().kind != "note":
+            return 0.0
+        if self.gate().beats <= 0.0 or not self.is_active():
+            return 0.0
+        return 1.0 if self._gate_on else 0.0
+
+    def viz_pulse(self, now: float) -> float:
+        """Beat-synced 0..1 pulse for the pad rim and idle field."""
+        period = 60.0 / max(40.0, min(240.0, float(self.bpm)))
+        phase = (float(now) % period) / period
+        beat = max(0.0, 1.0 - phase * 5.0)
+        return max(beat * 0.45, self.gate_flash() * 0.9)
 
     # --- settings ---------------------------------------------------------
 

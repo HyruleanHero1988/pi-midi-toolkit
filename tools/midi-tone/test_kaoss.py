@@ -18,8 +18,12 @@ from kaoss import (
     SCALE_ORDER,
     SCALE_ORDER_ALL,
     KaossPad,
+    hsv_to_rgb,
     midi_cc,
     note_at_x,
+    pad_led_hex,
+    program_hue,
+    rgb_hex,
     scale_notes,
 )
 
@@ -215,6 +219,49 @@ class GateArpTest(unittest.TestCase):
         pad.touch(0.0, 1.0, now=0.0)
         self.assertEqual(pad.tick(1.0), [])
         self.assertIsNotNone(pad.sounding_note())
+
+    def test_gate_flash_tracks_on_phase(self) -> None:
+        pad = KaossPad()
+        pad.gate_id = "8th"
+        pad.bpm = 120.0
+        pad.touch(0.0, 1.0, now=0.0)
+        self.assertEqual(pad.gate_flash(), 0.0)
+        pad.tick(0.01)
+        self.assertEqual(pad.gate_flash(), 1.0)
+        pad.tick(0.20)
+        self.assertEqual(pad.gate_flash(), 0.0)
+
+
+class LedFieldTest(unittest.TestCase):
+    def test_hsv_primaries(self) -> None:
+        self.assertEqual(hsv_to_rgb(0.0, 1.0, 1.0), (255, 0, 0))
+        self.assertEqual(hsv_to_rgb(1.0 / 3.0, 1.0, 1.0), (0, 255, 0))
+        self.assertEqual(hsv_to_rgb(2.0 / 3.0, 1.0, 1.0), (0, 0, 255))
+        self.assertEqual(hsv_to_rgb(0.0, 0.0, 0.0), (0, 0, 0))
+        self.assertEqual(rgb_hex((15, 32, 255)), "#0f20ff")
+
+    def test_finger_lights_nearest_led(self) -> None:
+        hot = pad_led_hex(6, 3, t=0.0, finger=(0.55, 0.5), hue_shift=0.93)
+        cold = pad_led_hex(0, 0, t=0.0, finger=(0.55, 0.5), hue_shift=0.93)
+        self.assertGreater(self._luma(hot), self._luma(cold) + 40)
+
+    def test_ripple_and_hold_add_light(self) -> None:
+        idle = pad_led_hex(4, 3, t=0.0, hue_shift=0.2)
+        held = pad_led_hex(4, 3, t=0.0, hold=True, hue_shift=0.2)
+        ring = pad_led_hex(
+            4, 3, t=0.0, ripples=((0.0, 0.5, 0.39),), hue_shift=0.2
+        )
+        self.assertGreater(self._luma(held), self._luma(idle))
+        self.assertGreater(self._luma(ring), self._luma(idle))
+
+    def test_programs_use_different_hues(self) -> None:
+        self.assertNotEqual(program_hue("lead"), program_hue("filter"))
+        self.assertGreater(KaossPad().viz_pulse(0.0), 0.3)
+
+    @staticmethod
+    def _luma(color: str) -> int:
+        raw = color.lstrip("#")
+        return int(raw[0:2], 16) + int(raw[2:4], 16) + int(raw[4:6], 16)
 
 
 if __name__ == "__main__":
