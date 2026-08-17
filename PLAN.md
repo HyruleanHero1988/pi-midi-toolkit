@@ -437,7 +437,7 @@ Korg manuals set the rules (not a 100-program dump):
 | **OUT / CH** | `LOCAL` / `USB` / `BOTH` (shares Songs USB port); notes + CCs on ch 1–16 |
 | **SEQ** | Pad notes record into a running backbone / overdub take |
 | **Look** | 12×7 LED field (create once, `itemconfigure` fills). Hue from X / program, finger glow + short trail, tap ripples, BPM rim pulse. Idle ~12 fps so a Pi 2 stays cheap |
-| **FULL PAD** | Hide nav + settings so the pad fills 800×480. Exit is a 0.7s hold on a top rail (not a play stroke). Do not use a 3-finger chord — Tk only sees one pointer |
+| **FULL PAD** | Hide nav + settings so the pad fills 800×480. Exit is a 0.7s hold on a top rail |
 
 Model: `tools/midi-tone/kaoss.py` (no Tk; color math is unit-tested). Tests: `test_kaoss.py`, `test_ui_kaoss.py`.
 
