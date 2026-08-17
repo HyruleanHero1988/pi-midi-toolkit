@@ -6072,8 +6072,10 @@ class MidiToneApp:
             self._kaoss_header.pack_forget()
         if self._kaoss_footer is not None:
             self._kaoss_footer.pack_forget()
-        if self._kaoss_exit_bar is not None:
+        if self._kaoss_exit_bar is not None and self._kaoss_canvas is not None:
+            self._kaoss_canvas.pack_forget()
             self._kaoss_exit_bar.pack(side=tk.TOP, fill=tk.X)
+            self._kaoss_canvas.pack(fill=tk.BOTH, expand=True)
         self._kaoss_paint_exit_bar(holding=False)
         self._kaoss_draw_grid()
         self._kaoss_arm_viz()
