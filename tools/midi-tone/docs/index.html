@@ -146,6 +146,7 @@
     <a href="#pads-edit">PADS EDIT</a>
     <a href="#pads-play">PADS PLAY</a>
     <a href="#kaoss">KAOSS</a>
+    <a href="#kaoss-scales">SCALES</a>
     <a href="#songs">SONGS</a>
     <a href="#presets">PRESETS</a>
     <a href="#log">LOG</a>
@@ -280,13 +281,27 @@
       <table>
         <tr><th>XY pad</th><td>Press / slide / lift. X is scale pitch on note programs; Y sculpts tone, morph, vibrato, or an FX pair. The surface is a cheap LED matrix (hue from X, glow + trail under the finger, tap ripples, BPM / GATE pulse). Grid lines mark scale degrees (roots are brighter).</td></tr>
         <tr><th>PROG</th><td>LEAD / MORPH / VIB play notes. FILTER / ECHO / DRIVE / SPACE are momentary mix-bus FX (restore on lift unless HOLD).</td></tr>
-        <tr><th>SCALE / KEY / OCT</th><td>Constrain X to a key over 1–4 octaves. Default is a short starter set; <strong>SHOW ALL</strong> unlocks the full factory Kaossilator list.</td></tr>
+        <tr><th>SCALE / KEY / OCT</th><td><strong>SCALE</strong> opens a full-name grid (same idea as VOICES). KEY / OCT cycle. Default is a short starter set; <strong>SHOW ALL</strong> unlocks the full factory Kaossilator list.</td></tr>
         <tr><th>SHOW ALL</th><td>On the KAOSS header, or PRESETS → <code>KAOSS: ALL</code>. Full 31+ scales (raga, pelog, Miyakobushi, …) and every XY program the engine can drive. Saved in <code>settings.json</code>.</td></tr>
         <tr><th>HOLD</th><td>Freeze the last XY after you lift — same idea as Kaossilator SHIFT+hold.</td></tr>
         <tr><th>GATE + BPM</th><td>Retrigger the held note on 1/8, 1/16, or triplets. Off = sustain while down.</td></tr>
         <tr><th>OUT / CH</th><td>LOCAL / USB / BOTH (shares the Songs USB port). Notes + CC#12 (X) / CC#13 (Y) / CC#92 (touch) on the chosen channel.</td></tr>
       </table>
       <p class="note">Factory MIDI matches the original Kaoss Pad manual so a DIN synth can treat the Pi as a Kaoss controller. Playing while SEQ is recording captures the pad notes.</p>
+    </section>
+
+    <section class="screen" id="kaoss-scales">
+      <h2>KAOSS scales</h2>
+      <p class="lede">Opened from KAOSS → SCALE. Same idea as VOICES: tap a full name instead of cycling three-letter Korg codes.</p>
+      <figure>
+        <img src="screens/14-kaoss-scales.png" alt="KAOSS scale picker grid" width="800" height="480" />
+        <figcaption>14 — KAOSS scales (SHOW ALL on — factory list with readable names)</figcaption>
+      </figure>
+      <table>
+        <tr><th>Scale tiles</th><td>Pick the scale that locks X. Current scale is highlighted. Drag or use ▲ / ▼ to scroll the factory list.</td></tr>
+        <tr><th>SHOW ALL</th><td>Starter set vs every factory Kaossilator scale (raga, pelog, Miyakobushi, …). Same setting as the pad header / PRESETS toggle.</td></tr>
+        <tr><th>CLOSE</th><td>Back to the XY pad without changing scale.</td></tr>
+      </table>
     </section>
 
     <section class="screen" id="songs">

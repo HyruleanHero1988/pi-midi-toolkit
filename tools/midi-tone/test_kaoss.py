@@ -181,6 +181,19 @@ class ShowAllCatalogTest(unittest.TestCase):
             seen.add(pad.cycle_program().id)
         self.assertEqual(seen, set(PROGRAM_IDS_ALL))
 
+    def test_scale_label_is_full_name_even_when_show_all(self) -> None:
+        pad = KaossPad()
+        pad.set_scale("mixolydian")
+        pad.set_show_all(True)
+        self.assertEqual(pad.scale_label(), "MIXOLYDIAN")
+        self.assertNotEqual(pad.scale_label(), pad.scale().short)
+
+    def test_set_scale_ignores_unknown_ids(self) -> None:
+        pad = KaossPad()
+        pad.set_scale("blues")
+        self.assertEqual(pad.set_scale("not-a-scale"), "blues")
+        self.assertEqual(pad.scale_label(), "BLUES")
+
     def test_exotic_scale_still_quantizes(self) -> None:
         notes = scale_notes("egyptian", 0, root_midi=48, octaves=1)
         self.assertEqual(notes[0], 48)
