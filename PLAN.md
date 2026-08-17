@@ -21,7 +21,7 @@ todos:
     content: "Phase 1: channel remap, CC remap + learn, always-full / velocity remap, stuck-note safety"
     status: pending
   - id: touch-ui
-    content: "One kiosk UI: Synth/Seq/Pads/Songs now; Map mode for remap thru (never on MIDI hot path)"
+    content: "One kiosk UI: Synth/Seq/Pads/Kaoss/Songs now; Map mode for remap thru (never on MIDI hot path)"
     status: in_progress
   - id: drum-retrigger
     content: "Phase 2: per-pad/note auto-retrigger with configurable interval"
@@ -53,6 +53,9 @@ todos:
   - id: tft70-display
     content: "Migrate kiosk to BigTreeTech Pi TFT70 V2.1 (7\" DSI, capacitive GT911); retire ADS7846 resistive path"
     status: pending
+  - id: kaoss-mode
+    content: "KAOSS mode: Kaossilator-style XY notes + original Kaoss Pad MIDI CCs for local synth and USB→DIN"
+    status: completed
   - id: arp
     content: "Phase 4 (optional distinct mode): key-relative step pattern transposed by held root"
     status: pending
@@ -83,6 +86,7 @@ Power on → Openbox kiosk → modes. The soft-synth path started as a Phase 0 h
 | **Synth** | Jambox | Wavetable morph synth + drum kit + scopes |
 | **Seq** | Jambox | Free-timing backbone loop + 808-style overdub layers (drums and keys) |
 | **Phrases / Pads** | Jambox (+ MIDI out) | 16 clip-launch cells; touch **and** MPK pads |
+| **Kaoss** | Both | XY pad: scale notes + factory Kaoss CCs; LOCAL and/or USB→DIN |
 | **Songs** | Both | `.mid` library; tempo; LOCAL and/or USB→DIN |
 | **Presets** | Jambox | Synth slots + session autosave |
 | **Map / Thru** | Remap | Channel / CC / velocity remap; ports; learn → Rust engine |
@@ -193,7 +197,7 @@ CME’s PC/Mac app **configures their USB MIDI interfaces**. Filters, routes, an
 
 Live surface in `tools/midi-tone`:
 - Wavetable voices, A/B morph, MPK knobs, drum kit, scopes
-- Modes: Synth / Seq / Pads / Songs / Presets / Log
+- Modes: Synth / Seq / Pads / Kaoss / Songs / Presets / Log
 - Kiosk session (`kiosk.sh` / Openbox) so the box boots into the UI
 - **Session autosave** → `tools/midi-tone/settings.json` every ~2s when dirty and on quit
 - **Named presets** → `tools/midi-tone/user-presets/slot-01.json` … `slot-08.json`
@@ -413,6 +417,27 @@ Persist per-pad fields in `phrases/pad-NN.json` (version 4 — adds per-pad `gai
 **PLAY vs EDIT:** same 16 cells; PLAY is performance (no arm-record); EDIT is record/clear/mode + TRIG / FOLLOW·LOCK / CH / SYNTH / OUT.
 
 **Voice lock:** soft-synth multi-timbre — locked pads bake a wavetable; FOLLOW + live keys share global morph; drums stay procedural on ch10. Cap concurrent locked tables at 4 (Pi 2).
+
+## Phase 3d — Kaoss XY pad — **done on `cursor/kaoss-pad-mode-0d80`**
+
+The TFT70 is a 7″ capacitive surface; **KAOSS** is the mode that spends it. Two
+Korg manuals set the rules (not a 100-program dump):
+
+| Source | What we kept |
+|--------|----------------|
+| **Kaossilator KO-1** | X = scale-quantized pitch, Y = tone; lift = note-off; **HOLD**; **SCALE** + **KEY**; **GATE ARP** |
+| **Kaoss Pad (factory MIDI)** | X = CC#12, Y = CC#13, pad touch = CC#92 (127/0) |
+
+| Piece | Behavior |
+|-------|----------|
+| **PROG** | `LEAD` / `MORPH` / `VIB` play notes (Y = tone / morph / vibrato). `FILTER` / `ECHO` / `DRIVE` / `SPACE` are momentary mix-bus FX (restore on lift unless HOLD) |
+| **SCALE / KEY / OCT** | **SCALE** opens a VOICES-style grid of full names (not 3-letter Korg codes). Curated starter set by default; **SHOW ALL** (PRESETS, KAOSS header, or the scale grid) unlocks the factory Kaossilator PRO list + PRO+ extras |
+| **OUT / CH** | `LOCAL` / `USB` / `BOTH` (shares Songs USB port); notes + CCs on ch 1–16 |
+| **SEQ** | Pad notes record into a running backbone / overdub take |
+| **Look** | 12×7 LED field (create once, `itemconfigure` fills). Hue from X / program, finger glow + short trail, tap ripples, BPM rim pulse. Idle ~12 fps so a Pi 2 stays cheap |
+| **FULL PAD** | Hide nav + settings so the pad fills 800×480. Exit is a 0.7s hold on a top rail |
+
+Model: `tools/midi-tone/kaoss.py` (no Tk; color math is unit-tested). Tests: `test_kaoss.py`, `test_ui_kaoss.py`.
 
 ## Phase 4 — Key-relative arpeggiator
 
