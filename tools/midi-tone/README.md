@@ -225,6 +225,7 @@ the onboard wavetable engine **and** a hardware synth on USB→DIN.
 | Lift | Note-off — unless **HOLD** is on (last XY stays sounding) |
 | **PROG** | `LEAD` / `MORPH` / `VIB` play notes; `FILTER` / `ECHO` / `DRIVE` / `SPACE` are Kaoss-Pad FX (momentary unless HOLD) |
 | **SCALE** / **KEY** / **OCT** | **SCALE** opens a VOICES-style grid of full names (Major, Mixolydian, Miyakobushi, …) — not the 3-letter Korg codes. KEY / OCT still cycle. Default list is a short starter set |
+| **FULL PAD** | Hides nav + settings so the XY surface fills the 800×480 panel. **HOLD TO EXIT** on the slim top rail (~0.7s) brings chrome back — a hold on the bezel, not a play stroke. (Tk only sees one finger, so a three-finger chord can’t be the exit.) |
 | **SHOW ALL** | PRESETS → **KAOSS: ALL**, or the **SHOW ALL** button on the pad — unlocks every factory Kaossilator scale (31 + PRO+ extras) and every XY program the engine can drive |
 | **GATE** | Off, 1/8, 1/16, or triplet retrigger while the pad is down (BPM − / +) |
 | **OUT** | `LOCAL` / `USB` / `BOTH` — same USB port as Songs / Pads |
@@ -373,7 +374,7 @@ Files:
 
 ## Screen reference
 
-Open [docs/index.html](docs/index.html) in a browser for labeled 800×480 captures of every mode (HOME, SYNTH, SEQ, PADS, KAOSS, SONGS, PRESETS, LOG, SET) and the VOICES / MORPH / KIT / POWER / SAVE AS / KAOSS scales overlays.
+Open [docs/index.html](docs/index.html) in a browser for labeled 800×480 captures of every mode (HOME, SYNTH, SEQ, PADS, KAOSS, SONGS, PRESETS, LOG, SET) and the VOICES / MORPH / KIT / POWER / SAVE AS / KAOSS scales / FULL PAD overlays.
 
 Re-capture after UI changes (needs Tk + an 800×480 X display, or the script starts Xvfb itself):
 

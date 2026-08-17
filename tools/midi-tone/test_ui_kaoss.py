@@ -131,6 +131,8 @@ class KaossScreenTest(unittest.TestCase):
         app._kaoss.scale_id = "ionian"
         if app._kaoss_scale_open:
             app._close_kaoss_scale_grid(restore_main=False)
+        if app._kaoss_play:
+            app._kaoss_leave_play()
         app.engine.all_notes_off()
 
     def pump(self, seconds: float = 0.05) -> None:
@@ -224,6 +226,25 @@ class KaossScreenTest(unittest.TestCase):
         self.assertIn("KAOSS: ALL", app._preset_kaoss_all_btn.cget("text"))
         app._kaoss_toggle_show_all()
         self.assertFalse(app._kaoss.show_all)
+
+    def test_full_pad_hides_chrome_hold_exit_restores(self) -> None:
+        app = self.app
+        app._switch_mode("kaoss")
+        self.pump()
+        self.assertTrue(bool(app._nav.winfo_ismapped()))
+        app._kaoss_enter_play()
+        self.pump()
+        self.assertTrue(app._kaoss_play)
+        self.assertFalse(bool(app._nav.winfo_ismapped()))
+        self.assertTrue(bool(app._kaoss_exit_bar.winfo_ismapped()))
+        app._kaoss_exit_press()
+        app._kaoss_exit_release()
+        self.pump()
+        self.assertTrue(app._kaoss_play)
+        app._kaoss_exit_press()
+        self.pump(0.85)
+        self.assertFalse(app._kaoss_play)
+        self.assertTrue(bool(app._nav.winfo_ismapped()))
 
     def test_axis_labels_sit_on_bottom_and_left(self) -> None:
         app = self.app

@@ -30,7 +30,7 @@ Modes today in `tools/midi-tone`:
 
 **Save voice:** VOICES / MORPH → **SAVE AS…** bakes morph + drive + tone into `.wav`, and keeps delay/reverb in a tiny `.fx.json` beside it.
 
-**Kaoss:** **KAOSS** is a full-screen XY pad (Kaossilator-style scale notes + original Kaoss Pad CC#12/13/92) for the onboard engine and/or USB→DIN. The surface is a 12×7 LED field (finger glow, trail, tap ripples, BPM pulse). **SCALE** opens a VOICES-style grid of full names. Model + color math live in `tools/midi-tone/kaoss.py`.
+**Kaoss:** **KAOSS** is a full-screen XY pad (Kaossilator-style scale notes + original Kaoss Pad CC#12/13/92) for the onboard engine and/or USB→DIN. The surface is a 12×7 LED field (finger glow, trail, tap ripples, BPM pulse). **SCALE** opens a VOICES-style grid of full names. **FULL PAD** hides chrome; hold the top rail to exit (Tk is single-touch — not a 3-finger chord). Model + color math live in `tools/midi-tone/kaoss.py`.
 
 **Sequencer:** **SEQ** replaced LOOPER. First take is the backbone (auto-trimmed; it locks the loop length), then REC again overdubs drums or keys over the running loop and KEEP / DROP / UNDO decide what survives. Model + transport live in `tools/midi-tone/sequencer.py` (no Tk / numpy / audio) so `test_sequencer.py`, `test_ui_seq.py`, and `test_phrase_pads.py` run headless.
 

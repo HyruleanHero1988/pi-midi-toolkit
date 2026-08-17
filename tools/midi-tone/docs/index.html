@@ -147,6 +147,7 @@
     <a href="#pads-play">PADS PLAY</a>
     <a href="#kaoss">KAOSS</a>
     <a href="#kaoss-scales">SCALES</a>
+    <a href="#kaoss-play">FULL PAD</a>
     <a href="#songs">SONGS</a>
     <a href="#presets">PRESETS</a>
     <a href="#log">LOG</a>
@@ -285,7 +286,7 @@
         <tr><th>SHOW ALL</th><td>On the KAOSS header, or PRESETS → <code>KAOSS: ALL</code>. Full 31+ scales (raga, pelog, Miyakobushi, …) and every XY program the engine can drive. Saved in <code>settings.json</code>.</td></tr>
         <tr><th>HOLD</th><td>Freeze the last XY after you lift — same idea as Kaossilator SHIFT+hold.</td></tr>
         <tr><th>GATE + BPM</th><td>Retrigger the held note on 1/8, 1/16, or triplets. Off = sustain while down.</td></tr>
-        <tr><th>OUT / CH</th><td>LOCAL / USB / BOTH (shares the Songs USB port). Notes + CC#12 (X) / CC#13 (Y) / CC#92 (touch) on the chosen channel.</td></tr>
+        <tr><th>FULL PAD</th><td>After settings are set, hide nav + buttons so the pad fills the panel. Hold the top <code>HOLD TO EXIT</code> rail (~0.7s) to come back — not a Kaoss play stroke. Tk only sees one finger, so a three-finger chord is not a reliable exit.</td></tr>
       </table>
       <p class="note">Factory MIDI matches the original Kaoss Pad manual so a DIN synth can treat the Pi as a Kaoss controller. Playing while SEQ is recording captures the pad notes.</p>
     </section>
@@ -302,6 +303,20 @@
         <tr><th>SHOW ALL</th><td>Starter set vs every factory Kaossilator scale (raga, pelog, Miyakobushi, …). Same setting as the pad header / PRESETS toggle.</td></tr>
         <tr><th>CLOSE</th><td>Back to the XY pad without changing scale.</td></tr>
       </table>
+    </section>
+
+    <section class="screen" id="kaoss-play">
+      <h2>KAOSS full pad</h2>
+      <p class="lede">Opened from KAOSS → FULL PAD once program / scale / key are set. The pad takes the whole 800×480 panel.</p>
+      <figure>
+        <img src="screens/15-kaoss-play.png" alt="KAOSS full-pad play mode" width="800" height="480" />
+        <figcaption>15 — KAOSS full pad (HOLD TO EXIT rail at the top)</figcaption>
+      </figure>
+      <table>
+        <tr><th>Pad</th><td>Same XY play as the settings view, just larger. LED field, axes, HOLD / gate still apply.</td></tr>
+        <tr><th>HOLD TO EXIT</th><td>Press and hold the top rail for about 0.7s. A tap or a slide off the rail cancels. This is not a Kaoss play gesture (those stay on the pad).</td></tr>
+      </table>
+      <p class="note">A three-finger hold would also be “not a play stroke,” but Tk on X11 only sees one pointer. The hold rail is the same idea and works on a Pi 2.</p>
     </section>
 
     <section class="screen" id="songs">

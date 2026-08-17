@@ -89,6 +89,9 @@ DEFAULT_MAX_VOICES = 12
 TABLE_SIZE = 2048
 TABLE_MASK = TABLE_SIZE - 1
 LOG_MAX = 60
+# Full-pad play mode: hold the top rail this long to get chrome back.
+# Not a Kaoss play stroke (those are press / slide / lift on the pad).
+KAOSS_PLAY_EXIT_MS = 700
 EVENT_Q_MAX = 200
 # MIDI channel 10 (1-based) = index 9 — MPK drum pads
 DRUM_CHANNEL = 9
@@ -4206,6 +4209,13 @@ class MidiToneApp:
         self._kaoss_scale_drag: Optional[Dict[str, object]] = None
         self._kaoss_scale_count_var = tk.StringVar(value="")
         self._kaoss_scale_grid_all_btn: Optional[tk.Button] = None
+        self._kaoss_play = False
+        self._kaoss_header: Optional[tk.Frame] = None
+        self._kaoss_footer: Optional[tk.Frame] = None
+        self._kaoss_play_btn: Optional[tk.Button] = None
+        self._kaoss_exit_bar: Optional[tk.Frame] = None
+        self._kaoss_exit_lbl: Optional[tk.Label] = None
+        self._kaoss_exit_after_id: Optional[str] = None
         self._pads_view = "edit"  # play | edit
         self._phrase_out_mode = "local"  # local | usb | both (shares Songs USB port)
         self._phrases.set_output_hooks(
@@ -7456,6 +7466,8 @@ class MidiToneApp:
             footer_padx=6,
             footer_pady=6,
         )
+        self._kaoss_header = header
+        self._kaoss_footer = footer
         tk.Label(
             header,
             text="Kaoss",
@@ -7468,6 +7480,11 @@ class MidiToneApp:
         )
         self._kaoss_all_btn.configure(font=("DejaVu Sans", 11, "bold"), pady=6, padx=8)
         self._kaoss_all_btn.pack(side=tk.LEFT, padx=(10, 0))
+        self._kaoss_play_btn = self._mk_touch_btn(
+            header, "FULL PAD", self._kaoss_enter_play, bg="#689d6a"
+        )
+        self._kaoss_play_btn.configure(font=("DejaVu Sans", 11, "bold"), pady=6, padx=8)
+        self._kaoss_play_btn.pack(side=tk.LEFT, padx=(6, 0))
         tk.Label(
             header,
             textvariable=self._kaoss_status_var,
@@ -7479,6 +7496,20 @@ class MidiToneApp:
 
         pad_wrap = tk.Frame(body, bg="#111111")
         pad_wrap.pack(fill=tk.BOTH, expand=True)
+        self._kaoss_exit_bar = tk.Frame(pad_wrap, bg="#1d2021", height=40)
+        self._kaoss_exit_bar.pack_propagate(False)
+        self._kaoss_exit_lbl = tk.Label(
+            self._kaoss_exit_bar,
+            text="HOLD TO EXIT",
+            font=("DejaVu Sans", 13, "bold"),
+            fg="#fbf1c7",
+            bg="#1d2021",
+        )
+        self._kaoss_exit_lbl.pack(fill=tk.BOTH, expand=True)
+        for widget in (self._kaoss_exit_bar, self._kaoss_exit_lbl):
+            widget.bind("<ButtonPress-1>", self._kaoss_exit_press)
+            widget.bind("<ButtonRelease-1>", self._kaoss_exit_release)
+            widget.bind("<Leave>", self._kaoss_exit_release)
         self._kaoss_canvas = tk.Canvas(
             pad_wrap,
             bg="#08040a",
@@ -7564,6 +7595,99 @@ class MidiToneApp:
         self._kaoss_ch_btn.pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2)
         self._paint_kaoss()
 
+    def _kaoss_enter_play(self) -> None:
+        """Hide chrome so the pad owns the 800×480 surface."""
+        if self._kaoss_play:
+            return
+        if self._kaoss_scale_open:
+            self._close_kaoss_scale_grid(restore_main=True)
+        if self._mode != "kaoss":
+            self._switch_mode("kaoss")
+        self._kaoss_play = True
+        try:
+            self._nav.pack_forget()
+        except tk.TclError:
+            pass
+        if self._kaoss_header is not None:
+            self._kaoss_header.pack_forget()
+        if self._kaoss_footer is not None:
+            self._kaoss_footer.pack_forget()
+        if self._kaoss_exit_bar is not None:
+            self._kaoss_exit_bar.pack(side=tk.TOP, fill=tk.X)
+        self._kaoss_paint_exit_bar(holding=False)
+        self._kaoss_draw_grid()
+        self._kaoss_arm_viz()
+        self._append_log("KAOSS FULL PAD — hold the top bar to exit")
+
+    def _kaoss_leave_play(self) -> None:
+        if not self._kaoss_play:
+            return
+        self._kaoss_cancel_exit_hold()
+        self._kaoss_play = False
+        if self._kaoss_exit_bar is not None:
+            self._kaoss_exit_bar.pack_forget()
+        try:
+            self._nav.pack(side=tk.TOP, fill=tk.X, before=self._mode_host)
+        except tk.TclError:
+            try:
+                self._nav.pack(side=tk.TOP, fill=tk.X)
+            except tk.TclError:
+                pass
+        footer = self._kaoss_footer
+        header = self._kaoss_header
+        if footer is not None:
+            footer.pack(side=tk.BOTTOM, fill=tk.X, padx=6, pady=6)
+        if header is not None:
+            header.pack(side=tk.TOP, fill=tk.X, padx=8, pady=(6, 0))
+        self._paint_kaoss()
+        self._kaoss_draw_grid()
+        self._kaoss_arm_viz()
+
+    def _kaoss_paint_exit_bar(self, *, holding: bool) -> None:
+        bar = self._kaoss_exit_bar
+        lbl = self._kaoss_exit_lbl
+        if bar is None or lbl is None:
+            return
+        color = "#9d0006" if holding else "#1d2021"
+        try:
+            bar.configure(bg=color)
+            lbl.configure(
+                text="EXIT…" if holding else "HOLD TO EXIT",
+                bg=color,
+                fg="#fbf1c7",
+            )
+        except tk.TclError:
+            pass
+
+    def _kaoss_exit_press(self, _event: object = None) -> str:
+        if not self._kaoss_play:
+            return "break"
+        self._kaoss_cancel_exit_hold()
+        self._kaoss_paint_exit_bar(holding=True)
+        self._kaoss_exit_after_id = self.root.after(
+            KAOSS_PLAY_EXIT_MS, self._kaoss_exit_hold_done
+        )
+        return "break"
+
+    def _kaoss_exit_release(self, _event: object = None) -> str:
+        if self._kaoss_exit_after_id is not None:
+            self._kaoss_cancel_exit_hold()
+            self._kaoss_paint_exit_bar(holding=False)
+        return "break"
+
+    def _kaoss_exit_hold_done(self) -> None:
+        self._kaoss_exit_after_id = None
+        self._kaoss_leave_play()
+
+    def _kaoss_cancel_exit_hold(self) -> None:
+        aid = self._kaoss_exit_after_id
+        self._kaoss_exit_after_id = None
+        if aid is not None:
+            try:
+                self.root.after_cancel(aid)
+            except Exception:
+                pass
+
     def _kaoss_xy(self, event: tk.Event) -> Tuple[float, float]:  # type: ignore[name-defined]
         canvas = self._kaoss_canvas
         if canvas is None:
@@ -7617,6 +7741,7 @@ class MidiToneApp:
 
     def _kaoss_cancel_tick(self) -> None:
         self._kaoss_tick_armed = False
+        self._kaoss_cancel_exit_hold()
         aid = self._kaoss_after_id
         self._kaoss_after_id = None
         if aid is not None:
@@ -7788,6 +7913,8 @@ class MidiToneApp:
         """VOICES-style picker: full scale names, not the 3-letter Korg codes."""
         if self._kaoss_scale_open:
             return
+        if self._kaoss_play:
+            self._kaoss_leave_play()
         if self._mode != "kaoss":
             self._switch_mode("kaoss")
         self._kaoss_scale_open = True
@@ -8340,6 +8467,11 @@ class MidiToneApp:
         self._kaoss_arm_tick()
         self._kaoss_arm_viz()
 
+    def _kaoss_docs_play(self) -> None:
+        """Docs shot: full-pad play with the LED field lit."""
+        self._kaoss_docs_pose()
+        self._kaoss_enter_play()
+
     def _switch_mode(self, mode: str) -> None:
         mode = mode if mode in UI_MODES else "synth"
         # Close synth-only overlays before swapping shells
@@ -8372,6 +8504,7 @@ class MidiToneApp:
             self._seq_to_pad_armed = False
         # Leaving KAOSS: lift the pad unless HOLD is latched; stop the LED tick
         if self._mode == "kaoss" and mode != "kaoss":
+            self._kaoss_leave_play()
             self._kaoss_cancel_viz()
             if not self._kaoss.hold:
                 self._kaoss_apply(self._kaoss.release(), ended=True)
@@ -10335,6 +10468,8 @@ class MidiToneApp:
             self._close_update_token(restore_main=False)
         if self._kaoss_scale_open:
             self._close_kaoss_scale_grid(restore_main=False)
+        if self._kaoss_play:
+            self._kaoss_leave_play()
 
         self._power_ui_open = True
         prev = self._mode
