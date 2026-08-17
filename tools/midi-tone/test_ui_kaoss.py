@@ -112,6 +112,7 @@ class KaossScreenTest(unittest.TestCase):
         try:
             cls.app._stop.set()
             cls.app._kaoss_cancel_tick()
+            cls.app._kaoss_cancel_viz()
             cls.app._seq.stop()
             cls.app.engine.stop()
             cls.app.root.destroy()
@@ -219,6 +220,35 @@ class KaossScreenTest(unittest.TestCase):
         self.assertIn("KAOSS: ALL", app._preset_kaoss_all_btn.cget("text"))
         app._kaoss_toggle_show_all()
         self.assertFalse(app._kaoss.show_all)
+
+    def test_led_field_follows_finger(self) -> None:
+        app = self.app
+        app._switch_mode("kaoss")
+        self.pump()
+        canvas = app._kaoss_canvas
+        canvas.update_idletasks()
+        self.assertEqual(len(app._kaoss_leds), 12 * 7)
+
+        class Ev:
+            def __init__(self, x: int, y: int) -> None:
+                self.x = x
+                self.y = y
+                self.state = 0x0100
+
+        w = max(40, int(canvas.winfo_width()))
+        h = max(40, int(canvas.winfo_height()))
+        app._kaoss_on_press(Ev(int(w * 0.7), int(h * 0.25)))
+        app._kaoss_paint_leds(0.0)
+        fills = [canvas.itemcget(item, "fill") for item in app._kaoss_leds]
+        self.assertTrue(any(self._luma(c) > 80 for c in fills))
+        app._kaoss_on_release()
+
+    @staticmethod
+    def _luma(color: str) -> int:
+        raw = (color or "#000000").lstrip("#")
+        if len(raw) < 6:
+            return 0
+        return int(raw[0:2], 16) + int(raw[2:4], 16) + int(raw[4:6], 16)
 
 
 if __name__ == "__main__":

@@ -434,8 +434,9 @@ Korg manuals set the rules (not a 100-program dump):
 | **SCALE / KEY / OCT** | Curated starter set by default; **SHOW ALL** (PRESETS or KAOSS header) unlocks the factory Kaossilator PRO list + PRO+ extras |
 | **OUT / CH** | `LOCAL` / `USB` / `BOTH` (shares Songs USB port); notes + CCs on ch 1–16 |
 | **SEQ** | Pad notes record into a running backbone / overdub take |
+| **Look** | 12×7 LED field (create once, `itemconfigure` fills). Hue from X / program, finger glow + short trail, tap ripples, BPM rim pulse. Idle ~12 fps so a Pi 2 stays cheap |
 
-Model: `tools/midi-tone/kaoss.py` (no Tk). Tests: `test_kaoss.py`, `test_ui_kaoss.py`.
+Model: `tools/midi-tone/kaoss.py` (no Tk; color math is unit-tested). Tests: `test_kaoss.py`, `test_ui_kaoss.py`.
 
 ## Phase 4 — Key-relative arpeggiator
 
