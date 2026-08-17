@@ -53,7 +53,6 @@ from sequencer import (  # noqa: E402  (local module, imported after the hard de
     trim_loop_take,
 )
 from kaoss import (  # noqa: E402
-    SCALE_LABELS,
     KaossEvent,
     KaossPad,
     note_name as kaoss_note_name,
@@ -1665,6 +1664,15 @@ class SineEngine:
         if name == "vib":
             self.set_vib_depth(value)
             self.set_vib_always(1.0 if float(value) > 0.02 else 0.0)
+            return
+        if name == "level":
+            self.set_level(value)
+            return
+        if name == "attack":
+            self.set_attack(value)
+            return
+        if name == "release":
+            self.set_release(value)
             return
         if name in self.KAOSS_BUS_PARAMS:
             if value > 1.0:
@@ -3889,6 +3897,8 @@ class MidiToneApp:
         self._kaoss_bpm_lbl: Optional[tk.Label] = None
         self._kaoss_out_btn: Optional[tk.Button] = None
         self._kaoss_ch_btn: Optional[tk.Button] = None
+        self._kaoss_all_btn: Optional[tk.Button] = None
+        self._preset_kaoss_all_btn: Optional[tk.Button] = None
         self._pads_view = "edit"  # play | edit
         self._phrase_out_mode = "local"  # local | usb | both (shares Songs USB port)
         self._phrases.set_output_hooks(
@@ -4849,7 +4859,15 @@ class MidiToneApp:
         self._mk_touch_btn(footer, "DELETE", self._preset_delete_selected, bg="#9d0006").pack(
             side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=16
         )
+        extras = tk.Frame(shell, bg="#111111")
+        extras.pack(fill=tk.X, padx=8, pady=(0, 8))
+        self._preset_kaoss_all_btn = self._mk_touch_btn(
+            extras, "KAOSS: CURATED", self._kaoss_toggle_show_all, bg="#3c3836"
+        )
+        self._preset_kaoss_all_btn.configure(font=("DejaVu Sans", 13, "bold"), pady=10)
+        self._preset_kaoss_all_btn.pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3)
         self._paint_preset_slots()
+        self._paint_kaoss_show_all()
 
     def _preset_slot_label(self, slot: int) -> str:
         path = self._preset_path(slot)
@@ -5885,6 +5903,11 @@ class MidiToneApp:
             fg="#fbf1c7",
             bg="#111111",
         ).pack(side=tk.LEFT)
+        self._kaoss_all_btn = self._mk_touch_btn(
+            header, "SHOW ALL", self._kaoss_toggle_show_all, bg="#3c3836"
+        )
+        self._kaoss_all_btn.configure(font=("DejaVu Sans", 11, "bold"), pady=6, padx=8)
+        self._kaoss_all_btn.pack(side=tk.LEFT, padx=(10, 0))
         tk.Label(
             header,
             textvariable=self._kaoss_status_var,
@@ -6215,11 +6238,47 @@ class MidiToneApp:
         self._paint_kaoss()
         self._mark_settings_dirty()
 
+    def _kaoss_toggle_show_all(self) -> None:
+        on = self._kaoss.toggle_show_all()
+        self._paint_kaoss()
+        self._paint_kaoss_show_all()
+        self._kaoss_draw_grid()
+        self._mark_settings_dirty()
+        n_scale = len(self._kaoss.scale_ids())
+        n_prog = len(self._kaoss.program_ids())
+        self._append_log(
+            f"KAOSS list → {'ALL' if on else 'CURATED'} "
+            f"({n_prog} programs, {n_scale} scales)"
+        )
+        if self._preset_status_var is not None:
+            self._preset_status_var.set(
+                "KAOSS SHOW ALL — every factory scale + every XY program."
+                if on
+                else "KAOSS curated — short starter list. Tap again for the full set."
+            )
+
     def _paint_kaoss_status(self) -> None:
         self._kaoss_status_var.set(self._kaoss.status_line())
 
+    def _paint_kaoss_show_all(self) -> None:
+        on = bool(self._kaoss.show_all)
+        color = "#d79921" if on else "#3c3836"
+        if self._kaoss_all_btn is not None:
+            self._kaoss_all_btn.configure(
+                text="ALL: ON" if on else "SHOW ALL",
+                bg=color,
+                activebackground=color,
+            )
+        if self._preset_kaoss_all_btn is not None:
+            self._preset_kaoss_all_btn.configure(
+                text="KAOSS: ALL" if on else "KAOSS: CURATED",
+                bg=color,
+                activebackground=color,
+            )
+
     def _paint_kaoss(self) -> None:
         self._paint_kaoss_status()
+        self._paint_kaoss_show_all()
         prog = self._kaoss.program()
         if self._kaoss_prog_btn is not None:
             color = "#b16286" if prog.kind == "note" else "#d79921"
@@ -6229,7 +6288,7 @@ class MidiToneApp:
         if self._kaoss_scale_btn is not None:
             muted = prog.kind != "note"
             self._kaoss_scale_btn.configure(
-                text=SCALE_LABELS.get(self._kaoss.scale_id, self._kaoss.scale_id.upper()),
+                text=self._kaoss.scale_label(),
                 bg="#3c3836" if muted else "#458588",
                 activebackground="#3c3836" if muted else "#458588",
             )

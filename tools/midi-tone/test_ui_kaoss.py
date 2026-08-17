@@ -204,6 +204,22 @@ class KaossScreenTest(unittest.TestCase):
         self.pump()
         self.assertFalse(app._kaoss.is_active())
 
+    def test_show_all_unlocks_factory_scales(self) -> None:
+        app = self.app
+        app._switch_mode("kaoss")
+        self.pump()
+        curated = len(app._kaoss.scale_ids())
+        app._kaoss_toggle_show_all()
+        self.pump()
+        self.assertTrue(app._kaoss.show_all)
+        self.assertGreater(len(app._kaoss.scale_ids()), curated)
+        self.assertIn("ALL: ON", app._kaoss_all_btn.cget("text"))
+        app._switch_mode("presets")
+        self.pump()
+        self.assertIn("KAOSS: ALL", app._preset_kaoss_all_btn.cget("text"))
+        app._kaoss_toggle_show_all()
+        self.assertFalse(app._kaoss.show_all)
+
 
 if __name__ == "__main__":
     sys.exit(unittest.main())
