@@ -176,7 +176,7 @@ the onboard wavetable engine **and** a hardware synth on USB→DIN.
 
 | Gesture / control | What it does |
 |-------------------|--------------|
-| Finger on the pad | Note-on (X = scale pitch, Y = tone / morph / vibrato — see PROG). The pad is an LED field: hue follows X, a glow + trail sit under the finger, taps ripple, GATE / BPM pulse the rim |
+| Finger on the pad | Note-on. L-shaped axes: **X** along the bottom (scale pitch), **Y** up the left (tone / morph / vibrato — see PROG). LED field: hue follows X, glow + trail under the finger, tap ripples, GATE / BPM pulse the rim |
 | Slide | Legato to the next scale degree; Y keeps sculpting |
 | Lift | Note-off — unless **HOLD** is on (last XY stays sounding) |
 | **PROG** | `LEAD` / `MORPH` / `VIB` play notes; `FILTER` / `ECHO` / `DRIVE` / `SPACE` are Kaoss-Pad FX (momentary unless HOLD) |

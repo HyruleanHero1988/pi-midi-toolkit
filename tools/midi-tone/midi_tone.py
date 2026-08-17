@@ -6545,24 +6545,7 @@ class MidiToneApp:
             for frac in (0.25, 0.5, 0.75):
                 x = int(w * frac)
                 canvas.create_line(x, 0, x, h, fill="#3a1528", width=1, tags="grid")
-        canvas.create_text(
-            10,
-            h - 12,
-            text=prog.x_axis,
-            fill="#d3869b",
-            font=("DejaVu Sans", 11, "bold"),
-            anchor="sw",
-            tags="axis",
-        )
-        canvas.create_text(
-            10,
-            14,
-            text=prog.y_axis,
-            fill="#d3869b",
-            font=("DejaVu Sans", 11, "bold"),
-            anchor="nw",
-            tags="axis",
-        )
+        self._kaoss_draw_axes(canvas, w, h, prog)
         self._kaoss_paint_leds()
         if self._kaoss.is_active() or self._kaoss.hold:
             self._kaoss_draw_cursor(self._kaoss.x, self._kaoss.y, active=True)
@@ -6572,6 +6555,78 @@ class MidiToneApp:
         canvas.tag_raise("ripple")
         canvas.tag_raise("axis")
         canvas.tag_raise("cursor")
+
+    def _kaoss_draw_axes(self, canvas: tk.Canvas, w: int, h: int, prog) -> None:
+        """L-shaped XY legend — labels sit on the edge they control, not both left."""
+        spine = "#d3869b"
+        left = 22
+        bottom = max(28, h - 18)
+        top = 16
+        right = max(left + 40, w - 16)
+        canvas.create_line(
+            left,
+            bottom,
+            right,
+            bottom,
+            fill=spine,
+            width=2,
+            arrow=tk.LAST,
+            arrowshape=(10, 12, 5),
+            tags="axis",
+        )
+        canvas.create_line(
+            left,
+            bottom,
+            left,
+            top,
+            fill=spine,
+            width=2,
+            arrow=tk.LAST,
+            arrowshape=(10, 12, 5),
+            tags="axis",
+        )
+        self._kaoss_axis_caption(
+            canvas, (left + right) // 2, bottom - 13, f"X  {prog.x_axis}"
+        )
+        y_label = f"Y  {prog.y_axis}"
+        try:
+            self._kaoss_axis_caption(canvas, left + 15, h // 2, y_label, angle=90.0)
+        except tk.TclError:
+            self._kaoss_axis_caption(canvas, left + 30, h // 2, f"Y ↑ {y_label[2:].strip()}")
+
+    def _kaoss_axis_caption(
+        self,
+        canvas: tk.Canvas,
+        x: int,
+        y: int,
+        text: str,
+        *,
+        angle: float = 0.0,
+    ) -> None:
+        item = canvas.create_text(
+            x,
+            y,
+            text=text,
+            fill="#fbf1c7",
+            font=("DejaVu Sans", 13, "bold"),
+            angle=angle,
+            tags="axis",
+        )
+        box = canvas.bbox(item)
+        if box is None:
+            return
+        x0, y0, x1, y1 = box
+        bg = canvas.create_rectangle(
+            x0 - 5,
+            y0 - 2,
+            x1 + 5,
+            y1 + 2,
+            fill="#0c060a",
+            outline="#5b203c",
+            width=1,
+            tags="axis",
+        )
+        canvas.tag_raise(item, bg)
 
     def _kaoss_ensure_leds(self, w: int, h: int) -> None:
         canvas = self._kaoss_canvas
