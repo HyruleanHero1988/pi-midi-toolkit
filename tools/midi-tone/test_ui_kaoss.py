@@ -225,6 +225,30 @@ class KaossScreenTest(unittest.TestCase):
         app._kaoss_toggle_show_all()
         self.assertFalse(app._kaoss.show_all)
 
+    def test_axis_labels_sit_on_bottom_and_left(self) -> None:
+        app = self.app
+        app._switch_mode("kaoss")
+        self.pump()
+        canvas = app._kaoss_canvas
+        canvas.update_idletasks()
+        app._kaoss_draw_grid()
+        w = max(40, int(canvas.winfo_width()))
+        h = max(40, int(canvas.winfo_height()))
+        texts = []
+        for item in canvas.find_withtag("axis"):
+            if canvas.type(item) != "text":
+                continue
+            texts.append((canvas.itemcget(item, "text"), canvas.coords(item)))
+        names = " ".join(t for t, _ in texts)
+        self.assertIn("X", names)
+        self.assertIn("PITCH", names)
+        self.assertIn("Y", names)
+        self.assertIn("TONE", names)
+        x_item = next(coords for text, coords in texts if "PITCH" in text)
+        y_item = next(coords for text, coords in texts if "TONE" in text and "PITCH" not in text)
+        self.assertGreater(x_item[1], h * 0.65)
+        self.assertLess(y_item[0], w * 0.35)
+
     def test_scale_button_opens_named_grid(self) -> None:
         app = self.app
         app._switch_mode("kaoss")
