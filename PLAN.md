@@ -192,6 +192,89 @@ CME’s PC/Mac app **configures their USB MIDI interfaces**. Filters, routes, an
 **Near-term thru targets inspired by CME:** filters + richer mapper rules + Map mode in the kiosk.  
 **Not chasing:** emulating “config lives in the adapter” or BLE unless needed.
 
+## Inspiration: MIDIbox SEQ V4 Lite
+
+Public page: [MIDIbox SEQ V4 Lite](https://www.ucapps.de/midibox_seq_lite.html) (Thorsten Klose, 2011 — firmware still maintained).
+
+MBSEQV4L is a **MIDI sequence looper for live sessions**, not a tracker and not an audio synth. Two looping sequences, record from a keyboard (step *or* live), then spice the take with **MIDI-domain effects** chosen from 15 one-button presets per effect. The sequencer **never has to stop**: load/save, record, and FX changes stay in sync with the internal or incoming clock. No LCD, no encoders — dedicated buttons, prepared setups, immediate.
+
+That UX law is closer to ours (“obvious under the hands, not another menu to learn”) than picotracker/EP cloning would be. The *effects* are the gap: our SEQ records and overdubs; SEQ Lite **performs the recording**.
+
+**Already in our world (don’t treat as new work):**
+
+| SEQ Lite | pi-midi-toolkit |
+|----------|-----------------|
+| Live record without stopping | **Have** — SEQ backbone + overdub |
+| Overdub / extra notes on a running loop | **Have** — KEEP / DROP / UNDO layers (clearer than their track-clear) |
+| Two parallel parts | **Partial** — one SEQ stack + 16 phrase pads; not two independent looping sequences with separate MIDI FX |
+| Save / load patterns while running | **Partial** — Songs `.mid` + phrase JSON; not a measure-synced 64-slot live bank |
+| MIDI thru (In→Out) | **Planned** — Map / Thru; not yet “thru *through* the sequencer’s scale/FX” |
+| Poly recording | **Have** — we store what you play |
+| Tempo | **Partial** — Songs BPM −/+; no tap tempo, no MIDI-clock master/slave |
+| Copy / paste / undo | **Partial** — layer UNDO; no copy-seq-to-seq / copy-to-pad |
+| Audio-style echo | **Have** — jambox delay/reverb (this is **not** MIDI echo) |
+| Per-layer vibrato | **Have** — baked on SEQ/pad takes; related to their LFO but only pitch, not vel/length/CC, and not a live effect bus |
+
+**Ideas we do *not* have in the plan today** (worth stealing as *ideas*, not as a feature-parity list):
+
+### 1. MIDI effects on the running loop — the actual product of SEQ Lite
+
+Our FX are **audio** (drive / delay / reverb) plus baked vibrato. SEQ Lite’s FX rewrite the **MIDI stream** of the loop. That is a different instrument:
+
+| Effect | What it does | Why it isn’t “we have delay / arp / vibrato” |
+|--------|----------------|-----------------------------------------------|
+| **MIDI Echo** | Repeats notes after a delay; fades or boosts velocity; some presets also **nudge pitch of repeats**. On a mono synth this becomes rhythm, not a wash. Pairs with force-to-scale so pitch walks stay musical. | Audio delay smears the local synth. MIDI echo would also hit **USB→DIN**. Arp *authors* a pattern; echo *decorates* a recording. |
+| **Groove styles** | Presets that vary **velocity, note delay, and note length** (swing / push / sloppy). | Quantize is listed as still-open for SEQ; groove is the musical *opposite* — keep the notes, change the feel. |
+| **Humanizer** | Randomize note, velocity, length, CC. Aimed at velocity-switched / “natural” patches. | We have none. Cheap, and fits “sing over a loop that doesn’t sound mechanical.” |
+| **LFO (Berlin-school button)** | Sine/saw spanning 16–64 steps, modulating **note, velocity, length, and/or CC**. One tap turns a static loop into a classic analog sequence. | Per-layer vibrato is a recorded pitch LFO on *that take’s* voices. This is a **live, retriggerable, sequence-wide** modulator, including CC. |
+| **Step progression** | Play the same steps **backward / forward / repeat / skip**. Used to *stretch* a short take. Turning it off **re-syncs to the measure**. | LEN ×2/÷2 and WRAP/EXTEND change cycle math. Progression changes **read order** without rewriting the take — undoable performance, not a destructive edit. |
+
+SEQ Lite does **not** expose delay-time / LFO-rate knobs. Each effect is **15 presets from “nice” to “extreme”** (plus off). That matches our design law better than a MIDI-FX parameter page.
+
+**Fit:** optional later SEQ page: `GROOVE` / `ECHO` / `HUMAN` / `LFO` / `PROG` as preset rows, off-by-default, applied on emit (local synth *and* USB). Do not block current work (Rust audio cutover, Map mode, drum retrigger, arp).
+
+### 2. Force-to-scale + live transpose of the *recording*
+
+- **Scale + root** (Major, several minors, pentatonics, blues, modes, chromatic, whole-tone, octatonic…). Incoming and generated notes snap to it.
+- **Transpose from the keyboard**: the running sequence follows the key you play; optionally the scale root follows too.
+- Strongly recommended on SEQ Lite whenever note-mutating FX (echo pitch, LFO, humanizer) are on.
+
+Phase 4 arp is **key-relative authored steps**. This is **transpose/quantize a recorded loop** (and live thru). CME “note transpose” on the remap path is related but chromatic, not scale-aware.
+
+**Fit:** one Scale control (off / a few pentatonic+major/minor presets + root) plus “hold a key to transpose SEQ.” High leverage next to MIDI FX; small without them (just keeps live playing in key).
+
+### 3. Step recording (punch a grid), not only free-timing
+
+SEQ Lite’s “most important page”: pick a step, play a note/chord/CC; length is captured; re-selecting the step replaces the note. Live record is the other mode (notes + high-res CC). Poly vs **mono** (last note wins) is a toggle.
+
+Our SEQ is **only** free-timing overdub. “Quantize” in Phase 3a is still open and is *playback* snap, not a 16-step enter-notes grid.
+
+**Fit:** optional later. The 808 mental model we already shipped doesn’t need a piano roll. A coarse 16-step “tap cell → play note” overlay could sit beside REC without becoming a tracker — only if free-timing ever feels too sloppy for drums.
+
+### 4. MIDI clock, tap tempo, bar-quantized start
+
+SEQ Lite: internal clock (tap tempo ×5) **or** slave to MIDI/USB/OSC clock; auto-switch to slave when a clock arrives; **Start waits for the next 16-step bar** so you never come in between the measure; clock is always echoed out. Step divider (64th…whole, + triplets) re-syncs tracks to the measure.
+
+We have Songs BPM and a sample-accurate *internal* clip clock. No MIDI-clock master/slave, no tap, no “start on next bar.”
+
+**Fit:** matters the moment USB→DIN talks to a drum machine / hardware sequencer. Natural companion to Map / Songs / Pads OUT. Bar-quantized start matches phrase-pad `quantize: bar` we already have internally.
+
+### 5. Smaller gaps (park, don’t pretend they’re planned)
+
+| Idea | Notes |
+|------|--------|
+| **CC / pitchbend as sequence layers** | SEQ Lite records up to ~19 CC lines + PB at 64th resolution, muteable per track. Our `LoopEvent` is note on/off only. Record knobs into a take (or a pad) is a real later jam feature; not in the plan. |
+| **Live pattern bank (measure-sync replace)** | 8 groups × 8 slots, load/save without stopping. We persist songs/phrases; we don’t hot-swap the running SEQ on a bar boundary from a bank. |
+| **Two independent sequences** (Seq1/Seq2, own channel + FX, select both) | Pads cover “more than one loop.” Dual SEQ lanes with *separate MIDI FX* is the missing bit; easy to overbuild. Prefer MIDI FX on the one SEQ + pads first. |
+| **Per-layer mute** | SEQ Lite mutes note / PB / CC tracks. Already listed as still-open for our SEQ. |
+| **Loop point ≠ length** | Hold Length to set a loop start. We have WRAP/EXTEND + LEN ×2/÷2. |
+| **MIDI thru through scale/FX** | SEQ Lite In→Out applies force-to-scale so a local-off synth is heard in-key. Map mode should stay a cable; “keyboard → scale → synth” can be a *jambox* option, not a thru-latency feature. |
+| **Rec arm / per-layer record filter** | Record notes but not CCs. Only bites if we add CC layers. |
+
+**Not chasing (hardware / product-identity):** 48-button / 64-LED front panel, SD-card session files compatible with full MBSEQ V4, DIN Sync / CV / AOUT, OSC Ethernet, using the Pi as a 16-track V4 playback brain, cloning their 64-step Bar1–4 editor, or turning SEQ into a tracker.
+
+**If we steal one thing:** MIDI-FX presets on the running loop (groove + echo first; force-to-scale so echo/LFO stay musical). Everything else above is optional color once that feels good.
+
 ## Phase 0 — Jambox surface (`midi-tone`) — active, first-class
 
 **Origin story:** prove **MPK → Pi** with a tiny soft synth (no DIN required).  
@@ -352,7 +435,7 @@ The free-timing looper grew into the **SEQ** mode and replaced it outright. One 
 
 Model and transport live in `tools/midi-tone/sequencer.py`, deliberately free of Tk / numpy / audio so the timing rules are unit-tested (`test_sequencer.py`) on any machine; `test_ui_seq.py` drives the real Tk screen under Xvfb with stub audio + MIDI ports.
 
-Still open: quantize, per-layer mute, and moving the transport onto the Rust engine's sample-accurate clock (the layer model maps onto `jambox-core`'s clip sequencer — a layer is a clip with a span in cycles).
+Still open: quantize, per-layer mute, and moving the transport onto the Rust engine's sample-accurate clock (the layer model maps onto `jambox-core`'s clip sequencer — a layer is a clip with a span in cycles). MIDI-domain loop FX (groove / echo / humanizer / LFO / step progression), force-to-scale, and live transpose are **not** in this phase — see [Inspiration: MIDIbox SEQ V4 Lite](#inspiration-midibox-seq-v4-lite).
 
 ## Phase 3b — Songs / SMF player (cheap win; in progress)
 

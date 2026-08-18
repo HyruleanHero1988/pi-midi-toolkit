@@ -34,6 +34,8 @@ Modes today in `tools/midi-tone`:
 
 **Sequencer:** **SEQ** replaced LOOPER. First take is the backbone (auto-trimmed; it locks the loop length), then REC again overdubs drums or keys over the running loop and KEEP / DROP / UNDO decide what survives. Model + transport live in `tools/midi-tone/sequencer.py` (no Tk / numpy / audio) so `test_sequencer.py`, `test_ui_seq.py`, and `test_phrase_pads.py` run headless.
 
+**SEQ Lite notes:** [PLAN.md](PLAN.md) “Inspiration: MIDIbox SEQ V4 Lite” — we already loop/overdub; we do **not** yet plan MIDI-domain loop FX (groove/echo/LFO/…), force-to-scale, or live transpose of a recording. Stolen later, not current work.
+
 **Jambox engine (Rust):** `jambox-core` (DSP + sample-accurate sequencer, no I/O) and `jambox-engine` (audio thread, MIDI, JSON control socket, RT hints) are scaffolded on `cursor/rust-jambox-engine-1052`. The kiosk talks to it via `tools/midi-tone/jambox_client.py`. Audio thread never locks, allocates, or does I/O; clips are freed on the control thread.
 
 **Next (architecture):** move kiosk modes onto the client one at a time (Pads first), add runtime wavetable upload, then retire the Python audio path.
