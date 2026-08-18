@@ -29,6 +29,8 @@ KAOSS_OUT_MODES = ("local", "usb", "both")
 DEFAULT_ROOT_MIDI = 48
 DEFAULT_BPM = 120.0
 NOTE_NAMES = ("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
+# Left-edge C of the pad (Kaossilator OCT +/−). C1 .. C5.
+ROOT_OCTAVE_MIDI: Tuple[int, ...] = (24, 36, 48, 60, 72)
 
 
 @dataclass(frozen=True)
@@ -75,7 +77,7 @@ _SCALE_DEFS: Tuple[KaossScale, ...] = (
     KaossScale("miyakobushi", "MIYAKOBUSHI", "JPN", (0, 1, 5, 7, 8)),
     KaossScale("ryukyu", "RYUKYU", "RKY", (0, 4, 5, 7, 11), True),
     KaossScale("chinese", "CHINESE", "CHN", (0, 4, 6, 7, 11)),
-    KaossScale("bassline", "BASS LINE", "BAS", (0, 7, 10)),
+    KaossScale("bassline", "BASS LINE", "BAS", (0, 7, 10), True),
     KaossScale("whole", "WHOLE TONE", "WHL", (0, 2, 4, 6, 8, 10), True),
     KaossScale("min3", "MIN 3RDS", "MI3", (0, 3, 6, 9)),
     KaossScale("maj3", "MAJ 3RDS", "3RD", (0, 4, 8)),
@@ -131,8 +133,19 @@ PROGRAM_IDS_ALL: Tuple[str, ...] = tuple(p.id for p in PROGRAMS)
 PROGRAM_BY_ID: Dict[str, KaossProgram] = {p.id: p for p in PROGRAMS}
 
 # LED field — Kaoss Quad / KP3 vibe. Wide TFT gets more columns than rows.
+# This grid is independent of the play/touch cells; matching them made the Pi
+# crawl, so CELLS stays the original 12×7 light field.
 LED_COLS = 12
 LED_ROWS = 7
+VIZ_STYLES: Tuple[str, ...] = ("glow", "cells")
+VIZ_STYLE_LABELS: Dict[str, str] = {
+    "glow": "GLOW",
+    "cells": "CELLS",
+}
+DEFAULT_VIZ_STYLE = "glow"
+GRID_WIDTH_MIN = 1
+GRID_WIDTH_MAX = 5
+DEFAULT_GRID_WIDTH = 2
 # Program tint so FILTER doesn't light up the same magenta as LEAD.
 PROGRAM_HUE: Dict[str, float] = {
     "lead": 0.93,
@@ -194,6 +207,43 @@ def midi_cc(value: float) -> int:
     return max(0, min(127, int(round(clamp01(value) * 127.0))))
 
 
+def glow_step(current: float, target: float, dt: float) -> float:
+    """Ease the GLOW blob in/out. Attack is quicker than release."""
+    cur = clamp01(current)
+    tgt = clamp01(target)
+    step = max(0.0, min(0.08, float(dt)))
+    if tgt >= cur:
+        if tgt == cur:
+            return cur
+        return clamp01(cur + step / 0.16)
+    return clamp01(cur - step / 0.32)
+
+
+def glow_radii(span: float, amp: float) -> Tuple[float, float, float]:
+    """Three concentric blooms. Size follows the fade envelope only, not XY."""
+    span = max(1.0, float(span))
+    amp = clamp01(amp)
+    scale = 0.82
+    outer = span * 0.52 * scale * (amp ** 1.35)
+    mid = span * 0.28 * scale * (amp ** 1.12)
+    core = span * 0.11 * scale * amp
+    return outer, mid, core
+
+
+def clamp_grid_width(value: Any) -> int:
+    try:
+        n = int(round(float(value)))
+    except (TypeError, ValueError):
+        n = DEFAULT_GRID_WIDTH
+    return max(GRID_WIDTH_MIN, min(GRID_WIDTH_MAX, n))
+
+
+def grid_line_widths(weight: int) -> Tuple[int, int]:
+    """(regular, octave-root) canvas stroke widths for the play-grid overlay."""
+    regular = clamp_grid_width(weight)
+    return regular, regular + 1
+
+
 def note_name(note: int) -> str:
     n = int(note) & 0x7F
     return f"{NOTE_NAMES[n % 12]}{(n // 12) - 1}"
@@ -253,6 +303,14 @@ def rgb_hex(rgb: Tuple[int, int, int]) -> str:
 
 def program_hue(program_id: str) -> float:
     return float(PROGRAM_HUE.get(program_id, 0.93))
+
+
+def normalize_viz_style(value: Any) -> str:
+    style = str(value or "").strip().lower()
+    # Retired: play-grid-matched LEDs ("live") and the near-black "static" fill.
+    if style in ("static", "live"):
+        style = "cells"
+    return style if style in VIZ_STYLES else DEFAULT_VIZ_STYLE
 
 
 def pad_led_hex(
@@ -330,6 +388,9 @@ class KaossPad:
         self.bpm: float = DEFAULT_BPM
         self.hold: bool = False
         self.show_all: bool = False
+        self.show_axis_labels: bool = True
+        self.viz_style: str = DEFAULT_VIZ_STYLE
+        self.grid_width: int = DEFAULT_GRID_WIDTH
         self.out_mode: str = "local"
         self.channel: int = 0
         self.cc_x: int = KAOSS_CC_X
@@ -339,6 +400,8 @@ class KaossPad:
         self.y: float = 0.5
         self.touching: bool = False
         self._note: Optional[int] = None
+        self._latched_note: Optional[int] = None
+        self._latched_velocity: int = 100
         self._cc_x_sent: Optional[int] = None
         self._cc_y_sent: Optional[int] = None
         self._touch_sent: Optional[int] = None
@@ -376,8 +439,7 @@ class KaossPad:
         return self.touching or (self.hold and self._is_latched())
 
     def _is_latched(self) -> bool:
-        if self.program().kind == "note":
-            return self._note is not None
+        """HOLD latches the last pad press, including gate-off gaps with no note."""
         return self._touch_sent == 127
 
     def sounding_note(self) -> Optional[int]:
@@ -411,6 +473,9 @@ class KaossPad:
             "bpm": float(self.bpm),
             "hold": bool(self.hold),
             "show_all": bool(self.show_all),
+            "show_axis_labels": bool(self.show_axis_labels),
+            "viz_style": self.viz_style,
+            "grid_width": int(self.grid_width),
             "out_mode": self.out_mode,
             "channel": int(self.channel),
             "cc_x": int(self.cc_x),
@@ -427,6 +492,12 @@ class KaossPad:
         self.scale_id = scale if scale in SCALES else "ionian"
         if "show_all" in data:
             self.show_all = bool(data.get("show_all"))
+        if "show_axis_labels" in data:
+            self.show_axis_labels = bool(data.get("show_axis_labels"))
+        if "viz_style" in data:
+            self.viz_style = normalize_viz_style(data.get("viz_style"))
+        if "grid_width" in data:
+            self.grid_width = clamp_grid_width(data.get("grid_width"))
         self.key = int(data.get("key", self.key)) % 12
         self.octaves = max(1, min(4, int(data.get("octaves", self.octaves))))
         self.root_midi = max(0, min(96, int(data.get("root_midi", self.root_midi))))
@@ -443,6 +514,12 @@ class KaossPad:
         self.cc_x = max(0, min(127, int(data.get("cc_x", self.cc_x))))
         self.cc_y = max(0, min(127, int(data.get("cc_y", self.cc_y))))
         self.cc_touch = max(0, min(127, int(data.get("cc_touch", self.cc_touch))))
+
+    def set_program(self, program_id: str) -> KaossProgram:
+        pid = str(program_id)
+        if pid in PROGRAM_BY_ID:
+            self.program_id = pid
+        return self.program()
 
     def cycle_program(self, step: int = 1) -> KaossProgram:
         ids = self.program_ids()
@@ -476,23 +553,94 @@ class KaossPad:
     def toggle_show_all(self) -> bool:
         return self.set_show_all(not self.show_all)
 
+    def set_show_axis_labels(self, enabled: bool) -> bool:
+        self.show_axis_labels = bool(enabled)
+        return self.show_axis_labels
+
+    def toggle_show_axis_labels(self) -> bool:
+        return self.set_show_axis_labels(not self.show_axis_labels)
+
+    def set_viz_style(self, style: str) -> str:
+        self.viz_style = normalize_viz_style(style)
+        return self.viz_style
+
+    def cycle_viz_style(self) -> str:
+        idx = VIZ_STYLES.index(self.viz_style) if self.viz_style in VIZ_STYLES else 0
+        self.viz_style = VIZ_STYLES[(idx + 1) % len(VIZ_STYLES)]
+        return self.viz_style
+
+    def set_grid_width(self, width: int) -> int:
+        self.grid_width = clamp_grid_width(width)
+        return self.grid_width
+
+    def nudge_grid_width(self, delta: int) -> int:
+        return self.set_grid_width(int(self.grid_width) + int(delta))
+
+    def led_grid_size(self) -> Tuple[int, int]:
+        """CELLS visualizer — fixed 12×7 field, not the play/touch grid."""
+        return LED_COLS, LED_ROWS
+
+    def set_key(self, key: int) -> int:
+        self.key = int(key) % 12
+        return self.key
+
     def cycle_key(self, step: int = 1) -> int:
         self.key = (self.key + int(step)) % 12
         return self.key
 
+    def set_octaves(self, octaves: int) -> int:
+        self.octaves = max(1, min(4, int(octaves)))
+        return self.octaves
+
     def cycle_octaves(self) -> int:
         self.octaves = 1 if self.octaves >= 4 else self.octaves + 1
         return self.octaves
+
+    def set_root_midi(self, note: int) -> int:
+        self.root_midi = max(24, min(72, int(note)))
+        return self.root_midi
+
+    def nudge_root_octave(self, step: int) -> int:
+        """Shift the pad window up or down by whole octaves."""
+        return self.set_root_midi(int(self.root_midi) + int(step) * 12)
+
+    def root_octave_midi(self) -> int:
+        """Nearest C-start on the OCT picker (C1..C5)."""
+        c = (int(self.root_midi) // 12) * 12
+        if c < ROOT_OCTAVE_MIDI[0]:
+            return ROOT_OCTAVE_MIDI[0]
+        if c > ROOT_OCTAVE_MIDI[-1]:
+            return ROOT_OCTAVE_MIDI[-1]
+        return c
+
+    def set_gate(self, gate_id: str, *, now: Optional[float] = None) -> GatePattern:
+        gid = str(gate_id)
+        if gid in GATE_BY_ID:
+            self.gate_id = gid
+        # HOLD drone → GATE: start the clock so repeats begin immediately.
+        if self.gate().beats > 0.0 and self.is_active():
+            self._gate_t0 = 0.0 if now is None else float(now)
+            self._gate_on = self._note is not None
+        return self.gate()
 
     def cycle_gate(self, step: int = 1) -> GatePattern:
         idx = GATE_IDS.index(self.gate().id)
         self.gate_id = GATE_IDS[(idx + int(step)) % len(GATE_IDS)]
         return self.gate()
 
+    def set_out_mode(self, mode: str) -> str:
+        if mode in KAOSS_OUT_MODES:
+            self.out_mode = mode
+        return self.out_mode
+
     def cycle_out_mode(self) -> str:
         idx = KAOSS_OUT_MODES.index(self.out_mode)
         self.out_mode = KAOSS_OUT_MODES[(idx + 1) % len(KAOSS_OUT_MODES)]
         return self.out_mode
+
+    def set_channel(self, channel: int) -> int:
+        self.channel = max(0, min(15, int(channel)))
+        return self.channel
 
     def cycle_channel(self) -> int:
         self.channel = (self.channel + 1) % 16
@@ -515,6 +663,8 @@ class KaossPad:
         events.extend(self._emit_touch(127))
         events.extend(self._emit_xy())
         if self.program().kind == "note":
+            self._latched_note = self._current_note()
+            self._latched_velocity = self._current_velocity()
             if self.gate().beats <= 0.0:
                 events.extend(self._ensure_note(self._current_note(), self._current_velocity()))
             # Gated: first tick() will fire the attack
@@ -549,6 +699,21 @@ class KaossPad:
         events = self.set_hold(not self.hold)
         return self.hold, events
 
+    def reassert(self, *, now: float = 0.0) -> List[KaossEvent]:
+        """Replay this program's XY mapping without dropping a HOLD latch."""
+        if not self.is_active():
+            return []
+        self._cc_x_sent = None
+        self._cc_y_sent = None
+        events: List[KaossEvent] = []
+        events.extend(self._emit_touch(127))
+        events.extend(self._emit_xy())
+        if self.program().kind == "note" and self.gate().beats <= 0.0:
+            events.extend(
+                self._ensure_note(self._current_note(), self._current_velocity())
+            )
+        return events
+
     def panic(self) -> List[KaossEvent]:
         self.hold = False
         self.touching = False
@@ -558,7 +723,7 @@ class KaossPad:
         """Re-quantize the current note after SCALE / KEY / RANGE changes."""
         if self.program().kind != "note":
             return []
-        if not (self.touching or (self.hold and self._note is not None)):
+        if not self.is_active():
             return []
         if self.gate().beats > 0.0 and not self._gate_on:
             return []
@@ -566,12 +731,13 @@ class KaossPad:
 
     def tick(self, now: float) -> List[KaossEvent]:
         """Advance the gate arpeggiator. Call ~60 Hz while ``is_active()``."""
-        if self.program().kind != "note":
-            return []
         gate = self.gate()
         if gate.beats <= 0.0:
             return []
-        if not self.touching and not (self.hold and self._note is not None):
+        if not self.is_active():
+            return []
+        pitch = self._gate_pitch()
+        if pitch is None:
             return []
         period = self._period_sec(gate)
         if period <= 0.0:
@@ -579,18 +745,18 @@ class KaossPad:
         elapsed = max(0.0, float(now) - self._gate_t0)
         phase = (elapsed % period) / period
         want_on = phase < gate.duty
+        vel = self._gate_velocity()
         events: List[KaossEvent] = []
         if want_on and not self._gate_on:
-            events.extend(self._ensure_note(self._current_note(), self._current_velocity(), retrigger=True))
+            events.extend(self._ensure_note(pitch, vel, retrigger=True))
             self._gate_on = True
         elif not want_on and self._gate_on:
             events.extend(self._note_off())
             self._gate_on = False
         elif want_on and self._note is not None:
             # Slide to a new scale degree mid-gate without waiting for the next step
-            nxt = self._current_note()
-            if nxt != self._note:
-                events.extend(self._ensure_note(nxt, self._current_velocity()))
+            if pitch != self._note:
+                events.extend(self._ensure_note(pitch, vel))
         return events
 
     # --- internals --------------------------------------------------------
@@ -603,6 +769,21 @@ class KaossPad:
 
     def _current_velocity(self) -> int:
         return velocity_at_y(self.y)
+
+    def _gate_pitch(self) -> Optional[int]:
+        """Pitch the GATE arp retriggers. Frozen on FX programs so FILTER X isn't a keyboard."""
+        if self.program().kind == "note":
+            pitch = self._current_note()
+            self._latched_note = pitch
+            return pitch
+        return self._latched_note
+
+    def _gate_velocity(self) -> int:
+        if self.program().kind == "note":
+            vel = self._current_velocity()
+            self._latched_velocity = vel
+            return vel
+        return max(1, min(127, int(self._latched_velocity)))
 
     def _period_sec(self, gate: GatePattern) -> float:
         bpm = max(40.0, min(240.0, float(self.bpm)))
@@ -648,6 +829,8 @@ class KaossPad:
         if self._note != note:
             events.append(KaossEvent(kind="note_on", note=note, velocity=velocity))
             self._note = note
+            self._latched_note = note
+            self._latched_velocity = velocity
         return events
 
     def _note_off(self) -> List[KaossEvent]:
@@ -662,27 +845,32 @@ class KaossPad:
         events.extend(self._note_off())
         events.extend(self._emit_touch(0))
         self._gate_on = False
+        self._latched_note = None
         self._cc_x_sent = None
         self._cc_y_sent = None
         return events
 
-    def status_line(self) -> str:
+    def header_line(
+        self,
+        *,
+        morph: Optional[Tuple[str, str, float]] = None,
+        tone: Optional[float] = None,
+    ) -> str:
+        """Short enough for the 800px KAOSS title row."""
         prog = self.program()
-        key = NOTE_NAMES[self.key % 12]
-        scale = self.scale_label()
-        hold = "HOLD" if self.hold else "lift=off"
-        gate = self.gate().label
-        out = self.out_mode.upper()
-        ch = self.channel + 1
-        note = note_name(self._note) if self._note is not None else "—"
+        if prog.id == "morph" and morph is not None:
+            _a, _b, frac = morph
+            pct = int(round(clamp01(frac) * 100.0))
+            note = note_name(self._note) if self._note is not None else "—"
+            return f"{prog.label}  {pct}%  {note}"
+        if prog.id == "lead" and tone is not None:
+            pct = int(round(clamp01(tone) * 100.0))
+            note = note_name(self._note) if self._note is not None else "—"
+            return f"{prog.label}  {pct}%  {note}"
         if prog.kind == "note":
-            return (
-                f"{prog.label}  {key} {scale}  {self.octaves}oct  "
-                f"{gate}  {int(round(self.bpm))} BPM  {hold}  "
-                f"OUT {out}  CH{ch}  {note}"
-            )
-        return (
-            f"{prog.label}  X={prog.x_axis} Y={prog.y_axis}  "
-            f"{hold}  OUT {out}  CH{ch}  "
-            f"CC{self.cc_x}/{self.cc_y}"
-        )
+            note = note_name(self._note) if self._note is not None else "—"
+            return f"{prog.label}  {note}"
+        return f"{prog.label}  X={prog.x_axis}  Y={prog.y_axis}"
+
+    def status_line(self) -> str:
+        return self.header_line()

@@ -118,6 +118,42 @@ class PanelBacklightTest(unittest.TestCase):
             self.assertEqual(brightness.read_text(encoding="ascii").strip(), "128")
             self.assertEqual(power.read_text(encoding="ascii").strip(), "0")
 
+    def test_restore_never_writes_zero(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as raw:
+            root = pathlib.Path(raw)
+            device = root / "10-0045"
+            device.mkdir()
+            brightness = device / "brightness"
+            power = device / "bl_power"
+            brightness.write_text("0\n", encoding="ascii")
+            power.write_text("0\n", encoding="ascii")
+            (device / "max_brightness").write_text("255\n", encoding="ascii")
+            (device / "actual_brightness").write_text("0\n", encoding="ascii")
+
+            panel = screensaver.PanelBacklight(root)
+            self.assertTrue(panel.dim())
+            self.assertTrue(panel.restore())
+            self.assertEqual(brightness.read_text(encoding="ascii").strip(), "255")
+
+    def test_ensure_lit_recovers_zero_left_by_previous_process(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as raw:
+            root = pathlib.Path(raw)
+            device = root / "10-0045"
+            device.mkdir()
+            brightness = device / "brightness"
+            brightness.write_text("0\n", encoding="ascii")
+            (device / "bl_power").write_text("0\n", encoding="ascii")
+            (device / "max_brightness").write_text("255\n", encoding="ascii")
+            (device / "actual_brightness").write_text("0\n", encoding="ascii")
+
+            panel = screensaver.PanelBacklight(root)
+            self.assertTrue(panel.ensure_lit())
+            self.assertEqual(brightness.read_text(encoding="ascii").strip(), "255")
+
     def test_missing_sysfs_is_a_no_op(self) -> None:
         import tempfile
 

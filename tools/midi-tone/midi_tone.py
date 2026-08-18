@@ -64,11 +64,21 @@ from screensaver import (  # noqa: E402
 )
 import updater  # noqa: E402  (local module; SET screen software update)
 from kaoss import (  # noqa: E402
+    GATE_PATTERNS,
+    KAOSS_OUT_MODES,
     LED_COLS,
     LED_ROWS,
+    PROGRAM_BY_ID,
+    ROOT_OCTAVE_MIDI,
     SCALE_BY_ID,
+    VIZ_STYLE_LABELS,
+    VIZ_STYLES,
     KaossEvent,
     KaossPad,
+    KaossProgram,
+    glow_radii,
+    glow_step,
+    grid_line_widths,
     hsv_to_rgb,
     note_name as kaoss_note_name,
     pad_led_hex,
@@ -577,6 +587,42 @@ def circular_moving_average(x: np.ndarray, win: int) -> np.ndarray:
     return y[n : 2 * n].astype(np.float32, copy=False)
 
 
+def apply_tone_lowpass(
+    buf: np.ndarray,
+    tone: float,
+    low: float,
+    band: float = 0.0,
+    sample_rate: float = 44100.0,
+) -> Tuple[float, float]:
+    """Darken a live audio block in place. ``tone`` 1 = open, 0 = dark.
+
+    Resonant lowpass (Chamberlin SVF), exponential cutoff. A one-pole with a
+    linear/squared knob sat near-open across most of the pad, so Kaoss Y and
+    the MPK tone knob sounded dead on typical wavetables.
+    """
+    n = int(buf.size)
+    tone = max(0.0, min(1.0, float(tone)))
+    if n == 0:
+        return float(low), float(band)
+    if tone >= 0.985:
+        return float(buf[-1]), 0.0
+    sr = max(8000.0, float(sample_rate))
+    # 90 Hz .. 8 kHz. Bottom of the pad is a closed filter; top is almost open
+    # (full bypass is the >= 0.985 branch).
+    fc = 90.0 * ((8000.0 / 90.0) ** tone)
+    f = 2.0 * math.sin(math.pi * min(fc, sr * 0.14) / sr)
+    damp = 0.38 + 0.62 * tone
+    lp = float(low)
+    bp = float(band)
+    samples = buf
+    for i in range(n):
+        lp += f * bp
+        hp = float(samples[i]) - lp - damp * bp
+        bp += f * hp
+        samples[i] = lp
+    return lp, bp
+
+
 def midi_note_name(note: int) -> str:
     return f"{NOTE_NAMES[note % 12]}{note // 12 - 1}"
 
@@ -1073,6 +1119,7 @@ class SineEngine:
         self._attack_sec = 0.012
         self._release_sec = 0.030
         self._filter_state = 0.0
+        self._svf_band = 0.0
         self._scratch = np.zeros(BLOCKSIZE * 2, dtype=np.float32)
         self._phase_buf = np.zeros(BLOCKSIZE * 2, dtype=np.float32)
         self._frac_buf = np.zeros(BLOCKSIZE * 2, dtype=np.float32)
@@ -2115,6 +2162,7 @@ class SineEngine:
             self._attack_sec = 0.012
             self._release_sec = 0.030
             self._filter_state = 0.0
+            self._svf_band = 0.0
             self._drum_pitch = 0.45
             self._drum_decay = 0.40
             self._drum_noise = 0.55
@@ -2292,21 +2340,18 @@ class SineEngine:
             if not drum_group_fx.is_dry():
                 drum_group_fx.process(drum_bus)
 
-        # Tone filter on keys only (drums keep their own tone macro).
-        # Cheap O(n) brightness: blend dry with a 2-tap blur (no convolve).
-        if tone < 0.999 and frames > 0:
-            blend = float(tone * tone)
-            soft = np.empty_like(key_bus)
-            soft[0] = 0.5 * (key_bus[0] + np.float32(self._filter_state))
-            soft[1:] = 0.5 * (key_bus[1:] + key_bus[:-1])
-            if blend <= 0.001:
-                key_bus[:] = soft
-            else:
-                key_bus *= np.float32(blend)
-                key_bus += soft * np.float32(1.0 - blend)
-            self._filter_state = float(key_bus[-1])
+        # Tone = brightness (Kaoss Y on LEAD, MPK tone knob). Top/open = 1.
+        if tone < 0.985 and frames > 0:
+            self._filter_state, self._svf_band = apply_tone_lowpass(
+                key_bus,
+                tone,
+                self._filter_state,
+                self._svf_band,
+                sr,
+            )
         elif frames > 0:
             self._filter_state = float(key_bus[-1])
+            self._svf_band = 0.0
 
         if synth_level < 0.999:
             key_bus *= np.float32(synth_level)
@@ -2456,6 +2501,51 @@ def phrase_pad_label(cell: int) -> str:
     c = max(0, min(PHRASE_PAD_COUNT - 1, int(cell)))
     bank = "A" if c < 8 else "B"
     return f"{bank}{(c % 8) + 1}"
+
+
+# Clip-launcher fills. Green is *only* "this pad is sounding".
+PHRASE_TILE_PLAYING = "#689d6a"
+PHRASE_TILE_IDLE = "#458588"
+PHRASE_TILE_SELECTED = "#076678"
+PHRASE_TILE_EMPTY = "#3c3836"
+PHRASE_TILE_EMPTY_LOOP = "#504945"
+PHRASE_TILE_REC = "#9d0006"
+PHRASE_TILE_MODE = "#b16286"
+PHRASE_TILE_ASSIGN = "#458588"
+PHRASE_TILE_CLEAR = "#cc241d"
+PHRASE_TILE_CLEAR_EMPTY = "#504945"
+
+
+def phrase_pad_tile_color(
+    *,
+    empty: bool,
+    loop: bool = False,
+    playing: bool = False,
+    selected: bool = False,
+    recording: bool = False,
+    mode_armed: bool = False,
+    assign_armed: bool = False,
+    clear_armed: bool = False,
+    edit_view: bool = False,
+) -> str:
+    """Pad square fill. Playing is always green; idle clips are blue whether LOOP or 1SHOT."""
+    if mode_armed:
+        return PHRASE_TILE_MODE
+    if assign_armed:
+        return PHRASE_TILE_ASSIGN
+    if clear_armed:
+        return PHRASE_TILE_CLEAR if not empty else PHRASE_TILE_CLEAR_EMPTY
+    if recording:
+        return PHRASE_TILE_REC
+    if playing:
+        return PHRASE_TILE_PLAYING
+    if empty:
+        if selected and edit_view:
+            return PHRASE_TILE_SELECTED
+        return PHRASE_TILE_EMPTY_LOOP if loop else PHRASE_TILE_EMPTY
+    if selected:
+        return PHRASE_TILE_SELECTED
+    return PHRASE_TILE_IDLE
 
 
 def phrase_cell_for_note(note: int) -> Optional[int]:
@@ -4046,6 +4136,9 @@ class MidiToneApp:
         # Idle watch before the MIDI thread so notes can poke it safely.
         self._idle = IdleWatch(timeout_from_env())
         self._backlight = PanelBacklight()
+        # Deploy / kiosk restart while blanked leaves sysfs at 0. Unblank now
+        # so the new process does not come up on a dark panel.
+        self._backlight.ensure_lit()
         self._saver_canvas: Optional[tk.Canvas] = None
         self._saver_hint: Optional[int] = None
         self._saver_clock: Optional[int] = None
@@ -4184,7 +4277,11 @@ class MidiToneApp:
         self._kaoss_after_id: Optional[str] = None
         self._kaoss_viz_after_id: Optional[str] = None
         self._kaoss_leds: List[int] = []
-        self._kaoss_led_geom: Optional[Tuple[int, int, int, int]] = None
+        self._kaoss_led_geom: Optional[Tuple[Any, ...]] = None
+        self._kaoss_glow: Dict[str, Any] = {}
+        self._glow_amp = 0.0
+        self._glow_t = 0.0
+        self._glow_xy: Tuple[float, float] = (0.5, 0.5)
         self._kaoss_ripple_items: List[int] = []
         self._kaoss_ripples: List[Tuple[float, float, float]] = []
         self._kaoss_trail: List[Tuple[float, float, float]] = []
@@ -4197,21 +4294,29 @@ class MidiToneApp:
         self._kaoss_hold_btn: Optional[tk.Button] = None
         self._kaoss_gate_btn: Optional[tk.Button] = None
         self._kaoss_bpm_lbl: Optional[tk.Label] = None
-        self._kaoss_out_btn: Optional[tk.Button] = None
-        self._kaoss_ch_btn: Optional[tk.Button] = None
-        self._kaoss_all_btn: Optional[tk.Button] = None
-        self._preset_kaoss_all_btn: Optional[tk.Button] = None
+        self._kaoss_gear_btn: Optional[tk.Button] = None
+        self._kaoss_play_btn: Optional[tk.Button] = None
+        self._kaoss_picker_open = False
+        self._kaoss_picker_kind = ""
+        self._picker_ignore_until = 0.0
+        self._kaoss_picker_frame: Optional[tk.Frame] = None
+        self._kaoss_picker_btns: Dict[str, tk.Button] = {}
+        self._kaoss_picker_inner: Optional[tk.Frame] = None
+        self._kaoss_picker_drag: Optional[Dict[str, object]] = None
+        self._kaoss_picker_count_var = tk.StringVar(value="")
         self._kaoss_scale_open = False
-        self._kaoss_scale_frame: Optional[tk.Frame] = None
         self._kaoss_scale_btns: Dict[str, tk.Button] = {}
-        self._kaoss_scale_inner: Optional[tk.Frame] = None
-        self._kaoss_scale_drag: Optional[Dict[str, object]] = None
-        self._kaoss_scale_count_var = tk.StringVar(value="")
-        self._kaoss_scale_grid_all_btn: Optional[tk.Button] = None
+        self._kaoss_settings_open = False
+        self._kaoss_settings_frame: Optional[tk.Frame] = None
+        self._kaoss_settings_all_btn: Optional[tk.Button] = None
+        self._kaoss_settings_axes_btn: Optional[tk.Button] = None
+        self._kaoss_settings_grid_lbl: Optional[tk.Label] = None
+        self._kaoss_settings_viz_btns: Dict[str, tk.Button] = {}
+        self._kaoss_settings_out_btns: Dict[str, tk.Button] = {}
+        self._kaoss_settings_ch_btns: Dict[int, tk.Button] = {}
         self._kaoss_play = False
         self._kaoss_header: Optional[tk.Frame] = None
         self._kaoss_footer: Optional[tk.Frame] = None
-        self._kaoss_play_btn: Optional[tk.Button] = None
         self._kaoss_exit_bar: Optional[tk.Frame] = None
         self._kaoss_exit_lbl: Optional[tk.Label] = None
         self._kaoss_exit_after_id: Optional[str] = None
@@ -4314,6 +4419,12 @@ class MidiToneApp:
         home_btn.pack(side=tk.LEFT, padx=(0, 4))
         self._mode_btns["home"] = home_btn
         self._home_btn = home_btn
+        set_btn = self._mk_touch_btn(
+            self._nav, "SET", lambda: self._switch_mode("settings"), bg="#3c3836"
+        )
+        set_btn.configure(font=("DejaVu Sans", 10, "bold"), pady=8, padx=8)
+        set_btn.pack(side=tk.LEFT, padx=(0, 4))
+        self._settings_nav_btn = set_btn
         power_btn = self._mk_touch_btn(
             self._nav, "POWER", self._open_power_menu, bg="#9d0006"
         )
@@ -4552,6 +4663,8 @@ class MidiToneApp:
                 pass
         self.root.after(2000, self._autosave_tick)
         self.root.bind_all("<ButtonPress>", self._on_pointer_activity, add="+")
+        self.root.bind_all("<ButtonRelease>", self._on_pointer_activity, add="+")
+        self.root.bind_all("<Motion>", self._on_pointer_activity, add="+")
         self._saver_tick_after = self.root.after(1000, self._screensaver_tick)
         self._apply_pixel_shift()
         self._append_log(
@@ -4618,7 +4731,8 @@ class MidiToneApp:
             or self._save_preset_open
             or self._fx_ui_open
             or self._token_ui_open
-            or self._kaoss_scale_open
+            or self._kaoss_picker_open
+            or self._kaoss_settings_open
             or bool(getattr(self, "_idle", None) and self._idle.active)
         )
 
@@ -5315,15 +5429,7 @@ class MidiToneApp:
         self._mk_touch_btn(footer, "DELETE", self._preset_delete_selected, bg="#9d0006").pack(
             side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=16
         )
-        extras = tk.Frame(shell, bg="#111111")
-        extras.pack(fill=tk.X, padx=8, pady=(0, 8))
-        self._preset_kaoss_all_btn = self._mk_touch_btn(
-            extras, "KAOSS: CURATED", self._kaoss_toggle_show_all, bg="#3c3836"
-        )
-        self._preset_kaoss_all_btn.configure(font=("DejaVu Sans", 13, "bold"), pady=10)
-        self._preset_kaoss_all_btn.pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3)
         self._paint_preset_slots()
-        self._paint_kaoss_show_all()
 
     def _preset_slot_label(self, slot: int) -> str:
         path = self._preset_path(slot)
@@ -7316,36 +7422,38 @@ class MidiToneApp:
             lock_mark = "·" if cell.is_voice_locked() else ""
             if mode_armed:
                 text = f"{label}\n{mode_mark}?"
-                color = "#b16286"
+                color = phrase_pad_tile_color(empty=cell.is_empty(), mode_armed=True)
             elif assign_armed:
                 text = f"{label}\nDROP?"
-                color = "#458588"
+                color = phrase_pad_tile_color(empty=cell.is_empty(), assign_armed=True)
             elif clear_armed:
                 text = f"{label}\nCLR?" if not cell.is_empty() else f"{label}\n—"
-                color = "#cc241d" if not cell.is_empty() else "#504945"
+                color = phrase_pad_tile_color(
+                    empty=cell.is_empty(), clear_armed=True
+                )
             elif rec == idx:
                 text = f"{label}\nREC"
-                color = "#9d0006"
+                color = phrase_pad_tile_color(empty=False, recording=True)
             elif idx in playing:
                 secs = cell.length
                 text = f"{label}\n{mode_mark}{lock_mark} {secs:.1f}s"
-                color = "#689d6a"
+                color = phrase_pad_tile_color(empty=False, playing=True)
             elif cell.is_empty():
                 text = f"{label}\n{mode_mark} —" if loop else f"{label}\n—"
-                color = "#504945" if loop else "#3c3836"
+                color = phrase_pad_tile_color(
+                    empty=True,
+                    loop=loop,
+                    selected=selected == idx,
+                    edit_view=self._pads_view == "edit",
+                )
             else:
                 text = f"{label}\n{mode_mark}{lock_mark} {cell.length:.1f}s"
-                color = "#689d6a" if loop else "#458588"
-            if (
-                not clear_armed
-                and not mode_armed
-                and not assign_armed
-                and selected == idx
-                and rec != idx
-                and idx not in playing
-            ):
-                if not cell.is_empty() or self._pads_view == "edit":
-                    color = "#076678"
+                color = phrase_pad_tile_color(
+                    empty=False,
+                    loop=loop,
+                    selected=selected == idx,
+                    edit_view=self._pads_view == "edit",
+                )
             try:
                 btn.configure(text=text, bg=color, activebackground=color)
             except Exception:
@@ -7474,24 +7582,14 @@ class MidiToneApp:
             fg="#fbf1c7",
             bg="#111111",
         ).pack(side=tk.LEFT)
-        self._kaoss_all_btn = self._mk_touch_btn(
-            header, "SHOW ALL", self._kaoss_toggle_show_all, bg="#3c3836"
-        )
-        self._kaoss_all_btn.configure(font=("DejaVu Sans", 11, "bold"), pady=6, padx=8)
-        self._kaoss_all_btn.pack(side=tk.LEFT, padx=(10, 0))
-        self._kaoss_play_btn = self._mk_touch_btn(
-            header, "FULL PAD", self._kaoss_enter_play, bg="#689d6a"
-        )
-        self._kaoss_play_btn.configure(font=("DejaVu Sans", 11, "bold"), pady=6, padx=8)
-        self._kaoss_play_btn.pack(side=tk.LEFT, padx=(6, 0))
         tk.Label(
             header,
             textvariable=self._kaoss_status_var,
-            font=("DejaVu Sans", 11, "bold"),
+            font=("DejaVu Sans", 13, "bold"),
             fg="#fabd2f",
             bg="#111111",
             anchor="e",
-        ).pack(side=tk.RIGHT, fill=tk.X, expand=True, padx=(8, 0))
+        ).pack(side=tk.RIGHT, padx=(12, 0))
 
         pad_wrap = tk.Frame(body, bg="#111111")
         pad_wrap.pack(fill=tk.BOTH, expand=True)
@@ -7528,17 +7626,17 @@ class MidiToneApp:
         row_a = tk.Frame(footer, bg="#111111")
         row_a.pack(fill=tk.X, pady=(0, 4))
         self._kaoss_prog_btn = self._mk_touch_btn(
-            row_a, "LEAD", self._kaoss_cycle_program, bg="#b16286"
+            row_a, "LEAD", lambda: self._open_kaoss_picker("program"), bg="#b16286"
         )
         self._kaoss_scale_btn = self._mk_touch_btn(
-            row_a, "MAJOR", self._open_kaoss_scale_grid, bg="#458588"
+            row_a, "MAJOR", lambda: self._open_kaoss_picker("scale"), bg="#458588"
         )
         self._kaoss_scale_btn.configure(font=("DejaVu Sans", 12, "bold"))
         self._kaoss_key_btn = self._mk_touch_btn(
-            row_a, "KEY C", self._kaoss_cycle_key, bg="#3c3836"
+            row_a, "KEY C", lambda: self._open_kaoss_picker("key"), bg="#3c3836"
         )
         self._kaoss_oct_btn = self._mk_touch_btn(
-            row_a, "2 OCT", self._kaoss_cycle_octaves, bg="#3c3836"
+            row_a, "2 OCT", lambda: self._open_kaoss_picker("octave"), bg="#3c3836"
         )
         self._kaoss_hold_btn = self._mk_touch_btn(
             row_a, "HOLD", self._kaoss_toggle_hold, bg="#3c3836"
@@ -7556,7 +7654,7 @@ class MidiToneApp:
         row_b = tk.Frame(footer, bg="#111111")
         row_b.pack(fill=tk.X)
         self._kaoss_gate_btn = self._mk_touch_btn(
-            row_b, "GATE OFF", self._kaoss_cycle_gate, bg="#3c3836"
+            row_b, "GATE OFF", lambda: self._open_kaoss_picker("gate"), bg="#3c3836"
         )
         bpm_minus = self._mk_touch_btn(
             row_b, "BPM −", lambda: self._kaoss_nudge_bpm(-5), bg="#3c3836"
@@ -7572,34 +7670,37 @@ class MidiToneApp:
         bpm_plus = self._mk_touch_btn(
             row_b, "BPM +", lambda: self._kaoss_nudge_bpm(5), bg="#3c3836"
         )
-        self._kaoss_out_btn = self._mk_touch_btn(
-            row_b, "OUT: LOCAL", self._kaoss_cycle_out, bg="#3c3836"
+        self._kaoss_play_btn = self._mk_touch_btn(
+            row_b, "FULL PAD", self._kaoss_enter_play, bg="#689d6a"
         )
-        self._kaoss_ch_btn = self._mk_touch_btn(
-            row_b, "CH 1", self._kaoss_cycle_channel, bg="#3c3836"
+        self._kaoss_gear_btn = self._mk_touch_btn(
+            row_b, "⚙", self._open_kaoss_settings, bg="#504945"
         )
         for btn in (
             self._kaoss_gate_btn,
             bpm_minus,
             bpm_plus,
-            self._kaoss_out_btn,
-            self._kaoss_ch_btn,
+            self._kaoss_play_btn,
         ):
             btn.configure(font=("DejaVu Sans", 12, "bold"), pady=8)
+        self._kaoss_gear_btn.configure(font=("DejaVu Sans", 18, "bold"), pady=4, padx=12)
+        # Pack gear first on the right so expand=True siblings cannot steal it.
+        self._kaoss_gear_btn.pack(side=tk.RIGHT, fill=tk.Y, padx=2)
         self._kaoss_gate_btn.pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2)
         bpm_minus.pack(side=tk.LEFT, fill=tk.BOTH, padx=2)
         self._kaoss_bpm_lbl.pack(side=tk.LEFT)
         bpm_plus.pack(side=tk.LEFT, fill=tk.BOTH, padx=2)
-        self._kaoss_out_btn.pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2)
-        self._kaoss_ch_btn.pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2)
+        self._kaoss_play_btn.pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2)
         self._paint_kaoss()
 
     def _kaoss_enter_play(self) -> None:
         """Hide chrome so the pad owns the 800×480 surface."""
         if self._kaoss_play:
             return
-        if self._kaoss_scale_open:
-            self._close_kaoss_scale_grid(restore_main=True)
+        if self._kaoss_picker_open:
+            self._close_kaoss_picker(restore_main=True)
+        if self._kaoss_settings_open:
+            self._close_kaoss_settings(restore_main=True)
         if self._mode != "kaoss":
             self._switch_mode("kaoss")
         self._kaoss_play = True
@@ -7717,11 +7818,14 @@ class MidiToneApp:
         x, y = self._kaoss_xy(event)
         self._kaoss_apply(self._kaoss.move(x, y))
         self._kaoss_push_trail(x, y)
-        self._kaoss_draw_cursor(x, y, active=True)
+        if self._kaoss.viz_style != "glow":
+            self._kaoss_draw_cursor(x, y, active=True)
         return "break"
 
     def _kaoss_on_release(self, _event: object = None) -> str:
-        self._kaoss_apply(self._kaoss.release(), ended=True)
+        self._kaoss_apply(self._kaoss.release(), ended=not self._kaoss.is_active())
+        if self._kaoss.is_active():
+            self._kaoss_arm_tick()
         self._kaoss_draw_cursor(self._kaoss.x, self._kaoss.y, active=self._kaoss.is_active())
         self._kaoss_paint_leds()
         return "break"
@@ -7756,7 +7860,10 @@ class MidiToneApp:
             return
         if self._mode != "kaoss" or self._stop.is_set():
             return
-        self._kaoss_viz_after_id = self.root.after(80, self._kaoss_viz_tick)
+        self._kaoss_viz_after_id = self.root.after(
+            50 if self._kaoss.viz_style == "glow" else 80,
+            self._kaoss_viz_tick,
+        )
 
     def _kaoss_cancel_viz(self) -> None:
         aid = self._kaoss_viz_after_id
@@ -7811,29 +7918,54 @@ class MidiToneApp:
         return {
             "tone": float(st.get("tone", 0.5)),
             "morph": float(st.get("morph", 0.0)),
+            "level": float(st.get("synth_level", st.get("level", 1.0))),
+            "attack": float(st.get("attack", 0.0)),
+            "release": float(st.get("release", 0.0)),
             "vib_depth": float(st.get("vib_depth", 0.0)),
             "vib_always": float(st.get("vib_always", 0.0)),
             "bus_fx": self.engine.bus_fx_snapshot(),
         }
+
+    def _kaoss_overlay_names(self, prog: KaossProgram) -> set:
+        """XY params this program writes live. LEAD tone stays put like a knob."""
+        names = {p for p in (prog.x_param, prog.y_param) if p}
+        if prog.id == "lead":
+            names.discard("tone")
+        if prog.id == "morph":
+            names.discard("morph")
+        return names
 
     def _kaoss_restore_fx(self) -> None:
         snap = self._kaoss_fx_snap
         self._kaoss_fx_snap = None
         if not isinstance(snap, dict):
             return
-        if "tone" in snap:
-            self.engine.set_tone(float(snap["tone"]))
-        if "morph" in snap:
-            self.engine.set_morph(float(snap["morph"]))
-        if "vib_depth" in snap:
-            depth = float(snap["vib_depth"])
+        names = self._kaoss_overlay_names(self._kaoss.program())
+        if "tone" in names:
+            self.engine.set_tone(float(snap.get("tone", 0.5)))
+        if "morph" in names:
+            self.engine.set_morph(float(snap.get("morph", 0.0)))
+        if "vib" in names:
+            depth = float(snap.get("vib_depth", 0.0))
             # set_vib_depth expects 0..1 (or MIDI). Stored value is semitones 0..2.
             self.engine.set_vib_depth(depth / 2.0)
-        if "vib_always" in snap:
-            self.engine.set_vib_always(float(snap["vib_always"]))
+            self.engine.set_vib_always(float(snap.get("vib_always", 0.0)))
+        if names.intersection(("level", "attack", "release")):
+            with self.engine._lock:
+                if "level" in names:
+                    self.engine._synth_level = float(snap.get("level", self.engine._synth_level))
+                if "attack" in names:
+                    self.engine._attack_sec = float(snap.get("attack", self.engine._attack_sec))
+                if "release" in names:
+                    self.engine._release_sec = float(snap.get("release", self.engine._release_sec))
         bus = snap.get("bus_fx")
-        if isinstance(bus, dict):
-            self.engine.apply_bus_fx_snapshot(bus)
+        bus_names = names.intersection(self.engine.KAOSS_BUS_PARAMS)
+        if isinstance(bus, dict) and bus_names:
+            current = self.engine.bus_fx_snapshot()
+            for key in bus_names:
+                if key in bus:
+                    current[key] = bus[key]
+            self.engine.apply_bus_fx_snapshot(current)
         self._q_put(("mod",))
 
     def _kaoss_midi_send(self, msg: mido.Message) -> None:
@@ -7855,9 +7987,10 @@ class MidiToneApp:
         *,
         began: bool = False,
         ended: bool = False,
+        restore: Optional[bool] = None,
     ) -> None:
         prog = self._kaoss.program()
-        if began and prog.kind == "fx" and self._kaoss_fx_snap is None:
+        if began and self._kaoss_fx_snap is None:
             self._kaoss_fx_snap = self._kaoss_capture_fx()
         ch = self._kaoss.channel & 0x0F
         want_local = self._kaoss.out_mode in ("local", "both")
@@ -7891,41 +8024,106 @@ class MidiToneApp:
             elif ev.kind == "param":
                 self.engine.set_kaoss_param(ev.param, ev.param_value)
                 self._q_put(("mod",))
-        if ended and prog.kind == "fx" and not self._kaoss.hold and not self._kaoss.touching:
+        should_restore = ended and not self._kaoss.touching and (
+            restore is True or (restore is not False and not self._kaoss.hold)
+        )
+        if should_restore:
             self._kaoss_restore_fx()
         if self._mode == "kaoss":
             self._paint_kaoss_status()
 
-    def _kaoss_cycle_program(self) -> None:
-        was = self._kaoss.touching
+    def _kaoss_apply_program(self, program_id: str) -> None:
+        keep_hold = bool(self._kaoss.hold and self._kaoss.is_active())
         x, y = self._kaoss.x, self._kaoss.y
-        self._kaoss_apply(self._kaoss.release(force=True), ended=True)
-        self._kaoss.cycle_program()
-        if was:
+        if keep_hold:
+            # HOLD is a drone: keep the latched note so FILTER/ECHO can run on it.
+            # Still restore the previous program's overlays (VIB must not stick).
+            self._kaoss_restore_fx()
+            self._kaoss.set_program(program_id)
             self._kaoss_apply(
-                self._kaoss.touch(x, y, now=time.monotonic()), began=True
+                self._kaoss.reassert(now=time.monotonic()), began=True
             )
             self._kaoss_arm_tick()
+        else:
+            was = self._kaoss.touching
+            self._kaoss_apply(self._kaoss.release(force=True), ended=True, restore=True)
+            self._kaoss.set_program(program_id)
+            if was:
+                self._kaoss_apply(
+                    self._kaoss.touch(x, y, now=time.monotonic()), began=True
+                )
+                self._kaoss_arm_tick()
         self._paint_kaoss()
         self._kaoss_draw_grid()
         self._mark_settings_dirty()
 
+    def _kaoss_picker_spec(self, kind: str) -> Tuple[str, str, int, List[Tuple[str, str]]]:
+        """title, count line, columns, (id, label) tiles."""
+        if kind == "program":
+            ids = list(self._kaoss.program_ids())
+            if self._kaoss.program_id not in ids:
+                ids.insert(0, self._kaoss.program_id)
+            items = [
+                (pid, PROGRAM_BY_ID[pid].label)
+                for pid in ids
+                if pid in PROGRAM_BY_ID
+            ]
+            catalog = "all programs" if self._kaoss.show_all else "starter"
+            return "PROGRAM — tap one", f"{len(items)} {catalog}", 3, items
+        if kind == "scale":
+            ids = list(self._kaoss.scale_ids())
+            if self._kaoss.scale_id not in ids:
+                ids.insert(0, self._kaoss.scale_id)
+            items = [
+                (sid, SCALE_BY_ID[sid].label)
+                for sid in ids
+                if sid in SCALE_BY_ID
+            ]
+            catalog = "all factory" if self._kaoss.show_all else "starter · more in ⚙"
+            return "SCALES — tap one", f"{len(items)} {catalog}", 3, items
+        if kind == "key":
+            items = [(str(i), NOTE_NAMES[i]) for i in range(12)]
+            return "KEY — tap one", "root of the scale", 6, items
+        if kind == "octave":
+            starts = [(f"start:{midi}", kaoss_note_name(midi)) for midi in ROOT_OCTAVE_MIDI]
+            wides = [(f"wide:{n}", f"{n} OCT wide") for n in range(1, 5)]
+            return (
+                "OCTAVE — start + width",
+                "left edge of the pad, then how many octaves",
+                5,
+                starts + wides,
+            )
+        items = [(g.id, g.label) for g in GATE_PATTERNS]
+        return "GATE — tap one", "retrigger while the pad is down", 2, items
+
     def _open_kaoss_scale_grid(self) -> None:
-        """VOICES-style picker: full scale names, not the 3-letter Korg codes."""
-        if self._kaoss_scale_open:
+        self._open_kaoss_picker("scale")
+
+    def _open_kaoss_picker(self, kind: str) -> None:
+        """VOICES-style grid instead of cycling a list with one button."""
+        if kind not in ("program", "scale", "key", "octave", "gate"):
+            return
+        if self._kaoss_picker_open and self._kaoss_picker_kind == kind:
             return
         if self._kaoss_play:
             self._kaoss_leave_play()
+        if self._kaoss_settings_open:
+            self._close_kaoss_settings(restore_main=False)
+        if self._kaoss_picker_open:
+            self._close_kaoss_picker(restore_main=False)
         if self._mode != "kaoss":
             self._switch_mode("kaoss")
-        self._kaoss_scale_open = True
+        self._kaoss_picker_open = True
+        self._kaoss_picker_kind = kind
+        self._kaoss_scale_open = kind == "scale"
         self._kaoss_cancel_viz()
         self._kaoss_shell.pack_forget()
 
-        self._kaoss_scale_frame = tk.Frame(self._mode_host, bg="#111111")
-        self._kaoss_scale_frame.pack(fill=tk.BOTH, expand=True)
+        title, count, _cols, _items = self._kaoss_picker_spec(kind)
+        self._kaoss_picker_frame = tk.Frame(self._mode_host, bg="#111111")
+        self._kaoss_picker_frame.pack(fill=tk.BOTH, expand=True)
         header, body, footer = self._pack_screen_regions(
-            self._kaoss_scale_frame,
+            self._kaoss_picker_frame,
             header_padx=8,
             header_pady=(6, 4),
             body_padx=4,
@@ -7935,123 +8133,395 @@ class MidiToneApp:
         )
         tk.Label(
             header,
-            text="SCALES — tap one",
+            text=title,
             font=("DejaVu Sans", 16, "bold"),
             fg="#fbf1c7",
             bg="#111111",
         ).pack(side=tk.LEFT)
+        self._kaoss_picker_count_var.set(count)
         tk.Label(
             header,
-            textvariable=self._kaoss_scale_count_var,
+            textvariable=self._kaoss_picker_count_var,
             font=("DejaVu Sans", 12),
             fg="#a89984",
             bg="#111111",
         ).pack(side=tk.RIGHT)
 
         _wrap, _canvas, inner, drag = self._build_touch_scroll_area(body)
-        self._kaoss_scale_inner = inner
-        self._kaoss_scale_drag = drag
-        self._kaoss_fill_scale_grid()
+        self._kaoss_picker_inner = inner
+        self._kaoss_picker_drag = drag
+        self._fill_kaoss_picker()
 
-        self._kaoss_scale_grid_all_btn = self._mk_touch_btn(
-            footer, "SHOW ALL", self._kaoss_toggle_show_all, bg="#3c3836"
-        )
-        self._kaoss_scale_grid_all_btn.configure(font=("DejaVu Sans", 13, "bold"))
-        self._kaoss_scale_grid_all_btn.pack(
-            side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=14
-        )
         self._mk_touch_btn(
-            footer, "CLOSE", self._close_kaoss_scale_grid, bg="#9d0006"
-        ).pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=14)
-        self._paint_kaoss_show_all()
+            footer, "CLOSE", self._close_kaoss_picker, bg="#9d0006"
+        ).pack(fill=tk.X, ipady=14)
+        self._arm_overlay_guard()
 
-    def _kaoss_fill_scale_grid(self) -> None:
-        inner = self._kaoss_scale_inner
-        drag = self._kaoss_scale_drag
+    def _fill_kaoss_picker(self) -> None:
+        inner = self._kaoss_picker_inner
+        drag = self._kaoss_picker_drag
         if inner is None or drag is None:
             return
         for child in inner.winfo_children():
             child.destroy()
-        self._kaoss_scale_btns = {}
-        ids = self._kaoss.scale_ids()
-        cols = 3
-        for i, sid in enumerate(ids):
-            spec = SCALE_BY_ID.get(sid)
-            if spec is None:
-                continue
+        _title, count, cols, items = self._kaoss_picker_spec(self._kaoss_picker_kind)
+        self._kaoss_picker_count_var.set(count)
+        self._kaoss_picker_btns = {}
+        current = self._kaoss_picker_current()
+        for i, (item_id, label) in enumerate(items):
             row, col = divmod(i, cols)
             btn = self._mk_scroll_select_btn(
                 inner,
-                spec.label,
-                lambda scale=sid: self._kaoss_pick_scale(scale),
+                label,
+                lambda value=item_id: self._kaoss_picker_choose(value),
                 drag,
                 bg="#3c3836",
             )
             btn.configure(font=("DejaVu Sans", 13, "bold"), pady=16)
             btn.grid(row=row, column=col, sticky="nsew", padx=3, pady=3, ipadx=4, ipady=8)
-            self._kaoss_scale_btns[sid] = btn
+            self._kaoss_picker_btns[item_id] = btn
         for col in range(cols):
             inner.grid_columnconfigure(col, weight=1)
-        n = len(self._kaoss_scale_btns)
-        kind = "all factory" if self._kaoss.show_all else "starter"
-        self._kaoss_scale_count_var.set(f"{n} {kind}")
-        self._paint_kaoss_scale_grid()
+        if self._kaoss_picker_kind == "scale":
+            self._kaoss_scale_btns = self._kaoss_picker_btns
+        self._paint_kaoss_picker()
 
-    def _paint_kaoss_scale_grid(self) -> None:
-        current = self._kaoss.scale_id
-        for sid, btn in self._kaoss_scale_btns.items():
-            on = sid == current
+    def _kaoss_picker_current(self) -> str:
+        kind = self._kaoss_picker_kind
+        if kind == "program":
+            return self._kaoss.program_id
+        if kind == "scale":
+            return self._kaoss.scale_id
+        if kind == "key":
+            return str(self._kaoss.key % 12)
+        if kind == "octave":
+            return ""
+        return self._kaoss.gate_id
+
+    def _paint_kaoss_picker(self) -> None:
+        kind = self._kaoss_picker_kind
+        if kind == "octave":
+            selected = {
+                f"start:{self._kaoss.root_octave_midi()}",
+                f"wide:{self._kaoss.octaves}",
+            }
+            for item_id, btn in self._kaoss_picker_btns.items():
+                on = item_id in selected
+                color = "#458588" if on else "#3c3836"
+                try:
+                    btn.configure(bg=color, activebackground=color)
+                except tk.TclError:
+                    pass
+            return
+        current = self._kaoss_picker_current()
+        for item_id, btn in self._kaoss_picker_btns.items():
+            on = item_id == current
             color = "#458588" if on else "#3c3836"
             try:
                 btn.configure(bg=color, activebackground=color)
             except tk.TclError:
                 pass
 
-    def _kaoss_pick_scale(self, scale_id: str) -> None:
-        self._kaoss.set_scale(scale_id)
-        self._kaoss_apply(self._kaoss.retune())
-        self._close_kaoss_scale_grid()
+    def _kaoss_picker_choose(self, value: str) -> None:
+        kind = self._kaoss_picker_kind
+        if kind == "program":
+            self._kaoss_apply_program(value)
+            self._append_log(f"KAOSS program → {self._kaoss.program().label}")
+        elif kind == "scale":
+            self._kaoss.set_scale(value)
+            self._kaoss_apply(self._kaoss.retune())
+            self._append_log(f"KAOSS scale → {self._kaoss.scale_label()}")
+        elif kind == "key":
+            self._kaoss.set_key(int(value))
+            self._kaoss_apply(self._kaoss.retune())
+            self._append_log(f"KAOSS key → {NOTE_NAMES[self._kaoss.key % 12]}")
+        elif kind == "octave":
+            if value.startswith("start:"):
+                self._kaoss.set_root_midi(int(value.split(":", 1)[1]))
+            elif value.startswith("wide:"):
+                self._kaoss.set_octaves(int(value.split(":", 1)[1]))
+            else:
+                self._kaoss.set_octaves(int(value))
+            self._kaoss_apply(self._kaoss.retune())
+            self._append_log(
+                f"KAOSS octave → {kaoss_note_name(self._kaoss.root_midi)} "
+                f"×{self._kaoss.octaves}"
+            )
+            self._paint_kaoss_picker()
+            self._paint_kaoss()
+            self._mark_settings_dirty()
+            return
+        else:
+            self._kaoss.set_gate(value, now=time.monotonic())
+            if self._kaoss.gate().beats > 0.0 and self._kaoss.is_active():
+                self._kaoss_arm_tick()
+            self._append_log(f"KAOSS {self._kaoss.gate().label}")
+        self._close_kaoss_picker()
         self._paint_kaoss()
         self._kaoss_draw_grid()
         self._mark_settings_dirty()
-        self._append_log(f"KAOSS scale → {self._kaoss.scale_label()}")
 
-    def _close_kaoss_scale_grid(self, restore_main: bool = True) -> None:
-        if not self._kaoss_scale_open:
+    def _kaoss_pick_scale(self, scale_id: str) -> None:
+        self._kaoss_picker_kind = "scale"
+        self._kaoss_picker_choose(scale_id)
+
+    def _close_kaoss_picker(self, restore_main: bool = True) -> None:
+        if not self._kaoss_picker_open:
             return
-        if self._kaoss_scale_frame is not None:
-            self._kaoss_scale_frame.destroy()
-            self._kaoss_scale_frame = None
+        if self._kaoss_picker_frame is not None:
+            self._kaoss_picker_frame.destroy()
+            self._kaoss_picker_frame = None
+        self._kaoss_picker_btns = {}
         self._kaoss_scale_btns = {}
-        self._kaoss_scale_inner = None
-        self._kaoss_scale_drag = None
-        self._kaoss_scale_grid_all_btn = None
+        self._kaoss_picker_inner = None
+        self._kaoss_picker_drag = None
+        self._kaoss_picker_open = False
+        self._kaoss_picker_kind = ""
         self._kaoss_scale_open = False
-        if restore_main and self._mode == "kaoss":
+        if restore_main and self._mode == "kaoss" and not self._kaoss_settings_open:
             self._kaoss_shell.pack(fill=tk.BOTH, expand=True)
             self._paint_kaoss()
             self._kaoss_draw_grid()
             self._kaoss_arm_tick()
             self._kaoss_arm_viz()
 
+    def _close_kaoss_scale_grid(self, restore_main: bool = True) -> None:
+        self._close_kaoss_picker(restore_main=restore_main)
+
     def _kaoss_docs_scale_grid(self) -> None:
         """Open the full factory list so the docs shot shows readable names."""
         self._kaoss.set_show_all(True)
-        self._open_kaoss_scale_grid()
+        self._open_kaoss_picker("scale")
 
-    def _kaoss_cycle_key(self) -> None:
-        self._kaoss.cycle_key()
-        self._kaoss_apply(self._kaoss.retune())
-        self._paint_kaoss()
-        self._kaoss_draw_grid()
-        self._mark_settings_dirty()
+    def _open_kaoss_settings(self) -> None:
+        if self._kaoss_settings_open:
+            return
+        if self._kaoss_play:
+            self._kaoss_leave_play()
+        if self._kaoss_picker_open:
+            self._close_kaoss_picker(restore_main=False)
+        if self._mode != "kaoss":
+            self._switch_mode("kaoss")
+        self._kaoss_settings_open = True
+        self._kaoss_cancel_viz()
+        self._kaoss_shell.pack_forget()
 
-    def _kaoss_cycle_octaves(self) -> None:
-        self._kaoss.cycle_octaves()
-        self._kaoss_apply(self._kaoss.retune())
-        self._paint_kaoss()
-        self._kaoss_draw_grid()
-        self._mark_settings_dirty()
+        self._kaoss_settings_frame = tk.Frame(self._mode_host, bg="#111111")
+        self._kaoss_settings_frame.pack(fill=tk.BOTH, expand=True)
+        header, body, footer = self._pack_screen_regions(
+            self._kaoss_settings_frame,
+            header_padx=8,
+            header_pady=(6, 4),
+            body_padx=8,
+            body_pady=4,
+            footer_padx=6,
+            footer_pady=6,
+        )
+        tk.Label(
+            header,
+            text="KAOSS settings",
+            font=("DejaVu Sans", 16, "bold"),
+            fg="#fbf1c7",
+            bg="#111111",
+        ).pack(side=tk.LEFT)
+        tk.Label(
+            header,
+            text="drag to scroll",
+            font=("DejaVu Sans", 12),
+            fg="#a89984",
+            bg="#111111",
+        ).pack(side=tk.RIGHT)
+
+        _wrap, _canvas, inner, drag = self._build_touch_scroll_area(body)
+
+        toggles = tk.Frame(inner, bg="#111111")
+        toggles.pack(fill=tk.X, pady=(0, 8))
+        self._kaoss_settings_all_btn = self._mk_scroll_select_btn(
+            toggles, "SHOW ALL", self._kaoss_toggle_show_all, drag, bg="#3c3836"
+        )
+        self._kaoss_settings_all_btn.configure(font=("DejaVu Sans", 13, "bold"), pady=14)
+        self._kaoss_settings_all_btn.pack(
+            side=tk.LEFT, expand=True, fill=tk.BOTH, padx=(0, 4)
+        )
+        self._kaoss_settings_axes_btn = self._mk_scroll_select_btn(
+            toggles, "AXES: ON", self._kaoss_toggle_axis_labels, drag, bg="#3c3836"
+        )
+        self._kaoss_settings_axes_btn.configure(font=("DejaVu Sans", 13, "bold"), pady=14)
+        self._kaoss_settings_axes_btn.pack(
+            side=tk.LEFT, expand=True, fill=tk.BOTH, padx=(4, 0)
+        )
+
+        tk.Label(
+            inner,
+            text="PAD VIZ",
+            font=("DejaVu Sans", 12, "bold"),
+            fg="#a89984",
+            bg="#111111",
+            anchor="w",
+        ).pack(fill=tk.X, pady=(4, 2))
+        viz_row = tk.Frame(inner, bg="#111111")
+        viz_row.pack(fill=tk.X, pady=(0, 8))
+        self._kaoss_settings_viz_btns = {}
+        for style in VIZ_STYLES:
+            btn = self._mk_scroll_select_btn(
+                viz_row,
+                VIZ_STYLE_LABELS.get(style, style.upper()),
+                lambda s=style: self._kaoss_set_viz_style(s),
+                drag,
+                bg="#3c3836",
+            )
+            btn.configure(font=("DejaVu Sans", 13, "bold"), pady=12)
+            btn.pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2)
+            self._kaoss_settings_viz_btns[style] = btn
+
+        tk.Label(
+            inner,
+            text="GRID LINES",
+            font=("DejaVu Sans", 12, "bold"),
+            fg="#a89984",
+            bg="#111111",
+            anchor="w",
+        ).pack(fill=tk.X, pady=(4, 2))
+        grid_row = tk.Frame(inner, bg="#111111")
+        grid_row.pack(fill=tk.X, pady=(0, 8))
+        minus = self._mk_scroll_select_btn(
+            grid_row, "−", lambda: self._kaoss_nudge_grid_width(-1), drag, bg="#3c3836"
+        )
+        minus.configure(font=("DejaVu Sans", 18, "bold"), pady=12)
+        minus.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 4), ipadx=16)
+        self._kaoss_settings_grid_lbl = tk.Label(
+            grid_row,
+            text="2",
+            font=("DejaVu Sans", 16, "bold"),
+            fg="#fbf1c7",
+            bg="#1d2021",
+            pady=12,
+        )
+        self._kaoss_settings_grid_lbl.pack(
+            side=tk.LEFT, expand=True, fill=tk.BOTH, padx=4
+        )
+        plus = self._mk_scroll_select_btn(
+            grid_row, "+", lambda: self._kaoss_nudge_grid_width(1), drag, bg="#3c3836"
+        )
+        plus.configure(font=("DejaVu Sans", 18, "bold"), pady=12)
+        plus.pack(side=tk.RIGHT, fill=tk.Y, padx=(4, 0), ipadx=16)
+
+        tk.Label(
+            inner,
+            text="OUT",
+            font=("DejaVu Sans", 12, "bold"),
+            fg="#a89984",
+            bg="#111111",
+            anchor="w",
+        ).pack(fill=tk.X, pady=(4, 2))
+        out_row = tk.Frame(inner, bg="#111111")
+        out_row.pack(fill=tk.X, pady=(0, 8))
+        self._kaoss_settings_out_btns = {}
+        for mode in KAOSS_OUT_MODES:
+            btn = self._mk_scroll_select_btn(
+                out_row,
+                mode.upper(),
+                lambda m=mode: self._kaoss_set_out(m),
+                drag,
+                bg="#3c3836",
+            )
+            btn.configure(font=("DejaVu Sans", 13, "bold"), pady=12)
+            btn.pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2)
+            self._kaoss_settings_out_btns[mode] = btn
+
+        tk.Label(
+            inner,
+            text="MIDI channel",
+            font=("DejaVu Sans", 12, "bold"),
+            fg="#a89984",
+            bg="#111111",
+            anchor="w",
+        ).pack(fill=tk.X, pady=(4, 2))
+        ch_grid = tk.Frame(inner, bg="#111111")
+        ch_grid.pack(fill=tk.X, pady=(0, 12))
+        self._kaoss_settings_ch_btns = {}
+        for i in range(16):
+            r, c = divmod(i, 4)
+            btn = self._mk_scroll_select_btn(
+                ch_grid,
+                str(i + 1),
+                lambda ch=i: self._kaoss_set_channel(ch),
+                drag,
+                bg="#3c3836",
+            )
+            btn.configure(font=("DejaVu Sans", 16, "bold"), pady=18)
+            btn.grid(row=r, column=c, sticky="nsew", padx=4, pady=4, ipadx=4, ipady=8)
+            self._kaoss_settings_ch_btns[i] = btn
+        for c in range(4):
+            ch_grid.grid_columnconfigure(c, weight=1)
+
+        self._mk_touch_btn(
+            footer, "CLOSE", self._close_kaoss_settings, bg="#9d0006"
+        ).pack(fill=tk.X, ipady=14)
+        self._paint_kaoss_settings()
+        self._arm_overlay_guard()
+
+    def _close_kaoss_settings(self, restore_main: bool = True) -> None:
+        if not self._kaoss_settings_open:
+            return
+        if self._kaoss_settings_frame is not None:
+            self._kaoss_settings_frame.destroy()
+            self._kaoss_settings_frame = None
+        self._kaoss_settings_all_btn = None
+        self._kaoss_settings_axes_btn = None
+        self._kaoss_settings_grid_lbl = None
+        self._kaoss_settings_viz_btns = {}
+        self._kaoss_settings_out_btns = {}
+        self._kaoss_settings_ch_btns = {}
+        self._kaoss_settings_open = False
+        if restore_main and self._mode == "kaoss" and not self._kaoss_picker_open:
+            self._kaoss_shell.pack(fill=tk.BOTH, expand=True)
+            self._paint_kaoss()
+            self._kaoss_draw_grid()
+            self._kaoss_arm_tick()
+            self._kaoss_arm_viz()
+
+    def _paint_kaoss_settings(self) -> None:
+        on = bool(self._kaoss.show_all)
+        color = "#d79921" if on else "#3c3836"
+        if self._kaoss_settings_all_btn is not None:
+            self._kaoss_settings_all_btn.configure(
+                text="SHOW ALL: ON" if on else "SHOW ALL: OFF",
+                bg=color,
+                activebackground=color,
+            )
+        axes = bool(self._kaoss.show_axis_labels)
+        axes_color = "#458588" if axes else "#3c3836"
+        if self._kaoss_settings_axes_btn is not None:
+            self._kaoss_settings_axes_btn.configure(
+                text="AXES: ON" if axes else "AXES: OFF",
+                bg=axes_color,
+                activebackground=axes_color,
+            )
+        if self._kaoss_settings_grid_lbl is not None:
+            n = int(self._kaoss.grid_width)
+            self._kaoss_settings_grid_lbl.configure(text=f"{n} px")
+        for style, btn in self._kaoss_settings_viz_btns.items():
+            selected = style == self._kaoss.viz_style
+            c = "#b16286" if selected else "#3c3836"
+            try:
+                btn.configure(bg=c, activebackground=c)
+            except tk.TclError:
+                pass
+        for mode, btn in self._kaoss_settings_out_btns.items():
+            selected = mode == self._kaoss.out_mode
+            c = "#458588" if selected else "#3c3836"
+            try:
+                btn.configure(bg=c, activebackground=c)
+            except tk.TclError:
+                pass
+        for ch, btn in self._kaoss_settings_ch_btns.items():
+            selected = ch == self._kaoss.channel
+            c = "#458588" if selected else "#3c3836"
+            try:
+                btn.configure(bg=c, activebackground=c)
+            except tk.TclError:
+                pass
 
     def _kaoss_toggle_hold(self) -> None:
         _on, events = self._kaoss.toggle_hold()
@@ -8064,41 +8534,58 @@ class MidiToneApp:
             self._kaoss_arm_tick()
         self._mark_settings_dirty()
 
-    def _kaoss_cycle_gate(self) -> None:
-        self._kaoss.cycle_gate()
-        if self._kaoss.gate().beats > 0.0 and self._kaoss.is_active():
-            self._kaoss_arm_tick()
-        self._paint_kaoss()
-        self._mark_settings_dirty()
-
     def _kaoss_nudge_bpm(self, delta: float) -> None:
         self._kaoss.nudge_bpm(delta)
         self._paint_kaoss()
         self._mark_settings_dirty()
 
-    def _kaoss_cycle_out(self) -> None:
-        self._kaoss.cycle_out_mode()
+    def _kaoss_set_out(self, mode: str) -> None:
+        self._kaoss.set_out_mode(mode)
         if self._kaoss.out_mode in ("usb", "both"):
             name = self._songs.ensure_outport()
             if name:
                 self._append_log(f"KAOSS USB out → {name}")
             else:
                 self._append_log("KAOSS USB out — no MIDI port found")
-        self._paint_kaoss()
+        self._paint_kaoss_settings()
         self._mark_settings_dirty()
 
-    def _kaoss_cycle_channel(self) -> None:
-        self._kaoss.cycle_channel()
-        self._paint_kaoss()
+    def _kaoss_set_channel(self, channel: int) -> None:
+        self._kaoss.set_channel(channel)
+        self._paint_kaoss_settings()
+        self._mark_settings_dirty()
+        self._append_log(f"KAOSS MIDI ch → {self._kaoss.channel + 1}")
+
+    def _kaoss_toggle_axis_labels(self) -> None:
+        on = self._kaoss.toggle_show_axis_labels()
+        self._paint_kaoss_settings()
+        self._kaoss_draw_grid()
+        self._mark_settings_dirty()
+        self._append_log(f"KAOSS axis labels → {'ON' if on else 'OFF'}")
+
+    def _kaoss_set_viz_style(self, style: str) -> None:
+        self._kaoss.set_viz_style(style)
+        self._kaoss_led_geom = None
+        self._paint_kaoss_settings()
+        self._kaoss_arm_viz()
+        if self._kaoss_canvas is not None:
+            self._kaoss_draw_grid()
+        self._mark_settings_dirty()
+
+    def _kaoss_nudge_grid_width(self, delta: int) -> None:
+        self._kaoss.nudge_grid_width(delta)
+        self._paint_kaoss_settings()
+        if self._kaoss_canvas is not None:
+            self._kaoss_draw_grid()
         self._mark_settings_dirty()
 
     def _kaoss_toggle_show_all(self) -> None:
         on = self._kaoss.toggle_show_all()
         self._paint_kaoss()
-        self._paint_kaoss_show_all()
+        self._paint_kaoss_settings()
         self._kaoss_draw_grid()
-        if self._kaoss_scale_open:
-            self._kaoss_fill_scale_grid()
+        if self._kaoss_picker_open and self._kaoss_picker_kind in ("program", "scale"):
+            self._fill_kaoss_picker()
         self._mark_settings_dirty()
         n_scale = len(self._kaoss.scale_ids())
         n_prog = len(self._kaoss.program_ids())
@@ -8106,41 +8593,18 @@ class MidiToneApp:
             f"KAOSS list → {'ALL' if on else 'CURATED'} "
             f"({n_prog} programs, {n_scale} scales)"
         )
-        if self._preset_status_var is not None:
-            self._preset_status_var.set(
-                "KAOSS SHOW ALL — every factory scale + every XY program."
-                if on
-                else "KAOSS curated — short starter list. Tap again for the full set."
-            )
 
     def _paint_kaoss_status(self) -> None:
-        self._kaoss_status_var.set(self._kaoss.status_line())
-
-    def _paint_kaoss_show_all(self) -> None:
-        on = bool(self._kaoss.show_all)
-        color = "#d79921" if on else "#3c3836"
-        if self._kaoss_all_btn is not None:
-            self._kaoss_all_btn.configure(
-                text="ALL: ON" if on else "SHOW ALL",
-                bg=color,
-                activebackground=color,
-            )
-        if self._preset_kaoss_all_btn is not None:
-            self._preset_kaoss_all_btn.configure(
-                text="KAOSS: ALL" if on else "KAOSS: CURATED",
-                bg=color,
-                activebackground=color,
-            )
-        if self._kaoss_scale_grid_all_btn is not None:
-            self._kaoss_scale_grid_all_btn.configure(
-                text="ALL: ON" if on else "SHOW ALL",
-                bg=color,
-                activebackground=color,
-            )
+        morph = None
+        tone = None
+        if self._kaoss.program_id == "morph":
+            morph = self.engine.morph_neighbors()
+        elif self._kaoss.program_id == "lead":
+            tone = float(self.engine.modulation_state().get("tone", 1.0))
+        self._kaoss_status_var.set(self._kaoss.header_line(morph=morph, tone=tone))
 
     def _paint_kaoss(self) -> None:
         self._paint_kaoss_status()
-        self._paint_kaoss_show_all()
         prog = self._kaoss.program()
         if self._kaoss_prog_btn is not None:
             color = "#b16286" if prog.kind == "note" else "#d79921"
@@ -8157,7 +8621,9 @@ class MidiToneApp:
         if self._kaoss_key_btn is not None:
             self._kaoss_key_btn.configure(text=f"KEY {NOTE_NAMES[self._kaoss.key % 12]}")
         if self._kaoss_oct_btn is not None:
-            self._kaoss_oct_btn.configure(text=f"{self._kaoss.octaves} OCT")
+            self._kaoss_oct_btn.configure(
+                text=f"{kaoss_note_name(self._kaoss.root_midi)}·{self._kaoss.octaves}"
+            )
         if self._kaoss_hold_btn is not None:
             on = self._kaoss.hold
             color = "#689d6a" if on else "#3c3836"
@@ -8175,16 +8641,6 @@ class MidiToneApp:
             )
         if self._kaoss_bpm_lbl is not None:
             self._kaoss_bpm_lbl.configure(text=str(int(round(self._kaoss.bpm))))
-        if self._kaoss_out_btn is not None:
-            mode = self._kaoss.out_mode
-            color = "#458588" if mode != "local" else "#3c3836"
-            self._kaoss_out_btn.configure(
-                text=f"OUT: {mode.upper()}",
-                bg=color,
-                activebackground=color,
-            )
-        if self._kaoss_ch_btn is not None:
-            self._kaoss_ch_btn.configure(text=f"CH {self._kaoss.channel + 1}")
 
     def _kaoss_draw_grid(self) -> None:
         canvas = self._kaoss_canvas
@@ -8196,10 +8652,12 @@ class MidiToneApp:
         h = max(1, int(canvas.winfo_height()))
         self._kaoss_ensure_leds(w, h)
         prog = self._kaoss.program()
+        regular, octave_w = grid_line_widths(self._kaoss.grid_width)
         # Faint overlay so scale degrees stay readable on top of the LEDs
         for frac, color in ((0.25, "#3a1528"), (0.5, "#5b203c"), (0.75, "#3a1528")):
             y = int(h * (1.0 - frac))
-            canvas.create_line(0, y, w, y, fill=color, width=1, tags="grid")
+            stroke = octave_w if frac == 0.5 else regular
+            canvas.create_line(0, y, w, y, fill=color, width=stroke, tags="grid")
         if prog.kind == "note":
             notes = self._kaoss.notes()
             n = max(1, len(notes) - 1)
@@ -8207,12 +8665,14 @@ class MidiToneApp:
                 x = int(round((i / n) * (w - 1))) if n else 0
                 octave = (midi % 12) == (self._kaoss.key % 12)
                 color = "#fb4934" if octave else "#4a2040"
-                width = 2 if octave else 1
-                canvas.create_line(x, 0, x, h, fill=color, width=width, tags="grid")
+                canvas.create_line(
+                    x, 0, x, h, fill=color, width=octave_w if octave else regular, tags="grid"
+                )
         else:
             for frac in (0.25, 0.5, 0.75):
                 x = int(w * frac)
-                canvas.create_line(x, 0, x, h, fill="#3a1528", width=1, tags="grid")
+                stroke = octave_w if frac == 0.5 else regular
+                canvas.create_line(x, 0, x, h, fill="#3a1528", width=stroke, tags="grid")
         self._kaoss_draw_axes(canvas, w, h, prog)
         self._kaoss_paint_leds()
         if self._kaoss.is_active() or self._kaoss.hold:
@@ -8253,10 +8713,19 @@ class MidiToneApp:
             arrowshape=(10, 12, 5),
             tags="axis",
         )
+        if not self._kaoss.show_axis_labels:
+            return
         self._kaoss_axis_caption(
             canvas, (left + right) // 2, bottom - 13, f"X  {prog.x_axis}"
         )
         y_label = f"Y  {prog.y_axis}"
+        if prog.id == "morph":
+            a, b, frac = self.engine.morph_neighbors()
+            pct = int(round(max(0.0, min(1.0, frac)) * 100.0))
+            y_label = f"Y  {a[:6]} {pct}% {b[:6]}"
+        elif prog.id == "lead":
+            pct = int(round(float(self.engine.modulation_state().get("tone", 1.0)) * 100.0))
+            y_label = f"Y  TONE {pct}%"
         try:
             self._kaoss_axis_caption(canvas, left + 15, h // 2, y_label, angle=90.0)
         except tk.TclError:
@@ -8300,12 +8769,43 @@ class MidiToneApp:
         canvas = self._kaoss_canvas
         if canvas is None or w < 40 or h < 40:
             return
-        geom = (w, h, LED_COLS, LED_ROWS)
+        style = self._kaoss.viz_style
+        cols, rows = self._kaoss.led_grid_size()
+        geom = (w, h, cols, rows, style)
+        if style == "glow":
+            if self._kaoss_led_geom == geom and self._kaoss_glow:
+                return
+            canvas.delete("led")
+            canvas.delete("glow")
+            canvas.delete("ripple")
+            self._kaoss_leds = []
+            self._kaoss_ripple_items = []
+            wash = canvas.create_rectangle(
+                0, 0, w, h, fill="#08040a", outline="", tags="glow"
+            )
+            blooms = [
+                canvas.create_oval(0, 0, 0, 0, fill="", outline="", tags="glow")
+                for _ in range(3)
+            ]
+            trail = [
+                canvas.create_oval(0, 0, 0, 0, fill="", outline="", tags="glow")
+                for _ in range(8)
+            ]
+            self._kaoss_glow = {"wash": wash, "blooms": blooms, "trail": trail}
+            for _ in range(4):
+                self._kaoss_ripple_items.append(
+                    canvas.create_oval(0, 0, 0, 0, outline="", width=2, tags="ripple")
+                )
+            canvas.tag_lower("glow")
+            self._kaoss_led_geom = geom
+            return
         if self._kaoss_led_geom == geom and len(self._kaoss_leds) == LED_COLS * LED_ROWS:
             return
         canvas.delete("led")
+        canvas.delete("glow")
         canvas.delete("ripple")
         self._kaoss_leds = []
+        self._kaoss_glow = {}
         self._kaoss_ripple_items = []
         gap = 3
         cell_w = max(2.0, (w - gap * (LED_COLS + 1)) / float(LED_COLS))
@@ -8333,10 +8833,7 @@ class MidiToneApp:
         canvas.tag_lower("led")
         self._kaoss_led_geom = geom
 
-    def _kaoss_paint_leds(self, now: Optional[float] = None) -> None:
-        canvas = self._kaoss_canvas
-        if canvas is None or not self._kaoss_leds:
-            return
+    def _kaoss_viz_motion(self, now: Optional[float] = None):
         t = time.monotonic() if now is None else float(now)
         finger = None
         if self._kaoss.is_active() or self._kaoss.touching:
@@ -8359,32 +8856,116 @@ class MidiToneApp:
             live_ripples.append((x, y, born))
             ripples.append((x, y, max(0.0, age)))
         self._kaoss_ripples = live_ripples
+        return t, finger, trail, ripples
+
+    def _kaoss_paint_leds(self, now: Optional[float] = None) -> None:
+        canvas = self._kaoss_canvas
+        if canvas is None:
+            return
+        t, finger, trail, ripples = self._kaoss_viz_motion(now)
         hue = program_hue(self._kaoss.program_id)
         flash = self._kaoss.gate_flash()
         pulse = self._kaoss.viz_pulse(t)
         hold = bool(self._kaoss.hold and self._kaoss.is_active())
-        idx = 0
-        for row in range(LED_ROWS):
-            for col in range(LED_COLS):
-                color = pad_led_hex(
-                    col,
-                    row,
-                    t=t,
-                    finger=finger,
-                    trail=trail,
-                    ripples=ripples,
-                    hold=hold,
-                    gate_flash=flash,
-                    hue_shift=hue,
-                )
-                canvas.itemconfigure(self._kaoss_leds[idx], fill=color)
-                idx += 1
+        if self._kaoss.viz_style == "glow":
+            self._kaoss_paint_glow(canvas, t, finger, trail, hue, pulse, hold)
+        elif self._kaoss_leds:
+            idx = 0
+            for row in range(LED_ROWS):
+                for col in range(LED_COLS):
+                    if idx >= len(self._kaoss_leds):
+                        break
+                    color = pad_led_hex(
+                        col,
+                        row,
+                        t=t,
+                        finger=finger,
+                        trail=trail,
+                        ripples=ripples,
+                        hold=hold,
+                        gate_flash=flash,
+                        hue_shift=hue,
+                    )
+                    canvas.itemconfigure(self._kaoss_leds[idx], fill=color)
+                    idx += 1
         self._kaoss_paint_ripples(canvas, ripples, hue)
         rim = rgb_hex(hsv_to_rgb(hue, 0.85, 0.28 + 0.55 * pulse))
         try:
             canvas.configure(highlightbackground=rim)
         except tk.TclError:
             pass
+        canvas.tag_raise("grid")
+        canvas.tag_raise("ripple")
+        canvas.tag_raise("axis")
+        canvas.tag_raise("cursor")
+
+    def _kaoss_paint_glow(
+        self,
+        canvas: tk.Canvas,
+        t: float,
+        finger: Optional[Tuple[float, float]],
+        trail: List[Tuple[float, float, float]],
+        hue: float,
+        pulse: float,
+        hold: bool,
+    ) -> None:
+        glow = self._kaoss_glow
+        if not glow:
+            return
+        w = max(1, int(canvas.winfo_width()))
+        h = max(1, int(canvas.winfo_height()))
+        dt = 0.0 if self._glow_t <= 0.0 else min(0.08, t - self._glow_t)
+        self._glow_t = t
+        target = 1.0 if finger is not None else 0.0
+        if target > self._glow_amp and dt <= 0.0:
+            dt = 0.02
+        self._glow_amp = glow_step(self._glow_amp, target, dt)
+        if finger is not None:
+            self._glow_xy = finger
+        amp = self._glow_amp
+        wash_v = (0.05 + 0.07 * pulse + (0.04 if hold else 0.0)) * (0.35 + 0.65 * amp)
+        canvas.itemconfigure(
+            glow["wash"], fill=rgb_hex(hsv_to_rgb(hue, 0.55, wash_v))
+        )
+        canvas.coords(glow["wash"], 0, 0, w, h)
+        blooms = glow.get("blooms") or []
+        fx, fy = self._glow_xy
+        px = fx * (w - 1)
+        py = (1.0 - fy) * (h - 1)
+        if amp < 0.02:
+            for item in blooms:
+                canvas.coords(item, 0, 0, 0, 0)
+                canvas.itemconfigure(item, fill="")
+        else:
+            radii = glow_radii(min(w, h), amp)
+            fills = (
+                rgb_hex(hsv_to_rgb(hue, 0.85, 0.34 * amp)),
+                rgb_hex(hsv_to_rgb(hue, 0.70, 0.68 * amp)),
+                rgb_hex(hsv_to_rgb(hue, 0.18, 0.55 + 0.45 * amp)),
+            )
+            for item, radius, fill in zip(blooms, radii, fills):
+                if radius < 1.5:
+                    canvas.coords(item, 0, 0, 0, 0)
+                    canvas.itemconfigure(item, fill="")
+                    continue
+                canvas.coords(item, px - radius, py - radius, px + radius, py + radius)
+                canvas.itemconfigure(item, fill=fill, outline="")
+        trail_items = glow.get("trail") or []
+        for i, item in enumerate(trail_items):
+            if i >= len(trail):
+                canvas.coords(item, 0, 0, 0, 0)
+                canvas.itemconfigure(item, fill="")
+                continue
+            tx, ty, age = trail[i]
+            px = tx * (w - 1)
+            py = (1.0 - ty) * (h - 1)
+            radius = (8 + 18 * age) * max(0.25, amp)
+            canvas.coords(item, px - radius, py - radius, px + radius, py + radius)
+            canvas.itemconfigure(
+                item,
+                fill=rgb_hex(hsv_to_rgb(hue, 0.45, 0.50 * age * max(0.2, amp))),
+                outline="",
+            )
 
     def _kaoss_paint_ripples(
         self,
@@ -8417,7 +8998,11 @@ class MidiToneApp:
         px = int(round(max(0.0, min(1.0, x)) * (w - 1)))
         py = int(round((1.0 - max(0.0, min(1.0, y))) * (h - 1)))
         hue = (max(0.0, min(1.0, x)) * 0.70 + program_hue(self._kaoss.program_id)) % 1.0
-        if active:
+        # GLOW already draws the finger blob. The hard rings were the "two
+        # circles that pop" — skip them so the envelope can fade in.
+        if self._kaoss.viz_style == "glow":
+            pass
+        elif active:
             outer = rgb_hex(hsv_to_rgb(hue, 0.90, 0.55))
             mid = rgb_hex(hsv_to_rgb(hue, 0.85, 1.0))
             core = rgb_hex(hsv_to_rgb(hue, 0.12, 1.0))
@@ -8490,8 +9075,10 @@ class MidiToneApp:
             self._close_save_preset(restore_main=False)
         if self._token_ui_open:
             self._close_update_token(restore_main=False)
-        if self._kaoss_scale_open:
-            self._close_kaoss_scale_grid(restore_main=False)
+        if self._kaoss_picker_open:
+            self._close_kaoss_picker(restore_main=False)
+        if self._kaoss_settings_open:
+            self._close_kaoss_settings(restore_main=False)
 
         # Leaving pads while recording: keep the take
         if self._mode == "pads" and mode != "pads":
@@ -8509,6 +9096,10 @@ class MidiToneApp:
             self._kaoss_cancel_viz()
             if not self._kaoss.hold:
                 self._kaoss_apply(self._kaoss.release(), ended=True)
+            else:
+                # HOLD keeps the last note, but VIB / FILTER overlays must not
+                # follow you onto SYNTH / SEQ.
+                self._kaoss_restore_fx()
 
         self._mode = mode
         self._home_shell.pack_forget()
@@ -8602,6 +9193,13 @@ class MidiToneApp:
         if home is not None:
             color = "#458588" if self._mode == "home" else "#3c3836"
             home.configure(bg=color, activebackground=color)
+        settings_nav = getattr(self, "_settings_nav_btn", None)
+        if settings_nav is not None:
+            color = "#458588" if self._mode == "settings" else "#3c3836"
+            try:
+                settings_nav.configure(bg=color, activebackground=color)
+            except tk.TclError:
+                pass
 
     def _refresh_seq_status(self) -> None:
         self._seq_status_var.set(self._seq.status_line())
@@ -8931,6 +9529,10 @@ class MidiToneApp:
         drag["_release_grab"] = _release_grab
         return wrap, canvas, inner, drag
 
+    def _arm_overlay_guard(self, sec: float = 0.40) -> None:
+        """Ignore the finger-up that opened a grid so it cannot pick a tile."""
+        self._picker_ignore_until = time.monotonic() + float(sec)
+
     def _mk_scroll_select_btn(
         self,
         parent: tk.Misc,
@@ -8972,6 +9574,8 @@ class MidiToneApp:
             if was_drag:
                 return "break"
             now = time.monotonic()
+            if now < float(getattr(self, "_picker_ignore_until", 0.0) or 0.0):
+                return "break"
             last = getattr(btn, "_last_fire", 0.0)
             if now - last < 0.18:
                 return "break"
@@ -9395,6 +9999,7 @@ class MidiToneApp:
         )
         self._paint_vib_controls()
         self._paint_voice_grid()
+        self._arm_overlay_guard()
 
     def _paint_vib_controls(self) -> None:
         depth, rate, always = self.engine.vib_state()
@@ -9567,6 +10172,7 @@ class MidiToneApp:
             side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=12
         )
         self._paint_morph_menu()
+        self._arm_overlay_guard()
 
     def _set_morph_pick_side(self, side: str) -> None:
         self._morph_pick_side = "b" if side == "b" else "a"
@@ -10244,14 +10850,18 @@ class MidiToneApp:
         self.root.geometry(f"{sw}x{sh}+0+0")
         print(f"ui: geometry {sw}x{sh}", flush=True)
 
-    def _on_pointer_activity(self, _event: object = None) -> None:
+    def _on_pointer_activity(self, event: object = None) -> None:
         idle = getattr(self, "_idle", None)
         if idle is None:
             return
-        # While blanked, ANY pointer event must wake — the overlay canvas can
-        # miss capacitive events (dual ADS7846+ft5x06, grab failures, etc.).
+        # While blanked, ANY pointer event must wake — capacitive panels often
+        # emit release-only or motion-only bursts instead of ButtonPress.
         if idle.active or self._saver_canvas is not None:
             self._hide_screensaver()
+            return
+        # Awake: hover/motion must not keep the panel from ever blanking.
+        etype = str(getattr(event, "type", "") or "")
+        if etype in ("6", "Motion"):
             return
         idle.poke()
 
@@ -10260,6 +10870,10 @@ class MidiToneApp:
             return
         self._stop.set()
         self._cancel_screensaver_tick()
+        try:
+            self._backlight.restore()
+        except Exception:
+            pass
 
     def _cancel_screensaver_tick(self) -> None:
         aid = self._saver_tick_after
@@ -10319,19 +10933,16 @@ class MidiToneApp:
             canvas.focus_set()
         except Exception:
             pass
+        # Local grab only. grab_set_global() can swallow capacitive events so
+        # tap-to-wake never fires while the backlight is already at 0.
         try:
-            # Prefer global grab so a stray ADS7846/ft5x06 mapping still
-            # delivers the wake tap to this overlay.
-            canvas.grab_set_global()
+            canvas.grab_set()
         except Exception:
-            try:
-                canvas.grab_set()
-            except Exception:
-                pass
+            pass
         # Capacitive panels sometimes emit release-only or motion-only bursts.
         canvas.bind("<ButtonPress>", self._on_screensaver_tap)
         canvas.bind("<ButtonRelease>", self._on_screensaver_tap)
-        canvas.bind("<Motion>", self._on_screensaver_motion)
+        canvas.bind("<Motion>", self._on_screensaver_tap)
         canvas.bind("<B1-Motion>", self._on_screensaver_tap)
         self._saver_canvas = canvas
         self._saver_hint = canvas.create_text(
@@ -10398,14 +11009,6 @@ class MidiToneApp:
         self._hide_screensaver()
         return "break"
 
-    def _on_screensaver_motion(self, event: tk.Event) -> Optional[str]:  # type: ignore[name-defined]
-        # Ignore pure hover; only wake when a button is held (touch drag).
-        state = int(getattr(event, "state", 0) or 0)
-        if state & 0x0100:  # Button1Mask
-            self._hide_screensaver()
-            return "break"
-        return None
-
     def _hide_screensaver(self) -> None:
         idle = getattr(self, "_idle", None)
         if idle is not None:
@@ -10429,8 +11032,12 @@ class MidiToneApp:
             # Last-resort unblank if PanelBacklight had no saved state
             try:
                 path = pathlib.Path("/sys/class/backlight/10-0045/brightness")
+                max_path = pathlib.Path("/sys/class/backlight/10-0045/max_brightness")
+                value = "255"
+                if max_path.is_file():
+                    value = max_path.read_text(encoding="ascii").strip() or "255"
                 if path.is_file():
-                    path.write_text("128\n", encoding="ascii")
+                    path.write_text(f"{value}\n", encoding="ascii")
                 power = pathlib.Path("/sys/class/backlight/10-0045/bl_power")
                 if power.is_file():
                     power.write_text("0\n", encoding="ascii")
@@ -10467,8 +11074,10 @@ class MidiToneApp:
             self._close_save_preset(restore_main=False)
         if self._token_ui_open:
             self._close_update_token(restore_main=False)
-        if self._kaoss_scale_open:
-            self._close_kaoss_scale_grid(restore_main=False)
+        if self._kaoss_picker_open:
+            self._close_kaoss_picker(restore_main=False)
+        if self._kaoss_settings_open:
+            self._close_kaoss_settings(restore_main=False)
         if self._kaoss_play:
             self._kaoss_leave_play()
 

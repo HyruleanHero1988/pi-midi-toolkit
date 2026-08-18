@@ -15,12 +15,18 @@ from kaoss import (
     KAOSS_CC_Y,
     PROGRAM_IDS,
     PROGRAM_IDS_ALL,
+    ROOT_OCTAVE_MIDI,
     SCALE_ORDER,
     SCALE_ORDER_ALL,
+    VIZ_STYLES,
     KaossPad,
+    glow_radii,
+    glow_step,
+    grid_line_widths,
     hsv_to_rgb,
     midi_cc,
     note_at_x,
+    note_name,
     pad_led_hex,
     program_hue,
     rgb_hex,
@@ -105,6 +111,78 @@ class PadPlayTest(unittest.TestCase):
         self.assertIn("note_off", self.kinds(off))
         self.assertFalse(self.pad.is_active())
 
+    def test_hold_keeps_gate_arp_after_lift(self) -> None:
+        self.pad.gate_id = "8th"
+        self.pad.bpm = 120.0
+        self.pad.touch(0.0, 1.0, now=0.0)
+        self.assertIn("note_on", self.kinds(self.pad.tick(0.01)))
+        self.pad.set_hold(True)
+        self.assertEqual(self.pad.release(), [])
+        self.assertTrue(self.pad.is_active())
+        rest = self.pad.tick(0.20)
+        self.assertIn("note_off", self.kinds(rest))
+        self.assertTrue(self.pad.is_active())
+        self.assertIn("note_on", self.kinds(self.pad.tick(0.26)))
+        off = self.pad.set_hold(False)
+        self.assertIn("note_off", self.kinds(off))
+        self.assertFalse(self.pad.is_active())
+        self.assertEqual(self.pad.tick(0.51), [])
+
+    def test_hold_keeps_note_when_switching_to_filter(self) -> None:
+        self.pad.touch(0.0, 0.8)
+        self.pad.set_hold(True)
+        self.pad.release()
+        note = self.pad.sounding_note()
+        self.assertIsNotNone(note)
+        self.pad.set_program("filter")
+        events = self.pad.reassert(now=1.0)
+        self.assertEqual(self.pad.sounding_note(), note)
+        self.assertTrue(self.pad.is_active())
+        self.assertEqual(self.pad.program().id, "filter")
+        self.assertIn("param", self.kinds(events))
+        self.assertNotIn("note_off", self.kinds(events))
+
+    def test_hold_and_gate_before_first_tick(self) -> None:
+        self.pad.gate_id = "8th"
+        self.pad.bpm = 120.0
+        self.pad.touch(0.0, 1.0, now=0.0)
+        self.pad.set_hold(True)
+        self.pad.release()
+        self.assertTrue(self.pad.is_active())
+        self.assertIsNone(self.pad.sounding_note())
+        self.assertIn("note_on", self.kinds(self.pad.tick(0.01)))
+
+    def test_hold_and_gate_keep_repeating_on_filter(self) -> None:
+        """FILTER must not kill a HOLD+GATE arp — X is tone, pitch stays latched."""
+        self.pad.gate_id = "8th"
+        self.pad.bpm = 120.0
+        self.pad.touch(0.0, 1.0, now=0.0)
+        self.assertIn("note_on", self.kinds(self.pad.tick(0.01)))
+        note = self.pad.sounding_note()
+        self.pad.set_hold(True)
+        self.pad.release()
+        self.pad.set_program("filter")
+        self.pad.reassert(now=0.01)
+        self.assertTrue(self.pad.is_active())
+        rest = self.pad.tick(0.20)
+        self.assertIn("note_off", self.kinds(rest))
+        self.assertTrue(self.pad.is_active())
+        again = self.pad.tick(0.26)
+        self.assertIn("note_on", self.kinds(again))
+        on = next(e for e in again if e.kind == "note_on")
+        self.assertEqual(on.note, note)
+
+    def test_turning_gate_on_while_held_starts_the_arp(self) -> None:
+        self.pad.touch(0.0, 1.0, now=0.0)
+        self.pad.set_hold(True)
+        self.pad.release()
+        self.assertIsNotNone(self.pad.sounding_note())
+        self.pad.set_gate("8th", now=0.0)
+        self.assertTrue(self.pad.is_active())
+        rest = self.pad.tick(0.20)
+        self.assertIn("note_off", self.kinds(rest))
+        self.assertIn("note_on", self.kinds(self.pad.tick(0.26)))
+
     def test_y_writes_tone_param(self) -> None:
         events = self.pad.touch(0.3, 0.25)
         params = [e for e in events if e.kind == "param"]
@@ -139,10 +217,26 @@ class PadPlayTest(unittest.TestCase):
         self.pad.out_mode = "both"
         self.pad.channel = 2
         self.pad.show_all = True
+        self.pad.show_axis_labels = False
+        self.pad.viz_style = "cells"
         snap = self.pad.snapshot()
         other = KaossPad()
         other.apply(snap)
         self.assertEqual(other.snapshot(), snap)
+        self.assertEqual(other.viz_style, "cells")
+
+    def test_octave_start_and_width(self) -> None:
+        self.assertEqual(ROOT_OCTAVE_MIDI, (24, 36, 48, 60, 72))
+        self.assertEqual(note_name(24), "C1")
+        self.assertEqual(note_name(48), "C3")
+        self.pad.set_root_midi(36)
+        self.assertEqual(self.pad.root_midi, 36)
+        self.assertEqual(self.pad.root_octave_midi(), 36)
+        self.pad.set_octaves(4)
+        self.assertEqual(self.pad.octaves, 4)
+        self.pad.nudge_root_octave(1)
+        self.assertEqual(self.pad.root_midi, 48)
+        self.assertEqual(self.pad.root_octave_midi(), 48)
 
 
 class ShowAllCatalogTest(unittest.TestCase):
@@ -153,6 +247,7 @@ class ShowAllCatalogTest(unittest.TestCase):
         self.assertIn("pelog", SCALE_ORDER_ALL)
         self.assertIn("miyakobushi", SCALE_ORDER_ALL)
         self.assertNotIn("raga_bhairav", SCALE_ORDER)
+        self.assertIn("bassline", SCALE_ORDER)
         self.assertIn("octave", PROGRAM_IDS_ALL)
         self.assertNotIn("octave", PROGRAM_IDS)
 
@@ -193,6 +288,14 @@ class ShowAllCatalogTest(unittest.TestCase):
         pad.set_scale("blues")
         self.assertEqual(pad.set_scale("not-a-scale"), "blues")
         self.assertEqual(pad.scale_label(), "BLUES")
+
+    def test_set_program_and_hide_axis_labels(self) -> None:
+        pad = KaossPad()
+        self.assertEqual(pad.set_program("filter").id, "filter")
+        self.assertEqual(pad.set_program("nope").id, "filter")
+        pad.set_show_axis_labels(False)
+        self.assertFalse(pad.show_axis_labels)
+        self.assertFalse(pad.snapshot()["show_axis_labels"])
 
     def test_exotic_scale_still_quantizes(self) -> None:
         notes = scale_notes("egyptian", 0, root_midi=48, octaves=1)
@@ -267,9 +370,68 @@ class LedFieldTest(unittest.TestCase):
         self.assertGreater(self._luma(held), self._luma(idle))
         self.assertGreater(self._luma(ring), self._luma(idle))
 
+    def test_glow_eases_in_and_out(self) -> None:
+        self.assertLess(glow_step(0.0, 1.0, 0.05), 0.45)
+        self.assertGreater(glow_step(0.0, 1.0, 0.05), 0.2)
+        self.assertGreater(glow_step(1.0, 0.0, 0.05), 0.7)
+        self.assertEqual(glow_step(1.0, 1.0, 0.05), 1.0)
+
+    def test_glow_size_follows_fade_not_position(self) -> None:
+        span = 400.0
+        full = glow_radii(span, 1.0)
+        faded = glow_radii(span, 0.2)
+        self.assertGreater(full[0], faded[0] * 2.5)
+        self.assertGreater(full[0], 140.0)
+
     def test_programs_use_different_hues(self) -> None:
         self.assertNotEqual(program_hue("lead"), program_hue("filter"))
         self.assertGreater(KaossPad().viz_pulse(0.0), 0.3)
+
+    def test_viz_style_cycles_and_rejects_junk(self) -> None:
+        pad = KaossPad()
+        self.assertEqual(pad.viz_style, "glow")
+        self.assertEqual(pad.cycle_viz_style(), "cells")
+        self.assertEqual(pad.cycle_viz_style(), "glow")
+        pad.set_viz_style("nope")
+        self.assertEqual(pad.viz_style, "glow")
+        pad.set_viz_style("static")
+        self.assertEqual(pad.viz_style, "cells")
+        self.assertEqual(set(VIZ_STYLES), {"glow", "cells"})
+
+    def test_grid_width_defaults_thicker_and_clamps(self) -> None:
+        pad = KaossPad()
+        self.assertEqual(pad.grid_width, 2)
+        self.assertEqual(grid_line_widths(2), (2, 3))
+        self.assertEqual(pad.nudge_grid_width(1), 3)
+        self.assertEqual(pad.nudge_grid_width(9), 5)
+        self.assertEqual(pad.nudge_grid_width(-20), 1)
+        pad.apply({"grid_width": "nope"})
+        self.assertEqual(pad.grid_width, 2)
+        pad.apply({"grid_width": 4})
+        self.assertEqual(pad.snapshot()["grid_width"], 4)
+
+    def test_cell_grid_is_fixed_12x7(self) -> None:
+        pad = KaossPad()
+        pad.program_id = "lead"
+        pad.scale_id = "ionian"
+        pad.octaves = 2
+        self.assertEqual(pad.led_grid_size(), (12, 7))
+        pad.program_id = "filter"
+        self.assertEqual(pad.led_grid_size(), (12, 7))
+
+    def test_morph_header_shows_percent(self) -> None:
+        pad = KaossPad()
+        pad.program_id = "morph"
+        line = pad.header_line(morph=("saw", "organ", 0.42))
+        self.assertIn("42%", line)
+        self.assertIn("MORPH", line)
+
+    def test_lead_header_shows_tone_percent(self) -> None:
+        pad = KaossPad()
+        pad.program_id = "lead"
+        line = pad.header_line(tone=0.12)
+        self.assertIn("12%", line)
+        self.assertIn("LEAD", line)
 
     @staticmethod
     def _luma(color: str) -> int:

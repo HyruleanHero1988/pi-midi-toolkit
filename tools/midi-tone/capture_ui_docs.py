@@ -174,6 +174,8 @@ def close_overlays(app) -> None:
         app._close_save_voice(restore_main=True)
     if getattr(app, "_kaoss_scale_open", False):
         app._close_kaoss_scale_grid(restore_main=True)
+    if getattr(app, "_kaoss_settings_open", False):
+        app._close_kaoss_settings(restore_main=True)
     if getattr(app, "_kaoss_play", False):
         app._kaoss_leave_play()
 

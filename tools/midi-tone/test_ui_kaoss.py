@@ -113,7 +113,8 @@ class KaossScreenTest(unittest.TestCase):
             cls.app._stop.set()
             cls.app._kaoss_cancel_tick()
             cls.app._kaoss_cancel_viz()
-            cls.app._close_kaoss_scale_grid(restore_main=False)
+            cls.app._close_kaoss_picker(restore_main=False)
+            cls.app._close_kaoss_settings(restore_main=False)
             cls.app._seq.stop()
             cls.app.engine.stop()
             cls.app.root.destroy()
@@ -129,8 +130,14 @@ class KaossScreenTest(unittest.TestCase):
         app._kaoss.program_id = "lead"
         app._kaoss.gate_id = "off"
         app._kaoss.scale_id = "ionian"
-        if app._kaoss_scale_open:
-            app._close_kaoss_scale_grid(restore_main=False)
+        app._kaoss.show_all = False
+        app._kaoss.show_axis_labels = True
+        app._kaoss.viz_style = "glow"
+        app._kaoss_led_geom = None
+        if app._kaoss_picker_open:
+            app._close_kaoss_picker(restore_main=False)
+        if app._kaoss_settings_open:
+            app._close_kaoss_settings(restore_main=False)
         if app._kaoss_play:
             app._kaoss_leave_play()
         app.engine.all_notes_off()
@@ -216,16 +223,99 @@ class KaossScreenTest(unittest.TestCase):
         app._switch_mode("kaoss")
         self.pump()
         curated = len(app._kaoss.scale_ids())
+        app._open_kaoss_settings()
+        self.pump()
+        self.assertTrue(app._kaoss_settings_open)
         app._kaoss_toggle_show_all()
         self.pump()
         self.assertTrue(app._kaoss.show_all)
         self.assertGreater(len(app._kaoss.scale_ids()), curated)
-        self.assertIn("ALL: ON", app._kaoss_all_btn.cget("text"))
-        app._switch_mode("presets")
+        self.assertIn("ON", app._kaoss_settings_all_btn.cget("text"))
+        app._close_kaoss_settings()
         self.pump()
-        self.assertIn("KAOSS: ALL", app._preset_kaoss_all_btn.cget("text"))
         app._kaoss_toggle_show_all()
         self.assertFalse(app._kaoss.show_all)
+
+    def test_program_button_opens_named_grid(self) -> None:
+        app = self.app
+        app._switch_mode("kaoss")
+        self.pump()
+        app._open_kaoss_picker("program")
+        self.pump()
+        self.assertTrue(app._kaoss_picker_open)
+        names = [btn.cget("text") for btn in app._kaoss_picker_btns.values()]
+        self.assertIn("LEAD", names)
+        self.assertIn("FILTER", names)
+        app._kaoss_picker_choose("morph")
+        self.pump()
+        self.assertFalse(app._kaoss_picker_open)
+        self.assertEqual(app._kaoss.program_id, "morph")
+        self.assertEqual(app._kaoss_prog_btn.cget("text"), "MORPH")
+
+    def test_key_opens_grid_and_ignores_the_opening_finger_up(self) -> None:
+        app = self.app
+        app._switch_mode("kaoss")
+        self.pump()
+        app._kaoss.set_key(0)
+        app._open_kaoss_picker("key")
+        self.pump()
+        self.assertTrue(app._kaoss_picker_open)
+        names = [btn.cget("text") for btn in app._kaoss_picker_btns.values()]
+        self.assertIn("C", names)
+        self.assertIn("F#", names)
+        # Same lift that opened KEY must not steal C# (the old "cycling" feel).
+        app._kaoss_picker_btns["1"].event_generate("<ButtonRelease-1>")
+        self.pump()
+        self.assertTrue(app._kaoss_picker_open)
+        self.assertEqual(app._kaoss.key, 0)
+        app._picker_ignore_until = 0.0
+        app._kaoss_picker_choose("1")
+        self.pump()
+        self.assertFalse(app._kaoss_picker_open)
+        self.assertEqual(app._kaoss.key, 1)
+        self.assertEqual(app._kaoss_key_btn.cget("text"), "KEY C#")
+
+    def test_octave_picker_sets_start_and_width_without_closing(self) -> None:
+        app = self.app
+        app._switch_mode("kaoss")
+        self.pump()
+        app._open_kaoss_picker("octave")
+        self.pump()
+        self.assertTrue(app._kaoss_picker_open)
+        app._kaoss_picker_choose("start:36")
+        self.pump()
+        self.assertTrue(app._kaoss_picker_open)
+        self.assertEqual(app._kaoss.root_midi, 36)
+        app._kaoss_picker_choose("wide:4")
+        self.pump()
+        self.assertTrue(app._kaoss_picker_open)
+        self.assertEqual(app._kaoss.octaves, 4)
+        app._close_kaoss_picker()
+        self.pump()
+        self.assertEqual(app._kaoss_oct_btn.cget("text"), "C2·4")
+
+    def test_settings_can_hide_axis_labels(self) -> None:
+        app = self.app
+        app._switch_mode("kaoss")
+        self.pump()
+        app._open_kaoss_settings()
+        self.pump()
+        app._kaoss_toggle_axis_labels()
+        self.pump()
+        self.assertFalse(app._kaoss.show_axis_labels)
+        self.assertIn("OFF", app._kaoss_settings_axes_btn.cget("text"))
+        app._close_kaoss_settings()
+        self.pump()
+        canvas = app._kaoss_canvas
+        app._kaoss_draw_grid()
+        texts = []
+        for item in canvas.find_withtag("axis"):
+            if canvas.type(item) != "text":
+                continue
+            texts.append(canvas.itemcget(item, "text"))
+        names = " ".join(texts)
+        self.assertNotIn("PITCH", names)
+        self.assertNotIn("TONE", names)
 
     def test_full_pad_hides_chrome_hold_exit_restores(self) -> None:
         app = self.app
@@ -304,7 +394,16 @@ class KaossScreenTest(unittest.TestCase):
         self.pump()
         canvas = app._kaoss_canvas
         canvas.update_idletasks()
+        app._kaoss_draw_grid()
+        self.assertEqual(app._kaoss.viz_style, "glow")
+        self.assertEqual(app._kaoss_leds, [])
+        self.assertTrue(canvas.find_withtag("glow"))
+
+        app._kaoss_set_viz_style("cells")
+        self.pump()
         self.assertEqual(len(app._kaoss_leds), 12 * 7)
+        outline = canvas.itemcget(app._kaoss_leds[0], "outline")
+        self.assertTrue(outline, "original CELLS tiles have a gap outline")
 
         class Ev:
             def __init__(self, x: int, y: int) -> None:
@@ -319,6 +418,46 @@ class KaossScreenTest(unittest.TestCase):
         fills = [canvas.itemcget(item, "fill") for item in app._kaoss_leds]
         self.assertTrue(any(self._luma(c) > 80 for c in fills))
         app._kaoss_on_release()
+
+    def test_settings_can_pick_pad_viz(self) -> None:
+        app = self.app
+        app._switch_mode("kaoss")
+        self.pump()
+        app._open_kaoss_settings()
+        self.pump()
+        self.assertIn("glow", app._kaoss_settings_viz_btns)
+        self.assertIn("cells", app._kaoss_settings_viz_btns)
+        self.assertNotIn("static", app._kaoss_settings_viz_btns)
+        self.assertEqual(app._kaoss_settings_viz_btns["cells"].cget("text"), "CELLS")
+        self.assertEqual(len(app._kaoss_settings_ch_btns), 16)
+        app._kaoss_set_viz_style("cells")
+        self.assertEqual(app._kaoss.viz_style, "cells")
+        app._close_kaoss_settings()
+        self.pump()
+        self.assertEqual(app._kaoss.viz_style, "cells")
+
+    def test_settings_can_thicken_grid_lines(self) -> None:
+        app = self.app
+        app._switch_mode("kaoss")
+        self.pump()
+        self.assertEqual(app._kaoss.grid_width, 2)
+        app._open_kaoss_settings()
+        self.pump()
+        self.assertIsNotNone(app._kaoss_settings_grid_lbl)
+        self.assertIn("2", app._kaoss_settings_grid_lbl.cget("text"))
+        app._kaoss_nudge_grid_width(1)
+        self.assertEqual(app._kaoss.grid_width, 3)
+        self.assertIn("3", app._kaoss_settings_grid_lbl.cget("text"))
+        app._close_kaoss_settings()
+        self.pump()
+        canvas = app._kaoss_canvas
+        app._kaoss_draw_grid()
+        widths = [
+            int(float(canvas.itemcget(item, "width") or 0))
+            for item in canvas.find_withtag("grid")
+        ]
+        self.assertTrue(widths)
+        self.assertGreaterEqual(max(widths), 3)
 
     @staticmethod
     def _luma(color: str) -> int:

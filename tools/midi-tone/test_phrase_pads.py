@@ -301,5 +301,28 @@ class PhrasePadTrimTest(unittest.TestCase):
         bank.stop_all()
 
 
+class PhrasePadTileColorTest(unittest.TestCase):
+    def test_green_means_playing_not_loop_mode(self) -> None:
+        mt = load_midi_tone()
+        idle_loop = mt.phrase_pad_tile_color(empty=False, loop=True)
+        idle_shot = mt.phrase_pad_tile_color(empty=False, loop=False)
+        playing_loop = mt.phrase_pad_tile_color(empty=False, loop=True, playing=True)
+        playing_shot = mt.phrase_pad_tile_color(empty=False, loop=False, playing=True)
+        self.assertEqual(idle_loop, idle_shot)
+        self.assertEqual(idle_loop, mt.PHRASE_TILE_IDLE)
+        self.assertEqual(playing_loop, playing_shot)
+        self.assertEqual(playing_loop, mt.PHRASE_TILE_PLAYING)
+        self.assertNotEqual(idle_loop, playing_loop)
+
+    def test_selected_idle_is_teal_playing_stays_green(self) -> None:
+        mt = load_midi_tone()
+        selected = mt.phrase_pad_tile_color(empty=False, selected=True)
+        playing_sel = mt.phrase_pad_tile_color(
+            empty=False, selected=True, playing=True
+        )
+        self.assertEqual(selected, mt.PHRASE_TILE_SELECTED)
+        self.assertEqual(playing_sel, mt.PHRASE_TILE_PLAYING)
+
+
 if __name__ == "__main__":
     sys.exit(unittest.main())

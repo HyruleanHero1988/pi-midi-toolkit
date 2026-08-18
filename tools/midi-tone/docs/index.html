@@ -71,6 +71,11 @@
       margin: 0 0 0.35rem;
       font-size: 1.45rem;
     }
+    section.screen h3 {
+      margin: 1.15rem 0 0.4rem;
+      font-size: 1.05rem;
+      color: #c9e4df;
+    }
     section.screen .lede {
       margin: 0 0 1rem;
       color: var(--muted);
@@ -146,6 +151,7 @@
     <a href="#pads-edit">PADS EDIT</a>
     <a href="#pads-play">PADS PLAY</a>
     <a href="#kaoss">KAOSS</a>
+    <a href="#kaoss-programs">PROGRAMS</a>
     <a href="#kaoss-scales">SCALES</a>
     <a href="#kaoss-play">FULL PAD</a>
     <a href="#songs">SONGS</a>
@@ -243,7 +249,7 @@
       </figure>
       <table>
         <tr><th>PLAY / EDIT</th><td>Toggle views. EDIT allows recording into empty pads and shows detail controls.</td></tr>
-        <tr><th>Pad grid A1–B8</th><td>Empty pad: tap to arm record. Filled pad: launch / select for editing.</td></tr>
+        <tr><th>Pad grid A1–B8</th><td>Empty pad: tap to arm record. Filled pad: launch / select for editing. <strong>Green = playing</strong>, blue = clip ready, teal = selected, gray = empty, red = recording. Loop vs one-shot is the ↻ / ▶ mark, not the fill.</td></tr>
         <tr><th>STOP REC</th><td>Finish an in-progress pad recording.</td></tr>
         <tr><th>MODE</th><td>Arm, then tap a pad to toggle that pad ONE-SHOT ↔ LOOP.</td></tr>
         <tr><th>CLEAR</th><td>Arm clear, then tap a pad to erase it.</td></tr>
@@ -266,7 +272,7 @@
         <figcaption>04 — PADS · PLAY</figcaption>
       </figure>
       <table>
-        <tr><th>Pad grid</th><td>Tap filled pads to launch / toggle. Empty pads only select (no record in PLAY).</td></tr>
+        <tr><th>Pad grid</th><td>Tap filled pads to launch / toggle. Empty pads only select (no record in PLAY). Green = that clip is sounding; blue = ready. ↻ is LOOP, ▶ is one-shot.</td></tr>
         <tr><th>STOP ALL</th><td>Stop every playing phrase.</td></tr>
         <tr><th>OUT</th><td>LOCAL / USB / BOTH routing for phrase MIDI.</td></tr>
       </table>
@@ -281,14 +287,49 @@
       </figure>
       <table>
         <tr><th>XY pad</th><td>Press / slide / lift. An L-shaped legend marks the axes: <strong>X</strong> along the bottom (pitch on note programs), <strong>Y</strong> up the left (tone / morph / vibrato, or an FX pair). The surface is a cheap LED matrix (hue from X, glow + trail under the finger, tap ripples, BPM / GATE pulse). Grid lines mark scale degrees (roots are brighter).</td></tr>
-        <tr><th>PROG</th><td>LEAD / MORPH / VIB play notes. FILTER / ECHO / DRIVE / SPACE are momentary mix-bus FX (restore on lift unless HOLD).</td></tr>
-        <tr><th>SCALE / KEY / OCT</th><td><strong>SCALE</strong> opens a full-name grid (same idea as VOICES). KEY / OCT cycle. Default is a short starter set; <strong>SHOW ALL</strong> unlocks the full factory Kaossilator list.</td></tr>
-        <tr><th>SHOW ALL</th><td>On the KAOSS header, or PRESETS → <code>KAOSS: ALL</code>. Full 31+ scales (raga, pelog, Miyakobushi, …) and every XY program the engine can drive. Saved in <code>settings.json</code>.</td></tr>
-        <tr><th>HOLD</th><td>Freeze the last XY after you lift — same idea as Kaossilator SHIFT+hold.</td></tr>
-        <tr><th>GATE + BPM</th><td>Retrigger the held note on 1/8, 1/16, or triplets. Off = sustain while down.</td></tr>
-        <tr><th>FULL PAD</th><td>After settings are set, hide nav + buttons so the pad fills the panel. Hold the top <code>HOLD TO EXIT</code> rail (~0.7s) to come back.</td></tr>
+        <tr><th>PROG / SCALE / KEY / OCT / GATE</th><td>Each opens a tap-to-pick grid (same idea as VOICES) instead of cycling. PROG picks a pad mapping — see <a href="#kaoss-programs">Programs</a>. SCALE / KEY / OCT lock the note grid. GATE arps note programs only.</td></tr>
+        <tr><th>HOLD</th><td>Freeze the last XY after you lift — same idea as Kaossilator SHIFT+hold. On an FX program it also keeps the wet mix.</td></tr>
+        <tr><th>BPM − / +</th><td>Gate arp tempo. Stay on the pad while you nudge.</td></tr>
+        <tr><th>FULL PAD</th><td>Hide nav + buttons so the pad fills the panel. Hold the top <code>HOLD TO EXIT</code> rail (~0.7s) to come back.</td></tr>
+        <tr><th>⚙</th><td>KAOSS settings: SHOW ALL (full factory scales + programs), X/Y axis labels, GRID LINES 1–5 px, PAD VIZ (GLOW / CELLS), LOCAL / USB / BOTH, MIDI channel 1–16. Saved in <code>settings.json</code>.</td></tr>
       </table>
-      <p class="note">Factory MIDI matches the original Kaoss Pad manual so a DIN synth can treat the Pi as a Kaoss controller. Playing while SEQ is recording captures the pad notes.</p>
+      <p class="note">Factory MIDI matches the original Kaoss Pad manual so a DIN synth can treat the Pi as a Kaoss controller: <strong>CC#12 = X</strong>, <strong>CC#13 = Y</strong>, <strong>CC#92 = pad touch</strong>. Playing while SEQ is recording captures the pad notes.</p>
+    </section>
+
+    <section class="screen" id="kaoss-programs">
+      <h2>KAOSS programs</h2>
+      <p class="lede">PROG is two families. Note programs play the scale on X (Kaossilator). FX programs do not start a note — they only move filter / morph / delay / reverb on whatever is already sounding (Kaoss Pad).</p>
+      <p class="note">
+        <strong>FILTER does not play notes.</strong> If you open FILTER and tap an empty pad, you hear silence — that is expected.
+        Latch a sound first: pick <strong>LEAD</strong>, tap a note, turn <strong>HOLD</strong> on, lift, then pick <strong>FILTER</strong>.
+        The note keeps ringing. <strong>X</strong> is the resonant low-pass (dark left → bright/open right, same Chamberlin LPF as the MPK tone knob, ~90 Hz–8 kHz, bypass when fully open).
+        <strong>Y</strong> is a momentary morph between SYNTH A and SYNTH B (the pair from SYNTH → MORPH). Lift restores tone + morph unless HOLD stays on.
+        Keyboard, SEQ, and phrase pads work the same way: play something, then FILTER sculpts it.
+      </p>
+      <h3>Note programs — X = scale pitch</h3>
+      <table>
+        <tr><th>LEAD</th><td><strong>Y = TONE.</strong> Play the scale. Y opens the low-pass (sticky — stays where you left it). Bottom of the pad is also quieter velocity.</td></tr>
+        <tr><th>MORPH</th><td><strong>Y = MORPH.</strong> Play the scale. Y crossfades SYNTH A → B (sticky). Set the pair in SYNTH → MORPH.</td></tr>
+        <tr><th>VIB</th><td><strong>Y = VIB.</strong> Play the scale. Y is vibrato depth. Lift restores the previous vibrato so it does not stick when you leave VIB.</td></tr>
+        <tr><th>LEVEL</th><td><strong>Y = LEVEL.</strong> Play the scale. Y is synth volume.</td></tr>
+        <tr><th>DECAY</th><td><strong>Y = DECAY.</strong> Play the scale. Y is release time (how long the note rings after lift).</td></tr>
+        <tr><th>ATTACK</th><td><strong>Y = ATTACK.</strong> Play the scale. Y is attack time (slow swell toward the top of the pad).</td></tr>
+        <tr><th>OCTAVE</th><td><strong>Y = OCTAVE.</strong> Play the scale. Y adds up to two extra octaves on top of the X note.</td></tr>
+        <tr><th>GRIT</th><td><strong>Y = DRIVE.</strong> Play the scale. Y is saturation.</td></tr>
+        <tr><th>DELAY</th><td><strong>Y = DLY MIX.</strong> Play the scale. Y is echo send.</td></tr>
+      </table>
+      <h3>FX programs — no pitch from the pad</h3>
+      <p class="lede">Lift restores the previous mix unless HOLD is on. ⚙ SHOW ALL reveals RESO / WASH / CRUSH / SWEEP (and the extra note programs).</p>
+      <table>
+        <tr><th>FILTER</th><td><strong>X = TONE</strong> (filter cutoff), <strong>Y = MORPH</strong> (voice blend, momentary). Use the HOLD recipe above — this is the KP-style filter pad, not a keyboard.</td></tr>
+        <tr><th>ECHO</th><td><strong>X = DLY T</strong> (~50–750 ms), <strong>Y = DLY MIX</strong> (how loud the repeats are).</td></tr>
+        <tr><th>DRIVE</th><td><strong>X = DRIVE</strong> (saturation), <strong>Y = REVERB</strong> (reverb send).</td></tr>
+        <tr><th>SPACE</th><td><strong>X = ECHO</strong> (delay mix), <strong>Y = REVERB</strong> (reverb mix) — wash without touching pitch.</td></tr>
+        <tr><th>RESO</th><td><strong>X = TONE</strong>, <strong>Y = FB</strong> (delay feedback) — resonant repeats.</td></tr>
+        <tr><th>WASH</th><td><strong>X = SIZE</strong> (reverb size), <strong>Y = REVERB</strong> (reverb mix).</td></tr>
+        <tr><th>CRUSH</th><td><strong>X = DRIVE</strong>, <strong>Y = TONE</strong> — distort and darken a held note.</td></tr>
+        <tr><th>SWEEP</th><td><strong>X = TONE</strong>, <strong>Y = DLY T</strong> — filter vs delay time.</td></tr>
+      </table>
     </section>
 
     <section class="screen" id="kaoss-scales">
@@ -300,8 +341,7 @@
       </figure>
       <table>
         <tr><th>Scale tiles</th><td>Pick the scale that locks X. Current scale is highlighted. Drag or use ▲ / ▼ to scroll the factory list.</td></tr>
-        <tr><th>SHOW ALL</th><td>Starter set vs every factory Kaossilator scale (raga, pelog, Miyakobushi, …). Same setting as the pad header / PRESETS toggle.</td></tr>
-        <tr><th>CLOSE</th><td>Back to the XY pad without changing scale.</td></tr>
+        <tr><th>CLOSE</th><td>Back to the XY pad without changing scale. Turn on SHOW ALL from KAOSS ⚙ if you want the full factory list.</td></tr>
       </table>
     </section>
 

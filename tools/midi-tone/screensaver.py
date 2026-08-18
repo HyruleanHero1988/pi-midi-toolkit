@@ -177,9 +177,9 @@ class PanelBacklight:
         except (OSError, ValueError):
             return False
         if self._saved is None:
-            self._saved = current
-        # Remember power state so restore() can put it back if a previous
-        # build left the panel powered down — but never blank it here.
+            # Never remember 0 — a second dim (or a kiosk restart while blanked)
+            # would then "restore" to off and the panel stays dark forever.
+            self._saved = current if current > 0 else self._max_brightness()
         if self._power_path is not None and self._saved_power is None:
             try:
                 self._saved_power = int(
@@ -193,31 +193,71 @@ class PanelBacklight:
         except OSError:
             return False
 
+    def _max_brightness(self) -> int:
+        path = self._path if self._path is not None else self._find()
+        if path is None:
+            return 255
+        try:
+            raw = (path.parent / "max_brightness").read_text(encoding="ascii").strip()
+            value = int(raw or "255")
+            return value if value > 0 else 255
+        except (OSError, ValueError):
+            return 255
+
     def restore(self) -> bool:
         path = self._path if self._path is not None else self._find()
         if path is None:
             return False
         ok = False
         if self._power_path is not None:
-            # Always unblank (0). A stuck POWERDOWN from older builds is why
-            # some sessions needed a reboot to get touch back.
+            # Unblank if a previous build left POWERDOWN set. Permission
+            # denied is fine — brightness write is what actually lights the
+            # Pi TFT70.
             try:
                 self._power_path.write_text("0\n", encoding="ascii")
                 ok = True
             except OSError:
                 pass
-        value = self._saved
-        if value is None:
-            try:
-                max_path = path.parent / "max_brightness"
-                value = int(max_path.read_text(encoding="ascii").strip() or "1")
-            except (OSError, ValueError):
-                value = 1
+        value = self._saved if self._saved is not None and self._saved > 0 else self._max_brightness()
         try:
             path.write_text(f"{int(value)}\n", encoding="ascii")
             ok = True
         except OSError:
             pass
+        # If the driver swallowed the first write (brightness 0 → N), force max.
+        try:
+            actual_path = path.parent / "actual_brightness"
+            probe = actual_path if actual_path.is_file() else path
+            actual = int(probe.read_text(encoding="ascii").strip() or "0")
+            if actual <= 0:
+                path.write_text(f"{self._max_brightness()}\n", encoding="ascii")
+                ok = True
+        except (OSError, ValueError):
+            pass
         self._saved = None
         self._saved_power = None
         return ok
+
+    def ensure_lit(self) -> bool:
+        """Turn the panel on if a previous process left brightness at 0.
+
+        A kiosk restart while blanked does not run restore(), so the next
+        midi-tone thinks the screen is already awake and stays dark.
+        """
+        path = self._find()
+        if path is None:
+            return False
+        try:
+            current = int(path.read_text(encoding="ascii").strip() or "0")
+        except (OSError, ValueError):
+            current = 0
+        actual = current
+        actual_path = path.parent / "actual_brightness"
+        if actual_path.is_file():
+            try:
+                actual = int(actual_path.read_text(encoding="ascii").strip() or "0")
+            except (OSError, ValueError):
+                actual = current
+        if current > 0 and actual > 0:
+            return True
+        return self.restore()

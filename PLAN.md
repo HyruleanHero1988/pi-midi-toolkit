@@ -516,8 +516,8 @@ Korg manuals set the rules (not a 100-program dump):
 | Piece | Behavior |
 |-------|----------|
 | **PROG** | `LEAD` / `MORPH` / `VIB` play notes (Y = tone / morph / vibrato). `FILTER` / `ECHO` / `DRIVE` / `SPACE` are momentary mix-bus FX (restore on lift unless HOLD) |
-| **SCALE / KEY / OCT** | **SCALE** opens a VOICES-style grid of full names (not 3-letter Korg codes). Curated starter set by default; **SHOW ALL** (PRESETS, KAOSS header, or the scale grid) unlocks the factory Kaossilator PRO list + PRO+ extras |
-| **OUT / CH** | `LOCAL` / `USB` / `BOTH` (shares Songs USB port); notes + CCs on ch 1–16 |
+| **PROG / SCALE / KEY / OCT / GATE** | Each opens a tap-to-pick grid. PROG: `LEAD` / `MORPH` / `VIB` play notes (Y = tone / morph / vibrato). `FILTER` / `ECHO` / `DRIVE` / `SPACE` are momentary mix-bus FX (restore on lift unless HOLD) |
+| **⚙ settings** | SHOW ALL (factory Kaossilator PRO list + extra programs), X/Y axis labels on/off, OUT `LOCAL` / `USB` / `BOTH`, MIDI channel 1–16 |
 | **SEQ** | Pad notes record into a running backbone / overdub take |
 | **Look** | 12×7 LED field (create once, `itemconfigure` fills). Hue from X / program, finger glow + short trail, tap ripples, BPM rim pulse. Idle ~12 fps so a Pi 2 stays cheap |
 | **FULL PAD** | Hide nav + settings so the pad fills 800×480. Exit is a 0.7s hold on a top rail |

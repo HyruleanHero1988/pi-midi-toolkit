@@ -220,22 +220,66 @@ the onboard wavetable engine **and** a hardware synth on USB→DIN.
 
 | Gesture / control | What it does |
 |-------------------|--------------|
-| Finger on the pad | Note-on. L-shaped axes: **X** along the bottom (scale pitch), **Y** up the left (tone / morph / vibrato — see PROG). LED field: hue follows X, glow + trail under the finger, tap ripples, GATE / BPM pulse the rim |
+| Finger on the pad | Note programs: note-on. FX programs: start the XY overlay only (no pitch). L-shaped axes: **X** along the bottom, **Y** up the left — meaning depends on PROG. Glow + trail under the finger |
 | Slide | Legato to the next scale degree; Y keeps sculpting |
 | Lift | Note-off — unless **HOLD** is on (last XY stays sounding) |
-| **PROG** | `LEAD` / `MORPH` / `VIB` play notes; `FILTER` / `ECHO` / `DRIVE` / `SPACE` are Kaoss-Pad FX (momentary unless HOLD) |
-| **SCALE** / **KEY** / **OCT** | **SCALE** opens a VOICES-style grid of full names (Major, Mixolydian, Miyakobushi, …) — not the 3-letter Korg codes. KEY / OCT still cycle. Default list is a short starter set |
-| **FULL PAD** | Hides nav + settings so the XY surface fills the 800×480 panel. **HOLD TO EXIT** on the slim top rail (~0.7s) brings chrome back |
-| **SHOW ALL** | PRESETS → **KAOSS: ALL**, or the **SHOW ALL** button on the pad — unlocks every factory Kaossilator scale (31 + PRO+ extras) and every XY program the engine can drive |
-| **GATE** | Off, 1/8, 1/16, or triplet retrigger while the pad is down (BPM − / +) |
-| **OUT** | `LOCAL` / `USB` / `BOTH` — same USB port as Songs / Pads |
-| **CH** | MIDI channel 1–16 for notes + CCs |
+| **PROG** / **SCALE** / **KEY** / **OCT** / **GATE** | Each opens a tap-to-pick grid instead of cycling. PROG picks a pad mapping (see **Programs** below). SCALE / KEY / OCT lock the note grid. GATE is a note-program arp only |
+| **FULL PAD** | Hides nav + buttons so the XY surface fills the 800×480 panel. **HOLD TO EXIT** on the slim top rail (~0.7s) brings chrome back |
+| **⚙** | KAOSS settings: SHOW ALL (every factory scale + program), X/Y axis labels, GRID LINES 1–5 px, PAD VIZ (GLOW / CELLS), OUT `LOCAL` / `USB` / `BOTH`, MIDI channel 1–16 |
 
 External synths see the original Kaoss Pad factory map: **CC#12 = X**, **CC#13 = Y**,
 **CC#92 = pad touch** (127 down / 0 up), plus note-on/off on the chosen channel.
 FX programs write the mix-bus insert while the finger is down and restore the
 previous bus on lift (HOLD freezes the wet). Playing into **SEQ** while it is
 recording captures the pad notes onto the take.
+
+#### Programs
+
+Two families. **Note** programs play scale pitches on X (Kaossilator). **FX**
+programs do **not** start a note — they only move synth / mix-bus parameters
+(original Kaoss Pad). Lift restores those overlays unless **HOLD** is on.
+**LEAD** tone and **MORPH** blend are the exceptions: they stay where you left
+them.
+
+**FILTER** is the one that feels broken until you give it a sound to chew on.
+Touching FILTER alone is silence. Latch a note first:
+
+1. Pick **LEAD**, tap the pad, turn **HOLD** on, lift.
+2. Open **PROG** → **FILTER**. The note keeps ringing.
+3. **X** is the filter (dark left → bright/open right — same Chamberlin
+   resonant LPF as the MPK tone knob, ~90 Hz–8 kHz, bypass when fully open).
+   **Y** is a momentary morph between SYNTH A and SYNTH B.
+4. Lift restores tone + morph unless HOLD stays on.
+
+Same idea with the keyboard, SEQ, or phrase pads running while FILTER is
+selected. ⚙ **SHOW ALL** adds the extra mappings; the starter set is first.
+
+**Note programs** (X = scale pitch, Y = extra):
+
+| PROG | Y | What you hear |
+|------|---|---------------|
+| **LEAD** | TONE | Play the scale. Y opens the low-pass (sticky). Bottom of the pad is also quieter velocity. |
+| **MORPH** | MORPH | Play the scale. Y crossfades SYNTH A → B (sticky). Set the pair in SYNTH → MORPH. |
+| **VIB** | VIB | Play the scale. Y is vibrato depth. Lift restores the previous vibrato (it will not stick). |
+| **LEVEL** | LEVEL | Play the scale. Y is synth volume. |
+| **DECAY** | DECAY | Play the scale. Y is release time (how long the note rings after lift). |
+| **ATTACK** | ATTACK | Play the scale. Y is attack time (slow swell at the top). |
+| **OCTAVE** | OCTAVE | Play the scale. Y adds up to two extra octaves on top of the X note. |
+| **GRIT** | DRIVE | Play the scale. Y is saturation / drive. |
+| **DELAY** | DLY MIX | Play the scale. Y is echo send (delay mix). |
+
+**FX programs** (no pitch from the pad — sculpt whatever is already sounding):
+
+| PROG | X | Y | What you hear |
+|------|---|---|---------------|
+| **FILTER** | TONE | MORPH | Filter cutoff vs voice blend. See the latch recipe above. |
+| **ECHO** | DLY T | DLY MIX | Delay time (~50–750 ms) vs how much delay you hear. |
+| **DRIVE** | DRIVE | REVERB | Saturation vs reverb send. |
+| **SPACE** | ECHO | REVERB | Delay mix vs reverb mix (washes without touching pitch). |
+| **RESO** | TONE | FB | Filter cutoff vs delay feedback (resonant repeats). |
+| **WASH** | SIZE | REVERB | Reverb size vs reverb mix. |
+| **CRUSH** | DRIVE | TONE | Distortion vs filter (trash the tone of a held note). |
+| **SWEEP** | TONE | DLY T | Filter vs delay time (tempo-ish filter + slap). |
 
 ### Phrase Pads
 
@@ -261,6 +305,7 @@ Two views (top-right of PADS): **EDIT** (record / fine-tune) and **PLAY** (perfo
 **PLAY**
 - Launch / stop filled pads only (empty pads do not arm record)
 - **STOP ALL** + **OUT** — minimal chrome for performance
+- Pad colors: **green = playing**, **blue = clip ready** (loop or one-shot — the ↻ / ▶ mark tells them apart), **teal = selected** in EDIT, **gray = empty**, **red = recording**
 
 While a phrase is **recording**, MPK pads on the **armed cell** (and other empty pads) play/record **drum voices**. A **filled** pad still launches from the MPK — same as tapping its square — so you do not need the touch screen to fire clips. When nothing is recording, pads launch/arm phrases (EDIT) or launch only (PLAY). Synth mode still always plays the 16-pad drum kit. Locked pads show a `·` mark next to the trigger icon.
 
