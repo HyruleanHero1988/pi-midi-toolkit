@@ -79,6 +79,7 @@ from kaoss import (  # noqa: E402
     glow_radii,
     glow_step,
     grid_line_widths,
+    note_grid_xs,
     hsv_to_rgb,
     note_name as kaoss_note_name,
     pad_led_hex,
@@ -8660,10 +8661,11 @@ class MidiToneApp:
             canvas.create_line(0, y, w, y, fill=color, width=stroke, tags="grid")
         if prog.kind == "note":
             notes = self._kaoss.notes()
-            n = max(1, len(notes) - 1)
-            for i, midi in enumerate(notes):
-                x = int(round((i / n) * (w - 1))) if n else 0
-                octave = (midi % 12) == (self._kaoss.key % 12)
+            key = self._kaoss.key % 12
+            xs = note_grid_xs(len(notes), w)
+            for i, x in enumerate(xs):
+                starts = notes[i] if i < len(notes) else None
+                octave = starts is not None and (starts % 12) == key
                 color = "#fb4934" if octave else "#4a2040"
                 canvas.create_line(
                     x, 0, x, h, fill=color, width=octave_w if octave else regular, tags="grid"

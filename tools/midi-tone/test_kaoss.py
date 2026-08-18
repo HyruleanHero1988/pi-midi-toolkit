@@ -26,6 +26,9 @@ from kaoss import (
     hsv_to_rgb,
     midi_cc,
     note_at_x,
+    note_cell_edges,
+    note_grid_xs,
+    note_index_at_x,
     note_name,
     pad_led_hex,
     program_hue,
@@ -54,6 +57,34 @@ class ScaleMapTest(unittest.TestCase):
         self.assertEqual(note_at_x(0.0, notes), 48)
         self.assertEqual(note_at_x(1.0, notes), 53)
         self.assertEqual(note_at_x(0.5, notes), 52)
+
+    def test_x_uses_equal_width_cells(self) -> None:
+        notes = [48, 50, 52, 53]
+        self.assertEqual(note_at_x(0.24, notes), 48)
+        self.assertEqual(note_at_x(0.25, notes), 50)
+        self.assertEqual(note_at_x(0.49, notes), 50)
+        self.assertEqual(note_at_x(0.50, notes), 52)
+        self.assertEqual(note_cell_edges(4), [0.0, 0.25, 0.5, 0.75, 1.0])
+
+    def test_dorian_grid_lines_match_note_boundaries(self) -> None:
+        notes = scale_notes("dorian", 0, root_midi=48, octaves=2)
+        n = len(notes)
+        self.assertEqual(n, 15)
+        width = 800
+        xs = note_grid_xs(n, width)
+        self.assertEqual(len(xs), n + 1)
+        self.assertEqual(xs[0], 0)
+        self.assertEqual(xs[-1], width - 1)
+        for i, midi in enumerate(notes):
+            left = i / n
+            right = (i + 1) / n
+            self.assertEqual(note_at_x(left + 1e-6, notes), midi)
+            self.assertEqual(note_at_x((left + right) / 2, notes), midi)
+            if i + 1 < n:
+                self.assertNotEqual(note_at_x(right + 1e-6, notes), midi)
+            pixel = max(0, min(width - 1, xs[i]))
+            x = pixel / width
+            self.assertEqual(note_index_at_x(x + 1.0 / width, n), i)
 
 
 class PadPlayTest(unittest.TestCase):

@@ -361,13 +361,33 @@ def pad_led_hex(
     return rgb_hex(hsv_to_rgb(hue, sat, val))
 
 
+def note_index_at_x(x: float, n_notes: int) -> int:
+    """Equal-width cell index for pad X in 0..1. Last cell includes x=1."""
+    n = max(1, int(n_notes))
+    idx = int(clamp01(x) * n)
+    return n - 1 if idx >= n else idx
+
+
+def note_cell_edges(n_notes: int) -> List[float]:
+    """Inclusive 0..1 edges of equal-width note cells (N notes → N+1 edges)."""
+    n = max(1, int(n_notes))
+    return [i / n for i in range(n + 1)]
+
+
+def note_grid_xs(n_notes: int, width: int) -> List[int]:
+    """Pixel X of each ``note_cell_edges`` line, clamped onto the canvas."""
+    w = max(1, int(width))
+    xs: List[int] = []
+    for frac in note_cell_edges(n_notes):
+        x = int(round(frac * w))
+        xs.append(w - 1 if x >= w else x)
+    return xs
+
+
 def note_at_x(x: float, notes: Sequence[int]) -> int:
     if not notes:
         return 60
-    if len(notes) == 1:
-        return int(notes[0])
-    idx = int(round(clamp01(x) * (len(notes) - 1)))
-    return int(notes[idx])
+    return int(notes[note_index_at_x(x, len(notes))])
 
 
 def velocity_at_y(y: float) -> int:
