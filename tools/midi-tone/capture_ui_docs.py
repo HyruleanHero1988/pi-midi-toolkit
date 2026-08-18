@@ -162,6 +162,8 @@ def grab(root, path: pathlib.Path) -> None:
 def close_overlays(app) -> None:
     if getattr(app, "_power_ui_open", False):
         app._close_power_menu(restore_main=True)
+    if getattr(app, "_token_ui_open", False):
+        app._close_update_token(restore_main=True)
     if app._grid_open:
         app._close_voice_grid(restore_main=True)
     if app._morph_ui_open:
@@ -170,6 +172,12 @@ def close_overlays(app) -> None:
         app._close_kit_explorer(restore_main=True)
     if getattr(app, "_save_voice_open", False):
         app._close_save_voice(restore_main=True)
+    if getattr(app, "_kaoss_scale_open", False):
+        app._close_kaoss_scale_grid(restore_main=True)
+    if getattr(app, "_kaoss_settings_open", False):
+        app._close_kaoss_settings(restore_main=True)
+    if getattr(app, "_kaoss_play", False):
+        app._kaoss_leave_play()
 
 
 def main() -> int:
@@ -219,14 +227,21 @@ def main() -> int:
         grab(root, OUT / f"{name}.png")
 
     try:
-        shot("01-synth")
+        shot("00-home", lambda: app._switch_mode("home"))
+        shot("01-synth", lambda: app._switch_mode("synth"))
         shot("02-seq", lambda: app._switch_mode("seq"))
         shot(
             "03-pads-edit",
             lambda: (app._switch_mode("pads"), app._phrase_set_view("edit")),
         )
         shot("04-pads-play", lambda: app._phrase_set_view("play"))
-        shot("05-songs", lambda: app._switch_mode("songs"))
+        shot("14-kaoss", lambda: app._kaoss_docs_pose())
+        shot("16-kaoss-play", lambda: app._kaoss_docs_play())
+        shot("15-kaoss-scales", lambda: app._kaoss_docs_scale_grid())
+        shot(
+            "05-songs",
+            lambda: (app._kaoss.set_show_all(False), app._switch_mode("songs")),
+        )
         shot("06-presets", lambda: app._switch_mode("presets"))
         shot("07-log", lambda: app._switch_mode("log"))
         shot(
@@ -267,6 +282,8 @@ def main() -> int:
         _pump(root, 0.25)
         if hasattr(app, "_open_save_voice"):
             shot("12-save-as", app._open_save_voice)
+        close_overlays(app)
+        shot("13-settings", lambda: app._switch_mode("settings"))
         close_overlays(app)
         app._switch_mode("synth")
     finally:

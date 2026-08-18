@@ -71,6 +71,11 @@
       margin: 0 0 0.35rem;
       font-size: 1.45rem;
     }
+    section.screen h3 {
+      margin: 1.15rem 0 0.4rem;
+      font-size: 1.05rem;
+      color: #c9e4df;
+    }
     section.screen .lede {
       margin: 0 0 1rem;
       color: var(--muted);
@@ -132,21 +137,27 @@
     <h1>midi-tone screen reference</h1>
     <p>
       Touch-first soft-synth / phrase / sequencer UI for the Raspberry Pi panel (800×480).
-      Screenshots captured from the live Tk app at the 800×480 kiosk size (no window chrome).
-      Global nav is always along the top: <strong>SYNTH · SEQ · PADS · SONGS · PRESETS · LOG</strong>,
-      plus <strong>POWER</strong>.
+      Global nav is always along the top: <strong>HOME</strong> and <strong>POWER</strong>.
+      While jamming, <strong>SYNTH · SEQ · PADS · KAOSS</strong> stay as shortcuts.
+      Every other screen is a tile on HOME.
     </p>
   </header>
 
   <nav class="toc" aria-label="Screens">
     <a href="#global">Global</a>
+    <a href="#home">HOME</a>
     <a href="#synth">SYNTH</a>
     <a href="#seq">SEQ</a>
     <a href="#pads-edit">PADS EDIT</a>
     <a href="#pads-play">PADS PLAY</a>
+    <a href="#kaoss">KAOSS</a>
+    <a href="#kaoss-programs">PROGRAMS</a>
+    <a href="#kaoss-scales">SCALES</a>
+    <a href="#kaoss-play">FULL PAD</a>
     <a href="#songs">SONGS</a>
     <a href="#presets">PRESETS</a>
     <a href="#log">LOG</a>
+    <a href="#settings">SET</a>
     <a href="#voices">VOICES</a>
     <a href="#morph">MORPH</a>
     <a href="#kit">KIT</a>
@@ -161,13 +172,25 @@
       <p class="lede">Always visible on every primary mode.</p>
       <table>
         <tr><th>midi-tone</th><td>App title (not a button).</td></tr>
-        <tr><th>POWER</th><td>Opens the shutdown / reboot confirmation screen (safe for kiosk — no desktop power UI).</td></tr>
-        <tr><th>SYNTH</th><td>Wavetable morph synth, CRT scope, voice / morph / kit / drum &amp; FX modes.</td></tr>
-        <tr><th>SEQ</th><td>Free-timing overdub sequencer (drums + keys, layered takes).</td></tr>
-        <tr><th>PADS</th><td>16 phrase pads with PLAY and EDIT views.</td></tr>
+        <tr><th>HOME</th><td>Launcher tiles for every mode. Always in the top bar.</td></tr>
+        <tr><th>POWER</th><td>Shutdown / reboot, SCREEN OFF, and blanking-timeout cycle (kiosk-safe — no desktop power UI).</td></tr>
+        <tr><th>SYNTH / SEQ / PADS / KAOSS</th><td>Jam shortcuts — visible only while you are in those four modes.</td></tr>
+      </table>
+    </section>
+
+    <section class="screen" id="home">
+      <h2>HOME</h2>
+      <p class="lede">Launcher for every mode. New screens get a tile here instead of another persistent tab.</p>
+      <figure>
+        <img src="screens/00-home.png" alt="HOME launcher tiles" width="800" height="480" />
+        <figcaption>00 — HOME</figcaption>
+      </figure>
+      <table>
+        <tr><th>SYNTH / SEQ / PADS / KAOSS</th><td>Jam cluster. Those four also stay as top-bar shortcuts while you are in them.</td></tr>
         <tr><th>SONGS</th><td>Play Standard MIDI Files locally and/or out USB→DIN; BPM and loop controls.</td></tr>
-        <tr><th>PRESETS</th><td>Eight slots for saving / loading synth sound + full-velocity preference.</td></tr>
-        <tr><th>LOG</th><td>Scrolling MIDI / UI event log and panic / power shortcuts.</td></tr>
+        <tr><th>PRESETS</th><td>Eight named slots for a <strong>full session</strong> snapshot, plus FACTORY reset.</td></tr>
+        <tr><th>LOG</th><td>Scrolling MIDI / UI event log with CLEAR and panic.</td></tr>
+        <tr><th>SET</th><td>Software update: show the running commit, CHECK GitHub, UPDATE &amp; restart. Songs / presets / phrases stay.</td></tr>
       </table>
     </section>
 
@@ -180,17 +203,19 @@
       </figure>
       <table>
         <tr><th>CRT scope</th><td>Live picture of the current morph wavetable (tiled to three periods). Updates when morph / voice changes.</td></tr>
-        <tr><th>Morph caption</th><td>Shows endpoints and blend, e.g. <code>Morph · sine → square 0%</code>.</td></tr>
-        <tr><th>Status lines</th><td>Last MIDI event, active notes, and knob summary (morph / tone / level / bend / vib).</td></tr>
+        <tr><th>Morph caption</th><td>Shows endpoints and blend, e.g. <code>Morph · sine → square  0%</code>.</td></tr>
+        <tr><th>Last event</th><td>Short line for the latest UI / MIDI action (voice change, knob label, etc.).</td></tr>
+        <tr><th>Active notes</th><td>Which keyboard notes are currently held.</td></tr>
+        <tr><th>Knob readout</th><td>Live summary that follows the current knob focus — morph % · tone · <strong>Syn</strong> / <strong>Drm</strong> levels · bend · vib when editing the synth; drum macros in DRUM MODE; drive / delay / reverb in FX MODE or BUS FX.</td></tr>
         <tr><th>ALL NOTES OFF</th><td>Panic — silence all sounding notes immediately.</td></tr>
         <tr><th>FULL VEL</th><td>Toggle: force velocity 127 on note-ons (easier on a light touch), or use real velocity.</td></tr>
-        <tr><th>FX MODE</th><td>Remaps MPK knobs to the current insert FX target (per-voice or per-drum). Highlighted when on.</td></tr>
-        <tr><th>BUS FX</th><td>Remaps knobs to the global mix-bus FX (wet on the whole soft-synth mix).</td></tr>
+        <tr><th>FX MODE</th><td>Remaps MPK knobs to the current insert FX target and opens a live FX readout panel. Highlighted when on.</td></tr>
+        <tr><th>BUS FX</th><td>Remaps knobs to the global mix-bus FX (wet on the whole soft-synth mix) and opens the same FX panel.</td></tr>
         <tr><th>◀ PREV / NEXT ▶</th><td>Step morph-A voice; parks morph at pure A. Center label shows current pair / blend; tap it to open VOICES.</td></tr>
-        <tr><th>VOICES</th><td>Full voice grid overlay to pick morph-A (and related actions).</td></tr>
-        <tr><th>MORPH</th><td>Overlay to set morph endpoints A/B and related options.</td></tr>
-        <tr><th>KIT</th><td>Drum kit explorer — pick a pad model, audition, and aim FX at drums.</td></tr>
-        <tr><th>DRUM MODE</th><td>When on, knobs 1–4 edit drum macros (pitch / stretch / noise / tone) and knob 8 is drum level.</td></tr>
+        <tr><th>VOICES</th><td>Scrollable voice grid plus on-screen vibrato controls.</td></tr>
+        <tr><th>MORPH</th><td>Overlay to set morph endpoints A/B (SWAP / DONE / CANCEL).</td></tr>
+        <tr><th>KIT</th><td>Drum pad grid; ALL DRUMS for kit FX; WAVE drills into a CRT one-shot scope.</td></tr>
+        <tr><th>DRUM MODE</th><td>When on, knobs 1–4 edit drum macros (pitch / stretch / noise / tone) and knob 8 is drum bus level.</td></tr>
       </table>
     </section>
 
@@ -217,23 +242,25 @@
 
     <section class="screen" id="pads-edit">
       <h2>PADS — EDIT</h2>
-      <p class="lede">Build and fine-tune the 16 phrase pads (record into empty pads, set trigger / voice / channel).</p>
+      <p class="lede">Build and fine-tune the 16 phrase pads (record into empty pads, set trigger / voice / channel / vibrato / volume).</p>
       <figure>
         <img src="screens/03-pads-edit.png" alt="PADS EDIT view" width="800" height="480" />
         <figcaption>03 — PADS · EDIT</figcaption>
       </figure>
       <table>
         <tr><th>PLAY / EDIT</th><td>Toggle views. EDIT allows recording into empty pads and shows detail controls.</td></tr>
-        <tr><th>Pad grid A1–B8</th><td>Empty pad: tap to arm record. Filled pad: launch / select for editing.</td></tr>
+        <tr><th>Pad grid A1–B8</th><td>Empty pad: tap to arm record. Filled pad: launch / select for editing. <strong>Green = playing</strong>, blue = clip ready, teal = selected, gray = empty, red = recording. Loop vs one-shot is the ↻ / ▶ mark, not the fill.</td></tr>
         <tr><th>STOP REC</th><td>Finish an in-progress pad recording.</td></tr>
-        <tr><th>MODE</th><td>Arm “mode” then tap a pad to cycle that pad’s options (workflow helper).</td></tr>
+        <tr><th>MODE</th><td>Arm, then tap a pad to toggle that pad ONE-SHOT ↔ LOOP.</td></tr>
         <tr><th>CLEAR</th><td>Arm clear, then tap a pad to erase it.</td></tr>
         <tr><th>STOP ALL</th><td>Stop all playing phrases.</td></tr>
         <tr><th>OUT</th><td>Cycle phrase output: LOCAL / USB / BOTH (shares song USB port).</td></tr>
         <tr><th>TRIG</th><td>Per-selected-pad: one-shot vs loop trigger.</td></tr>
-        <tr><th>FOLLOW / LOCK</th><td>Pad uses live global morph, or a locked voice snapshot.</td></tr>
-        <tr><th>CH</th><td>Force MIDI out channel or keep recorded channel.</td></tr>
-        <tr><th>Other detail buttons</th><td>May include synth mute / vibrato bake controls depending on pad state.</td></tr>
+        <tr><th>FOLLOW / LOCK</th><td>Pad follows the live global morph, or locks a voice snapshot (and related FX).</td></tr>
+        <tr><th>CH</th><td>Force MIDI out channel or keep the recorded channel.</td></tr>
+        <tr><th>SYNTH</th><td>Enable / mute local soft-synth for that pad.</td></tr>
+        <tr><th>VIB</th><td>Use the vibrato baked at record time, or follow the live rig (<code>VIB live</code>).</td></tr>
+        <tr><th>VOL− / VOL+</th><td>Per-pad gain trim (about 10% per tap).</td></tr>
       </table>
     </section>
 
@@ -245,9 +272,89 @@
         <figcaption>04 — PADS · PLAY</figcaption>
       </figure>
       <table>
-        <tr><th>Pad grid</th><td>Tap filled pads to launch / toggle. Empty pads only select (no record in PLAY).</td></tr>
+        <tr><th>Pad grid</th><td>Tap filled pads to launch / toggle. Empty pads only select (no record in PLAY). Green = that clip is sounding; blue = ready. ↻ is LOOP, ▶ is one-shot.</td></tr>
         <tr><th>STOP ALL</th><td>Stop every playing phrase.</td></tr>
         <tr><th>OUT</th><td>LOCAL / USB / BOTH routing for phrase MIDI.</td></tr>
+      </table>
+    </section>
+
+    <section class="screen" id="kaoss">
+      <h2>KAOSS</h2>
+      <p class="lede">XY touch pad in the Kaossilator / Kaoss Pad tradition — play scale notes on the onboard synth and/or send notes + factory CCs to a hardware synth.</p>
+      <figure>
+        <img src="screens/14-kaoss.png" alt="KAOSS XY pad screen" width="800" height="480" />
+        <figcaption>14 — KAOSS (LED field + finger glow; L-shaped axes: X along the bottom, Y up the left)</figcaption>
+      </figure>
+      <table>
+        <tr><th>XY pad</th><td>Press / slide / lift. An L-shaped legend marks the axes: <strong>X</strong> along the bottom (pitch on note programs), <strong>Y</strong> up the left (tone / morph / vibrato, or an FX pair). The surface is a cheap LED matrix (hue from X, glow + trail under the finger, tap ripples, BPM / GATE pulse). Grid lines mark scale degrees (roots are brighter).</td></tr>
+        <tr><th>PROG / SCALE / KEY / OCT / GATE</th><td>Each opens a tap-to-pick grid (same idea as VOICES) instead of cycling. PROG picks a pad mapping — see <a href="#kaoss-programs">Programs</a>. SCALE / KEY / OCT lock the note grid. GATE arps note programs only.</td></tr>
+        <tr><th>HOLD</th><td>Freeze the last XY after you lift — same idea as Kaossilator SHIFT+hold. On an FX program it also keeps the wet mix.</td></tr>
+        <tr><th>BPM − / +</th><td>Gate arp tempo. Stay on the pad while you nudge.</td></tr>
+        <tr><th>FULL PAD</th><td>Hide nav + buttons so the pad fills the panel. Hold the top <code>HOLD TO EXIT</code> rail (~0.7s) to come back.</td></tr>
+        <tr><th>⚙</th><td>KAOSS settings: SHOW ALL (full factory scales + programs), X/Y axis labels, GRID LINES 1–5 px, PAD VIZ (GLOW / CELLS), LOCAL / USB / BOTH, MIDI channel 1–16. Saved in <code>settings.json</code>.</td></tr>
+      </table>
+      <p class="note">Factory MIDI matches the original Kaoss Pad manual so a DIN synth can treat the Pi as a Kaoss controller: <strong>CC#12 = X</strong>, <strong>CC#13 = Y</strong>, <strong>CC#92 = pad touch</strong>. Playing while SEQ is recording captures the pad notes.</p>
+    </section>
+
+    <section class="screen" id="kaoss-programs">
+      <h2>KAOSS programs</h2>
+      <p class="lede">PROG is two families. Note programs play the scale on X (Kaossilator). FX programs do not start a note — they only move filter / morph / delay / reverb on whatever is already sounding (Kaoss Pad).</p>
+      <p class="note">
+        <strong>FILTER does not play notes.</strong> If you open FILTER and tap an empty pad, you hear silence — that is expected.
+        Latch a sound first: pick <strong>LEAD</strong>, tap a note, turn <strong>HOLD</strong> on, lift, then pick <strong>FILTER</strong>.
+        The note keeps ringing. <strong>X</strong> is the resonant low-pass (dark left → bright/open right, same Chamberlin LPF as the MPK tone knob, ~90 Hz–8 kHz, bypass when fully open).
+        <strong>Y</strong> is a momentary morph between SYNTH A and SYNTH B (the pair from SYNTH → MORPH). Lift restores tone + morph unless HOLD stays on.
+        Keyboard, SEQ, and phrase pads work the same way: play something, then FILTER sculpts it.
+      </p>
+      <h3>Note programs — X = scale pitch</h3>
+      <table>
+        <tr><th>LEAD</th><td><strong>Y = TONE.</strong> Play the scale. Y opens the low-pass (sticky — stays where you left it). Bottom of the pad is also quieter velocity.</td></tr>
+        <tr><th>MORPH</th><td><strong>Y = MORPH.</strong> Play the scale. Y crossfades SYNTH A → B (sticky). Set the pair in SYNTH → MORPH.</td></tr>
+        <tr><th>VIB</th><td><strong>Y = VIB.</strong> Play the scale. Y is vibrato depth. Lift restores the previous vibrato so it does not stick when you leave VIB.</td></tr>
+        <tr><th>LEVEL</th><td><strong>Y = LEVEL.</strong> Play the scale. Y is synth volume.</td></tr>
+        <tr><th>DECAY</th><td><strong>Y = DECAY.</strong> Play the scale. Y is release time (how long the note rings after lift).</td></tr>
+        <tr><th>ATTACK</th><td><strong>Y = ATTACK.</strong> Play the scale. Y is attack time (slow swell toward the top of the pad).</td></tr>
+        <tr><th>OCTAVE</th><td><strong>Y = OCTAVE.</strong> Play the scale. Y adds up to two extra octaves on top of the X note.</td></tr>
+        <tr><th>GRIT</th><td><strong>Y = DRIVE.</strong> Play the scale. Y is saturation.</td></tr>
+        <tr><th>DELAY</th><td><strong>Y = DLY MIX.</strong> Play the scale. Y is echo send.</td></tr>
+      </table>
+      <h3>FX programs — no pitch from the pad</h3>
+      <p class="lede">Lift restores the previous mix unless HOLD is on. ⚙ SHOW ALL reveals RESO / WASH / CRUSH / SWEEP (and the extra note programs).</p>
+      <table>
+        <tr><th>FILTER</th><td><strong>X = TONE</strong> (filter cutoff), <strong>Y = MORPH</strong> (voice blend, momentary). Use the HOLD recipe above — this is the KP-style filter pad, not a keyboard.</td></tr>
+        <tr><th>ECHO</th><td><strong>X = DLY T</strong> (~50–750 ms), <strong>Y = DLY MIX</strong> (how loud the repeats are).</td></tr>
+        <tr><th>DRIVE</th><td><strong>X = DRIVE</strong> (saturation), <strong>Y = REVERB</strong> (reverb send).</td></tr>
+        <tr><th>SPACE</th><td><strong>X = ECHO</strong> (delay mix), <strong>Y = REVERB</strong> (reverb mix) — wash without touching pitch.</td></tr>
+        <tr><th>RESO</th><td><strong>X = TONE</strong>, <strong>Y = FB</strong> (delay feedback) — resonant repeats.</td></tr>
+        <tr><th>WASH</th><td><strong>X = SIZE</strong> (reverb size), <strong>Y = REVERB</strong> (reverb mix).</td></tr>
+        <tr><th>CRUSH</th><td><strong>X = DRIVE</strong>, <strong>Y = TONE</strong> — distort and darken a held note.</td></tr>
+        <tr><th>SWEEP</th><td><strong>X = TONE</strong>, <strong>Y = DLY T</strong> — filter vs delay time.</td></tr>
+      </table>
+    </section>
+
+    <section class="screen" id="kaoss-scales">
+      <h2>KAOSS scales</h2>
+      <p class="lede">Opened from KAOSS → SCALE. Same idea as VOICES: tap a full name instead of cycling three-letter Korg codes.</p>
+      <figure>
+        <img src="screens/15-kaoss-scales.png" alt="KAOSS scale picker grid" width="800" height="480" />
+        <figcaption>15 — KAOSS scales (SHOW ALL on — factory list with readable names)</figcaption>
+      </figure>
+      <table>
+        <tr><th>Scale tiles</th><td>Pick the scale that locks X. Current scale is highlighted. Drag or use ▲ / ▼ to scroll the factory list.</td></tr>
+        <tr><th>CLOSE</th><td>Back to the XY pad without changing scale. Turn on SHOW ALL from KAOSS ⚙ if you want the full factory list.</td></tr>
+      </table>
+    </section>
+
+    <section class="screen" id="kaoss-play">
+      <h2>KAOSS full pad</h2>
+      <p class="lede">Opened from KAOSS → FULL PAD once program / scale / key are set. The pad takes the whole 800×480 panel.</p>
+      <figure>
+        <img src="screens/16-kaoss-play.png" alt="KAOSS full-pad play mode" width="800" height="480" />
+        <figcaption>16 — KAOSS full pad (HOLD TO EXIT rail at the top)</figcaption>
+      </figure>
+      <table>
+        <tr><th>Pad</th><td>Same XY play as the settings view, just larger. LED field, axes, HOLD / gate still apply.</td></tr>
+        <tr><th>HOLD TO EXIT</th><td>Press and hold the top rail for about 0.7s. A tap or a slide off the rail cancels.</td></tr>
       </table>
     </section>
 
@@ -260,29 +367,31 @@
       </figure>
       <table>
         <tr><th>BPM − / + / −5 / +5</th><td>Nudge playback tempo relative to the file.</td></tr>
-        <tr><th>Song list + ▲ / ▼</th><td>Select a <code>.mid</code> file; scroll when the library is long.</td></tr>
+        <tr><th>Song list + ▲ / ▼</th><td>Tap a <code>.mid</code> row to select; page with the chunky ▲ / ▼ buttons.</td></tr>
         <tr><th>PLAY / STOP</th><td>Start or stop song playback.</td></tr>
-        <tr><th>REFRESH / DELETE</th><td>Rescan folder or delete the selected file (as labeled on the row).</td></tr>
+        <tr><th>SAVE SEQ</th><td>Export the current sequencer arrangement into <code>songs/</code> as a MIDI file.</td></tr>
+        <tr><th>DELETE</th><td>Remove the selected file from <code>songs/</code>.</td></tr>
         <tr><th>OUT</th><td>LOCAL / USB / BOTH — soft-synth and/or hardware DIN via USB MIDI adapter.</td></tr>
         <tr><th>SONG LOOP</th><td>Repeat the file when it ends.</td></tr>
-        <tr><th>SAVE SEQ</th><td>Export the current sequencer take into <code>songs/</code> as a MIDI file (when available).</td></tr>
       </table>
-      <p class="note">Demo songs seed into <code>songs/</code> on first launch if the folder is empty.</p>
+      <p class="note">Demo songs seed into <code>songs/</code> on first launch if missing; they are not overwritten if you delete them.</p>
     </section>
 
     <section class="screen" id="presets">
       <h2>PRESETS</h2>
-      <p class="lede">Eight quick slots for the current synth sound and full-velocity preference.</p>
+      <p class="lede">Eight touch slots for a named <strong>full session</strong> (not just the synth patch).</p>
       <figure>
         <img src="screens/06-presets.png" alt="PRESETS screen" width="800" height="480" />
         <figcaption>06 — PRESETS</figcaption>
       </figure>
       <table>
-        <tr><th>Slots 1–8</th><td>Tap to select. Shows name or EMPTY.</td></tr>
-        <tr><th>LOAD</th><td>Recall the selected slot into the live synth.</td></tr>
-        <tr><th>SAVE</th><td>Store the current synth patch into the selected slot.</td></tr>
-        <tr><th>DELETE</th><td>Clear the selected slot.</td></tr>
+        <tr><th>Slots 1–8</th><td>Tap to select. Shows name plus a short tag (e.g. layer / pad counts, or <code>session</code>).</td></tr>
+        <tr><th>FACTORY</th><td>Hard-reset morph, tone, drums, levels, and FX to baked-in defaults (autosaved as the current session).</td></tr>
+        <tr><th>LOAD</th><td>Restore the selected slot (synth, sequencer, phrases, songs prefs, screensaver timeout, related UI state).</td></tr>
+        <tr><th>SAVE</th><td>Opens a name pad, then writes the full session into the selected slot.</td></tr>
+        <tr><th>DELETE</th><td>Clear the selected slot file.</td></tr>
       </table>
+      <p class="note">Autosave also keeps a separate <code>settings.json</code> session so a reboot returns where you left off.</p>
     </section>
 
     <section class="screen" id="log">
@@ -293,11 +402,27 @@
         <figcaption>07 — LOG</figcaption>
       </figure>
       <table>
+        <tr><th>Last event</th><td>Same short status line used on SYNTH (latest action).</td></tr>
         <tr><th>Event list</th><td>Scrolling history of notes, mode changes, and other messages.</td></tr>
         <tr><th>CLEAR LOG</th><td>Wipe the on-screen log.</td></tr>
         <tr><th>ALL NOTES OFF</th><td>Panic.</td></tr>
-        <tr><th>POWER</th><td>Same shutdown / reboot menu as the nav POWER button.</td></tr>
       </table>
+    </section>
+
+    <section class="screen" id="settings">
+      <h2>SET (Settings)</h2>
+      <p class="lede">Opt-in software update from GitHub <code>master</code>. The instrument stays offline until you tap CHECK / UPDATE.</p>
+      <figure>
+        <img src="screens/13-settings.png" alt="SET settings and update screen" width="800" height="480" />
+        <figcaption>13 — SET</figcaption>
+      </figure>
+      <table>
+        <tr><th>Running / remote</th><td>Local commit (from git or <code>version.json</code>) and, after CHECK, the tip of <code>master</code>.</td></tr>
+        <tr><th>CHECK</th><td>Ask GitHub whether <code>master</code> is ahead. Does not install.</td></tr>
+        <tr><th>UPDATE</th><td>If behind: confirm, deploy the whole repo (kiosk + crates + presets + committed <code>dist/armv7</code> engines into <code>bin/</code>), restart kiosk and any midi-engine / jambox-engine units. Second tap is INSTALL NOW.</td></tr>
+        <tr><th>TOKEN</th><td>Store a GitHub PAT on the box (private repo). Written to <code>.update-credentials</code>.</td></tr>
+      </table>
+      <p class="note">Same as SSH deploy: never overwrites <code>settings.json</code>, <code>songs/</code>, <code>phrases/</code> (pad recordings), <code>user-presets/</code>, <code>user-wavetables/</code>, or <code>presets/active.json</code>. Does not cargo-build on the Pi — engines are the committed <code>dist/armv7</code> binaries (rebuild with <code>./deploy/build-pi-bins.sh</code> before pushing crate changes).</p>
     </section>
 
     <section class="screen" id="voices">
@@ -308,9 +433,10 @@
         <figcaption>08 — VOICES</figcaption>
       </figure>
       <table>
-        <tr><th>Voice tiles</th><td>Pick morph-A (and park morph at pure A). Includes built-in shapes and AKWF wavetables.</td></tr>
-        <tr><th>SAVE AS…</th><td>Bake the current morph / timbre into a new named wavetable (opens SAVE AS).</td></tr>
-        <tr><th>CLOSE / back</th><td>Return to SYNTH (footer / cancel control on the overlay).</td></tr>
+        <tr><th>Voice tiles</th><td>Tap to pick morph-A (parks morph at pure A). Drag to scroll the grid on the capacitive panel.</td></tr>
+        <tr><th>VIB row</th><td><code>WHEEL</code> / <code>ON</code> plus DEPTH −/+ and RATE −/+ — on-screen vibrato without the mod wheel.</td></tr>
+        <tr><th>SAVE AS…</th><td>Bake the current morph / timbre into a new named wavetable under <code>user-wavetables/</code>.</td></tr>
+        <tr><th>CLOSE</th><td>Return to SYNTH.</td></tr>
       </table>
     </section>
 
@@ -322,82 +448,85 @@
         <figcaption>09 — MORPH</figcaption>
       </figure>
       <table>
-        <tr><th>A / B side buttons</th><td>Select which endpoint the next grid tap assigns.</td></tr>
-        <tr><th>Voice grid</th><td>Assign the chosen side to a wavetable.</td></tr>
-        <tr><th>SWAP / CANCEL</th><td>Swap endpoints or restore the previous pair (as labeled).</td></tr>
-        <tr><th>SAVE AS…</th><td>Bake morph cycle to a new wavetable file.</td></tr>
+        <tr><th>A / B side buttons</th><td>Select which endpoint the next grid tap assigns (after A, B is armed automatically).</td></tr>
+        <tr><th>Voice grid</th><td>Assign the chosen side; drag to scroll.</td></tr>
+        <tr><th>SWAP</th><td>Flip A↔B and invert the blend so the sound stays put.</td></tr>
+        <tr><th>SAVE AS…</th><td>Bake the current morph cycle to a new user wavetable.</td></tr>
+        <tr><th>DONE</th><td>Keep the pair and return to SYNTH.</td></tr>
+        <tr><th>CANCEL</th><td>Restore the pair you walked in with.</td></tr>
       </table>
-      <p class="note">Knob 1 (CC normally mapped to morph) blends A→B while you play.</p>
+      <p class="note">Knob 1 blends A→B while you play. Opening MORPH turns off DRUM MODE / FX MODE / BUS FX so Knob 1 stays morph.</p>
     </section>
 
     <section class="screen" id="kit">
       <h2>KIT overlay</h2>
-      <p class="lede">Drum models for MPK pads, with preview scope and FX targeting.</p>
+      <p class="lede">Drum models for MPK pads, with an optional WAVE drill-down and FX targeting.</p>
       <figure>
         <img src="screens/10-kit.png" alt="KIT drum explorer" width="800" height="480" />
-        <figcaption>10 — KIT</figcaption>
+        <figcaption>10 — KIT (pad grid)</figcaption>
       </figure>
       <table>
-        <tr><th>Pad / model buttons</th><td>Select which drum voice you’re editing / auditioning.</td></tr>
-        <tr><th>Wave preview</th><td>Shows the one-shot shape; stretch / pitch / noise / tone reshape it.</td></tr>
-        <tr><th>PLAY</th><td>Audition the selected drum.</td></tr>
-        <tr><th>ALL DRUMS</th><td>Point FX MODE at the shared kit bus.</td></tr>
+        <tr><th>Pad / model buttons</th><td>Select and audition which drum you’re editing.</td></tr>
+        <tr><th>ALL DRUMS</th><td>Point insert FX at the shared kit bus (one echo/drive for the whole kit).</td></tr>
+        <tr><th>WAVE</th><td>Full-screen CRT scope for the selected one-shot; knobs reshape it live. BACK returns to the grid.</td></tr>
         <tr><th>CLOSE</th><td>Return to SYNTH.</td></tr>
       </table>
-      <p class="note">Enable <strong>DRUM MODE</strong> on SYNTH so knobs 1–4 edit drum macros live.</p>
+      <p class="note">With FX MODE off, opening a kit pad turns on <strong>DRUM MODE</strong> so knobs 1–4 reshape the body. With FX MODE on, kit selection aims the insert FX target instead.</p>
     </section>
 
     <section class="screen" id="power">
       <h2>POWER</h2>
-      <p class="lede">Kiosk-safe power controls (no desktop session UI).</p>
+      <p class="lede">Kiosk-safe power and burn-in controls (no desktop session UI).</p>
       <figure>
         <img src="screens/11-power.png" alt="POWER confirmation screen" width="800" height="480" />
         <figcaption>11 — POWER</figcaption>
       </figure>
       <table>
-        <tr><th>SHUTDOWN / POWER OFF</th><td>Halt the Pi after stopping the app / audio clients.</td></tr>
-        <tr><th>REBOOT</th><td>Restart the Pi.</td></tr>
-        <tr><th>CANCEL</th><td>Return to the previous mode without powering down.</td></tr>
+        <tr><th>BLANK …</th><td>Header button cycles auto-blank timeout (1 / 3 / 10 min / off). Idle is <strong>touch-only</strong> — MIDI does not postpone blanking.</td></tr>
+        <tr><th>SCREEN OFF</th><td>Blank the TFT now. Tap the panel to wake; playing MIDI will not.</td></tr>
+        <tr><th>SHUT DOWN</th><td>Power the Pi off cleanly.</td></tr>
+        <tr><th>REBOOT</th><td>Restart into the kiosk.</td></tr>
+        <tr><th>CANCEL</th><td>Return to the previous mode.</td></tr>
       </table>
     </section>
 
     <section class="screen" id="save-as">
       <h2>SAVE AS…</h2>
-      <p class="lede">Bake the current morph timbre into a new wavetable stored under <code>wavetables/</code>.</p>
+      <p class="lede">Bake the current morph timbre into a new user wavetable.</p>
       <figure>
         <img src="screens/12-save-as.png" alt="SAVE AS voice dialog" width="800" height="480" />
         <figcaption>12 — SAVE AS</figcaption>
       </figure>
       <table>
-        <tr><th>Name field / keyboard</th><td>Enter a filename for the new single-cycle WAV.</td></tr>
-        <tr><th>SAVE / CONFIRM</th><td>Write the baked cycle (and related patch data where implemented).</td></tr>
+        <tr><th>Name field / keyboard</th><td>Enter a name for the new single-cycle WAV under <code>user-wavetables/</code>.</td></tr>
+        <tr><th>SAVE</th><td>Write the baked wave (drive/tone folded in) plus a delay/reverb sidecar when present.</td></tr>
         <tr><th>CANCEL</th><td>Dismiss without writing.</td></tr>
       </table>
     </section>
 
     <section class="screen" id="knobs">
       <h2>MPK knobs (default mapping)</h2>
-      <p class="lede">When FX MODE and BUS FX are off, and DRUM MODE is off:</p>
+      <p class="lede">Factory MPC program (<code>Prog Select → Pad 1</code>). When FX MODE, BUS FX, and DRUM MODE are off:</p>
       <table>
         <tr><th>Knob 1</th><td>Morph A→B</td></tr>
-        <tr><th>Knob 2</th><td>Tone / brightness style control on the wavetable path</td></tr>
+        <tr><th>Knob 2</th><td>Tone / brightness (low-pass)</td></tr>
         <tr><th>Knob 3</th><td>Attack</td></tr>
         <tr><th>Knob 4</th><td>Release</td></tr>
-        <tr><th>Knob 5</th><td>Vibrato rate</td></tr>
-        <tr><th>Knob 6</th><td>Vibrato depth</td></tr>
+        <tr><th>Knob 5</th><td>Vibrato depth</td></tr>
+        <tr><th>Knob 6</th><td>Vibrato rate</td></tr>
         <tr><th>Knob 7</th><td>Reserved / free</td></tr>
-        <tr><th>Knob 8</th><td>Synth level (or drum level while DRUM MODE is on)</td></tr>
+        <tr><th>Knob 8</th><td>Synth bus level (drum bus level while DRUM MODE is on)</td></tr>
       </table>
       <p class="note">
-        <strong>FX MODE</strong> / <strong>BUS FX</strong> retarget knobs to drive, delay, and reverb parameters for the
-        selected insert or the master bus. Pitch bend and mod wheel still affect the voice as usual.
+        <strong>DRUM MODE</strong> remaps knobs 1–4 to pitch / stretch / noise / drum-tone.
+        <strong>FX MODE</strong> / <strong>BUS FX</strong> remap knobs 1–6 to drive, delay time/feedback/mix, and reverb size/mix
+        (and open the live FX panel). Pitch bend and the mod wheel still affect the voice as usual.
       </p>
     </section>
   </main>
 
   <footer>
-    midi-tone screen reference · 800×480 panel captures via <code>tools/midi-tone/capture_ui_docs.py</code>
-    · open this file in a browser from <code>tools/midi-tone/docs/</code>
+    midi-tone screen reference · Raspberry Pi TFT70 kiosk UI (800×480)
   </footer>
 </body>
 </html>

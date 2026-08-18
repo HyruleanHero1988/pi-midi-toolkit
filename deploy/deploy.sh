@@ -4,9 +4,14 @@
 #   ./deploy/deploy.sh pi@192.168.1.50
 #   TARGET=armv7-unknown-linux-gnueabihf ./deploy/deploy.sh pi@192.168.1.50
 #   WITH_JAMBOX=1 ./deploy/deploy.sh pi@192.168.1.50   # also ship the audio engine
+#   USE_STAGED=1 ./deploy/deploy.sh pi@192.168.1.50    # scp dist/armv7 (no cargo)
+#
+# Daily SET→UPDATE path needs those same ELFs committed: ./deploy/build-pi-bins.sh
+# Armv7 builds from this script are also copied into dist/armv7 for that commit.
 #
 # jambox-engine links ALSA, so cross-building it needs libasound for the target
-# (e.g. via `cross`). It is opt-in so the mapper deploy never breaks on that.
+# (e.g. via `cross` or `build-pi-bins.sh`). It is opt-in so the mapper deploy
+# never breaks on that.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -16,21 +21,50 @@ REMOTE_DIR="${REMOTE_DIR:-/home/pi/pi-midi-toolkit}"
 
 cd "$ROOT"
 
-if [[ -n "$TARGET" ]]; then
+USE_STAGED="${USE_STAGED:-}"
+WITH_JAMBOX="${WITH_JAMBOX:-}"
+STAGE="$ROOT/dist/armv7"
+
+stage_armv7() {
+  local src="$1" name="$2"
+  if [[ "$TARGET" != "armv7-unknown-linux-gnueabihf" ]]; then
+    return 0
+  fi
+  mkdir -p "$STAGE"
+  cp "$src" "$STAGE/$name"
+  chmod +x "$STAGE/$name"
+  echo "staged $STAGE/$name (commit dist/armv7 so SET→UPDATE can install it)"
+}
+
+if [[ -n "$USE_STAGED" ]]; then
+  BIN="$STAGE/midi-engine"
+  if [[ ! -f "$BIN" ]]; then
+    echo "error: USE_STAGED=1 but $BIN is missing — run ./deploy/build-pi-bins.sh first" >&2
+    exit 1
+  fi
+  if [[ -n "$WITH_JAMBOX" ]]; then
+    JAMBOX_BIN="$STAGE/jambox-engine"
+    if [[ ! -f "$JAMBOX_BIN" ]]; then
+      echo "error: USE_STAGED=1 WITH_JAMBOX=1 but $JAMBOX_BIN is missing" >&2
+      exit 1
+    fi
+  fi
+elif [[ -n "$TARGET" ]]; then
   echo "cross-building for $TARGET ..."
   cargo build --release -p midi-engine --target "$TARGET"
   BIN="$ROOT/target/$TARGET/release/midi-engine"
+  stage_armv7 "$BIN" midi-engine
 else
   echo "building host release (use TARGET=... for Pi cross-compile) ..."
   cargo build --release -p midi-engine
   BIN="$ROOT/target/release/midi-engine"
 fi
 
-WITH_JAMBOX="${WITH_JAMBOX:-}"
-if [[ -n "$WITH_JAMBOX" ]]; then
+if [[ -n "$WITH_JAMBOX" && -z "$USE_STAGED" ]]; then
   if [[ -n "$TARGET" ]]; then
     cargo build --release -p jambox-engine --target "$TARGET"
     JAMBOX_BIN="$ROOT/target/$TARGET/release/jambox-engine"
+    stage_armv7 "$JAMBOX_BIN" jambox-engine
   else
     cargo build --release -p jambox-engine
     JAMBOX_BIN="$ROOT/target/release/jambox-engine"

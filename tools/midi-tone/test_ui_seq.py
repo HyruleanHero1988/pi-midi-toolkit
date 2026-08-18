@@ -219,6 +219,72 @@ class SeqScreenTest(unittest.TestCase):
         self.assertFalse(app._seq.is_playing())
         app._seq_clear()
 
+    def test_seq_to_pad_then_drum_pad_launches_the_clip(self) -> None:
+        """SEQ → PAD (lost when LOOPER became SEQ) plus MPK pad launch."""
+        app = self.app
+        mt = self.midi_tone
+        app._switch_mode("seq")
+        self.pump()
+        app._seq_toggle_record()
+        for note in (36, 38):
+            self.play(note)
+            self.pump(0.06)
+        app._seq_toggle_record()
+        self.pump(0.05)
+        self.assertGreater(float(app._seq.status()["length"]), 0.0)
+
+        app._seq_assign_to_pad()
+        self.pump()
+        self.assertTrue(app._seq_to_pad_armed)
+        self.assertEqual(app._mode, "pads")
+
+        # MPK pad A1 (note 36, ch10) drops the sequence onto that cell
+        self.play(36)
+        self.pump(0.15)
+        cell = app._phrases.cell(0)
+        self.assertFalse(cell.is_empty())
+        self.assertTrue(cell.is_loop())
+        self.assertFalse(app._seq_to_pad_armed)
+        self.assertEqual(app._pads_view, "play")
+
+        # Same drum pad now launches the clip instead of playing a one-shot
+        self.play(36)
+        self.pump(0.12)
+        self.assertTrue(app._phrases.is_playing(0))
+        app._phrase_stop_all()
+        app._phrases.clear_cell(0)
+        app._seq_clear()
+        self.pump()
+        self.assertEqual(mt.phrase_cell_for_note(36), 0)
+
+    def test_drum_pad_launches_a_filled_clip_while_edit_is_recording(self) -> None:
+        """Regression: EDIT REC used to turn every MPK pad into a drum."""
+        app = self.app
+        mt = self.midi_tone
+        events = [
+            mt.LoopEvent(t=0.00, on=True, channel=0, note=64, velocity=110),
+            mt.LoopEvent(t=0.08, on=False, channel=0, note=64, velocity=0),
+        ]
+        app._phrases.load_from_events(
+            0, events, 0.12, trigger_mode=mt.PHRASE_TRIG_LOOP
+        )
+        app._switch_mode("pads")
+        app._pads_view = "edit"
+        app._build_pads_mode()
+        self.pump()
+        app._phrases.arm_record(1)
+        self.assertTrue(app._phrases.is_recording())
+
+        # Pad A1 (note 36) is filled — must launch, not fall through as a kick
+        self.play(36)
+        self.pump(0.2)
+        self.assertTrue(app._phrases.is_playing(0))
+        self.assertTrue(app._phrases.is_recording(), "A2 rec should still be armed")
+        app._phrase_stop_all()
+        app._phrases.stop_record()
+        app._phrases.clear_cell(0)
+        self.pump()
+
 
 if __name__ == "__main__":
     sys.exit(unittest.main())

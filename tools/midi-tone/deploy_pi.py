@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import pathlib
+import subprocess
 import sys
 import time
 
@@ -21,6 +23,7 @@ CREDS = HERE / ".pi-credentials"
 FILES = [
     "midi_tone.py",
     "sequencer.py",  # imported by midi_tone.py — the app won't start without it
+    "screensaver.py",  # TFT idle blank / burn-in guard
     "fetch_akwf.py",
     "fetch_songs.py",
     "requirements.txt",
@@ -43,6 +46,11 @@ FILES = [
     "BOOT-RECOVERY-HDMI.txt",
     "fix-touch-x11.sh",
     "set-touch-overlay.sh",
+    "splash-x11.py",
+    "install-pidi-splash.sh",
+    "pi-power.sh",
+    "updater.py",
+    "kaoss.py",
 ]
 
 # Extra trees copied recursively
@@ -50,6 +58,7 @@ DIRS = [
     "wavetables",
     "kiosk",
     "demo-songs",  # offline Mutopia demos; seeded into songs/ on first launch
+    "branding",
 ]
 
 
@@ -144,9 +153,37 @@ def deploy(restart: bool) -> None:
         run(
             client,
             f"sed -i 's/\\r$//' {remote_dir}/*.sh {remote_dir}/*.desktop "
-            f"{remote_dir}/kiosk/*.desktop {remote_dir}/kiosk/openbox/* 2>/dev/null; "
-            f"chmod +x {remote_dir}/*.sh {remote_dir}/fetch_akwf.py 2>/dev/null || true",
+            f"{remote_dir}/kiosk/*.sh {remote_dir}/kiosk/*.desktop "
+            f"{remote_dir}/kiosk/openbox/* 2>/dev/null; "
+            f"chmod +x {remote_dir}/*.sh {remote_dir}/kiosk/*.sh "
+            f"{remote_dir}/fetch_akwf.py "
+            f"{remote_dir}/splash-x11.py 2>/dev/null || true",
         )
+        # Stamp the SHA this copy came from so SET → CHECK can compare to GitHub.
+        try:
+            sha = subprocess.check_output(
+                ["git", "rev-parse", "HEAD"],
+                cwd=str(HERE.parent.parent),
+                text=True,
+                timeout=8,
+            ).strip()
+        except Exception:
+            sha = ""
+        if sha:
+            payload = json.dumps(
+                {
+                    "sha": sha,
+                    "branch": "master",
+                    "source": "deploy",
+                    "repo_url": "https://github.com/HyruleanHero1988/pi-midi-toolkit.git",
+                },
+                indent=2,
+            )
+            run(
+                client,
+                f"cat > {remote_dir}/version.json <<'EOF'\n{payload}\nEOF",
+                check=False,
+            )
         # Refresh menu/desktop launchers so they keep using the venv via run.sh
         run(client, f"bash {remote_dir}/install-desktop-shortcut.sh", check=False)
 

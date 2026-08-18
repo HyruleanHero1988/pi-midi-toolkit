@@ -244,6 +244,85 @@ class PhrasePadTrimTest(unittest.TestCase):
         bank.stop_record()
         self.assertTrue(bank.cell(1).is_empty())
 
+    def test_load_from_events_drops_a_sequence_onto_a_pad(self) -> None:
+        mt = self.midi_tone
+        bank = self.make_bank()
+        events = [
+            mt.LoopEvent(t=0.00, on=True, channel=9, note=36, velocity=100),
+            mt.LoopEvent(t=0.05, on=False, channel=9, note=36, velocity=0),
+            mt.LoopEvent(t=0.25, on=True, channel=0, note=60, velocity=90),
+            mt.LoopEvent(t=0.40, on=False, channel=0, note=60, velocity=0),
+        ]
+        self.assertTrue(bank.load_from_events(3, events, 0.50))
+        cell = bank.cell(3)
+        self.assertFalse(cell.is_empty())
+        self.assertTrue(cell.is_loop())
+        self.assertAlmostEqual(cell.length, 0.50, places=3)
+        self.assertEqual(len(cell.events), 4)
+        self.assertFalse(bank.load_from_events(0, [], 1.0))
+        self.assertTrue(bank.cell(0).is_empty())
+
+    def test_drum_pad_handle_launches_a_filled_cell(self) -> None:
+        mt = self.midi_tone
+        engine = FakeEngine()
+        bank = self.make_bank(engine)
+        events = [
+            mt.LoopEvent(t=0.00, on=True, channel=0, note=64, velocity=100),
+            mt.LoopEvent(t=0.05, on=False, channel=0, note=64, velocity=0),
+        ]
+        bank.load_from_events(0, events, 0.10, trigger_mode=mt.PHRASE_TRIG_ONESHOT)
+        action = bank.handle_pad(0, from_touch=False, allow_record=False)
+        self.assertEqual(action, "launch")
+        deadline = time.monotonic() + 0.5
+        while time.monotonic() < deadline and not engine.ons:
+            time.sleep(0.01)
+        self.assertEqual(engine.ons[0], (0, 64, 100))
+        bank.stop_all()
+
+    def test_drum_pad_still_launches_while_another_cell_records(self) -> None:
+        """Touch could fire a filled clip during REC; MPK pads used to be ignored."""
+        mt = self.midi_tone
+        engine = FakeEngine()
+        bank = self.make_bank(engine)
+        events = [
+            mt.LoopEvent(t=0.00, on=True, channel=0, note=64, velocity=100),
+            mt.LoopEvent(t=0.05, on=False, channel=0, note=64, velocity=0),
+        ]
+        bank.load_from_events(0, events, 0.10, trigger_mode=mt.PHRASE_TRIG_ONESHOT)
+        bank.arm_record(1)
+        self.assertTrue(bank.is_recording())
+        self.assertEqual(bank.handle_pad(0, from_touch=False), "launch")
+        self.assertEqual(bank.handle_pad(1, from_touch=False), "ignore")
+        self.assertEqual(bank.handle_pad(2, from_touch=False), "ignore")
+        deadline = time.monotonic() + 0.5
+        while time.monotonic() < deadline and not engine.ons:
+            time.sleep(0.01)
+        self.assertEqual(engine.ons[0], (0, 64, 100))
+        bank.stop_all()
+
+
+class PhrasePadTileColorTest(unittest.TestCase):
+    def test_green_means_playing_not_loop_mode(self) -> None:
+        mt = load_midi_tone()
+        idle_loop = mt.phrase_pad_tile_color(empty=False, loop=True)
+        idle_shot = mt.phrase_pad_tile_color(empty=False, loop=False)
+        playing_loop = mt.phrase_pad_tile_color(empty=False, loop=True, playing=True)
+        playing_shot = mt.phrase_pad_tile_color(empty=False, loop=False, playing=True)
+        self.assertEqual(idle_loop, idle_shot)
+        self.assertEqual(idle_loop, mt.PHRASE_TILE_IDLE)
+        self.assertEqual(playing_loop, playing_shot)
+        self.assertEqual(playing_loop, mt.PHRASE_TILE_PLAYING)
+        self.assertNotEqual(idle_loop, playing_loop)
+
+    def test_selected_idle_is_teal_playing_stays_green(self) -> None:
+        mt = load_midi_tone()
+        selected = mt.phrase_pad_tile_color(empty=False, selected=True)
+        playing_sel = mt.phrase_pad_tile_color(
+            empty=False, selected=True, playing=True
+        )
+        self.assertEqual(selected, mt.PHRASE_TILE_SELECTED)
+        self.assertEqual(playing_sel, mt.PHRASE_TILE_PLAYING)
+
 
 if __name__ == "__main__":
     sys.exit(unittest.main())

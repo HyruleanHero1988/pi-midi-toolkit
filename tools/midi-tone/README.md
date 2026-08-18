@@ -4,12 +4,14 @@ Hear and see MIDI from the **Akai MPK mini** on the Pi **without** USB-DIN or a 
 
 - Opens a MIDI input (prefers a port name containing `MPK`)
 - Note-on → wavetable tone through the Pi audio jack / HDMI
-- **Modes** (top right): **SYNTH**, **SEQ**, **PADS**, **SONGS**, **PRESETS**, **LOG** — fully separate UIs
+- **Modes:** **HOME** launcher tiles; jam shortcuts **SYNTH / SEQ / PADS / KAOSS** stay in the top bar while you are in those modes; **SONGS / PRESETS / LOG / SET** open from HOME
 - Synth: voices, A/B morph, knobs, live morph-cycle scope; **MPK pads (ch10) = analog drum voices**; **KIT** drill-down scopes a selected drum
 - Sequencer: record a backbone loop, then overdub layers of drums and keys over it
 - Pads: 16 phrase clips (Bank A+B); record from keys, launch from touch squares **or** MPK pads
+- Kaoss: full-screen XY pad (Kaossilator-style notes + original Kaoss Pad MIDI CCs) for the soft-synth and/or USB→DIN
 - Songs: scrolling list of every `.mid` in `songs/`, tempo, play local and/or USB→DIN
 - Presets: 8 save slots + autosave last session (`settings.json`)
+- Set: check GitHub `master`, full-repo deploy if the box is behind, restart into the new kiosk
 - Log: full scrolling MIDI/event history
 - Bundled [Adventure Kid (AKWF)](https://github.com/KristofferKarlAxelEkstrand/AKWF-FREE) single-cycles (**CC0**) plus built-in sine/square/saw/triangle
 
@@ -53,7 +55,7 @@ Factory **Prog Select → Pad 1** (MPC program) maps knobs to CC70–77:
 | 4 | 73 | Release |
 | 5 | 74 | Vibrato depth |
 | 6 | 75 | Vibrato rate |
-| 8 | 77 | Level |
+| 8 | 77 | Synth bus level |
 
 Joystick Y still sends **CC1** = vibrato amount. PREV/NEXT jumps morph to a voice; Knob 1 sweeps continuously between them.
 
@@ -91,7 +93,7 @@ Factory MPC program (`Prog Select` → Pad 1): **Bank A = notes 36–43**, **Ban
 | 2 | 71 | Noise brightness (tone) |
 | 3 | 72 | Stretch / decay length |
 | 4 | 73 | Noise amount |
-| 8 | 77 | Master level (always) |
+| 8 | 77 | Drum bus level |
 
 Hitting pads does **not** steal morph knobs. With DRUM MODE off, Knob 1 stays morph. Opening **MORPH** turns DRUM MODE / FX MODE / BUS FX off. Session-only (not saved across restart).
 
@@ -112,11 +114,11 @@ Hitting pads does **not** steal morph knobs. With DRUM MODE off, Knob 1 stays mo
 | 4 | 73 | Delay mix |
 | 5 | 74 | Reverb size |
 | 6 | 75 | Reverb mix |
-| 8 | 77 | Master level (always) |
+| 8 | 77 | Synth bus level |
 
-Amounts persist in `settings.json` / presets (`voice_fx` / `drum_fx` / `drum_group_fx` / `bus_fx`); the mode toggles themselves do not.
+Amounts persist in `settings.json` / presets (`voice_fx` / `drum_fx` / `drum_group_fx` / `bus_fx`). FX MODE / BUS FX / DRUM MODE toggles are restored with the session too.
 
-**Waveforms:** SYNTH shows a live **morph-cycle** scope that redraws as Knob 1 / voice changes. Tap **KIT** for a drum drill-down — pick a pad (touch or MPK), watch its one-shot reshape with pitch / stretch / noise / tone knobs (DRUM MODE turns on while KIT is open). Keeps the main synth screen uncluttered.
+**Waveforms:** SYNTH shows a live **morph-cycle** scope that redraws as Knob 1 / voice changes. Tap **KIT** for a drum pad grid (ALL DRUMS / WAVE / CLOSE). **WAVE** opens a full CRT scope for the selected one-shot; knobs reshape it live. **FX MODE** / **BUS FX** open a dedicated live knob readout panel.
 
 **SAVE AS…** (from **VOICES** or **MORPH**) writes a user voice under `user-wavetables/`:
 
@@ -134,15 +136,56 @@ Top-right tabs stay visible:
 - **SYNTH** — wavetable soft-synth, voice grid, morph pair
 - **SEQ** — record a backbone loop, overdub layers over it, KEEP / DROP / UNDO (free timing; notes only)
 - **PADS** — 4×4 phrase clip launcher (MPK Bank A+B); touch or drum pads
+- **KAOSS** — XY touch pad with a Kaoss-style LED field: play scale notes (local and/or USB MIDI) or sweep FX; HOLD / GATE ARP
 - **SONGS** — lists every `.mid` / `.midi` in `songs/`; big ▲ UP / ▼ DOWN to scroll; tempo; LOCAL/USB out
-- **PRESETS** — 8 touch slots: SAVE / LOAD / DELETE current sound + full-velocity
+- **PRESETS** — 8 touch slots: SAVE (name it) / LOAD / DELETE a **full session** snapshot; **FACTORY** resets morph/tone/drums/levels/FX to baked-in defaults (autosaved as the session)
 - **LOG** — full event history (also has CLEAR / panic)
+- **SET** — running version, CHECK GitHub `master`, full-repo UPDATE & restart (songs/presets kept)
 
 Last session autosaves to `settings.json` (gitignored) every few seconds and on quit.
-Named presets live in `user-presets/slot-01.json` … `slot-08.json`.
+Named presets live in `user-presets/slot-01.json` … `slot-08.json`. Each file is the same payload as the session autosave, plus a display `name`:
+
+- synth sound (morph pair, tone, ADSR-ish, vibrato, drum macros, voice/drum/bus FX)
+- FULL VEL, DRUM / FX / BUS FX mode toggles, active screen (SYNTH/SEQ/…)
+- sequencer layers + loop length
+- all 16 phrase pads (and writes through to `phrases/pad-NN.json` on load)
+- songs selection, BPM, loop, LOCAL/USB out
+- screensaver timeout
 User-saved morph wavetables live in `user-wavetables/*.wav` (+ `*.fx.json` for delay/reverb, gitignored).
 Song files live as whatever you put in `songs/` (any `.mid` name).
 Phrase pads persist as `phrases/pad-01.json` … `pad-16.json` (gitignored).
+
+### Settings / update (SET)
+
+The box can pull a newer build from GitHub without a PC deploy. **HOME → SET** shows the
+running commit, **CHECK** looks at `master`, and **UPDATE** deploys the **whole repo**
+(kiosk, crates, deploy scripts, shipped presets) then restarts — the same tree SSH
+deploy updates. Songs, presets, phrases, `settings.json`, `presets/active.json`,
+and live `bin/` is not overlay-copied. After the tree lands, committed
+`dist/armv7/{midi-engine,jambox-engine}` are copied onto `bin/` (the systemd
+paths) and `midi-engine` / `jambox-engine` restart if those units exist.
+
+This does **not** cargo-build on the Pi (too slow on a Pi 2). When crates
+change, rebuild on a PC or cloud-agent VM **before commit**:
+
+```bash
+./deploy/build-pi-bins.sh
+git add dist/armv7
+git commit -m "Rebuild Pi armv7 engines"
+```
+
+Skipping that step means SET→UPDATE ships new Rust source but the box keeps
+the old engines. `deploy_pi.py` still writes `version.json` so CHECK has a
+local SHA; SSH `deploy/deploy.sh` also stages `dist/armv7` when `TARGET` is
+armv7.
+
+The repo is private, so CHECK needs a GitHub token with Contents: Read:
+
+- On the panel: **SET → TOKEN** (saved as `.update-credentials`, gitignored)
+- Or via SSH: `GITHUB_TOKEN=…` in `~/midi-tone/.update-credentials`
+
+`deploy_pi.py` still works and writes `version.json` so CHECK has a local SHA to
+compare. Rust engines are installed from `dist/armv7` (not cargo-built on the Pi).
 
 ### Sequencer (SEQ)
 
@@ -161,10 +204,82 @@ The backbone is the only take that sets length; everything after it is measured 
 - **LEN ×2 / ÷2** grows or shrinks the sequence in whole cycles. The groove tiles underneath, so a doubled sequence lets you overdub a fill that only happens the second time around. ÷2 refuses to cut a layer that is longer than the target.
 - **OVERDUB: WRAP** (default) folds a long take back onto the same cycle, the way a drum machine does. **OVERDUB: EXTEND** instead stretches the sequence to as many whole backbone cycles as the take needs (up to 8).
 - Layers are a stack, not one flat list, so UNDO works layer by layer. **SONGS → SAVE SEQ** exports the flattened result as `.mid`.
+- **→ PAD** copies the flattened sequence onto a phrase cell as a **LOOP**. Tap it, then tap a square or hit the matching **MPK drum pad**. PLAY view comes up so that same pad now launches the clip.
+
+On stop, every free-timing take is **auto-trimmed**: leading silence before the first hit is removed, and trailing silence after the last hit is capped to the largest gap between note-ons (so lag hitting REC doesn’t leave a dead bar at the loop point). The same trim runs on phrase-pad recordings.
 
 On stop, every free-timing take is **auto-trimmed**: leading silence before the first hit is removed, and trailing silence after the last hit is capped to the largest gap between note-ons (so lag hitting REC doesn’t leave a dead bar at the loop point). The same trim runs on phrase-pad recordings.
 
 Live playing still works while the sequence runs. Voice/morph/knob settings from Synth apply to sequenced notes too. Recording keeps going if you switch modes — handy for changing voice mid-overdub.
+
+### Kaoss pad
+
+The 7″ capacitive panel is the instrument. **KAOSS** is a Kaossilator-style
+play pad plus the original Kaoss Pad’s factory MIDI, so the same finger drives
+the onboard wavetable engine **and** a hardware synth on USB→DIN.
+
+| Gesture / control | What it does |
+|-------------------|--------------|
+| Finger on the pad | Note programs: note-on. FX programs: start the XY overlay only (no pitch). L-shaped axes: **X** along the bottom, **Y** up the left — meaning depends on PROG. Glow + trail under the finger |
+| Slide | Legato to the next scale degree; Y keeps sculpting |
+| Lift | Note-off — unless **HOLD** is on (last XY stays sounding) |
+| **PROG** / **SCALE** / **KEY** / **OCT** / **GATE** | Each opens a tap-to-pick grid instead of cycling. PROG picks a pad mapping (see **Programs** below). SCALE / KEY / OCT lock the note grid. GATE is a note-program arp only |
+| **FULL PAD** | Hides nav + buttons so the XY surface fills the 800×480 panel. **HOLD TO EXIT** on the slim top rail (~0.7s) brings chrome back |
+| **⚙** | KAOSS settings: SHOW ALL (every factory scale + program), X/Y axis labels, GRID LINES 1–5 px, PAD VIZ (GLOW / CELLS), OUT `LOCAL` / `USB` / `BOTH`, MIDI channel 1–16 |
+
+External synths see the original Kaoss Pad factory map: **CC#12 = X**, **CC#13 = Y**,
+**CC#92 = pad touch** (127 down / 0 up), plus note-on/off on the chosen channel.
+FX programs write the mix-bus insert while the finger is down and restore the
+previous bus on lift (HOLD freezes the wet). Playing into **SEQ** while it is
+recording captures the pad notes onto the take.
+
+#### Programs
+
+Two families. **Note** programs play scale pitches on X (Kaossilator). **FX**
+programs do **not** start a note — they only move synth / mix-bus parameters
+(original Kaoss Pad). Lift restores those overlays unless **HOLD** is on.
+**LEAD** tone and **MORPH** blend are the exceptions: they stay where you left
+them.
+
+**FILTER** is the one that feels broken until you give it a sound to chew on.
+Touching FILTER alone is silence. Latch a note first:
+
+1. Pick **LEAD**, tap the pad, turn **HOLD** on, lift.
+2. Open **PROG** → **FILTER**. The note keeps ringing.
+3. **X** is the filter (dark left → bright/open right — same Chamberlin
+   resonant LPF as the MPK tone knob, ~90 Hz–8 kHz, bypass when fully open).
+   **Y** is a momentary morph between SYNTH A and SYNTH B.
+4. Lift restores tone + morph unless HOLD stays on.
+
+Same idea with the keyboard, SEQ, or phrase pads running while FILTER is
+selected. ⚙ **SHOW ALL** adds the extra mappings; the starter set is first.
+
+**Note programs** (X = scale pitch, Y = extra):
+
+| PROG | Y | What you hear |
+|------|---|---------------|
+| **LEAD** | TONE | Play the scale. Y opens the low-pass (sticky). Bottom of the pad is also quieter velocity. |
+| **MORPH** | MORPH | Play the scale. Y crossfades SYNTH A → B (sticky). Set the pair in SYNTH → MORPH. |
+| **VIB** | VIB | Play the scale. Y is vibrato depth. Lift restores the previous vibrato (it will not stick). |
+| **LEVEL** | LEVEL | Play the scale. Y is synth volume. |
+| **DECAY** | DECAY | Play the scale. Y is release time (how long the note rings after lift). |
+| **ATTACK** | ATTACK | Play the scale. Y is attack time (slow swell at the top). |
+| **OCTAVE** | OCTAVE | Play the scale. Y adds up to two extra octaves on top of the X note. |
+| **GRIT** | DRIVE | Play the scale. Y is saturation / drive. |
+| **DELAY** | DLY MIX | Play the scale. Y is echo send (delay mix). |
+
+**FX programs** (no pitch from the pad — sculpt whatever is already sounding):
+
+| PROG | X | Y | What you hear |
+|------|---|---|---------------|
+| **FILTER** | TONE | MORPH | Filter cutoff vs voice blend. See the latch recipe above. |
+| **ECHO** | DLY T | DLY MIX | Delay time (~50–750 ms) vs how much delay you hear. |
+| **DRIVE** | DRIVE | REVERB | Saturation vs reverb send. |
+| **SPACE** | ECHO | REVERB | Delay mix vs reverb mix (washes without touching pitch). |
+| **RESO** | TONE | FB | Filter cutoff vs delay feedback (resonant repeats). |
+| **WASH** | SIZE | REVERB | Reverb size vs reverb mix. |
+| **CRUSH** | DRIVE | TONE | Distortion vs filter (trash the tone of a held note). |
+| **SWEEP** | TONE | DLY T | Filter vs delay time (tempo-ish filter + slap). |
 
 ### Phrase Pads
 
@@ -190,8 +305,11 @@ Two views (top-right of PADS): **EDIT** (record / fine-tune) and **PLAY** (perfo
 **PLAY**
 - Launch / stop filled pads only (empty pads do not arm record)
 - **STOP ALL** + **OUT** — minimal chrome for performance
+- Pad colors: **green = playing**, **blue = clip ready** (loop or one-shot — the ↻ / ▶ mark tells them apart), **teal = selected** in EDIT, **gray = empty**, **red = recording**
 
-While a phrase is **recording**, MPK pads play/record **drum voices** (not launch). When not recording, those pads launch/arm phrases (EDIT) or launch only (PLAY). Synth mode still always plays the 16-pad drum kit. Locked pads show a `·` mark next to the trigger icon.
+While a phrase is **recording**, MPK pads on the **armed cell** (and other empty pads) play/record **drum voices**. A **filled** pad still launches from the MPK — same as tapping its square — so you do not need the touch screen to fire clips. When nothing is recording, pads launch/arm phrases (EDIT) or launch only (PLAY). Synth mode still always plays the 16-pad drum kit. Locked pads show a `·` mark next to the trigger icon.
+
+A sequence built in **SEQ** can land on a pad without re-recording it: **SEQ → PAD**, then tap the cell (touch or drum pad). That pad becomes a LOOP clip you trigger from PADS PLAY with the same drum pad.
 
 ### Songs
 
@@ -253,7 +371,10 @@ Boots a minimal **X11** session that only runs midi-tone fullscreen (restart
 loop if it crashes). No wallpaper / panel / file manager / labwc.
 
 **Display target:** BigTreeTech **Pi TFT70 V2.1** (7″ DSI, 800×480, capacitive GT911).
+Voice/morph grids scroll with a finger drag (tap selects; drag past ~10px scrolls).
 Legacy resistive HDMI/ADS7846 helpers (`enable-gpio-touch.sh` / `calibrate-touch-y.sh`) are for the old panel only.
+
+The kiosk **blanks the TFT after 3 minutes of no touch** (playing MIDI does not keep it awake; sequencer/songs keep playing). **Tap the panel** to wake. While the UI is showing, chrome slowly pixel-shifts by 2px so bold labels and boxes cannot sit on the same cells. **POWER** has **SCREEN OFF** (blank now) and **BLANK 3 MIN** (cycle 1 / 3 / 10 min / off). Override with `MIDI_TONE_SCREENSAVER_SEC` (seconds; `0` disables auto-blank).
 
 **New TFT70 bring-up (DSI):**
 ```bash
@@ -298,7 +419,7 @@ Files:
 
 ## Screen reference
 
-Open [`docs/index.html`](docs/index.html) in a browser for labeled 800×480 captures of every mode (SYNTH, SEQ, PADS, SONGS, PRESETS, LOG) and the VOICES / MORPH / KIT / POWER / SAVE AS overlays.
+Open [docs/index.html](docs/index.html) in a browser for labeled 800×480 captures of every mode (HOME, SYNTH, SEQ, PADS, KAOSS, SONGS, PRESETS, LOG, SET) and the VOICES / MORPH / KIT / POWER / SAVE AS / KAOSS scales / FULL PAD overlays.
 
 Re-capture after UI changes (needs Tk + an 800×480 X display, or the script starts Xvfb itself):
 

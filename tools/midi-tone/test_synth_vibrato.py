@@ -151,6 +151,252 @@ class VibratoTest(unittest.TestCase):
         restored.apply_settings(snap)
         self.assertEqual(restored.vib_state(), engine.vib_state())
 
+    def test_tone_zero_is_darker_than_tone_open(self) -> None:
+        """KAOSS Y=TONE / the tone knob must change the sound, not just a 2-tap mix."""
+        mt = self.midi_tone
+        saw = np.linspace(-1.0, 1.0, mt.TABLE_SIZE, dtype=np.float32)
+
+        def centroid(tone: float) -> float:
+            engine = mt.SineEngine({"saw": saw}, max_voices=4)
+            engine.set_tone(tone)
+            engine.note_on(0, 60, 127)
+            self.render(engine, 512)
+            wave = self.render(engine, 2048)
+            window = wave * np.hanning(len(wave))
+            mag = np.abs(np.fft.rfft(window)) + 1e-12
+            freqs = np.fft.rfftfreq(len(wave), 1.0 / engine.sample_rate)
+            return float(np.sum(freqs * mag) / np.sum(mag))
+
+        open_c = centroid(1.0)
+        self.assertLess(centroid(0.0), open_c * 0.45)
+        # Mid-pad used to sit near-open. 35% must already be a closed filter.
+        self.assertLess(centroid(0.35), open_c * 0.75)
+
+    def test_tone_closes_enough_to_quiet_a_high_sine(self) -> None:
+        """Bottom of the pad must pull cutoff below a high note, not just dull a saw."""
+        mt = self.midi_tone
+        phase = np.linspace(0.0, 2.0 * np.pi, mt.TABLE_SIZE, endpoint=False)
+        sine = np.sin(phase).astype(np.float32)
+
+        def rms(tone: float) -> float:
+            engine = mt.SineEngine({"sine": sine}, max_voices=4)
+            engine.set_tone(tone)
+            engine.note_on(0, 84, 127)  # C6 ~ 1047 Hz
+            self.render(engine, 512)
+            wave = self.render(engine, 2048)
+            return float(np.sqrt(np.mean(wave * wave)))
+
+        self.assertLess(rms(0.0), rms(1.0) * 0.35)
+
+    def test_leaving_vib_clears_always_on_vibrato(self) -> None:
+        """VIB Y arms always-on vibrato; switching to LEAD must not leave it stuck."""
+        from types import SimpleNamespace
+
+        from kaoss import KaossPad
+
+        mt = self.midi_tone
+        engine = self.make_engine()
+        pad = KaossPad()
+        pad.program_id = "vib"
+        engine.set_tone(0.35)
+
+        class Harness:
+            def __init__(self) -> None:
+                self.engine = engine
+                self._kaoss = pad
+                self._kaoss_fx_snap = None
+                self._mode = "kaoss"
+                self._seq = SimpleNamespace(record_note=lambda *a, **k: None)
+
+            def _q_put(self, *a, **k):
+                pass
+
+            def _paint_kaoss_status(self):
+                pass
+
+            def _paint_kaoss(self):
+                pass
+
+            def _kaoss_draw_grid(self):
+                pass
+
+            def _mark_settings_dirty(self):
+                pass
+
+            def _kaoss_arm_tick(self):
+                pass
+
+            def _kaoss_midi_send(self, msg):
+                pass
+
+            def _kaoss_capture_fx(self):
+                return mt.MidiToneApp._kaoss_capture_fx(self)
+
+            def _kaoss_overlay_names(self, prog):
+                return mt.MidiToneApp._kaoss_overlay_names(self, prog)
+
+            def _kaoss_restore_fx(self):
+                return mt.MidiToneApp._kaoss_restore_fx(self)
+
+            def _kaoss_apply(self, events, *, began=False, ended=False, restore=None):
+                return mt.MidiToneApp._kaoss_apply(
+                    self, events, began=began, ended=ended, restore=restore
+                )
+
+            def _kaoss_apply_program(self, program_id):
+                return mt.MidiToneApp._kaoss_apply_program(self, program_id)
+
+        app = Harness()
+        app._kaoss_apply(pad.touch(0.5, 0.85), began=True)
+        _depth, _hz, always = engine.vib_state()
+        self.assertGreater(always, 0.5)
+
+        app._kaoss_apply(pad.release(), ended=True)
+        _depth, _hz, always = engine.vib_state()
+        self.assertEqual(always, 0.0)
+        self.assertAlmostEqual(engine.modulation_state()["tone"], 0.35, places=3)
+
+        app._kaoss_apply(pad.touch(0.4, 0.9), began=True)
+        self.assertGreater(engine.vib_state()[2], 0.5)
+        pad.hold = True
+        app._kaoss_apply_program("lead")
+        self.assertEqual(engine.vib_state()[2], 0.0)
+
+    def test_hold_keeps_voice_when_switching_to_filter(self) -> None:
+        """HOLD + LEAD, then FILTER, must keep the note so XY can audition FX."""
+        from types import SimpleNamespace
+
+        from kaoss import KaossPad
+
+        mt = self.midi_tone
+        engine = self.make_engine()
+        pad = KaossPad()
+        pad.program_id = "lead"
+
+        class Harness:
+            def __init__(self) -> None:
+                self.engine = engine
+                self._kaoss = pad
+                self._kaoss_fx_snap = None
+                self._mode = "kaoss"
+                self._seq = SimpleNamespace(record_note=lambda *a, **k: None)
+
+            def _q_put(self, *a, **k):
+                pass
+
+            def _paint_kaoss_status(self):
+                pass
+
+            def _paint_kaoss(self):
+                pass
+
+            def _kaoss_draw_grid(self):
+                pass
+
+            def _mark_settings_dirty(self):
+                pass
+
+            def _kaoss_arm_tick(self):
+                pass
+
+            def _kaoss_midi_send(self, msg):
+                pass
+
+            def _kaoss_capture_fx(self):
+                return mt.MidiToneApp._kaoss_capture_fx(self)
+
+            def _kaoss_overlay_names(self, prog):
+                return mt.MidiToneApp._kaoss_overlay_names(self, prog)
+
+            def _kaoss_restore_fx(self):
+                return mt.MidiToneApp._kaoss_restore_fx(self)
+
+            def _kaoss_apply(self, events, *, began=False, ended=False, restore=None):
+                return mt.MidiToneApp._kaoss_apply(
+                    self, events, began=began, ended=ended, restore=restore
+                )
+
+            def _kaoss_apply_program(self, program_id):
+                return mt.MidiToneApp._kaoss_apply_program(self, program_id)
+
+        app = Harness()
+        app._kaoss_apply(pad.touch(0.0, 0.8), began=True)
+        pad.set_hold(True)
+        app._kaoss_apply(pad.release(), ended=True)
+        self.assertTrue(engine._voices)
+        note = pad.sounding_note()
+        app._kaoss_apply_program("filter")
+        self.assertEqual(pad.program_id, "filter")
+        self.assertTrue(pad.is_active())
+        self.assertEqual(pad.sounding_note(), note)
+        self.assertTrue(engine._voices)
+
+    def test_morph_program_keeps_voice_blend(self) -> None:
+        """MORPH Y is a knob: leaving the pad must not snap back to the old mix."""
+        from types import SimpleNamespace
+
+        from kaoss import KaossPad
+
+        mt = self.midi_tone
+        engine = self.make_engine()
+        engine.set_morph(0.15)
+        pad = KaossPad()
+        pad.program_id = "morph"
+
+        class Harness:
+            def __init__(self) -> None:
+                self.engine = engine
+                self._kaoss = pad
+                self._kaoss_fx_snap = None
+                self._mode = "kaoss"
+                self._seq = SimpleNamespace(record_note=lambda *a, **k: None)
+
+            def _q_put(self, *a, **k):
+                pass
+
+            def _paint_kaoss_status(self):
+                pass
+
+            def _paint_kaoss(self):
+                pass
+
+            def _kaoss_draw_grid(self):
+                pass
+
+            def _mark_settings_dirty(self):
+                pass
+
+            def _kaoss_arm_tick(self):
+                pass
+
+            def _kaoss_midi_send(self, msg):
+                pass
+
+            def _kaoss_capture_fx(self):
+                return mt.MidiToneApp._kaoss_capture_fx(self)
+
+            def _kaoss_overlay_names(self, prog):
+                return mt.MidiToneApp._kaoss_overlay_names(self, prog)
+
+            def _kaoss_restore_fx(self):
+                return mt.MidiToneApp._kaoss_restore_fx(self)
+
+            def _kaoss_apply(self, events, *, began=False, ended=False, restore=None):
+                return mt.MidiToneApp._kaoss_apply(
+                    self, events, began=began, ended=ended, restore=restore
+                )
+
+            def _kaoss_apply_program(self, program_id):
+                return mt.MidiToneApp._kaoss_apply_program(self, program_id)
+
+        app = Harness()
+        app._kaoss_apply(pad.touch(0.5, 0.8), began=True)
+        self.assertAlmostEqual(engine.morph(), 0.8, places=3)
+        app._kaoss_apply(pad.release(), ended=True)
+        self.assertAlmostEqual(engine.morph(), 0.8, places=3)
+        app._kaoss_apply_program("lead")
+        self.assertAlmostEqual(engine.morph(), 0.8, places=3)
+
 
 if __name__ == "__main__":
     sys.exit(unittest.main())

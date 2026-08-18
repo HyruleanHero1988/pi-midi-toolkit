@@ -17,14 +17,18 @@ Thumbs.db
 !/presets/mpk-mini-ch3.json
 /takes/
 
-# Deploy artifacts
-/dist/
+# Deploy scratch. Committed Pi engines live in dist/armv7/ (see deploy/build-pi-bins.sh).
+/dist/*
+!/dist/armv7/
+!/dist/armv7/**
 .cargo/config.toml
 
 # Python
 tools/midi-tone/.venv/
 tools/midi-tone/.pi-credentials
+tools/midi-tone/.update-credentials
 tools/midi-tone/settings.json
+tools/midi-tone/version.json
 tools/midi-tone/user-presets/
 tools/midi-tone/user-wavetables/
 tools/midi-tone/songs/

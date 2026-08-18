@@ -1,6 +1,6 @@
 ﻿# Handoff — pi-midi-toolkit
 
-Updated: 2026-08-11
+Updated: 2026-08-17
 
 Open this folder as the Cursor workspace.
 
@@ -21,7 +21,7 @@ One kiosk UI. Soft-synth started as a Phase 0 hear-test; that framing is obsolet
 
 Modes today in `tools/midi-tone`:
 
-- **Synth / Seq / Pads / Songs / Presets / Log**
+- **Home / Synth / Seq / Pads / Kaoss / Songs / Presets / Log / Set**
 - **Map / Thru** — not in the kiosk yet; Rust `midi-engine` already does remap via CLI/JSON
 
 **Design law (jambox):** stay obvious under the hands. Winning vs gear you already own (picotracker, EP-class boxes) is *learning cost*, not feature count.
@@ -30,7 +30,11 @@ Modes today in `tools/midi-tone`:
 
 **Save voice:** VOICES / MORPH → **SAVE AS…** bakes morph + drive + tone into `.wav`, and keeps delay/reverb in a tiny `.fx.json` beside it.
 
+**Kaoss:** **KAOSS** is a full-screen XY pad (Kaossilator-style scale notes + original Kaoss Pad CC#12/13/92) for the onboard engine and/or USB→DIN. The surface is a 12×7 LED field (finger glow, trail, tap ripples, BPM pulse). **SCALE** opens a VOICES-style grid of full names. **FULL PAD** hides chrome; hold the top rail to exit. Model + color math live in `tools/midi-tone/kaoss.py`.
+
 **Sequencer:** **SEQ** replaced LOOPER. First take is the backbone (auto-trimmed; it locks the loop length), then REC again overdubs drums or keys over the running loop and KEEP / DROP / UNDO decide what survives. Model + transport live in `tools/midi-tone/sequencer.py` (no Tk / numpy / audio) so `test_sequencer.py`, `test_ui_seq.py`, and `test_phrase_pads.py` run headless.
+
+**SEQ Lite notes:** [PLAN.md](PLAN.md) “Inspiration: MIDIbox SEQ V4 Lite” — we already loop/overdub; we do **not** yet plan MIDI-domain loop FX (groove/echo/LFO/…), force-to-scale, or live transpose of a recording. Stolen later, not current work.
 
 **Jambox engine (Rust):** `jambox-core` (DSP + sample-accurate sequencer, no I/O) and `jambox-engine` (audio thread, MIDI, JSON control socket, RT hints) are scaffolded on `cursor/rust-jambox-engine-1052`. The kiosk talks to it via `tools/midi-tone/jambox_client.py`. Audio thread never locks, allocates, or does I/O; clips are freed on the control thread.
 
@@ -67,6 +71,8 @@ Still needs hardware / machine:
 ## Host setup
 
 Rust toolchain on PATH for engine work. midi-tone is Python venv on the Pi.
+
+When crates change, compile Pi binaries **before commit** (PC Linux/WSL or cloud-agent VM): `./deploy/build-pi-bins.sh` then `git add dist/armv7`. SET→UPDATE copies those files onto `bin/` on the box. Do not use Git LFS for them (archive downloads would get pointer files).
 
 ## Not related to play-my-synth
 

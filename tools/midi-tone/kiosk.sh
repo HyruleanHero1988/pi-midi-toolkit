@@ -18,6 +18,38 @@ unset WAYLAND_DISPLAY || true
 export PULSE_LATENCY_MSEC="${PULSE_LATENCY_MSEC:-100}"
 export PIPEWIRE_LATENCY="${PIPEWIRE_LATENCY:-1536/44100}"
 
+LOG=/tmp/midi-tone-kiosk.log
+echo "==== midi-tone kiosk $(date -Is) pid=$$ display=$DISPLAY ====" >>"$LOG"
+
+# --- PiDI splash FIRST (before xrandr / audio / touch setup) -----------------
+# LightDM display-setup.sh may already have started one; reuse it if so.
+SPLASH_PID=""
+_start_pidi_splash() {
+  if pgrep -f '[s]plash-x11.py' >/dev/null 2>&1; then
+    SPLASH_PID="$(pgrep -f '[s]plash-x11.py' | head -n1 || true)"
+    echo "pidi splash already running pid=$SPLASH_PID" >>"$LOG"
+    return 0
+  fi
+  if [[ -f "$DIR/branding/pidi-splash.png" && -f "$DIR/splash-x11.py" ]]; then
+    if command -v python3 >/dev/null 2>&1; then
+      python3 "$DIR/splash-x11.py" >>"$LOG" 2>&1 &
+      SPLASH_PID=$!
+      echo "pidi splash pid=$SPLASH_PID" >>"$LOG"
+      # Let the first fullscreen frame map before we touch the display
+      sleep 0.25
+    fi
+  fi
+}
+_stop_pidi_splash() {
+  if [[ -n "${SPLASH_PID}" ]] && kill -0 "$SPLASH_PID" 2>/dev/null; then
+    kill "$SPLASH_PID" 2>/dev/null || true
+  fi
+  SPLASH_PID=""
+  pkill -f '[s]plash-x11.py' >/dev/null 2>&1 || true
+  rm -f /tmp/pidi-splash.pid
+}
+_start_pidi_splash
+
 # Point Openbox at our minimal config (no panel / desktop icons)
 export OPENBOX_CONFIG_DIR="${OPENBOX_CONFIG_DIR:-$DIR/kiosk/openbox}"
 mkdir -p "$HOME/.config/openbox"
@@ -29,19 +61,21 @@ for f in rc.xml autostart; do
   fi
 done
 
-LOG=/tmp/midi-tone-kiosk.log
-echo "==== midi-tone kiosk $(date -Is) pid=$$ display=$DISPLAY ====" >>"$LOG"
-
-# Disable screen blanking / DPMS if xset exists
+# X screensaver / DPMS stays off so LightDM never races the app. midi-tone
+# blanks the TFT itself after idle (burn-in / image-retention guard).
 if command -v xset >/dev/null 2>&1; then
   xset s off >/dev/null 2>&1 || true
   xset -dpms >/dev/null 2>&1 || true
   xset s noblank >/dev/null 2>&1 || true
 fi
 
-# Prefer TFT70 DSI as the only 800x480 kiosk surface (HDMI off if also plugged)
+# Prefer TFT70 DSI as the only 800x480 kiosk surface (HDMI off if also plugged).
+# Do not kill the splash around this — a restart is what the user sees as a gap.
 if [[ -x "$DIR/prefer-tft70-display.sh" ]]; then
   bash "$DIR/prefer-tft70-display.sh" >>"$LOG" 2>&1 || true
+  if ! pgrep -f '[s]plash-x11.py' >/dev/null 2>&1; then
+    _start_pidi_splash
+  fi
 fi
 
 # Hide cursor for touch; mouse motion brings it back
@@ -104,6 +138,7 @@ if [[ "$need_wm" -eq 1 ]]; then
 fi
 
 cleanup() {
+  _stop_pidi_splash
   pkill -f '[m]idi_tone.py' >/dev/null 2>&1 || true
   if [[ -n "${WM_PID}" ]] && kill -0 "$WM_PID" 2>/dev/null; then
     kill "$WM_PID" 2>/dev/null || true
@@ -119,7 +154,34 @@ while true; do
     sleep 5
     continue
   fi
+  # Ensure splash is up for the whole Python/audio bring-up
+  if ! pgrep -f '[s]plash-x11.py' >/dev/null 2>&1; then
+    _start_pidi_splash
+  fi
+  MARK="kiosk-launch-$$-$(date +%s%N)"
+  echo "MARK $MARK" >>"$LOG"
+  # Watcher: drop X splash only after *this* launch paints (or timeout).
+  # splash-x11 is topmost, so it must retire after the app is ready.
+  (
+    for _ in $(seq 1 80); do
+      if awk -v m="$MARK" '
+          index($0, m) { seen = 1 }
+          seen && /ui: construction complete/ { found = 1; exit }
+          END { exit found ? 0 : 1 }
+        ' "$LOG" 2>/dev/null; then
+        sleep 0.3
+        break
+      fi
+      sleep 0.25
+    done
+    pkill -f '[s]plash-x11.py' >/dev/null 2>&1 || true
+    rm -f /tmp/pidi-splash.pid
+  ) &
+  SPLASH_WATCH_PID=$!
   ./run.sh "${ARGS[@]}" >>"$LOG" 2>&1 || true
+  kill "$SPLASH_WATCH_PID" 2>/dev/null || true
+  wait "$SPLASH_WATCH_PID" 2>/dev/null || true
   echo "midi-tone exited; restarting in 3s" >>"$LOG"
+  _start_pidi_splash
   sleep 3
 done

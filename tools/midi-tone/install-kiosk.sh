@@ -182,8 +182,15 @@ if [[ -d /etc/lightdm ]]; then
   fi
   CONF_SRC="$DIR/kiosk/lightdm/99-midi-tone-kiosk.conf"
   CONF_DST="/etc/lightdm/lightdm.conf.d/99-midi-tone-kiosk.conf"
+  DISPLAY_SETUP="$DIR/kiosk/display-setup.sh"
+  if [[ -f "$DISPLAY_SETUP" ]]; then
+    sed -i 's/\r$//' "$DISPLAY_SETUP" 2>/dev/null || true
+    chmod +x "$DISPLAY_SETUP" 2>/dev/null || true
+  fi
   TMP_L="$(mktemp)"
-  sed "s|REPLACE_USER|$USER_NAME|g" "$CONF_SRC" >"$TMP_L"
+  sed -e "s|REPLACE_USER|$USER_NAME|g" \
+      -e "s|REPLACE_DISPLAY_SETUP|$DISPLAY_SETUP|g" \
+      "$CONF_SRC" >"$TMP_L"
   sudo_run mkdir -p /etc/lightdm/lightdm.conf.d
   sudo_run install -m 644 "$TMP_L" "$CONF_DST"
   rm -f "$TMP_L"
@@ -197,13 +204,32 @@ EOF
 as_user chmod +x "$USER_HOME/.xsession"
 
 # 6) Passwordless shutdown/reboot from the kiosk POWER button
-echo "    sudoers: allow $USER_NAME systemctl poweroff/reboot (NOPASSWD)"
+echo "    sudoers: allow $USER_NAME pi-power.sh + systemctl poweroff/reboot"
+POWER_SH="$DIR/pi-power.sh"
+sed -i 's/\r$//' "$POWER_SH" 2>/dev/null || true
+chmod +x "$POWER_SH" 2>/dev/null || true
 SUDOERS_DST="/etc/sudoers.d/midi-tone-power"
 TMP_S="$(mktemp)"
-cat >"$TMP_S" <<EOF
-# midi-tone kiosk POWER button — installed by install-kiosk.sh
-$USER_NAME ALL=(root) NOPASSWD: /bin/systemctl poweroff, /bin/systemctl reboot, /usr/bin/systemctl poweroff, /usr/bin/systemctl reboot, /sbin/shutdown, /usr/sbin/shutdown, /sbin/reboot, /usr/sbin/reboot
-EOF
+# Keep this file simple — complex systemctl flag lines fail visudo and the
+# installer would delete the whole drop-in. Plain poweroff/reboot only.
+# Resolve real paths so sudo -n matches exactly.
+SYSTEMCTL_BIN="$(command -v systemctl || true)"
+POWEROFF_BIN="$(command -v poweroff || true)"
+REBOOT_BIN="$(command -v reboot || true)"
+{
+  echo "# midi-tone kiosk POWER button — installed by install-kiosk.sh"
+  echo "$USER_NAME ALL=(root) NOPASSWD: $POWER_SH reboot, $POWER_SH poweroff"
+  if [[ -n "$SYSTEMCTL_BIN" ]]; then
+    echo "$USER_NAME ALL=(root) NOPASSWD: $SYSTEMCTL_BIN poweroff, $SYSTEMCTL_BIN reboot"
+  fi
+  if [[ -n "$POWEROFF_BIN" && -n "$REBOOT_BIN" ]]; then
+    echo "$USER_NAME ALL=(root) NOPASSWD: $POWEROFF_BIN, $REBOOT_BIN"
+  elif [[ -n "$POWEROFF_BIN" ]]; then
+    echo "$USER_NAME ALL=(root) NOPASSWD: $POWEROFF_BIN"
+  elif [[ -n "$REBOOT_BIN" ]]; then
+    echo "$USER_NAME ALL=(root) NOPASSWD: $REBOOT_BIN"
+  fi
+} >"$TMP_S"
 sudo_run install -m 440 "$TMP_S" "$SUDOERS_DST"
 rm -f "$TMP_S"
 if command -v visudo >/dev/null 2>&1; then
@@ -216,6 +242,8 @@ fi
 echo
 echo "Kiosk boot enabled for user: $USER_NAME"
 echo "  Session: MIDI Tone Kiosk (Openbox + midi-tone --fullscreen)"
+echo "  Optional PiDI boot splash (Plymouth, from power-on):"
+echo "    $DIR/install-pidi-splash.sh && sudo reboot"
 echo "  Reboot to apply:  sudo reboot"
 echo
 echo "Manual test now (from a graphical login / SSH with DISPLAY):"

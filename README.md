@@ -3,7 +3,7 @@
 Raspberry Pi **MIDI appliance**: one kiosk UI for local soft-synth play **and**
 low-latency MIDI thru/remap to a hardware synth. **Not** related to play-my-synth.
 
-**North star:** power on → kiosk → modes (Synth / Seq / Log / Map). See [PLAN.md](PLAN.md).
+**North star:** power on → kiosk → modes (Synth / Seq / Pads / Kaoss / Log / Map). See [PLAN.md](PLAN.md).
 
 - **Kiosk UI (active):** [`tools/midi-tone`](tools/midi-tone) — wavetable synth, morph, overdub sequencer, Openbox kiosk
 - **Thru engine:** Rust `midi-engine` — channel/CC/velocity remap via CLI + JSON presets (Map mode UI next)
@@ -51,8 +51,8 @@ systemd unit: [`deploy/jambox-engine.service`](deploy/jambox-engine.service).
 
 ```bash
 cd tools/midi-tone
-python3 -m unittest test_sequencer test_phrase_pads test_synth_vibrato test_jambox_client
-xvfb-run -a python3 -m unittest test_ui_seq     # builds the real Tk screen with stub audio/MIDI
+python3 -m unittest test_sequencer test_kaoss test_phrase_pads test_synth_vibrato test_jambox_client test_screensaver test_updater
+xvfb-run -a python3 -m unittest test_ui_seq test_ui_kaoss test_ui_screensaver test_ui_settings     # builds the real Tk screen with stub audio/MIDI
 ```
 
 ## Build & test (Windows / host)
@@ -114,11 +114,25 @@ sudo bash deploy/setup-pi.sh
 
 ### From the PC (daily)
 
-Cross-compile is preferred for Pi 2. Easiest path is often [cross](https://github.com/cross-rs/cross) or a Linux/WSL linker — see [`.cargo/config.toml.example`](.cargo/config.toml.example).
+Cross-compile is preferred for Pi 2. **Standard procedure:** build the Pi
+ELFs on the PC (or a Cursor cloud-agent VM) *before* committing crate
+changes, so SET→UPDATE can install them:
 
 ```bash
-# Bash (Git Bash / WSL / Linux)
+./deploy/build-pi-bins.sh          # stages dist/armv7/{midi-engine,jambox-engine}
+git add dist/armv7 && git commit   # required for SET→UPDATE
+```
+
+SSH deploy still works the same way. Easiest linker path is often Debian/WSL
+`gcc-arm-linux-gnueabihf` (the script installs it when sudo is available) or
+[cross](https://github.com/cross-rs/cross) — see [`.cargo/config.toml.example`](.cargo/config.toml.example).
+
+```bash
+# Bash (Git Bash / WSL / Linux) — also stages dist/armv7 when TARGET is armv7
 TARGET=armv7-unknown-linux-gnueabihf ./deploy/deploy.sh pi@<pi-ip>
+
+# Or scp already-committed engines (no cargo):
+USE_STAGED=1 WITH_JAMBOX=1 ./deploy/deploy.sh pi@<pi-ip>
 
 # PowerShell
 .\deploy\deploy.ps1 -PiHost pi@<pi-ip> -Target armv7-unknown-linux-gnueabihf
