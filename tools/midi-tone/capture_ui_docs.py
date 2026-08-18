@@ -233,9 +233,9 @@ def main() -> int:
             lambda: (app._switch_mode("pads"), app._phrase_set_view("edit")),
         )
         shot("04-pads-play", lambda: app._phrase_set_view("play"))
-        shot("13-kaoss", lambda: app._kaoss_docs_pose())
-        shot("15-kaoss-play", lambda: app._kaoss_docs_play())
-        shot("14-kaoss-scales", lambda: app._kaoss_docs_scale_grid())
+        shot("14-kaoss", lambda: app._kaoss_docs_pose())
+        shot("16-kaoss-play", lambda: app._kaoss_docs_play())
+        shot("15-kaoss-scales", lambda: app._kaoss_docs_scale_grid())
         shot(
             "05-songs",
             lambda: (app._kaoss.set_show_all(False), app._switch_mode("songs")),
