@@ -4648,9 +4648,7 @@ class MidiToneApp:
                     if "bpm" in songs:
                         self._songs.set_bpm(float(songs["bpm"]))
             ui_mode = data.get("ui_mode")
-            if isinstance(ui_mode, str) and ui_mode in (
-                "synth", "seq", "pads", "songs", "log", "presets", "settings"
-            ):
+            if isinstance(ui_mode, str) and ui_mode in UI_MODES:
                 # Defer switch until chrome exists; store for caller
                 self._pending_restore_mode = ui_mode
             self._settings_dirty = False
