@@ -132,6 +132,7 @@ class KaossScreenTest(unittest.TestCase):
         app._kaoss.scale_id = "ionian"
         app._kaoss.show_all = False
         app._kaoss.show_axis_labels = True
+        app._kaoss.show_grid_lines = True
         app._kaoss.viz_style = "glow"
         app._kaoss_led_geom = None
         if app._kaoss_picker_open:
@@ -317,7 +318,29 @@ class KaossScreenTest(unittest.TestCase):
         self.assertNotIn("PITCH", names)
         self.assertNotIn("TONE", names)
 
-    def test_full_pad_hides_chrome_hold_exit_restores(self) -> None:
+    def test_settings_can_hide_grid_lines(self) -> None:
+        app = self.app
+        app._switch_mode("kaoss")
+        self.pump()
+        app._open_kaoss_settings()
+        self.pump()
+        app._kaoss_toggle_grid_lines()
+        self.pump()
+        self.assertFalse(app._kaoss.show_grid_lines)
+        self.assertIn("OFF", app._kaoss_settings_grid_btn.cget("text"))
+        app._close_kaoss_settings()
+        self.pump()
+        canvas = app._kaoss_canvas
+        app._kaoss_draw_grid()
+        self.assertFalse(canvas.find_withtag("grid"))
+        lines = [
+            item
+            for item in canvas.find_withtag("axis")
+            if canvas.type(item) == "line"
+        ]
+        self.assertFalse(lines)
+
+    def test_full_pad_hides_chrome_bottom_hold_peeks_footer(self) -> None:
         app = self.app
         app._switch_mode("kaoss")
         self.pump()
@@ -326,15 +349,53 @@ class KaossScreenTest(unittest.TestCase):
         self.pump()
         self.assertTrue(app._kaoss_play)
         self.assertFalse(bool(app._nav.winfo_ismapped()))
-        self.assertTrue(bool(app._kaoss_exit_bar.winfo_ismapped()))
-        app._kaoss_exit_press()
-        app._kaoss_exit_release()
+        canvas = app._kaoss_canvas
+        canvas.update_idletasks()
+        w = max(80, int(canvas.winfo_width()))
+        h = max(80, int(canvas.winfo_height()))
+
+        class Ev:
+            def __init__(self, x: int, y: int) -> None:
+                self.x = x
+                self.y = y
+                self.state = 0x0100
+
+        # Press on the edge and wait — still playing, not an exit.
+        app._kaoss_on_press(Ev(8, h // 2))
+        self.pump(0.85)
+        self.assertTrue(app._kaoss_play)
+        app._kaoss_on_release()
+        self.pump()
+
+        # Drag from the middle onto the left edge and stay — stay in full pad.
+        app._kaoss_on_press(Ev(w // 2, h // 2))
+        app._kaoss_on_move(Ev(w // 2, h // 2))
+        self.pump(0.2)
+        self.assertTrue(app._kaoss_play)
+        app._kaoss_on_move(Ev(8, h // 2))
+        self.pump(0.85)
+        self.assertTrue(app._kaoss_play)
+        self.assertFalse(bool(app._nav.winfo_ismapped()))
+        self.assertFalse(app._kaoss_play_footer)
+        app._kaoss_on_release()
+        self.pump()
+
+        # Drag onto the bottom edge and stay still — footer peeks, nav stays gone.
+        app._kaoss_on_press(Ev(w // 2, h // 2))
+        app._kaoss_on_move(Ev(w // 2, h // 2))
+        app._kaoss_on_move(Ev(w // 2, h - 8))
+        self.pump(0.85)
+        self.assertTrue(app._kaoss_play)
+        self.assertTrue(app._kaoss_play_footer)
+        self.assertTrue(bool(app._kaoss_footer.winfo_ismapped()))
+        self.assertFalse(bool(app._nav.winfo_ismapped()))
+        self.assertEqual(app._kaoss_play_btn.cget("text"), "EXIT")
+
+        # Touch the pad again — footer hides, still full pad.
+        app._kaoss_on_press(Ev(w // 2, h // 2))
         self.pump()
         self.assertTrue(app._kaoss_play)
-        app._kaoss_exit_press()
-        self.pump(0.85)
-        self.assertFalse(app._kaoss_play)
-        self.assertTrue(bool(app._nav.winfo_ismapped()))
+        self.assertFalse(app._kaoss_play_footer)
 
     def test_axis_labels_sit_on_bottom_and_left(self) -> None:
         app = self.app

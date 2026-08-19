@@ -290,8 +290,8 @@
         <tr><th>PROG / SCALE / KEY / OCT / GATE</th><td>Each opens a tap-to-pick grid (same idea as VOICES) instead of cycling. PROG picks a pad mapping — see <a href="#kaoss-programs">Programs</a>. SCALE / KEY / OCT lock the note grid. GATE arps note programs only.</td></tr>
         <tr><th>HOLD</th><td>Freeze the last XY after you lift — same idea as Kaossilator SHIFT+hold. On an FX program it also keeps the wet mix.</td></tr>
         <tr><th>BPM − / +</th><td>Gate arp tempo. Stay on the pad while you nudge.</td></tr>
-        <tr><th>FULL PAD</th><td>Hide nav + buttons so the pad fills the panel. Hold the top <code>HOLD TO EXIT</code> rail (~0.7s) to come back.</td></tr>
-        <tr><th>⚙</th><td>KAOSS settings: SHOW ALL (full factory scales + programs), X/Y axis labels, GRID LINES 1–5 px, PAD VIZ (GLOW / CELLS), LOCAL / USB / BOTH, MIDI channel 1–16. Saved in <code>settings.json</code>.</td></tr>
+        <tr><th>FULL PAD</th><td>Hide nav + buttons so the pad fills the panel. Hold still on the bottom edge (~0.7s) to peek the control bar; tap the pad to hide it. EXIT on that bar leaves full pad.</td></tr>
+        <tr><th>⚙</th><td>KAOSS settings: SHOW ALL, X/Y axis labels on/off, grid lines on/off (1–5 px), PAD VIZ (GLOW / CELLS), LOCAL / USB / BOTH, MIDI channel 1–16. Saved in <code>settings.json</code>.</td></tr>
       </table>
       <p class="note">Factory MIDI matches the original Kaoss Pad manual so a DIN synth can treat the Pi as a Kaoss controller: <strong>CC#12 = X</strong>, <strong>CC#13 = Y</strong>, <strong>CC#92 = pad touch</strong>. Playing while SEQ is recording captures the pad notes.</p>
     </section>
@@ -350,11 +350,11 @@
       <p class="lede">Opened from KAOSS → FULL PAD once program / scale / key are set. The pad takes the whole 800×480 panel.</p>
       <figure>
         <img src="screens/16-kaoss-play.png" alt="KAOSS full-pad play mode" width="800" height="480" />
-        <figcaption>16 — KAOSS full pad (HOLD TO EXIT rail at the top)</figcaption>
+        <figcaption>16 — KAOSS full pad (hold the bottom edge for controls)</figcaption>
       </figure>
       <table>
         <tr><th>Pad</th><td>Same XY play as the settings view, just larger. LED field, axes, HOLD / gate still apply.</td></tr>
-        <tr><th>HOLD TO EXIT</th><td>Press and hold the top rail for about 0.7s. A tap or a slide off the rail cancels.</td></tr>
+        <tr><th>Bottom edge</th><td>Drag onto the bottom of the screen and stay still about 0.7s. A gold strip counts down, then the control bar peeks. Sliding along the pad, or parking on the left/right/top, does not reveal it. Tap the pad to hide the bar; EXIT leaves full pad.</td></tr>
       </table>
     </section>
 

@@ -143,6 +143,17 @@ impl WaveBank {
         &self.morph_table
     }
 
+    /// Wavetable for a live voice group. Morph A/B always hear the blend, even
+    /// after the nearer endpoint (and FX slot) flips at 50%.
+    pub fn table_for_live_group(&self, group: usize) -> &[f32; TABLE_SIZE] {
+        let (a, b, _) = self.morph_pair();
+        if a != b && (group == a || group == b) {
+            self.morph_table()
+        } else {
+            self.table(group)
+        }
+    }
+
     /// Freeze the live morph blend as a new named voice (host side; allocates).
     pub fn bake_morph_as(&mut self, name: &str) -> usize {
         self.rebuild_morph();
@@ -216,6 +227,19 @@ mod tests {
         assert_eq!(bank.nearer_index(), 1);
         bank.set_morph(0.8);
         assert_eq!(bank.nearer_index(), 3);
+    }
+
+    #[test]
+    fn live_group_keeps_the_blend_after_the_halfway_flip() {
+        let mut bank = WaveBank::with_builtins();
+        bank.set_morph_pair(0, 2);
+        bank.set_morph(0.9);
+        bank.rebuild_morph();
+        let blended = bank.morph_table()[10];
+        assert!((bank.table_for_live_group(0)[10] - blended).abs() < 1e-6);
+        assert!((bank.table_for_live_group(2)[10] - blended).abs() < 1e-6);
+        assert!((bank.table_for_live_group(0)[10] - bank.table(0)[10]).abs() > 1e-3);
+        assert_eq!(bank.table_for_live_group(1)[10], bank.table(1)[10]);
     }
 
     #[test]

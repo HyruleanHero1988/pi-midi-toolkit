@@ -107,8 +107,10 @@ DEFAULT_MAX_VOICES = 12
 TABLE_SIZE = 2048
 TABLE_MASK = TABLE_SIZE - 1
 LOG_MAX = 60
-# Full-pad play mode: hold the top rail this long to get chrome back.
+# Full-pad: shove into the bottom edge and stay still this long to peek controls.
 KAOSS_PLAY_EXIT_MS = 700
+KAOSS_PLAY_BORDER_PX = 40
+KAOSS_PLAY_HOLD_SLOP_PX = 18
 EVENT_Q_MAX = 200
 # MIDI channel 10 (1-based) = index 9 — MPK drum pads
 DRUM_CHANNEL = 9
@@ -2023,6 +2025,8 @@ class SineEngine:
         self._remote_fx(JamboxClient.bus_target(), "delay_mix", float(snap["fx_delay_mix"]))
         self._remote_fx(JamboxClient.bus_target(), "reverb_size", float(snap["fx_reverb_size"]))
         self._remote_fx(JamboxClient.bus_target(), "reverb_mix", float(snap["fx_reverb_mix"]))
+
+    def bus_fx_snapshot(self) -> Dict[str, float]:
         with self._lock:
             return self._bus_fx.snapshot()
 
@@ -4553,16 +4557,18 @@ class MidiToneApp:
         self._kaoss_settings_frame: Optional[tk.Frame] = None
         self._kaoss_settings_all_btn: Optional[tk.Button] = None
         self._kaoss_settings_axes_btn: Optional[tk.Button] = None
+        self._kaoss_settings_grid_btn: Optional[tk.Button] = None
         self._kaoss_settings_grid_lbl: Optional[tk.Label] = None
         self._kaoss_settings_viz_btns: Dict[str, tk.Button] = {}
         self._kaoss_settings_out_btns: Dict[str, tk.Button] = {}
         self._kaoss_settings_ch_btns: Dict[int, tk.Button] = {}
         self._kaoss_play = False
+        self._kaoss_play_footer = False
         self._kaoss_header: Optional[tk.Frame] = None
         self._kaoss_footer: Optional[tk.Frame] = None
-        self._kaoss_exit_bar: Optional[tk.Frame] = None
-        self._kaoss_exit_lbl: Optional[tk.Label] = None
         self._kaoss_exit_after_id: Optional[str] = None
+        self._kaoss_play_exit_from_inside = False
+        self._kaoss_play_exit_anchor: Optional[Tuple[float, float]] = None
         self._pads_view = "edit"  # play | edit
         self._phrase_out_mode = "local"  # local | usb | both (shares Songs USB port)
         self._phrases.set_output_hooks(
@@ -7844,20 +7850,6 @@ class MidiToneApp:
 
         pad_wrap = tk.Frame(body, bg="#111111")
         pad_wrap.pack(fill=tk.BOTH, expand=True)
-        self._kaoss_exit_bar = tk.Frame(pad_wrap, bg="#1d2021", height=40)
-        self._kaoss_exit_bar.pack_propagate(False)
-        self._kaoss_exit_lbl = tk.Label(
-            self._kaoss_exit_bar,
-            text="HOLD TO EXIT",
-            font=("DejaVu Sans", 13, "bold"),
-            fg="#fbf1c7",
-            bg="#1d2021",
-        )
-        self._kaoss_exit_lbl.pack(fill=tk.BOTH, expand=True)
-        for widget in (self._kaoss_exit_bar, self._kaoss_exit_lbl):
-            widget.bind("<ButtonPress-1>", self._kaoss_exit_press)
-            widget.bind("<ButtonRelease-1>", self._kaoss_exit_release)
-            widget.bind("<Leave>", self._kaoss_exit_release)
         self._kaoss_canvas = tk.Canvas(
             pad_wrap,
             bg="#08040a",
@@ -7871,7 +7863,7 @@ class MidiToneApp:
         self._kaoss_canvas.bind("<ButtonPress-1>", self._kaoss_on_press)
         self._kaoss_canvas.bind("<B1-Motion>", self._kaoss_on_move)
         self._kaoss_canvas.bind("<ButtonRelease-1>", self._kaoss_on_release)
-        # Finger leaving the widget still counts as a lift
+        # Finger leaving chrome still counts as a lift; full-pad uses the screen edge to exit.
         self._kaoss_canvas.bind("<Leave>", self._kaoss_on_leave)
 
         row_a = tk.Frame(footer, bg="#111111")
@@ -7922,10 +7914,7 @@ class MidiToneApp:
             row_b, "BPM +", lambda: self._kaoss_nudge_bpm(5), bg="#3c3836"
         )
         self._kaoss_play_btn = self._mk_touch_btn(
-            row_b, "FULL PAD", self._kaoss_enter_play, bg="#689d6a"
-        )
-        self._kaoss_wipe_btn = self._mk_touch_btn(
-            row_b, "WIPE FX", self._kaoss_wipe_fx, bg="#9d0006"
+            row_b, "FULL PAD", self._kaoss_on_full_pad_btn, bg="#689d6a"
         )
         self._kaoss_gear_btn = self._mk_touch_btn(
             row_b, "⚙", self._open_kaoss_settings, bg="#504945"
@@ -7937,11 +7926,9 @@ class MidiToneApp:
             self._kaoss_play_btn,
         ):
             btn.configure(font=("DejaVu Sans", 12, "bold"), pady=8)
-        self._kaoss_wipe_btn.configure(font=("DejaVu Sans", 12, "bold"), pady=8, padx=8)
         self._kaoss_gear_btn.configure(font=("DejaVu Sans", 18, "bold"), pady=4, padx=12)
         # Pack gear first on the right so expand=True siblings cannot steal it.
         self._kaoss_gear_btn.pack(side=tk.RIGHT, fill=tk.Y, padx=2)
-        self._kaoss_wipe_btn.pack(side=tk.RIGHT, fill=tk.Y, padx=2)
         self._kaoss_gate_btn.pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2)
         bpm_minus.pack(side=tk.LEFT, fill=tk.BOTH, padx=2)
         self._kaoss_bpm_lbl.pack(side=tk.LEFT)
@@ -7960,6 +7947,7 @@ class MidiToneApp:
         if self._mode != "kaoss":
             self._switch_mode("kaoss")
         self._kaoss_play = True
+        self._kaoss_play_footer = False
         try:
             self._nav.pack_forget()
         except tk.TclError:
@@ -7968,22 +7956,18 @@ class MidiToneApp:
             self._kaoss_header.pack_forget()
         if self._kaoss_footer is not None:
             self._kaoss_footer.pack_forget()
-        if self._kaoss_exit_bar is not None and self._kaoss_canvas is not None:
-            self._kaoss_canvas.pack_forget()
-            self._kaoss_exit_bar.pack(side=tk.TOP, fill=tk.X)
-            self._kaoss_canvas.pack(fill=tk.BOTH, expand=True)
-        self._kaoss_paint_exit_bar(holding=False)
         self._kaoss_draw_grid()
         self._kaoss_arm_viz()
-        self._append_log("KAOSS FULL PAD — hold the top bar to exit")
+        self._append_log("KAOSS FULL PAD — hold the bottom edge for controls")
 
     def _kaoss_leave_play(self) -> None:
         if not self._kaoss_play:
             return
         self._kaoss_cancel_exit_hold()
         self._kaoss_play = False
-        if self._kaoss_exit_bar is not None:
-            self._kaoss_exit_bar.pack_forget()
+        self._kaoss_play_footer = False
+        self._kaoss_play_exit_from_inside = False
+        self._kaoss_play_exit_anchor = None
         try:
             self._nav.pack(side=tk.TOP, fill=tk.X, before=self._mode_host)
         except tk.TclError:
@@ -8001,41 +7985,111 @@ class MidiToneApp:
         self._kaoss_draw_grid()
         self._kaoss_arm_viz()
 
-    def _kaoss_paint_exit_bar(self, *, holding: bool) -> None:
-        bar = self._kaoss_exit_bar
-        lbl = self._kaoss_exit_lbl
-        if bar is None or lbl is None:
+    def _kaoss_on_full_pad_btn(self) -> None:
+        if self._kaoss_play:
+            self._kaoss_leave_play()
             return
-        color = "#9d0006" if holding else "#1d2021"
+        self._kaoss_enter_play()
+
+    def _kaoss_show_play_footer(self) -> None:
+        if not self._kaoss_play or self._kaoss_play_footer:
+            return
+        footer = self._kaoss_footer
+        if footer is None:
+            return
+        self._kaoss_play_footer = True
+        footer.pack(side=tk.BOTTOM, fill=tk.X, padx=6, pady=6)
+        self._paint_kaoss()
+        self._kaoss_draw_grid()
+
+    def _kaoss_hide_play_footer(self) -> None:
+        if not self._kaoss_play or not self._kaoss_play_footer:
+            return
+        self._kaoss_play_footer = False
+        if self._kaoss_footer is not None:
+            self._kaoss_footer.pack_forget()
+        self._paint_kaoss()
+        self._kaoss_draw_grid()
+
+    def _kaoss_event_in_play_bottom(self, event: object) -> bool:
+        canvas = self._kaoss_canvas
+        if canvas is None:
+            return False
+        h = max(1, int(canvas.winfo_height()))
+        y = float(getattr(event, "y", 0))
+        return y >= (h - KAOSS_PLAY_BORDER_PX)
+
+    def _kaoss_paint_play_exit(self, *, dwelling: bool) -> None:
+        canvas = self._kaoss_canvas
+        if canvas is None:
+            return
         try:
-            bar.configure(bg=color)
-            lbl.configure(
-                text="EXIT…" if holding else "HOLD TO EXIT",
-                bg=color,
-                fg="#fbf1c7",
-            )
+            canvas.delete("play-exit")
+            if dwelling:
+                w = max(1, int(canvas.winfo_width()))
+                h = max(1, int(canvas.winfo_height()))
+                canvas.create_rectangle(
+                    0,
+                    max(0, h - 8),
+                    w,
+                    h,
+                    fill="#fabd2f",
+                    outline="",
+                    tags="play-exit",
+                )
+                canvas.tag_raise("play-exit")
         except tk.TclError:
             pass
 
-    def _kaoss_exit_press(self, _event: object = None) -> str:
+    def _kaoss_watch_play_exit(self, event: object, *, touching: bool) -> None:
         if not self._kaoss_play:
-            return "break"
+            return
+        if not touching:
+            self._kaoss_play_exit_from_inside = False
+            self._kaoss_play_exit_anchor = None
+            self._kaoss_cancel_exit_hold()
+            return
+        in_bottom = self._kaoss_event_in_play_bottom(event)
+        if in_bottom:
+            if not self._kaoss_play_exit_from_inside:
+                return
+            x = float(getattr(event, "x", 0))
+            y = float(getattr(event, "y", 0))
+            anchor = self._kaoss_play_exit_anchor
+            if self._kaoss_exit_after_id is None or anchor is None:
+                self._kaoss_play_exit_anchor = (x, y)
+                self._kaoss_arm_play_exit()
+                return
+            slop = KAOSS_PLAY_HOLD_SLOP_PX
+            dx = x - anchor[0]
+            dy = y - anchor[1]
+            if (dx * dx + dy * dy) > (slop * slop):
+                self._kaoss_cancel_exit_hold()
+                self._kaoss_play_exit_anchor = (x, y)
+                self._kaoss_arm_play_exit()
+            return
+        self._kaoss_play_exit_from_inside = True
+        self._kaoss_play_exit_anchor = None
         self._kaoss_cancel_exit_hold()
-        self._kaoss_paint_exit_bar(holding=True)
+
+    def _kaoss_arm_play_exit(self) -> None:
+        if not self._kaoss_play or self._kaoss_exit_after_id is not None:
+            return
+        self._kaoss_paint_play_exit(dwelling=True)
         self._kaoss_exit_after_id = self.root.after(
             KAOSS_PLAY_EXIT_MS, self._kaoss_exit_hold_done
         )
-        return "break"
-
-    def _kaoss_exit_release(self, _event: object = None) -> str:
-        if self._kaoss_exit_after_id is not None:
-            self._kaoss_cancel_exit_hold()
-            self._kaoss_paint_exit_bar(holding=False)
-        return "break"
 
     def _kaoss_exit_hold_done(self) -> None:
         self._kaoss_exit_after_id = None
-        self._kaoss_leave_play()
+        self._kaoss_play_exit_anchor = None
+        self._kaoss_paint_play_exit(dwelling=False)
+        if self._kaoss.touching:
+            self._kaoss_on_release()
+        if self._kaoss_play_footer:
+            self._kaoss_hide_play_footer()
+        else:
+            self._kaoss_show_play_footer()
 
     def _kaoss_cancel_exit_hold(self) -> None:
         aid = self._kaoss_exit_after_id
@@ -8045,6 +8099,7 @@ class MidiToneApp:
                 self.root.after_cancel(aid)
             except Exception:
                 pass
+        self._kaoss_paint_play_exit(dwelling=False)
 
     def _kaoss_xy(self, event: tk.Event) -> Tuple[float, float]:  # type: ignore[name-defined]
         canvas = self._kaoss_canvas
@@ -8057,6 +8112,13 @@ class MidiToneApp:
         return x, y
 
     def _kaoss_on_press(self, event: tk.Event) -> str:  # type: ignore[name-defined]
+        if self._kaoss_play:
+            in_bottom = self._kaoss_event_in_play_bottom(event)
+            self._kaoss_play_exit_from_inside = not in_bottom
+            self._kaoss_play_exit_anchor = None
+            self._kaoss_cancel_exit_hold()
+            if self._kaoss_play_footer and not in_bottom:
+                self._kaoss_hide_play_footer()
         x, y = self._kaoss_xy(event)
         now = time.monotonic()
         self._kaoss_apply(self._kaoss.touch(x, y, now=now), began=True)
@@ -8076,9 +8138,11 @@ class MidiToneApp:
         self._kaoss_push_trail(x, y)
         if self._kaoss.viz_style != "glow":
             self._kaoss_draw_cursor(x, y, active=True)
+        self._kaoss_watch_play_exit(event, touching=True)
         return "break"
 
     def _kaoss_on_release(self, _event: object = None) -> str:
+        self._kaoss_watch_play_exit(_event or object(), touching=False)
         self._kaoss_apply(self._kaoss.release(), ended=not self._kaoss.is_active())
         if self._kaoss.is_active():
             self._kaoss_arm_tick()
@@ -8087,6 +8151,9 @@ class MidiToneApp:
         return "break"
 
     def _kaoss_on_leave(self, event: tk.Event) -> str:  # type: ignore[name-defined]
+        # Full-pad: the screen edge is the exit gesture — don't treat Leave as lift.
+        if self._kaoss_play:
+            return "break"
         # Leave fires when crossing chrome; only treat as lift if button is down
         if getattr(event, "state", 0) & 0x0100 and self._kaoss.touching:
             return self._kaoss_on_release(event)
@@ -8623,10 +8690,10 @@ class MidiToneApp:
             bg="#111111",
         ).pack(side=tk.RIGHT)
 
-        _wrap, canvas, inner, drag = self._build_touch_scroll_area(body, show_rail=True)
+        _wrap, canvas, inner, drag = self._build_touch_scroll_area(body)
 
         wipe = self._mk_scroll_select_btn(
-            inner, "WIPE PAD FX", self._kaoss_wipe_fx, drag, bg="#9d0006"
+            inner, "WIPE FX", self._kaoss_wipe_fx, drag, bg="#9d0006"
         )
         wipe.configure(font=("DejaVu Sans", 13, "bold"), pady=14)
         wipe.pack(fill=tk.X, pady=(0, 8))
@@ -8637,14 +8704,21 @@ class MidiToneApp:
             toggles, "SHOW ALL", self._kaoss_toggle_show_all, drag, bg="#3c3836"
         )
         self._kaoss_settings_all_btn.configure(font=("DejaVu Sans", 13, "bold"), pady=14)
-        self._kaoss_settings_all_btn.pack(
-            side=tk.LEFT, expand=True, fill=tk.BOTH, padx=(0, 4)
-        )
+        self._kaoss_settings_all_btn.pack(fill=tk.X)
+        overlay = tk.Frame(inner, bg="#111111")
+        overlay.pack(fill=tk.X, pady=(0, 8))
         self._kaoss_settings_axes_btn = self._mk_scroll_select_btn(
-            toggles, "AXES: ON", self._kaoss_toggle_axis_labels, drag, bg="#3c3836"
+            overlay, "AXES: ON", self._kaoss_toggle_axis_labels, drag, bg="#3c3836"
         )
         self._kaoss_settings_axes_btn.configure(font=("DejaVu Sans", 13, "bold"), pady=14)
         self._kaoss_settings_axes_btn.pack(
+            side=tk.LEFT, expand=True, fill=tk.BOTH, padx=(0, 4)
+        )
+        self._kaoss_settings_grid_btn = self._mk_scroll_select_btn(
+            overlay, "GRID: ON", self._kaoss_toggle_grid_lines, drag, bg="#3c3836"
+        )
+        self._kaoss_settings_grid_btn.configure(font=("DejaVu Sans", 13, "bold"), pady=14)
+        self._kaoss_settings_grid_btn.pack(
             side=tk.LEFT, expand=True, fill=tk.BOTH, padx=(4, 0)
         )
 
@@ -8771,6 +8845,7 @@ class MidiToneApp:
             self._kaoss_settings_frame = None
         self._kaoss_settings_all_btn = None
         self._kaoss_settings_axes_btn = None
+        self._kaoss_settings_grid_btn = None
         self._kaoss_settings_grid_lbl = None
         self._kaoss_settings_viz_btns = {}
         self._kaoss_settings_out_btns = {}
@@ -8799,6 +8874,14 @@ class MidiToneApp:
                 text="AXES: ON" if axes else "AXES: OFF",
                 bg=axes_color,
                 activebackground=axes_color,
+            )
+        grid_on = bool(self._kaoss.show_grid_lines)
+        grid_color = "#458588" if grid_on else "#3c3836"
+        if self._kaoss_settings_grid_btn is not None:
+            self._kaoss_settings_grid_btn.configure(
+                text="GRID: ON" if grid_on else "GRID: OFF",
+                bg=grid_color,
+                activebackground=grid_color,
             )
         if self._kaoss_settings_grid_lbl is not None:
             n = int(self._kaoss.grid_width)
@@ -8864,6 +8947,13 @@ class MidiToneApp:
         self._kaoss_draw_grid()
         self._mark_settings_dirty()
         self._append_log(f"KAOSS axis labels → {'ON' if on else 'OFF'}")
+
+    def _kaoss_toggle_grid_lines(self) -> None:
+        on = self._kaoss.toggle_show_grid_lines()
+        self._paint_kaoss_settings()
+        self._kaoss_draw_grid()
+        self._mark_settings_dirty()
+        self._append_log(f"KAOSS grid lines → {'ON' if on else 'OFF'}")
 
     def _kaoss_set_viz_style(self, style: str) -> None:
         self._kaoss.set_viz_style(style)
@@ -8948,6 +9038,15 @@ class MidiToneApp:
             )
         if self._kaoss_bpm_lbl is not None:
             self._kaoss_bpm_lbl.configure(text=str(int(round(self._kaoss.bpm))))
+        if self._kaoss_play_btn is not None:
+            if self._kaoss_play:
+                self._kaoss_play_btn.configure(
+                    text="EXIT", bg="#9d0006", activebackground="#9d0006"
+                )
+            else:
+                self._kaoss_play_btn.configure(
+                    text="FULL PAD", bg="#689d6a", activebackground="#689d6a"
+                )
 
     def _kaoss_draw_grid(self) -> None:
         canvas = self._kaoss_canvas
@@ -8961,28 +9060,37 @@ class MidiToneApp:
         h = max(1, int(canvas.winfo_height()))
         self._kaoss_ensure_leds(w, h)
         prog = self._kaoss.program()
-        regular, octave_w = grid_line_widths(self._kaoss.grid_width)
-        # Faint overlay so scale degrees stay readable on top of the LEDs
-        for frac, color in ((0.25, "#3a1528"), (0.5, "#5b203c"), (0.75, "#3a1528")):
-            y = int(h * (1.0 - frac))
-            stroke = octave_w if frac == 0.5 else regular
-            canvas.create_line(0, y, w, y, fill=color, width=stroke, tags="grid")
-        if prog.kind == "note":
-            notes = self._kaoss.notes()
-            key = self._kaoss.key % 12
-            xs = note_grid_xs(len(notes), w)
-            for i, x in enumerate(xs):
-                starts = notes[i] if i < len(notes) else None
-                octave = starts is not None and (starts % 12) == key
-                color = "#fb4934" if octave else "#4a2040"
-                canvas.create_line(
-                    x, 0, x, h, fill=color, width=octave_w if octave else regular, tags="grid"
-                )
-        else:
-            for frac in (0.25, 0.5, 0.75):
-                x = int(w * frac)
+        if self._kaoss.show_grid_lines:
+            regular, octave_w = grid_line_widths(self._kaoss.grid_width)
+            # Faint overlay so scale degrees stay readable on top of the LEDs
+            for frac, color in ((0.25, "#3a1528"), (0.5, "#5b203c"), (0.75, "#3a1528")):
+                y = int(h * (1.0 - frac))
                 stroke = octave_w if frac == 0.5 else regular
-                canvas.create_line(x, 0, x, h, fill="#3a1528", width=stroke, tags="grid")
+                canvas.create_line(0, y, w, y, fill=color, width=stroke, tags="grid")
+            if prog.kind == "note":
+                notes = self._kaoss.notes()
+                key = self._kaoss.key % 12
+                xs = note_grid_xs(len(notes), w)
+                for i, x in enumerate(xs):
+                    starts = notes[i] if i < len(notes) else None
+                    octave = starts is not None and (starts % 12) == key
+                    color = "#fb4934" if octave else "#4a2040"
+                    canvas.create_line(
+                        x,
+                        0,
+                        x,
+                        h,
+                        fill=color,
+                        width=octave_w if octave else regular,
+                        tags="grid",
+                    )
+            else:
+                for frac in (0.25, 0.5, 0.75):
+                    x = int(w * frac)
+                    stroke = octave_w if frac == 0.5 else regular
+                    canvas.create_line(
+                        x, 0, x, h, fill="#3a1528", width=stroke, tags="grid"
+                    )
         self._kaoss_draw_axes(canvas, w, h, prog)
         self._kaoss_paint_leds()
         if self._kaoss.is_active() or self._kaoss.hold:
@@ -8994,6 +9102,7 @@ class MidiToneApp:
         canvas.tag_raise("axis")
         canvas.tag_raise("axis-label")
         canvas.tag_raise("cursor")
+        canvas.tag_raise("play-exit")
 
     def _kaoss_axis_pct(self, param: Optional[str], pad_axis: float) -> Optional[int]:
         """0–100 for a pad-mapped 0..1 param. None = this axis is not a mix amount."""
@@ -9071,33 +9180,34 @@ class MidiToneApp:
 
     def _kaoss_draw_axes(self, canvas: tk.Canvas, w: int, h: int, _prog) -> None:
         """L-shaped XY legend — labels sit on the edge they control, not both left."""
-        spine = "#d3869b"
-        left = 22
-        bottom = max(28, h - 18)
-        top = 16
-        right = max(left + 40, w - 16)
-        canvas.create_line(
-            left,
-            bottom,
-            right,
-            bottom,
-            fill=spine,
-            width=2,
-            arrow=tk.LAST,
-            arrowshape=(10, 12, 5),
-            tags="axis",
-        )
-        canvas.create_line(
-            left,
-            bottom,
-            left,
-            top,
-            fill=spine,
-            width=2,
-            arrow=tk.LAST,
-            arrowshape=(10, 12, 5),
-            tags="axis",
-        )
+        if self._kaoss.show_grid_lines:
+            spine = "#d3869b"
+            left = 22
+            bottom = max(28, h - 18)
+            top = 16
+            right = max(left + 40, w - 16)
+            canvas.create_line(
+                left,
+                bottom,
+                right,
+                bottom,
+                fill=spine,
+                width=2,
+                arrow=tk.LAST,
+                arrowshape=(10, 12, 5),
+                tags="axis",
+            )
+            canvas.create_line(
+                left,
+                bottom,
+                left,
+                top,
+                fill=spine,
+                width=2,
+                arrow=tk.LAST,
+                arrowshape=(10, 12, 5),
+                tags="axis",
+            )
         self._kaoss_axis_label_cache = None
         self._kaoss_refresh_axis_labels()
 

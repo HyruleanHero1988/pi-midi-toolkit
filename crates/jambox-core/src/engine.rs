@@ -403,12 +403,7 @@ impl JamboxEngine {
         let group_count = voices.active_groups(&mut groups);
         for &group in groups.iter().take(group_count) {
             group_buf[..n].iter_mut().for_each(|s| *s = 0.0);
-            let table =
-                if group == bank.nearer_index() && bank.morph_pair().0 != bank.morph_pair().1 {
-                    bank.morph_table()
-                } else {
-                    bank.table(group)
-                };
+            let table = bank.table_for_live_group(group);
             voices.render_group(group, table, &mut group_buf[..n], ctx);
             if let Some(fx) = voice_fx.get_mut(group) {
                 if !fx.params().is_bypassed() {
