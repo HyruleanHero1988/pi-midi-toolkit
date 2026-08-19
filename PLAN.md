@@ -354,7 +354,7 @@ Dropped beats while looping (UI/GIL/wall-clock sequencer vs audio callback) are 
 | **Ship FX in Python** | Jam and measure so the rewrite targets a known sound | Done |
 | **`jambox-core`** | Wavetable + drums + FX + **sample-accurate** loop/phrase clock, no I/O | Done |
 | **`jambox-engine`** | Audio thread, MIDI in/out, control socket, RT hints | Done |
-| **UI cutover** | Tk becomes a thin client (mode switches, knobs, pad grid) over IPC | Client shipped; per-mode cutover next |
+| **UI cutover** | Tk is a thin client over IPC | **In progress on `feat/jambox-engine-kiosk-cutover`:** `jambox-engine` owns audio + MIDI ingest (hardware hotplug + socket-injected touch/KAOSS). Knob CC meaning lives in the engine (`MidiMap`); Tk mode buttons send `knob_map` and then display echoed MIDI. Python `SineEngine` is UI state + fallback if the daemon is absent. Lab default `--midi-in MPK` is only what is on the desk now — not a product lock-in. |
 
 #### Timing model (why this fixes dropped beats)
 
@@ -375,7 +375,9 @@ Clips are built on the control thread, handed over as a `Box`, and the **old all
 
 `jambox-engine bench` renders a worst-case jam (held voices + drum loop + FX on every bus) offline and prints percent-of-one-core against the PLAN's <15% budget. No audio device required, so it runs in CI and over SSH on the Pi.
 
-Remaining before the Python synth can retire: wavetable upload at runtime, preset/settings bridge, and moving each kiosk mode onto the client one at a time (Pads first — it has the most to gain).
+Remaining after this cutover: runtime wavetable upload (SAVE AS / locked pad timbres), phrase/SEQ clocks on the sample-accurate sequencer (clips over IPC), and retiring the Python PortAudio callback once fallback is unused. Pads still gain the most from moving clip launch onto the engine clock.
+
+**Later — MIDI device picker:** do not treat `MPK` as the only legal controller. Hotplug already matches a name substring (`--midi-in` / kiosk `port_filter`). Add a Settings (or Map) screen that lists live inputs (skip Midi Through / engine loopback), lets the user pick one, and persists that choice. Engine should adopt the new filter without a process restart. Same idea for MIDI out when more than one destination exists.
 
 ### Stress test (the limit detector)
 
@@ -630,6 +632,12 @@ Not building this yet. Capture the ladder so we don’t overbuild or forget it w
 3. **Touch path:** Stop requiring `enable-gpio-touch.sh` / `calibrate-touch-y.sh` (ADS7846-specific). Capacitance should need little/no libinput matrix; keep those scripts as **legacy** for the old panel only.
 4. **UI:** Keep designing for **800×480 fullscreen**. 7″ at the same pixel grid means **larger physical hit targets** — good for music. Don’t invent a second layout; optional later: slightly larger fonts / pad cells if 7″ feels sparse.
 5. **Tk touch code:** `_mk_touch_btn` currently debounces for ADS7846 bounce (press-only, 180 ms). On GT911, re-tune (likely shorter debounce; still press-to-fire, not click). Do **not** depend on multi-touch gestures for v1 — 5-point is a bonus, not a UX requirement.
+
+#### Later: multi-touch (do not block the Rust engine cutover)
+
+Tk on X11 maps the GT911 to **one pointer** (`ButtonPress-1` / `B1-Motion`). The panel is 5-point capable; Linux already exposes extra contacts as `ABS_MT_SLOT`. Extra Tk bindings will not see finger 2.
+
+When we want two notes on KAOSS (or pitch + FX), add a small **evdev sidecar** that reads `/dev/input` and feeds extra contacts into the app while Tk still draws. Do **not** rewrite the kiosk in pygame/GTK/Qt for this. HOLD remains the one-finger “keep sounding” workaround until that sidecar exists. Three-finger exit gestures are a worse fit than two independent notes.
 6. **Pi 2 risk:** DSI+GT911 is widely used on Pi 3/4/BTT Pi; **verify on Pi 2 on day one**. If DSI/touch is flaky only on Pi 2, that becomes a hardware-upgrade trigger (same app → Pi 4/5), not a product rethink.
 7. **Kiosk:** `kiosk.sh --fullscreen` should fill 800×480 with no letterboxing surprises; fix geometry default `800x420` → `800x480` when we cut over.
 

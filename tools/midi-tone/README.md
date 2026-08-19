@@ -225,7 +225,8 @@ the onboard wavetable engine **and** a hardware synth on USB→DIN.
 | Lift | Note-off — unless **HOLD** is on (last XY stays sounding) |
 | **PROG** / **SCALE** / **KEY** / **OCT** / **GATE** | Each opens a tap-to-pick grid instead of cycling. PROG picks a pad mapping (see **Programs** below). SCALE / KEY / OCT lock the note grid. GATE is a note-program arp only |
 | **FULL PAD** | Hides nav + buttons so the XY surface fills the 800×480 panel. **HOLD TO EXIT** on the slim top rail (~0.7s) brings chrome back |
-| **⚙** | KAOSS settings: SHOW ALL (every factory scale + program), X/Y axis labels, GRID LINES 1–5 px, PAD VIZ (GLOW / CELLS), OUT `LOCAL` / `USB` / `BOTH`, MIDI channel 1–16 |
+| **WIPE FX** | Drop a held pad note and clear leftover mix-bus delay / reverb / drive (also in ⚙) |
+| **⚙** | KAOSS settings: SHOW ALL (every factory scale + program), X/Y axis labels, GRID LINES 1–5 px, PAD VIZ (GLOW / CELLS), OUT `LOCAL` / `USB` / `BOTH`, MIDI channel 1–16. Drag or use ▲/▼ to scroll. |
 
 External synths see the original Kaoss Pad factory map: **CC#12 = X**, **CC#13 = Y**,
 **CC#92 = pad touch** (127 down / 0 up), plus note-on/off on the chosen channel.

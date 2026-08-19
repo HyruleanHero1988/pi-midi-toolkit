@@ -49,6 +49,7 @@ pub enum SynthParam {
     DrumDecay,
     DrumNoise,
     DrumTone,
+    DrumLevel,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

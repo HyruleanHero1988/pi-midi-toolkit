@@ -11,13 +11,19 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use jambox_core::{JamboxEngine, MidiOutSink, ScheduledCommand, MAX_BLOCK_COMMANDS};
+use jambox_core::{JamboxEngine, MidiOutSink, ScheduledCommand, WaveBank, MAX_BLOCK_COMMANDS};
 use tracing::info;
 
 use crate::bus::AudioSide;
 
-pub fn run(sample_rate: u32, block: usize, mut audio: AudioSide, running: Arc<AtomicBool>) {
-    let mut engine = JamboxEngine::new(sample_rate as f64);
+pub fn run(
+    sample_rate: u32,
+    block: usize,
+    mut audio: AudioSide,
+    bank: WaveBank,
+    running: Arc<AtomicBool>,
+) {
+    let mut engine = JamboxEngine::with_bank(sample_rate as f64, bank);
     engine.sync_fx_slots();
     let mut midi_out = MidiOutSink::new();
     let mut scheduled: Vec<ScheduledCommand> = Vec::with_capacity(MAX_BLOCK_COMMANDS);

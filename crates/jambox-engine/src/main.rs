@@ -10,12 +10,13 @@ mod ipc;
 mod midi;
 mod protocol;
 mod rt;
+mod waves;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
-use jambox_core::{Clip, ClipEvent, ClipEventKind, Command, JamboxEngine, Quantize, PPQ};
+use jambox_core::{Clip, ClipEvent, ClipEventKind, Command, JamboxEngine, Quantize, WaveBank, PPQ};
 use tracing::{error, info};
 
 #[derive(Parser)]
@@ -52,6 +53,12 @@ enum Cmd {
         /// Run without a sound card (host/CI testing of control + sequencing).
         #[arg(long)]
         null_audio: bool,
+        /// Directory of single-cycle `.wav` files (kiosk `wavetables/`).
+        #[arg(long, default_value = "")]
+        waves: String,
+        /// Extra wavetable dir (kiosk `user-wavetables/`). Later dirs add/replace names.
+        #[arg(long, default_value = "")]
+        user_waves: String,
     },
     /// Offline render benchmark — the PLAN's CPU headroom check, no device needed.
     Bench {
@@ -88,7 +95,19 @@ fn main() {
             tcp,
             rt,
             null_audio,
-        } => run(output, midi_in, midi_out, control, tcp, rt, null_audio),
+            waves,
+            user_waves,
+        } => run(
+            output,
+            midi_in,
+            midi_out,
+            control,
+            tcp,
+            rt,
+            null_audio,
+            waves,
+            user_waves,
+        ),
         Cmd::Bench {
             sample_rate,
             block,
@@ -123,6 +142,8 @@ fn run(
     tcp: bool,
     rt: bool,
     null_audio: bool,
+    waves: String,
+    user_waves: String,
 ) {
     let running = Arc::new(AtomicBool::new(true));
     {
@@ -133,7 +154,18 @@ fn run(
         });
     }
 
+    let mut bank = WaveBank::with_builtins();
+    if !waves.trim().is_empty() {
+        waves::load_dir(std::path::Path::new(&waves), &mut bank);
+    }
+    if !user_waves.trim().is_empty() {
+        waves::load_dir(std::path::Path::new(&user_waves), &mut bank);
+    }
+
     let (control_side, midi_in_side, midi_out_side, audio_side) = bus::channel();
+    let hub = Arc::new(ipc::ClientHub::default());
+    let midi_map = Arc::new(midi::MidiMap::default());
+    let midi_in_bus = Arc::new(std::sync::Mutex::new(midi_in_side));
 
     // RT hints before the stream so the callback thread inherits the policy.
     rt::apply_rt_hints(rt);
@@ -142,7 +174,13 @@ fn run(
     let _stream = if null_audio {
         let running = running.clone();
         std::thread::spawn(move || {
-            headless::run(48_000, audio::PREFERRED_BLOCK as usize, audio_side, running);
+            headless::run(
+                48_000,
+                audio::PREFERRED_BLOCK as usize,
+                audio_side,
+                bank,
+                running,
+            );
         });
         None
     } else {
@@ -153,7 +191,7 @@ fn run(
                 return;
             }
         };
-        match audio::start(&device, audio_side) {
+        match audio::start(&device, audio_side, bank) {
             Ok(stream) => {
                 info!(
                     sample_rate = stream.sample_rate,
@@ -169,13 +207,13 @@ fn run(
         }
     };
 
-    let _midi_conn = match midi::open_input(&midi_in, midi_in_side) {
-        Ok(c) => Some(c),
-        Err(err) => {
-            info!(%err, "midi: no input (control socket still works)");
-            None
-        }
-    };
+    midi::spawn_input(
+        midi_in,
+        Arc::clone(&midi_in_bus),
+        Arc::clone(&hub),
+        Arc::clone(&midi_map),
+        running.clone(),
+    );
     midi::spawn_output(midi_out, midi_out_side, running.clone());
 
     let endpoint = if tcp {
@@ -193,7 +231,14 @@ fn run(
 
     let ipc_running = running.clone();
     let ipc_thread = std::thread::spawn(move || {
-        ipc::serve(endpoint, control_side, ipc_running);
+        ipc::serve(
+            endpoint,
+            control_side,
+            hub,
+            midi_map,
+            midi_in_bus,
+            ipc_running,
+        );
     });
 
     while running.load(Ordering::Relaxed) {

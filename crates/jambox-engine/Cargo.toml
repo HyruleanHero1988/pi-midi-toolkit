@@ -22,6 +22,7 @@ clap = { workspace = true }
 ctrlc = { workspace = true }
 cpal = "0.15"
 rtrb = "0.3"
+hound = "3.5"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = { workspace = true }

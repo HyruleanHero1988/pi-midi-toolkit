@@ -22,7 +22,12 @@ use crate::DRUM_CHANNEL;
 /// Max MIDI events the engine emits per block (clip playback → USB out).
 pub const MAX_MIDI_OUT: usize = 128;
 /// Largest audio block the engine preallocates for.
-const MAX_BLOCK: usize = 2048;
+///
+/// bcm2835 Headphones with cpal `BufferSize::Default` often callbacks at the
+/// full ALSA buffer (~4410 frames at 44.1 kHz), not the period. Rendering only
+/// 2048 of those left a silent tail every callback — choppy audio on the Pi.
+pub const MAX_RENDER_BLOCK: usize = 8192;
+const MAX_BLOCK: usize = MAX_RENDER_BLOCK;
 /// Makeup gain before the soft limiter — Pi line/headphone out is timid.
 const OUTPUT_MAKEUP: f32 = 1.65;
 
@@ -107,6 +112,7 @@ pub struct JamboxEngine {
 
     tone: f32,
     level: f32,
+    drum_level: f32,
     attack_sec: f32,
     release_sec: f32,
     vib_depth_semis: f32,
@@ -119,7 +125,11 @@ pub struct JamboxEngine {
 
 impl JamboxEngine {
     pub fn new(sample_rate: f64) -> Self {
-        let bank = WaveBank::with_builtins();
+        Self::with_bank(sample_rate, WaveBank::with_builtins())
+    }
+
+    /// Host thread: pass a preloaded wavetable bank (AKWF dir, etc.).
+    pub fn with_bank(sample_rate: f64, bank: WaveBank) -> Self {
         let sr = sample_rate as f32;
         let voice_fx = (0..bank.len()).map(|_| FxUnit::new(sr)).collect();
         let drum_fx = (0..DRUM_MODEL_COUNT).map(|_| FxUnit::new(sr)).collect();
@@ -150,6 +160,7 @@ impl JamboxEngine {
             timeline: Vec::with_capacity(MAX_BLOCK_COMMANDS * 2),
             tone: 1.0,
             level: 0.85,
+            drum_level: 1.0,
             attack_sec: 0.012,
             release_sec: 0.030,
             vib_depth_semis: 0.0,
@@ -357,6 +368,7 @@ impl JamboxEngine {
             group_buf,
             tone,
             level,
+            drum_level,
             attack_sec,
             release_sec,
             vib_depth_semis,
@@ -439,7 +451,7 @@ impl JamboxEngine {
         }
 
         for i in 0..n {
-            out[i] = key_bus[i] + drum_bus[i];
+            out[i] = key_bus[i] + drum_bus[i] * *drum_level;
         }
         if !bus_fx.params().is_bypassed() {
             bus_fx.process(out);
@@ -566,6 +578,7 @@ impl JamboxEngine {
                 macros.tone = unit;
                 self.drums.set_macros(macros);
             }
+            SynthParam::DrumLevel => self.drum_level = unit,
         }
     }
 

@@ -3,15 +3,20 @@
 //! The callback body is deliberately boring — every expensive thing (allocating a
 //! clip, sending MIDI bytes, writing a log line) happens on another thread.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, SampleFormat, StreamConfig};
-use jambox_core::{JamboxEngine, MidiOutSink, ScheduledCommand, MAX_BLOCK_COMMANDS};
+use jambox_core::{
+    JamboxEngine, MidiOutSink, ScheduledCommand, WaveBank, MAX_BLOCK_COMMANDS, MAX_RENDER_BLOCK,
+};
 use tracing::{info, warn};
 
 use crate::bus::AudioSide;
 
-/// Preferred block size. Small enough to feel immediate, big enough for Pi 2.
-pub const PREFERRED_BLOCK: u32 = 256;
+/// Same ballpark as the Python kiosk (`MIDI_TONE_BLOCKSIZE=1536`).
+pub const PREFERRED_BLOCK: u32 = 1536;
+const SCRATCH_FRAMES: usize = MAX_RENDER_BLOCK;
 
 #[derive(Debug, thiserror::Error)]
 pub enum AudioError {
@@ -62,67 +67,80 @@ pub struct RunningStream {
 }
 
 /// Build and start the output stream.
-pub fn start(device: &Device, mut audio: AudioSide) -> Result<RunningStream, AudioError> {
+pub fn start(device: &Device, mut audio: AudioSide, bank: WaveBank) -> Result<RunningStream, AudioError> {
     let supported = device
         .default_output_config()
         .map_err(|e| AudioError::Config(e.to_string()))?;
     let sample_rate = supported.sample_rate().0;
     let channels = supported.channels();
-    let config = StreamConfig {
-        channels,
-        sample_rate: cpal::SampleRate(sample_rate),
-        buffer_size: cpal::BufferSize::Fixed(PREFERRED_BLOCK),
-    };
+    let format = supported.sample_format();
+    let (config, chosen) = pick_stream_config(channels, sample_rate);
 
     info!(
         device = %device.name().unwrap_or_default(),
         sample_rate,
         channels,
-        block = PREFERRED_BLOCK,
+        format = ?format,
+        buffer = %chosen,
         "audio: opening output"
     );
 
-    let mut engine = JamboxEngine::new(sample_rate as f64);
+    let mut engine = JamboxEngine::with_bank(sample_rate as f64, bank);
     engine.sync_fx_slots();
     let mut midi_out = MidiOutSink::new();
-    // Preallocated so the callback never grows a Vec.
     let mut scheduled: Vec<ScheduledCommand> = Vec::with_capacity(MAX_BLOCK_COMMANDS);
-    let mut mono: Vec<f32> = vec![0.0; 4096];
+    let mut mono: Vec<f32> = vec![0.0; SCRATCH_FRAMES];
 
     let err_fn = |err| warn!(%err, "audio stream error");
 
-    let stream = match supported.sample_format() {
+    let stream = match format {
         SampleFormat::F32 => device.build_output_stream(
             &config,
             move |data: &mut [f32], _| {
-                let channels = channels as usize;
-                let frames = data.len() / channels.max(1);
-                if frames > mono.len() {
-                    // Device handed us a bigger block than expected: render what we can
-                    // rather than allocating on the audio thread.
-                    data.iter_mut().for_each(|s| *s = 0.0);
-                    return;
-                }
-
-                drain(&mut audio, &mut engine, &mut scheduled);
-                let block = &mut mono[..frames];
-                engine.render(block, &scheduled, &mut midi_out);
-
-                for (frame, event) in midi_out.as_slice() {
-                    let _ = frame;
-                    // Full ring means the sender thread is behind; dropping is better
-                    // than blocking the audio callback.
-                    let _ = audio.midi_out.push(*event);
-                }
-
-                for (i, frame_out) in data.chunks_mut(channels).enumerate() {
-                    let sample = block[i];
-                    for slot in frame_out.iter_mut() {
-                        *slot = sample;
-                    }
-                }
-
-                let _ = audio.status.push(engine.status());
+                callback_body(
+                    data,
+                    channels as usize,
+                    &mut audio,
+                    &mut engine,
+                    &mut scheduled,
+                    &mut midi_out,
+                    &mut mono,
+                    |s| s,
+                );
+            },
+            err_fn,
+            None,
+        ),
+        SampleFormat::I16 => device.build_output_stream(
+            &config,
+            move |data: &mut [i16], _| {
+                callback_body(
+                    data,
+                    channels as usize,
+                    &mut audio,
+                    &mut engine,
+                    &mut scheduled,
+                    &mut midi_out,
+                    &mut mono,
+                    |s| (s.clamp(-1.0, 1.0) * 32767.0) as i16,
+                );
+            },
+            err_fn,
+            None,
+        ),
+        SampleFormat::U16 => device.build_output_stream(
+            &config,
+            move |data: &mut [u16], _| {
+                callback_body(
+                    data,
+                    channels as usize,
+                    &mut audio,
+                    &mut engine,
+                    &mut scheduled,
+                    &mut midi_out,
+                    &mut mono,
+                    |s| ((s.clamp(-1.0, 1.0) * 0.5 + 0.5) * 65535.0) as u16,
+                );
             },
             err_fn,
             None,
@@ -144,6 +162,70 @@ pub fn start(device: &Device, mut audio: AudioSide) -> Result<RunningStream, Aud
         sample_rate,
         channels,
     })
+}
+
+fn pick_stream_config(channels: u16, sample_rate: u32) -> (StreamConfig, String) {
+    // Fixed(256) is Invalid argument on bcm2835 Headphones. Default opens and
+    // typically yields ~100 ms / ~4410 frames — now fully rendered.
+    let config = StreamConfig {
+        channels,
+        sample_rate: cpal::SampleRate(sample_rate),
+        buffer_size: cpal::BufferSize::Default,
+    };
+    (config, "alsa-default".into())
+}
+
+/// Render one device block. `to_sample` is the only format-specific work.
+fn callback_body<S: Copy>(
+    data: &mut [S],
+    channels: usize,
+    audio: &mut AudioSide,
+    engine: &mut JamboxEngine,
+    scheduled: &mut Vec<ScheduledCommand>,
+    midi_out: &mut MidiOutSink,
+    mono: &mut [f32],
+    to_sample: impl Fn(f32) -> S,
+) {
+    let frames = data.len() / channels.max(1);
+    static LOGGED_FRAMES: AtomicBool = AtomicBool::new(false);
+    if !LOGGED_FRAMES.swap(true, Ordering::Relaxed) {
+        info!(frames, "audio: callback frames");
+    }
+    if frames == 0 {
+        return;
+    }
+    if frames > mono.len() {
+        warn!(frames, scratch = mono.len(), "audio: callback larger than scratch; silencing");
+        let zero = to_sample(0.0);
+        data.iter_mut().for_each(|s| *s = zero);
+        return;
+    }
+
+    drain(audio, engine, scheduled);
+    let mut offset = 0usize;
+    while offset < frames {
+        let n = (frames - offset).min(MAX_RENDER_BLOCK);
+        let cmds: &[ScheduledCommand] = if offset == 0 { scheduled } else { &[] };
+        let block = &mut mono[offset..offset + n];
+        engine.render(block, cmds, midi_out);
+        for (_frame, event) in midi_out.as_slice() {
+            let _ = audio.midi_out.push(*event);
+        }
+        offset += n;
+    }
+
+    for (i, frame_out) in data.chunks_mut(channels).enumerate() {
+        let sample = to_sample(block_sample(mono, i));
+        for slot in frame_out.iter_mut() {
+            *slot = sample;
+        }
+    }
+
+    let _ = audio.status.push(engine.status());
+}
+
+fn block_sample(mono: &[f32], i: usize) -> f32 {
+    mono.get(i).copied().unwrap_or(0.0)
 }
 
 /// Drain both command rings and any clip swaps. Allocation-free.
