@@ -27,6 +27,7 @@ Thumbs.db
 apps/pidi/.venv/
 apps/pidi/.pi-credentials
 apps/pidi/.update-credentials
+apps/pidi/.wifi-credentials
 apps/pidi/settings.json
 apps/pidi/version.json
 apps/pidi/user-presets/
@@ -34,6 +35,7 @@ apps/pidi/user-wavetables/
 apps/pidi/songs/
 apps/pidi/phrases/
 apps/pidi/archive/debug/
+apps/pidi/_pi-user-backup/
 __pycache__/
 *.pyc
 
