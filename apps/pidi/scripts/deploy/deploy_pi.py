@@ -157,7 +157,8 @@ def main() -> None:
 
         run(
             client,
-            f"cd {remote_dir} && find bin scripts -name '*.sh' -exec chmod +x {{}} + "
+            f"cd {remote_dir} && find . -name '*.sh' -type f -print0 | xargs -0 sed -i 's/\\r$//' "
+            f"&& find bin scripts -name '*.sh' -exec chmod +x {{}} + "
             f"&& chmod +x kiosk.sh run.sh launch-desktop.sh install-kiosk.sh "
             f"disable-kiosk.sh setup-venv.sh 2>/dev/null || true",
             check=False,
@@ -172,18 +173,27 @@ def main() -> None:
             )
             run(
                 client,
-                "pkill -f 'python -m pidi' || true; pkill -f midi_tone || true",
+                "pkill -f 'python -m pidi' || true; pkill -f midi_tone || true; "
+                "pkill -f kiosk.sh || true",
                 check=False,
             )
-            time.sleep(1)
+            time.sleep(1.5)
+            # setsid so SSH doesn't wait on the kiosk process group.
+            restart_cmd = (
+                f"cd {remote_dir} && export DISPLAY=:0 "
+                f"XDG_RUNTIME_DIR=/run/user/$(id -u) "
+                f"&& setsid ./kiosk.sh </dev/null >/tmp/midi-tone-kiosk.log 2>&1 & "
+                f"echo restarted:$!"
+            )
+            run(client, "bash -lc " + repr(restart_cmd), check=False)
+            time.sleep(4)
             run(
                 client,
-                f"bash -lc 'cd {remote_dir} && export DISPLAY=:0 "
-                f"XDG_RUNTIME_DIR=/run/user/$(id -u) && ./launch-desktop.sh'",
+                "pgrep -af 'kiosk\\.sh|midi-tone-kiosk|python -m pidi|midi_tone' || true",
                 check=False,
             )
             run(client, "tail -n 40 /tmp/midi-tone.log || true", check=False)
-            run(client, "tail -n 20 /tmp/midi-tone-kiosk.log || true", check=False)
+            run(client, "tail -n 30 /tmp/midi-tone-kiosk.log || true", check=False)
     finally:
         client.close()
     print("deploy done", flush=True)

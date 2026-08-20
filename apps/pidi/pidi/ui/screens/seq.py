@@ -9,6 +9,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import mido
 
+from pidi.domain.phrases import PHRASE_TRIG_LOOP, phrase_pad_label
+from pidi.sequencer import SEQ_EMPTY, SEQ_OVERDUB, SEQ_REC_BACKBONE
 
 
 class SeqScreenMixin:

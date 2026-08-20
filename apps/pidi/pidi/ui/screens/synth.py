@@ -8,7 +8,15 @@ import tkinter as tk
 from typing import Any, Dict, List, Optional, Tuple
 
 import mido
+import numpy as np
 
+from pidi.constants import (
+    SCOPE_CRT_WAVE,
+    SCOPE_MORPH_CYCLES,
+    SCOPE_REDRAW_DEBOUNCE_S,
+    SCOPE_REDRAW_MAX_WAIT_S,
+)
+from pidi.ui.scope import blank_waveform_on_canvas, draw_waveform_on_canvas
 
 
 class SynthScreenMixin:

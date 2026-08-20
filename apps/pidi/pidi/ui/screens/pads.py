@@ -9,6 +9,17 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import mido
 
+from pidi.constants import (
+    PHRASE_GRID_CELLS,
+    PHRASE_PAD_COUNT,
+    SONG_OUT_MODES,
+)
+from pidi.domain.phrases import (
+    PHRASE_GAIN_STEP,
+    PHRASE_TRIG_LOOP,
+    phrase_pad_label,
+    phrase_pad_tile_color,
+)
 
 
 class PadsScreenMixin:

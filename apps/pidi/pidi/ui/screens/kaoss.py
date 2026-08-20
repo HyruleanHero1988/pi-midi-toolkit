@@ -9,6 +9,35 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import mido
 
+from pidi.constants import (
+    KAOSS_PLAY_BORDER_PX,
+    KAOSS_PLAY_EXIT_MS,
+    KAOSS_PLAY_HOLD_SLOP_PX,
+    NOTE_NAMES,
+)
+from pidi.kaoss import (
+    GATE_PATTERNS,
+    KAOSS_OUT_MODES,
+    LED_COLS,
+    LED_ROWS,
+    PROGRAM_BY_ID,
+    ROOT_OCTAVE_MIDI,
+    SCALE_BY_ID,
+    VIZ_STYLE_LABELS,
+    VIZ_STYLES,
+    KaossEvent,
+    KaossProgram,
+    clamp01,
+    glow_radii,
+    glow_step,
+    grid_line_widths,
+    hsv_to_rgb,
+    note_grid_xs,
+    note_name as kaoss_note_name,
+    pad_led_hex,
+    program_hue,
+    rgb_hex,
+)
 
 
 class KaossScreenMixin:

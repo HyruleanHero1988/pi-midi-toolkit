@@ -1,6 +1,12 @@
 """chrome UI mixin for MidiToneApp."""
 from __future__ import annotations
 
+import time
+import tkinter as tk
+from typing import Optional, Tuple
+
+from pidi.constants import TOUCH_SCROLL_THRESH_PX
+
 
 class ChromeMixin:
     def _pack_screen_regions(

@@ -9,6 +9,17 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import mido
 
+from pidi.audio.drums import drum_model_for_note, mpk_note_for_phrase_cell
+from pidi.constants import (
+    DRUM_CHANNEL,
+    DRUM_SCOPE_SEC,
+    PHRASE_GRID_CELLS,
+    PHRASE_PAD_BASE,
+    SCOPE_CRT_BG,
+    SCOPE_CRT_WAVE,
+)
+from pidi.domain.phrases import phrase_pad_label
+from pidi.ui.scope import draw_waveform_on_canvas
 
 
 class KitScreenMixin:

@@ -15,6 +15,8 @@ from pidi.constants import (
     CC_TONE,
     CC_VIB_DEPTH,
     CC_VIB_RATE,
+    DRUM_CHANNEL,
+    KNOB_CCS,
 )
 from pidi.jambox_client import connect_or_spawn, midi_notice_to_message, prefer_python_engine
 

@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import mido
 
+from pidi.constants import HOME_TILES
 
 
 class HomeScreenMixin:

@@ -5,10 +5,10 @@ import math
 import pathlib
 import time
 import tkinter as tk
+from tkinter import ttk
 from typing import Any, Dict, List, Optional, Tuple
 
 import mido
-
 
 
 class LogScreenMixin:

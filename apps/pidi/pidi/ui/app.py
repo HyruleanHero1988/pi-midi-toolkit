@@ -33,7 +33,7 @@ from pidi.audio.drums import (
     render_drum_preview,
 )
 from pidi.audio.engine import SineEngine
-from pidi.audio.wavetable import load_wavetables
+from pidi.audio.wavetable import load_user_voice_fx_map, load_wavetables
 from pidi.constants import *  # noqa: F403
 from pidi.domain.phrases import (
     PhraseCell,

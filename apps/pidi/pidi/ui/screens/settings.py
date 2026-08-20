@@ -3,12 +3,16 @@ from __future__ import annotations
 
 import math
 import pathlib
+import sys
+import threading
 import time
 import tkinter as tk
 from typing import Any, Dict, List, Optional, Tuple
 
 import mido
 
+from pidi import updater
+from pidi.constants import SETTINGS_PATH
 
 
 class SettingsScreenMixin:
