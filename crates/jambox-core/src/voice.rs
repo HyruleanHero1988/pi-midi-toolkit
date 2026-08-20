@@ -181,8 +181,8 @@ impl VoicePool {
         ctx: VoiceContext,
     ) -> bool {
         let mut audible = false;
-        let attack_coef = one_pole_coef(ctx.attack_sec, ctx.sample_rate);
-        let release_coef = one_pole_coef(ctx.release_sec, ctx.sample_rate);
+        let attack_step = linear_env_step(ctx.attack_sec, ctx.sample_rate);
+        let release_step = linear_env_step(ctx.release_sec, ctx.sample_rate);
 
         for v in self.voices.iter_mut() {
             if !v.active || v.group != group {
@@ -193,12 +193,16 @@ impl VoicePool {
             let phase_inc = hz * TABLE_SIZE as f64 / ctx.sample_rate as f64;
 
             for sample in out.iter_mut() {
-                let coef = if v.target_amp > v.amp {
-                    attack_coef
+                if v.target_amp > v.amp {
+                    v.amp = (v.amp + attack_step * v.target_amp.max(0.05)).min(v.target_amp);
                 } else {
-                    release_coef
-                };
-                v.amp += (v.target_amp - v.amp) * coef;
+                    let ref_amp = if v.releasing {
+                        v.amp.max(1e-4)
+                    } else {
+                        v.amp.max(0.05)
+                    };
+                    v.amp = (v.amp - release_step * ref_amp).max(v.target_amp);
+                }
 
                 let i0 = v.phase as usize & TABLE_MASK;
                 let i1 = (i0 + 1) & TABLE_MASK;
@@ -221,9 +225,8 @@ impl VoicePool {
 }
 
 #[inline]
-fn one_pole_coef(seconds: f32, sample_rate: f32) -> f32 {
-    let n = (seconds.max(0.0005) * sample_rate).max(1.0);
-    (1.0 / n).min(1.0)
+fn linear_env_step(seconds: f32, sample_rate: f32) -> f32 {
+    1.0 / (seconds.max(0.0005) * sample_rate).max(1.0)
 }
 
 #[inline]

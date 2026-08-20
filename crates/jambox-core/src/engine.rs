@@ -30,6 +30,47 @@ pub const MAX_RENDER_BLOCK: usize = 8192;
 const MAX_BLOCK: usize = MAX_RENDER_BLOCK;
 /// Makeup gain before the soft limiter — Pi line/headphone out is timid.
 const OUTPUT_MAKEUP: f32 = 1.65;
+/// Extra kit bus gain, matching Python `DRUM_BUS_GAIN`.
+const DRUM_BUS_GAIN: f32 = 1.55;
+
+const ATTACK_SEC_MIN: f32 = 0.002;
+const ATTACK_SEC_MAX: f32 = 0.400;
+const RELEASE_SEC_MIN: f32 = 0.010;
+const RELEASE_SEC_MAX: f32 = 0.800;
+
+/// Exponential knob → seconds, matching Python `set_attack` / `set_release`.
+fn map_exp_time(unit: f32, min: f32, max: f32) -> f32 {
+    min * (max / min).powf(unit.clamp(0.0, 1.0))
+}
+
+/// Resonant lowpass for keys brightness (Kaoss Y / MPK tone knob).
+/// `tone` 0 = dark, 1 = open/bypass. Matches Python `apply_tone_lowpass`.
+fn apply_tone_lowpass(buf: &mut [f32], tone: f32, lp: &mut f32, bp: &mut f32, sample_rate: f32) {
+    if buf.is_empty() {
+        return;
+    }
+    let tone = tone.clamp(0.0, 1.0);
+    if tone >= 0.985 {
+        *lp = buf[buf.len() - 1];
+        *bp = 0.0;
+        return;
+    }
+    let sr = sample_rate.max(8000.0);
+    let fc = 90.0 * (8000.0_f32 / 90.0).powf(tone);
+    let fc = fc.min(sr * 0.14);
+    let f = (2.0 * std::f32::consts::PI * fc / sr).sin();
+    let damp = 0.38 + 0.62 * tone;
+    let mut l = *lp;
+    let mut b = *bp;
+    for s in buf.iter_mut() {
+        l += f * b;
+        let hp = *s - l - damp * b;
+        b += f * hp;
+        *s = l;
+    }
+    *lp = l;
+    *bp = b;
+}
 
 /// Frame-tagged MIDI produced by the engine (clip playback), for USB/DIN out.
 pub struct MidiOutSink {
@@ -117,9 +158,12 @@ pub struct JamboxEngine {
     release_sec: f32,
     vib_depth_semis: f32,
     vib_rate_hz: f32,
+    vib_mod: f32,
+    vib_always: f32,
     vib_phase: f64,
     bend_semis: f32,
-    tone_state: f32,
+    tone_lp: f32,
+    tone_bp: f32,
     status: EngineStatus,
 }
 
@@ -159,15 +203,18 @@ impl JamboxEngine {
             ],
             timeline: Vec::with_capacity(MAX_BLOCK_COMMANDS * 2),
             tone: 1.0,
-            level: 0.85,
+            level: 1.0,
             drum_level: 1.0,
             attack_sec: 0.012,
             release_sec: 0.030,
-            vib_depth_semis: 0.0,
+            vib_depth_semis: 0.5,
             vib_rate_hz: 5.0,
+            vib_mod: 0.0,
+            vib_always: 0.0,
             vib_phase: 0.0,
             bend_semis: 0.0,
-            tone_state: 0.0,
+            tone_lp: 0.0,
+            tone_bp: 0.0,
             status: EngineStatus::default(),
         }
     }
@@ -373,9 +420,12 @@ impl JamboxEngine {
             release_sec,
             vib_depth_semis,
             vib_rate_hz,
+            vib_mod,
+            vib_always,
             vib_phase,
             bend_semis,
-            tone_state,
+            tone_lp,
+            tone_bp,
             ..
         } = self;
 
@@ -383,11 +433,15 @@ impl JamboxEngine {
         key_bus[..n].iter_mut().for_each(|s| *s = 0.0);
         drum_bus[..n].iter_mut().for_each(|s| *s = 0.0);
 
-        // Vibrato is per-span so long blocks still modulate smoothly.
-        let vib = (*vib_phase).sin() as f32 * *vib_depth_semis;
-        *vib_phase += std::f64::consts::TAU * *vib_rate_hz as f64 * n as f64 / sr as f64;
-        if *vib_phase > std::f64::consts::TAU {
-            *vib_phase -= std::f64::consts::TAU;
+        // Wheel or screen — whichever asks for more, matching Python `max(_mod, _vib_always)`.
+        let vib_amt = (*vib_mod).max(*vib_always);
+        let mut vib = 0.0f32;
+        if vib_amt > 0.01 && *vib_depth_semis > 0.001 {
+            *vib_phase += std::f64::consts::TAU * *vib_rate_hz as f64 * n as f64 / sr as f64;
+            if *vib_phase > std::f64::consts::TAU {
+                *vib_phase %= std::f64::consts::TAU;
+            }
+            vib = (*vib_phase).sin() as f32 * *vib_depth_semis * vib_amt;
         }
 
         bank.rebuild_morph();
@@ -415,16 +469,8 @@ impl JamboxEngine {
             }
         }
 
-        // Tone (brightness) is a keys-only filter; drums have their own tone macro.
-        if *tone < 0.999 {
-            let coef = (0.02 + 0.98 * *tone).clamp(0.02, 1.0);
-            for s in key_bus[..n].iter_mut() {
-                *tone_state += (*s - *tone_state) * coef;
-                *s = *tone_state;
-            }
-        } else if n > 0 {
-            *tone_state = key_bus[n - 1];
-        }
+        // Tone (brightness) is a keys-only resonant lowpass; drums have their own tone macro.
+        apply_tone_lowpass(&mut key_bus[..n], *tone, tone_lp, tone_bp, sr);
 
         // Drums: per-model insert, then the shared kit bus.
         let mut models = [0usize; MAX_DRUM_HITS];
@@ -432,6 +478,9 @@ impl JamboxEngine {
         for &model_idx in models.iter().take(model_count) {
             group_buf[..n].iter_mut().for_each(|s| *s = 0.0);
             drums.render_model(DrumModel::from_index(model_idx), &mut group_buf[..n]);
+            for s in group_buf[..n].iter_mut() {
+                *s *= DRUM_BUS_GAIN;
+            }
             if let Some(fx) = drum_fx.get_mut(model_idx) {
                 if !fx.params().is_bypassed() {
                     fx.process(&mut group_buf[..n]);
@@ -552,10 +601,16 @@ impl JamboxEngine {
             SynthParam::Morph => self.bank.set_morph(unit),
             SynthParam::Tone => self.tone = unit,
             SynthParam::Level => self.level = unit,
-            SynthParam::Attack => self.attack_sec = 0.002 + unit * 0.398,
-            SynthParam::Release => self.release_sec = 0.010 + unit * 0.790,
-            SynthParam::VibratoDepth => self.vib_depth_semis = unit * 1.0,
-            SynthParam::VibratoRate => self.vib_rate_hz = 0.5 + unit * 12.0,
+            SynthParam::Attack => {
+                self.attack_sec = map_exp_time(unit, ATTACK_SEC_MIN, ATTACK_SEC_MAX)
+            }
+            SynthParam::Release => {
+                self.release_sec = map_exp_time(unit, RELEASE_SEC_MIN, RELEASE_SEC_MAX)
+            }
+            SynthParam::VibratoDepth => self.vib_depth_semis = unit * 2.0,
+            SynthParam::VibratoRate => self.vib_rate_hz = 1.0 + unit * 8.0,
+            SynthParam::VibratoMod => self.vib_mod = unit,
+            SynthParam::VibratoAlways => self.vib_always = unit,
             SynthParam::PitchBend => self.bend_semis = value.clamp(-24.0, 24.0),
             SynthParam::DrumPitch => {
                 macros.pitch = unit;
@@ -785,6 +840,63 @@ mod tests {
         assert!((e.fx_params(FxTarget::Drum(0)).delay_mix - 0.7).abs() < 1e-6);
         assert_eq!(e.fx_params(FxTarget::Bus).delay_mix, 0.0);
         assert_eq!(e.fx_params(FxTarget::Voice(0)).delay_mix, 0.0);
+    }
+
+    #[test]
+    fn tone_lowpass_mid_is_brighter_than_dark() {
+        let sr = 44100.0_f32;
+        let src: Vec<f32> = (0..512).map(|i| if i % 2 == 0 { 1.0 } else { -1.0 }).collect();
+        let mut dark = src.clone();
+        let mut mid = src.clone();
+        let mut lp_d = 0.0_f32;
+        let mut bp_d = 0.0_f32;
+        let mut lp_m = 0.0_f32;
+        let mut bp_m = 0.0_f32;
+        apply_tone_lowpass(&mut dark, 0.0, &mut lp_d, &mut bp_d, sr);
+        apply_tone_lowpass(&mut mid, 0.5, &mut lp_m, &mut bp_m, sr);
+        let peak = |v: &[f32]| v.iter().fold(0.0_f32, |m, x| m.max(x.abs()));
+        assert!(peak(&mid) > peak(&dark) * 1.2);
+    }
+
+    #[test]
+    fn attack_knob_uses_python_exponential_map() {
+        assert!((map_exp_time(0.0, ATTACK_SEC_MIN, ATTACK_SEC_MAX) - 0.002).abs() < 1e-6);
+        assert!((map_exp_time(1.0, ATTACK_SEC_MIN, ATTACK_SEC_MAX) - 0.400).abs() < 1e-6);
+        let mid = map_exp_time(0.5, ATTACK_SEC_MIN, ATTACK_SEC_MAX);
+        // Linear map would be ~0.201 s; Python's log curve is ~0.028 s.
+        assert!(mid < 0.04 && mid > 0.02);
+    }
+
+    #[test]
+    fn vibrato_stays_off_until_mod_or_always() {
+        let mut dry = engine();
+        let mut wet = engine();
+        for e in [&mut dry, &mut wet] {
+            e.apply(Command::SetSynth {
+                param: SynthParam::VibratoDepth,
+                value: 1.0,
+            });
+            e.apply(Command::NoteOn {
+                channel: 0,
+                note: 69,
+                velocity: 127,
+            });
+        }
+        wet.apply(Command::SetSynth {
+            param: SynthParam::VibratoAlways,
+            value: 1.0,
+        });
+        let mut dry_buf = vec![0.0f32; 2048];
+        let mut wet_buf = vec![0.0f32; 2048];
+        let mut midi = MidiOutSink::new();
+        dry.render(&mut dry_buf, &[], &mut midi);
+        wet.render(&mut wet_buf, &[], &mut midi);
+        let diff: f32 = dry_buf
+            .iter()
+            .zip(wet_buf.iter())
+            .map(|(a, b)| (a - b).abs())
+            .sum();
+        assert!(diff > 0.5, "always-on vibrato should detune vs gated-off, diff={diff}");
     }
 
     #[test]

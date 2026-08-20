@@ -4,7 +4,7 @@
 //! the master bus (see `PLAN.md` "Effects (insert + kit group + bus)"). Buffers are
 //! sized in [`FxUnit::new`]; `process` never allocates.
 
-const DELAY_MAX_SEC: f32 = 0.80;
+const DELAY_MAX_SEC: f32 = 1.0;
 const REVERB_MAX_SEC: f32 = 0.55;
 
 /// Plain-old-data FX amounts, all 0..1. Cheap to copy across the command ring.
@@ -34,7 +34,10 @@ impl Default for FxParams {
 impl FxParams {
     /// True when the unit would be a no-op, so `process` can be skipped entirely.
     pub fn is_bypassed(&self) -> bool {
-        self.drive <= 0.001 && self.delay_mix <= 0.001 && self.reverb_mix <= 0.001
+        self.drive <= 0.001
+            && self.delay_mix <= 0.001
+            && self.delay_fb <= 0.001
+            && self.reverb_mix <= 0.001
     }
 }
 
@@ -46,6 +49,7 @@ pub struct FxUnit {
     delay_pos: usize,
     reverb: Vec<f32>,
     reverb_pos: usize,
+    reverb_prev: f32,
 }
 
 impl FxUnit {
@@ -60,6 +64,7 @@ impl FxUnit {
             delay_pos: 0,
             reverb: vec![0.0; rlen],
             reverb_pos: 0,
+            reverb_prev: 0.0,
         }
     }
 
@@ -84,6 +89,7 @@ impl FxUnit {
         self.reverb.iter_mut().for_each(|v| *v = 0.0);
         self.delay_pos = 0;
         self.reverb_pos = 0;
+        self.reverb_prev = 0.0;
     }
 
     /// Process in place. Allocation-free; safe to call from the audio thread.
@@ -133,12 +139,18 @@ impl FxUnit {
             let fb = 0.25 + 0.45 * size;
             let mix = p.reverb_mix;
             let dry = 1.0 - mix;
+            let blend = if size > 0.05 { size.clamp(0.0, 1.0) } else { 0.0 };
             for s in buf.iter_mut() {
                 let mut wet = 0.0f32;
                 for (tap, gain) in taps.iter().zip(gains.iter()) {
                     let read = (self.reverb_pos + rlen - tap) % rlen;
                     wet += self.reverb[read] * gain;
                 }
+                if blend > 0.0 {
+                    let soft = 0.5 * (wet + self.reverb_prev);
+                    wet = wet * (1.0 - blend) + soft * blend;
+                }
+                self.reverb_prev = wet;
                 self.reverb[self.reverb_pos] = *s * 0.7 + wet * fb;
                 self.reverb_pos = (self.reverb_pos + 1) % rlen;
                 *s = *s * dry + wet * mix;
@@ -152,8 +164,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_params_are_bypassed() {
-        assert!(FxParams::default().is_bypassed());
+    fn default_params_leave_the_audible_mix_dry() {
+        // Defaults match Python: delay_fb is 0.35 so the delay line still runs
+        // (is_dry is false), but mix is 0 so the audible buffer is unchanged.
+        assert!(!FxParams::default().is_bypassed());
+        assert!(FxParams::default().delay_mix <= 0.001);
+        assert!(FxParams::default().reverb_mix <= 0.001);
+        assert!(FxParams::default().drive <= 0.001);
     }
 
     #[test]

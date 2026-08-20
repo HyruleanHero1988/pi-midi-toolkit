@@ -1298,6 +1298,8 @@ class SineEngine:
             release = float(self._release_sec)
             vib_depth = float(self._vib_depth_semis)
             vib_hz = float(self._vib_hz)
+            vib_always = float(self._vib_always)
+            vib_mod = float(self._mod)
             bend = float(self._bend_semitones)
             drum_pitch = float(self._drum_pitch)
             drum_decay = float(self._drum_decay)
@@ -1324,6 +1326,8 @@ class SineEngine:
         client.synth("release", max(0.0, min(1.0, release_u)))
         client.synth("vibrato_depth", max(0.0, min(1.0, vib_depth / 2.0)))
         client.synth("vibrato_rate", max(0.0, min(1.0, (vib_hz - 1.0) / 8.0)))
+        client.synth("vibrato_always", vib_always)
+        client.synth("vibrato_mod", vib_mod)
         client.synth("pitch_bend", bend)
         client.synth("drum_pitch", drum_pitch)
         client.synth("drum_decay", drum_decay)
@@ -1595,6 +1599,8 @@ class SineEngine:
     def set_mod_wheel(self, value: int) -> None:
         with self._lock:
             self._mod = max(0.0, min(1.0, value / 127.0))
+            mod = float(self._mod)
+        self._remote_synth("vibrato_mod", mod)
 
     def set_morph(self, value: float) -> None:
         """Blend A→B: 0..1 (or MIDI 0..127 if > 1)."""
@@ -1742,7 +1748,9 @@ class SineEngine:
         """0 = mod wheel gates vibrato (as before); 1 = always on at set depth."""
         with self._lock:
             self._vib_always = max(0.0, min(1.0, float(amount)))
-            return float(self._vib_always)
+            out = float(self._vib_always)
+        self._remote_synth("vibrato_always", out)
+        return out
 
     def nudge_vib_depth(self, delta_semis: float) -> float:
         with self._lock:

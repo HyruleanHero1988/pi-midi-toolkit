@@ -309,6 +309,8 @@ fn parse_synth_param(name: &str) -> Option<SynthParam> {
         "release" => SynthParam::Release,
         "vibrato_depth" => SynthParam::VibratoDepth,
         "vibrato_rate" => SynthParam::VibratoRate,
+        "vibrato_mod" => SynthParam::VibratoMod,
+        "vibrato_always" => SynthParam::VibratoAlways,
         "pitch_bend" => SynthParam::PitchBend,
         "drum_pitch" => SynthParam::DrumPitch,
         "drum_decay" => SynthParam::DrumDecay,

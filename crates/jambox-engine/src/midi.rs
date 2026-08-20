@@ -111,6 +111,7 @@ impl MidiMap {
             }),
             MidiEvent::NoteOff { channel, note, .. } => Some(Command::NoteOff { channel, note }),
             MidiEvent::PitchBend { value, .. } => {
+                // ±2 semitones, same as Python `_bend_range`.
                 let semis = ((value as f32) - 8192.0) / 8192.0 * 2.0;
                 Some(Command::SetSynth {
                     param: SynthParam::PitchBend,
@@ -127,8 +128,9 @@ impl MidiMap {
     fn interpret_cc(&self, controller: u8, value: u8) -> Option<Command> {
         let unit = (value as f32 / 127.0).clamp(0.0, 1.0);
         if controller == CC_MOD {
+            // Wheel scales existing depth; it must not overwrite Knob 5.
             return Some(Command::SetSynth {
-                param: SynthParam::VibratoDepth,
+                param: SynthParam::VibratoMod,
                 value: unit,
             });
         }
@@ -144,7 +146,7 @@ impl MidiMap {
                 CC_LEVEL => {
                     return Some(Command::SetSynth {
                         param: SynthParam::Level,
-                        value: unit,
+                        value: unit.powf(1.15),
                     });
                 }
                 _ => return None,
@@ -161,7 +163,12 @@ impl MidiMap {
                 CC_TONE => SynthParam::DrumTone,
                 CC_ATTACK => SynthParam::DrumDecay,
                 CC_RELEASE => SynthParam::DrumNoise,
-                CC_LEVEL => SynthParam::DrumLevel,
+                CC_LEVEL => {
+                    return Some(Command::SetSynth {
+                        param: SynthParam::DrumLevel,
+                        value: unit.powf(1.15),
+                    });
+                },
                 _ => return None,
             };
             return Some(Command::SetSynth { param, value: unit });
@@ -173,7 +180,12 @@ impl MidiMap {
             CC_RELEASE => SynthParam::Release,
             CC_VIB_DEPTH => SynthParam::VibratoDepth,
             CC_VIB_RATE => SynthParam::VibratoRate,
-            CC_LEVEL => SynthParam::Level,
+            CC_LEVEL => {
+                return Some(Command::SetSynth {
+                    param: SynthParam::Level,
+                    value: unit.powf(1.15),
+                });
+            }
             _ => return None,
         };
         Some(Command::SetSynth { param, value: unit })
@@ -396,6 +408,25 @@ mod tests {
                 channel: 0,
                 note: 60
             })
+        );
+    }
+
+    #[test]
+    fn mod_wheel_scales_vibrato_instead_of_replacing_depth() {
+        let map = MidiMap::default();
+        let command = map
+            .interpret(MidiEvent::ControlChange {
+                channel: 0,
+                controller: CC_MOD,
+                value: 127,
+            })
+            .unwrap();
+        assert_eq!(
+            command,
+            Command::SetSynth {
+                param: SynthParam::VibratoMod,
+                value: 1.0
+            }
         );
     }
 
