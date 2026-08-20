@@ -23,20 +23,24 @@ Thumbs.db
 !/dist/armv7/**
 .cargo/config.toml
 
-# Python
+# Python / PiDI kiosk
+apps/pidi/.venv/
+apps/pidi/.pi-credentials
+apps/pidi/.update-credentials
+apps/pidi/settings.json
+apps/pidi/version.json
+apps/pidi/user-presets/
+apps/pidi/user-wavetables/
+apps/pidi/songs/
+apps/pidi/phrases/
+apps/pidi/archive/debug/
+__pycache__/
+*.pyc
+
+# Legacy path (pre apps/pidi move)
 tools/midi-tone/.venv/
 tools/midi-tone/.pi-credentials
 tools/midi-tone/.update-credentials
-tools/midi-tone/settings.json
-tools/midi-tone/version.json
-tools/midi-tone/user-presets/
-tools/midi-tone/user-wavetables/
-tools/midi-tone/songs/
-tools/midi-tone/phrases/
-tools/midi-tone/_*.py
-tools/midi-tone/_*.txt
-__pycache__/
-*.pyc
 
 # Local Cursor state (plan copy lives in PLAN.md)
 .cursor/
