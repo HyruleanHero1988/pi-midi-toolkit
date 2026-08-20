@@ -26,6 +26,7 @@ HERE = pathlib.Path(__file__).resolve().parents[2]  # apps/pidi deploy root
 CREDS = HERE / ".pi-credentials"
 
 FILES = [
+    "VERSION",
     "midi_tone.py",
     "kiosk.sh",
     "run.sh",
@@ -166,33 +167,43 @@ def main() -> None:
         run(client, f"bash {remote_dir}/scripts/install/install-desktop-shortcut.sh", check=False)
 
         if args.restart:
+            # Never `systemctl restart lightdm` — on this Pi it can hang mid-stop
+            # and leave a blank panel. Keep LightDM/X; only recycle the app so
+            # the existing kiosk.sh loop picks up new code.
             run(
                 client,
-                "pgrep -af 'kiosk\\.sh|midi-tone-kiosk|python -m pidi|midi_tone' || true",
+                f"bash {remote_dir}/scripts/session/ensure-lightdm.sh || true",
                 check=False,
             )
             run(
                 client,
-                "pkill -f 'python -m pidi' || true; pkill -f midi_tone || true; "
-                "pkill -f kiosk.sh || true",
+                "pgrep -af 'kiosk\\.sh|midi-tone-kiosk|pidi --fullscreen|midi_tone' || true",
                 check=False,
             )
-            time.sleep(1.5)
-            # setsid so SSH doesn't wait on the kiosk process group.
-            restart_cmd = (
-                f"cd {remote_dir} && export DISPLAY=:0 "
-                f"XDG_RUNTIME_DIR=/run/user/$(id -u) "
-                f"&& setsid ./kiosk.sh </dev/null >/tmp/midi-tone-kiosk.log 2>&1 & "
-                f"echo restarted:$!"
+            run(
+                client,
+                "pkill -f 'pidi --fullscreen' || true; pkill -f '[m]idi_tone.py' || true",
+                check=False,
             )
-            run(client, "bash -lc " + repr(restart_cmd), check=False)
+            time.sleep(3)
+            run(
+                client,
+                "pgrep -af 'kiosk\\.sh|pidi --fullscreen|midi_tone' || true",
+                check=False,
+            )
+            # If no kiosk loop remains (manual session), start one without touching DM.
+            run(
+                client,
+                "bash -lc "
+                + repr(
+                    f"pgrep -f '/midi-tone/bin/kiosk.sh|/midi-tone/kiosk.sh' >/dev/null || "
+                    f"(cd {remote_dir} && export DISPLAY=:0 "
+                    f"XDG_RUNTIME_DIR=/run/user/$(id -u) && "
+                    f"setsid ./kiosk.sh </dev/null >>/tmp/midi-tone-kiosk.log 2>&1 & echo started:$!)"
+                ),
+                check=False,
+            )
             time.sleep(4)
-            run(
-                client,
-                "pgrep -af 'kiosk\\.sh|midi-tone-kiosk|python -m pidi|midi_tone' || true",
-                check=False,
-            )
-            run(client, "tail -n 40 /tmp/midi-tone.log || true", check=False)
             run(client, "tail -n 30 /tmp/midi-tone-kiosk.log || true", check=False)
     finally:
         client.close()

@@ -219,11 +219,17 @@ TMP_S="$(mktemp)"
 SYSTEMCTL_BIN="$(command -v systemctl || true)"
 POWEROFF_BIN="$(command -v poweroff || true)"
 REBOOT_BIN="$(command -v reboot || true)"
+ENSURE_LD="$DIR/scripts/session/ensure-lightdm.sh"
+sed -i 's/\r$//' "$ENSURE_LD" 2>/dev/null || true
+chmod +x "$ENSURE_LD" 2>/dev/null || true
 {
   echo "# midi-tone kiosk POWER button — installed by install-kiosk.sh"
   echo "$USER_NAME ALL=(root) NOPASSWD: $POWER_SH reboot, $POWER_SH poweroff"
+  echo "$USER_NAME ALL=(root) NOPASSWD: $ENSURE_LD, $ENSURE_LD --force-start"
   if [[ -n "$SYSTEMCTL_BIN" ]]; then
     echo "$USER_NAME ALL=(root) NOPASSWD: $SYSTEMCTL_BIN poweroff, $SYSTEMCTL_BIN reboot"
+    # Watchdog / recovery — start + reset-failed only (never restart; that hung this Pi)
+    echo "$USER_NAME ALL=(root) NOPASSWD: $SYSTEMCTL_BIN start lightdm, $SYSTEMCTL_BIN start --no-block lightdm, $SYSTEMCTL_BIN reset-failed lightdm, $SYSTEMCTL_BIN is-active lightdm"
   fi
   if [[ -n "$POWEROFF_BIN" && -n "$REBOOT_BIN" ]]; then
     echo "$USER_NAME ALL=(root) NOPASSWD: $POWEROFF_BIN, $REBOOT_BIN"
@@ -242,9 +248,24 @@ if command -v visudo >/dev/null 2>&1; then
   }
 fi
 
+# 7) LightDM watchdog — recovers a blank panel if the DM was left stopped
+echo "    systemd: midi-tone-lightdm-watchdog.timer"
+WATCH_SVC_SRC="$DIR/kiosk/midi-tone-lightdm-watchdog.service"
+WATCH_TMR_SRC="$DIR/kiosk/midi-tone-lightdm-watchdog.timer"
+WATCH_SVC_DST="/etc/systemd/system/midi-tone-lightdm-watchdog.service"
+WATCH_TMR_DST="/etc/systemd/system/midi-tone-lightdm-watchdog.timer"
+TMP_W="$(mktemp)"
+sed "s|/home/ray/midi-tone|$DIR|g" "$WATCH_SVC_SRC" >"$TMP_W"
+sudo_run install -m 644 "$TMP_W" "$WATCH_SVC_DST"
+rm -f "$TMP_W"
+sudo_run install -m 644 "$WATCH_TMR_SRC" "$WATCH_TMR_DST"
+sudo_run systemctl daemon-reload >/dev/null 2>&1 || true
+sudo_run systemctl enable --now midi-tone-lightdm-watchdog.timer >/dev/null 2>&1 || true
+
 echo
 echo "Kiosk boot enabled for user: $USER_NAME"
 echo "  Session: MIDI Tone Kiosk (Openbox + midi-tone --fullscreen)"
+echo "  LightDM watchdog timer: midi-tone-lightdm-watchdog.timer (every 30s)"
 echo "  Optional PiDI boot splash (Plymouth, from power-on):"
 echo "    $DIR/scripts/install/install-pidi-splash.sh && sudo reboot"
 echo "  Reboot to apply:  sudo reboot"
