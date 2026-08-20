@@ -1,0 +1,20 @@
+name: Redeploy raygarrison.us (PiDI docs)
+
+on:
+  push:
+    branches: ["master"]
+    paths:
+      - "tools/midi-tone/docs/**"
+  workflow_dispatch:
+
+jobs:
+  trigger-site-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger raygarrison.us site deploy
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.RAYGARRISON_SITE_DEPLOY_TOKEN }}
+          repository: HyruleanHero1988/raygarrison-us-site
+          event-type: pidi-docs-updated
+          client-payload: '{"source_repo":"pi-midi-toolkit","source_sha":"${{ github.sha }}"}'
