@@ -1,10 +1,11 @@
 """Waveform scope drawing helpers for SYNTH / KIT canvases."""
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, List, Optional
 
 import numpy as np
 
+from pidi.audio.drums import downsample_waveform
 from pidi.constants import SCOPE_CRT_AXIS, SCOPE_CRT_GRID, SCOPE_CRT_WAVE
 
 if TYPE_CHECKING:

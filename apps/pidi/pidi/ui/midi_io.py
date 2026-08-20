@@ -511,6 +511,25 @@ class MidiIoMixin:
                         self._settings_status_var.set(f"Installed {short} — restarting…")
                         self._append_log(f"Update installed {short}")
                         self.root.after(250, self._restart_after_update)
+                elif kind == "wifi":
+                    self._update_busy = False
+                    ok, detail = bool(item[1]), str(item[2] or "")
+                    if ok:
+                        self._append_log(f"Wi-Fi: {detail}")
+                    else:
+                        self._append_log(f"Wi-Fi failed: {detail}")
+                    self._refresh_settings_status()
+                    if not ok and detail:
+                        # Keep the failure visible above the refreshed status briefly
+                        base = self._settings_status_var.get()
+                        self._settings_status_var.set(f"Wi-Fi: {detail}\n{base}")
+                elif kind == "settings_hub":
+                    wifi_line, build = str(item[1] or ""), str(item[2] or "")
+                    self._settings_hub_wifi_cache = wifi_line
+                    if getattr(self, "_settings_panel", "hub") == "hub":
+                        self._settings_hub_detail_var.set(
+                            f"{build}\n{wifi_line}" if build else wifi_line
+                        )
                 elif kind == "kit_sel":
                     self._select_kit_note(int(item[1]), audition=False)
         except queue.Empty:

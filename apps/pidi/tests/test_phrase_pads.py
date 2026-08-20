@@ -304,6 +304,24 @@ class PhrasePadTrimTest(unittest.TestCase):
         bank.stop_all()
 
 
+class PhrasePadMappingTest(unittest.TestCase):
+    def test_screen_top_left_a1_is_mpk_hardware_pad_5(self) -> None:
+        from pidi.domain.phrases import (
+            mpk_note_for_phrase_cell,
+            phrase_cell_for_note,
+            phrase_pad_label,
+        )
+
+        self.assertEqual(phrase_pad_label(0), "A1")
+        self.assertEqual(phrase_cell_for_note(40), 0)  # MPK pad 5 (top-left)
+        self.assertEqual(phrase_cell_for_note(36), 4)  # MPK pad 1 (bottom-left) → A5
+        self.assertEqual(mpk_note_for_phrase_cell(0), 40)
+        self.assertEqual(mpk_note_for_phrase_cell(4), 36)
+        self.assertEqual(phrase_cell_for_note(48), 8)  # Bank B pad 5 → B1
+        self.assertEqual(phrase_cell_for_note(44), 12)  # Bank B pad 1 → B5
+        self.assertEqual(mpk_note_for_phrase_cell(8), 48)
+
+
 class PhrasePadTileColorTest(unittest.TestCase):
     def test_green_means_playing_not_loop_mode(self) -> None:
         mt = load_midi_tone()

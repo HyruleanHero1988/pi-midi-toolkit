@@ -192,12 +192,8 @@ the old engines. `deploy_pi.py` still writes `version.json` so CHECK has a
 local SHA; SSH `deploy/deploy.sh` also stages `dist/armv7` when `TARGET` is
 armv7.
 
-The repo is private, so CHECK needs a GitHub token with Contents: Read:
-
-- On the panel: **SET → TOKEN** (saved as `.update-credentials`, gitignored)
-- Or via SSH: `GITHUB_TOKEN=…` in `~/midi-tone/.update-credentials`
-
-`deploy_pi.py` still works and writes `version.json` so CHECK has a local SHA to
+CHECK/UPDATE talk to the public GitHub repo over HTTPS (no token).
+`deploy_pi.py` still writes `version.json` so CHECK has a local SHA to
 compare. Rust engines are installed from `dist/armv7` (not cargo-built on the Pi).
 
 ### Sequencer (SEQ)

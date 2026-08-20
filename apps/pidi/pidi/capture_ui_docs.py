@@ -162,8 +162,6 @@ def grab(root, path: pathlib.Path) -> None:
 def close_overlays(app) -> None:
     if getattr(app, "_power_ui_open", False):
         app._close_power_menu(restore_main=True)
-    if getattr(app, "_token_ui_open", False):
-        app._close_update_token(restore_main=True)
     if app._grid_open:
         app._close_voice_grid(restore_main=True)
     if app._morph_ui_open:

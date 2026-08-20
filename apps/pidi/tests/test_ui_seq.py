@@ -238,8 +238,8 @@ class SeqScreenTest(unittest.TestCase):
         self.assertTrue(app._seq_to_pad_armed)
         self.assertEqual(app._mode, "pads")
 
-        # MPK pad A1 (note 36, ch10) drops the sequence onto that cell
-        self.play(36)
+        # MPK top-left pad (note 40 / hardware pad 5) → phrase A1 (cell 0)
+        self.play(40)
         self.pump(0.15)
         cell = app._phrases.cell(0)
         self.assertFalse(cell.is_empty())
@@ -248,14 +248,15 @@ class SeqScreenTest(unittest.TestCase):
         self.assertEqual(app._pads_view, "play")
 
         # Same drum pad now launches the clip instead of playing a one-shot
-        self.play(36)
+        self.play(40)
         self.pump(0.12)
         self.assertTrue(app._phrases.is_playing(0))
         app._phrase_stop_all()
         app._phrases.clear_cell(0)
         app._seq_clear()
         self.pump()
-        self.assertEqual(mt.phrase_cell_for_note(36), 0)
+        self.assertEqual(mt.phrase_cell_for_note(40), 0)
+        self.assertEqual(mt.phrase_cell_for_note(36), 4)
 
     def test_drum_pad_launches_a_filled_clip_while_edit_is_recording(self) -> None:
         """Regression: EDIT REC used to turn every MPK pad into a drum."""
@@ -275,8 +276,8 @@ class SeqScreenTest(unittest.TestCase):
         app._phrases.arm_record(1)
         self.assertTrue(app._phrases.is_recording())
 
-        # Pad A1 (note 36) is filled — must launch, not fall through as a kick
-        self.play(36)
+        # Pad A1 (note 40 / hardware pad 5) is filled — must launch, not fall through as a kick
+        self.play(40)
         self.pump(0.2)
         self.assertTrue(app._phrases.is_playing(0))
         self.assertTrue(app._phrases.is_recording(), "A2 rec should still be armed")

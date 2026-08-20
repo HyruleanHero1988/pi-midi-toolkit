@@ -1,13 +1,7 @@
 """home UI mixin for MidiToneApp."""
 from __future__ import annotations
 
-import math
-import pathlib
-import time
 import tkinter as tk
-from typing import Any, Dict, List, Optional, Tuple
-
-import mido
 
 from pidi.constants import HOME_TILES
 
@@ -21,26 +15,31 @@ class HomeScreenMixin:
         header = tk.Frame(shell, bg="#111111")
         header.pack(fill=tk.X, padx=8, pady=(10, 4))
         tk.Label(
-            header, text="Home", font=("DejaVu Sans", 18, "bold"),
-            fg="#fbf1c7", bg="#111111",
+            header,
+            text="Home",
+            font=("DejaVu Sans", 18, "bold"),
+            fg="#fbf1c7",
+            bg="#111111",
         ).pack(side=tk.LEFT)
-        tk.Label(
-            header, text="tap a mode",
-            font=("DejaVu Sans", 11), fg="#a89984", bg="#111111",
-        ).pack(side=tk.RIGHT)
 
+        # Fixed 4×2 grid — equal column/row weights so every tile is the same size.
         body = tk.Frame(shell, bg="#111111")
         body.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
-        rows = (HOME_TILES[:4], HOME_TILES[4:])
-        for spec in rows:
-            row = tk.Frame(body, bg="#111111")
-            row.pack(fill=tk.BOTH, expand=True, pady=4)
-            for key, title, subtitle, color in spec:
-                btn = self._mk_touch_btn(
-                    row,
-                    f"{title}\n{subtitle}",
-                    lambda m=key: self._switch_mode(m),
-                    bg=color,
-                )
-                btn.configure(font=("DejaVu Sans", 18, "bold"), pady=22, justify=tk.CENTER)
-                btn.pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=4)
+        for r in range(2):
+            body.rowconfigure(r, weight=1, uniform="home_row")
+        for c in range(4):
+            body.columnconfigure(c, weight=1, uniform="home_col")
+
+        tiles = list(HOME_TILES)
+        if len(tiles) != 8:
+            raise RuntimeError(f"HOME_TILES must be exactly 8 entries (4×2), got {len(tiles)}")
+        for i, (key, title, color) in enumerate(tiles):
+            r, c = divmod(i, 4)
+            btn = self._mk_touch_btn(
+                body,
+                title,
+                lambda m=key: self._switch_mode(m),
+                bg=color,
+            )
+            btn.configure(font=("DejaVu Sans", 16, "bold"), pady=8, justify=tk.CENTER)
+            btn.grid(row=r, column=c, sticky="nsew", padx=4, pady=4)

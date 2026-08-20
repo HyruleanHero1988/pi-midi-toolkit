@@ -464,14 +464,15 @@ class MidiToneApp(
         self._update_check: Optional[updater.UpdateCheck] = None
         self._update_busy = False
         self._update_confirming = False
+        self._settings_panel = "hub"  # hub | update | wifi
+        self._settings_keep_panel = False
+        self._settings_hub_wifi_cache = "Wi-Fi: …"
         self._settings_status_var = tk.StringVar(value=updater.format_status_lines())
+        self._settings_hub_detail_var = tk.StringVar(value="")
         self._settings_check_btn: Optional[tk.Button] = None
         self._settings_update_btn: Optional[tk.Button] = None
-        self._token_ui_open = False
-        self._token_frame: Optional[tk.Frame] = None
-        self._token_entry: Optional[tk.Entry] = None
-        self._token_keys: Optional[tk.Frame] = None
-        self._token_keys_digits = False
+        self._settings_wifi_btn: Optional[tk.Button] = None
+        self._settings_version_lbl: Optional[tk.Label] = None
 
         # Keep PiDI splash on top while chrome is packed underneath
         splash = getattr(self, "_boot_splash", None)
@@ -482,7 +483,7 @@ class MidiToneApp(
                 pass
 
         # Persistent chrome: title, HOME, POWER. Jam modes keep SYNTH/SEQ/PADS
-        # on the right; every other screen is reached from HOME tiles.
+        # on the right; Settings and other screens are reached from HOME tiles.
         self._nav = tk.Frame(self.root, bg="#1d2021")
         self._nav.pack(side=tk.TOP, fill=tk.X, padx=0, pady=0)
         tk.Label(
@@ -496,12 +497,6 @@ class MidiToneApp(
         home_btn.pack(side=tk.LEFT, padx=(0, 4))
         self._mode_btns["home"] = home_btn
         self._home_btn = home_btn
-        set_btn = self._mk_touch_btn(
-            self._nav, "SET", lambda: self._switch_mode("settings"), bg="#3c3836"
-        )
-        set_btn.configure(font=("DejaVu Sans", 10, "bold"), pady=8, padx=8)
-        set_btn.pack(side=tk.LEFT, padx=(0, 4))
-        self._settings_nav_btn = set_btn
         power_btn = self._mk_touch_btn(
             self._nav, "POWER", self._open_power_menu, bg="#9d0006"
         )
@@ -818,7 +813,6 @@ class MidiToneApp(
             or self._save_voice_open
             or self._save_preset_open
             or self._fx_ui_open
-            or self._token_ui_open
             or self._kaoss_picker_open
             or self._kaoss_settings_open
             or bool(getattr(self, "_idle", None) and self._idle.active)
@@ -841,9 +835,8 @@ class MidiToneApp(
 
     def _refresh_kit_status(self) -> None:
         pitch, decay, noise, tone = self.engine.drum_macros()
-        label = phrase_pad_label(
-            max(0, min(15, self._kit_selected_note - PHRASE_PAD_BASE))
-        )
+        cell = phrase_cell_for_note(self._kit_selected_note)
+        label = phrase_pad_label(0 if cell is None else cell)
         model = self._kit_model_selected().replace("_", " ")
         macros = (
             f"pitch {int(pitch * 127)} · stretch {int(decay * 127)} · "
@@ -911,8 +904,6 @@ class MidiToneApp(
             self._close_save_voice(restore_main=False)
         if self._save_preset_open:
             self._close_save_preset(restore_main=False)
-        if self._token_ui_open:
-            self._close_update_token(restore_main=False)
         if self._kaoss_picker_open:
             self._close_kaoss_picker(restore_main=False)
         if self._kaoss_settings_open:
@@ -939,6 +930,7 @@ class MidiToneApp(
                 # follow you onto SYNTH / SEQ.
                 self._kaoss_restore_fx()
 
+        prev_mode = self._mode
         self._mode = mode
         self._home_shell.pack_forget()
         self._synth_shell.pack_forget()
@@ -1000,6 +992,19 @@ class MidiToneApp(
             except Exception:
                 pass
         elif mode == "settings":
+            # Fresh entry lands on the hub unless a nested panel was requested.
+            # Avoid rebuilding the hub every visit — destroy/recreate is laggy.
+            if prev_mode != "settings":
+                keep = bool(getattr(self, "_settings_keep_panel", False))
+                self._settings_keep_panel = False
+                if not keep:
+                    if getattr(self, "_settings_panel", "hub") != "hub":
+                        self._settings_panel = "hub"
+                        self._build_settings_mode()
+                    elif not self._settings_shell.winfo_children():
+                        self._build_settings_mode()
+                elif not self._settings_shell.winfo_children():
+                    self._build_settings_mode()
             self._settings_shell.pack(fill=tk.BOTH, expand=True)
             self._refresh_settings_status()
         else:
@@ -1032,13 +1037,6 @@ class MidiToneApp(
         if home is not None:
             color = "#458588" if self._mode == "home" else "#3c3836"
             home.configure(bg=color, activebackground=color)
-        settings_nav = getattr(self, "_settings_nav_btn", None)
-        if settings_nav is not None:
-            color = "#458588" if self._mode == "settings" else "#3c3836"
-            try:
-                settings_nav.configure(bg=color, activebackground=color)
-            except tk.TclError:
-                pass
 
 
     def _mk_touch_btn(self, parent: tk.Misc, text: str, command, bg: str = "#3c3836") -> tk.Button:
@@ -2087,8 +2085,6 @@ class MidiToneApp(
             self._close_save_voice(restore_main=False)
         if self._save_preset_open:
             self._close_save_preset(restore_main=False)
-        if self._token_ui_open:
-            self._close_update_token(restore_main=False)
         if self._kaoss_picker_open:
             self._close_kaoss_picker(restore_main=False)
         if self._kaoss_settings_open:

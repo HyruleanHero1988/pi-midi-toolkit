@@ -410,17 +410,17 @@
     </section>
 
     <section class="screen" id="settings">
-      <h2>SET (Settings)</h2>
-      <p class="lede">Opt-in software update from GitHub <code>master</code>. The instrument stays offline until you tap CHECK / UPDATE.</p>
+      <h2>Settings</h2>
+      <p class="lede">System hub: version, Wi‑Fi, burn-in guard, and opt-in software update from public GitHub <code>master</code>.</p>
       <figure>
-        <img src="screens/13-settings.png" alt="SET settings and update screen" width="800" height="480" />
-        <figcaption>13 — SET</figcaption>
+        <img src="screens/13-settings.png" alt="Settings screen" width="800" height="480" />
+        <figcaption>13 — Settings</figcaption>
       </figure>
       <table>
-        <tr><th>Running / remote</th><td>Local commit (from git or <code>version.json</code>) and, after CHECK, the tip of <code>master</code>.</td></tr>
-        <tr><th>CHECK</th><td>Ask GitHub whether <code>master</code> is ahead. Does not install.</td></tr>
-        <tr><th>UPDATE</th><td>If behind: confirm, deploy the whole repo (kiosk + crates + presets + committed <code>dist/armv7</code> engines into <code>bin/</code>), restart kiosk and any midi-engine / jambox-engine units. Second tap is INSTALL NOW.</td></tr>
-        <tr><th>TOKEN</th><td>Store a GitHub PAT on the box (private repo). Written to <code>.update-credentials</code>.</td></tr>
+        <tr><th>Version</th><td>Product semver (<code>VERSION</code>) plus local commit from git or <code>version.json</code>.</td></tr>
+        <tr><th>UPDATE</th><td>Nested panel: CHECK asks GitHub whether <code>master</code> is ahead; UPDATE deploys (confirm → INSTALL NOW), then restarts.</td></tr>
+        <tr><th>WIFI</th><td>Nested panel: CONNECT joins the saved NetworkManager profile (or <code>.wifi-credentials</code>).</td></tr>
+        <tr><th>BLANK / TIMEOUT</th><td>Force the burn-in screensaver, or cycle idle timeout.</td></tr>
       </table>
       <p class="note">Same as SSH deploy: never overwrites <code>settings.json</code>, <code>songs/</code>, <code>phrases/</code> (pad recordings), <code>user-presets/</code>, <code>user-wavetables/</code>, or <code>presets/active.json</code>. Does not cargo-build on the Pi — engines are the committed <code>dist/armv7</code> binaries (rebuild with <code>./deploy/build-pi-bins.sh</code> before pushing crate changes).</p>
     </section>

@@ -73,12 +73,31 @@ def phrase_pad_tile_color(
     return PHRASE_TILE_IDLE
 
 
+def _mpk_row_swap(within_bank: int) -> int:
+    """Swap top/bottom rows of 4 inside an 8-pad bank.
+
+    Factory MPK layout has pads 5–8 on top and 1–4 on bottom. Screen labels put
+    A1–A4 on top, so hardware pad 5 (note 40) maps to cell A1 and pad 1 (note 36)
+    maps to cell A5.
+    """
+    return (int(within_bank) + 4) & 7
+
+
 def phrase_cell_for_note(note: int) -> Optional[int]:
     """Map factory MPK pad note (36–51) → phrase cell index, else None."""
     n = note & 0x7F
     if PHRASE_PAD_BASE <= n < PHRASE_PAD_BASE + PHRASE_PAD_COUNT:
-        return n - PHRASE_PAD_BASE
+        raw = n - PHRASE_PAD_BASE
+        bank = raw & ~0x7
+        return bank + _mpk_row_swap(raw & 7)
     return None
+
+
+def mpk_note_for_phrase_cell(cell: int) -> int:
+    """Phrase cell 0..15 → factory MPK note (row-swapped to match the screen)."""
+    c = int(cell) & 0x0F
+    bank = c & ~0x7
+    return PHRASE_PAD_BASE + bank + _mpk_row_swap(c & 7)
 
 
 PHRASE_TRIG_ONESHOT = "oneshot"

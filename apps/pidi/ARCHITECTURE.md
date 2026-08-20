@@ -8,6 +8,7 @@ Python PortAudio fallback.
 
 ```
 apps/pidi/                 deploy root (also copied to ~/midi-tone on the Pi)
+  VERSION                  product semver (Settings display; bump for releases)
   midi_tone.py             thin shim — prefer `python -m pidi`
   kiosk.sh / run.sh / …    thin wrappers → bin/ or scripts/install/
   bin/                     real session entrypoints
@@ -19,7 +20,7 @@ apps/pidi/                 deploy root (also copied to ~/midi-tone on the Pi)
   tests/                   unit + UI tests
   pidi/                    Python package
     main.py                CLI
-    constants.py
+    constants.py           APP_VERSION from VERSION; modes; paths
     jambox_client.py
     kaoss.py / sequencer.py / screensaver.py / updater.py
     audio/                 Python soft-synth fallback
@@ -29,7 +30,7 @@ apps/pidi/                 deploy root (also copied to ~/midi-tone on the Pi)
       midi_io.py           MIDI ports / CC / queue drain
       session_io.py        settings / session JSON
       chrome.py / scope.py
-      screens/             one mixin per mode
+      screens/             home 4×2; settings hub (Update/Wi‑Fi nested); …
   docs/                    screen reference (bundled to raygarrison.us)
   archive/debug/           obsolete bring-up helpers
 ```

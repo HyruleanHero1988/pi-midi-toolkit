@@ -7,6 +7,20 @@ import pathlib
 # Deploy root (apps/pidi or ~/midi-tone), not the inner package directory.
 HERE = pathlib.Path(__file__).resolve().parents[1]
 
+
+def _read_app_version() -> str:
+    path = HERE / "VERSION"
+    try:
+        text = path.read_text(encoding="utf-8").strip().splitlines()[0].strip()
+        if text:
+            return text
+    except (OSError, IndexError):
+        pass
+    return "0.0.0"
+
+
+APP_VERSION = _read_app_version()
+
 SAMPLE_RATE = 44100
 # Larger default block / latency = fewer xruns on Pi (crunchy / robotic audio).
 # Override for lower latency if the machine can take it:
@@ -43,12 +57,14 @@ SONG_OUT_PREFER = ("u2midi", "uxmidi", "hxmidi", "din", "usb midi", "midi out", 
 PHRASES_DIR = HERE / "phrases"
 PHRASE_PAD_COUNT = 16  # MPK Bank A + Bank B
 PHRASE_PAD_BASE = 36   # factory MPC program: pads 36–51
-# Visual 4×4 (top→bottom): A top, A bottom, B top, B bottom — matches MPK pad layout
+# Visual 4×4 (top→bottom): A1–A4, A5–A8, B1–B4, B5–B8
+# MPK hardware has pads 5–8 on top and 1–4 on bottom; note↔cell swaps those rows
+# so the top-left screen pad (A1) matches the top-left MPK pad (note 40).
 PHRASE_GRID_CELLS = (
-    4, 5, 6, 7,      # Bank A pads 5–8 (top row)
-    0, 1, 2, 3,      # Bank A pads 1–4 (bottom row)
-    12, 13, 14, 15,  # Bank B pads 5–8
-    8, 9, 10, 11,    # Bank B pads 1–4
+    0, 1, 2, 3,      # Bank A 1–4 (top row)
+    4, 5, 6, 7,      # Bank A 5–8
+    8, 9, 10, 11,    # Bank B 1–4
+    12, 13, 14, 15,  # Bank B 5–8
 )
 MAX_PHRASE_PLAYERS = 8
 SETTINGS_VERSION = 2
@@ -58,14 +74,14 @@ TOUCH_SCROLL_THRESH_PX = 10  # press→drag before a grid tap counts as scroll (
 UI_MODES = ("home", "synth", "seq", "pads", "kaoss", "songs", "presets", "log", "settings")
 JAM_NAV_MODES = ("synth", "seq", "pads", "kaoss")
 HOME_TILES = (
-    ("synth", "SYNTH", "soft-synth", "#458588"),
-    ("seq", "SEQ", "overdub", "#b16286"),
-    ("pads", "PADS", "phrases", "#d79921"),
-    ("kaoss", "KAOSS", "xy pad", "#fe8019"),
-    ("songs", "SONGS", ".mid files", "#689d6a"),
-    ("presets", "PRESETS", "8 slots", "#83a598"),
-    ("log", "LOG", "history", "#504945"),
-    ("settings", "SET", "update", "#665c54"),
+    ("synth", "SYNTHESIZER", "#458588"),
+    ("seq", "SEQUENCER", "#b16286"),
+    ("pads", "PADS", "#d79921"),
+    ("kaoss", "KAOSS", "#fe8019"),
+    ("songs", "SONGS", "#689d6a"),
+    ("presets", "PRESETS", "#83a598"),
+    ("log", "LOG", "#504945"),
+    ("settings", "SETTINGS", "#665c54"),
 )
 
 

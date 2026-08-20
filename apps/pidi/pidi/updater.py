@@ -25,8 +25,7 @@ Does **not** cargo-build on the Pi (Pi 2 is too slow). Rebuild those
 ELFs on a PC or cloud-agent VM with ``./deploy/build-pi-bins.sh`` and
 commit ``dist/armv7/`` before pushing.
 
-The GitHub repo is private, so CHECK/UPDATE need a token (or a git remote
-that already has credentials).
+Public GitHub CHECK/UPDATE uses anonymous HTTPS (no token).
 """
 
 from __future__ import annotations
@@ -209,28 +208,6 @@ def load_credentials(install: pathlib.Path = HERE) -> Credentials:
     return creds
 
 
-def save_token(token: str, install: pathlib.Path = HERE) -> pathlib.Path:
-    """Write / update GITHUB_TOKEN in ``.update-credentials`` (gitignored)."""
-    path = install / CREDENTIALS_NAME
-    existing = _read_kv_file(path)
-    existing["GITHUB_TOKEN"] = token.strip()
-    if "REPO_URL" not in existing:
-        existing["REPO_URL"] = DEFAULT_REPO_URL
-    lines = [
-        "# midi-tone kiosk update credentials (gitignored — do not commit)",
-        f"REPO_URL={existing.get('REPO_URL', DEFAULT_REPO_URL)}",
-        f"BRANCH={existing.get('BRANCH', '')}",
-        f"GITHUB_TOKEN={token.strip()}",
-        "",
-    ]
-    path.write_text("\n".join(lines), encoding="utf-8")
-    try:
-        os.chmod(path, 0o600)
-    except OSError:
-        pass
-    return path
-
-
 def _run_git(
     args: Sequence[str],
     *,
@@ -408,8 +385,7 @@ def remote_head_via_api(
     except urllib.error.HTTPError as exc:
         if exc.code in (401, 403, 404):
             raise UpdateError(
-                "can't reach the private repo — add a GitHub token "
-                "(SET → TOKEN, or .update-credentials)"
+                f"can't reach GitHub (HTTP {exc.code}) — check network / branch name"
             ) from exc
         raise UpdateError(f"GitHub API error {exc.code}") from exc
     except urllib.error.URLError as exc:
@@ -733,7 +709,7 @@ def _git_fast_forward(
     except UpdateError:
         if not url:
             raise
-        progress("Fetching with token…")
+        progress("Fetching from GitHub…")
         _run_git(
             ["fetch", "--tags", url, f"+refs/heads/{branch}:refs/remotes/origin/{branch}"],
             cwd=root,
@@ -785,8 +761,7 @@ def _download_archive(
     except urllib.error.HTTPError as exc:
         if exc.code in (401, 403, 404):
             raise UpdateError(
-                "download failed — private repo needs a GitHub token "
-                "(SET → TOKEN)"
+                f"download failed (HTTP {exc.code}) — check network / branch name"
             ) from exc
         raise UpdateError(f"download failed (HTTP {exc.code})") from exc
     except urllib.error.URLError as exc:
@@ -905,17 +880,37 @@ def restart_current_process(argv: Optional[Iterable[str]] = None) -> None:
     os.execv(python, args)
 
 
+def format_running_version_line(install: pathlib.Path = HERE) -> str:
+    """Product semver + short git/deploy stamp for the Settings hub.
+
+    Prefers version.json so the UI never blocks on git subprocesses.
+    """
+    from pidi.constants import APP_VERSION
+
+    stamped = read_version_file(install)
+    local = stamped if stamped.sha else local_version(install)
+    line = f"PiDI {APP_VERSION}"
+    if local.short and local.short not in ("unknown", ""):
+        line += f"  ·  {local.short}"
+    return line
+
+
 def format_status_lines(check: Optional[UpdateCheck] = None, install: pathlib.Path = HERE) -> str:
-    local = check.local if check else local_version(install)
-    creds = load_credentials(install)
-    has_token = bool(creds.token)
+    from pidi.constants import APP_VERSION
+
+    if check is not None:
+        local = check.local
+    else:
+        stamped = read_version_file(install)
+        local = stamped if stamped.sha else local_version(install)
     lines = [
+        f"PiDI {APP_VERSION}",
         f"Running: {local.short}"
         + (f"  ({local.branch})" if local.branch else "")
         + (f"  via {local.source}" if local.source and local.source != "unknown" else ""),
     ]
     if check is None:
-        lines.append("Remote: tap CHECK to look at GitHub.")
+        lines.append("Remote: —")
     elif check.error:
         lines.append(f"Remote: {check.error}")
     else:
@@ -924,12 +919,6 @@ def format_status_lines(check: Optional[UpdateCheck] = None, install: pathlib.Pa
             f"Remote {remote.branch}: {remote.short}"
             + (" — UPDATE available" if check.available else " — up to date")
         )
-    if not has_token and (check is None or check.error):
-        lines.append("Private repo: add a GitHub token (TOKEN) if CHECK fails.")
-    lines.append(
-        "Same as SSH deploy: phrases, songs, presets, and settings stay on this box. "
-        "Pi engines come from committed dist/armv7 (not cargo-build on this box)."
-    )
     return "\n".join(lines)
 
 

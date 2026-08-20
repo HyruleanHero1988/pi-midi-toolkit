@@ -5,8 +5,8 @@ from typing import Dict, Optional, Tuple
 
 import numpy as np
 
-from pidi.constants import DRUM_SCOPE_SEC, NOTE_NAMES, PHRASE_PAD_BASE, SAMPLE_RATE, SCOPE_MORPH_CYCLES
-
+from pidi.constants import DRUM_SCOPE_SEC, NOTE_NAMES, SAMPLE_RATE, SCOPE_MORPH_CYCLES
+from pidi.domain.phrases import mpk_note_for_phrase_cell  # noqa: F401 — kit / UI re-export
 
 def midi_note_name(note: int) -> str:
     return f"{NOTE_NAMES[note % 12]}{note // 12 - 1}"
@@ -59,11 +59,6 @@ def drum_model_for_note(note: int) -> str:
     # Unknown note: cycle through the kit so every pad still sounds distinct
     models = list(dict.fromkeys(MPK_PAD_KIT.values()))
     return models[n % len(models)]
-
-
-def mpk_note_for_phrase_cell(cell: int) -> int:
-    """Phrase/pad cell index 0..15 → factory MPK note 36..51."""
-    return PHRASE_PAD_BASE + (int(cell) & 0x0F)
 
 
 def downsample_waveform(samples: np.ndarray, points: int) -> np.ndarray:

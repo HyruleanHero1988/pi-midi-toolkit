@@ -104,17 +104,6 @@ class CredentialsTest(unittest.TestCase):
             self.assertEqual(creds.branch, "main")
             self.assertEqual(creds.repo_url, "https://example.invalid/from-pi.git")
 
-    def test_save_token_writes_gitignored_file(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            install = pathlib.Path(tmp)
-            path = updater.save_token("ghp_test_token", install)
-            self.assertTrue(path.is_file())
-            text = path.read_text(encoding="utf-8")
-            self.assertIn("ghp_test_token", text)
-            with _clear_update_env():
-                creds = updater.load_credentials(install)
-            self.assertEqual(creds.token, "ghp_test_token")
-
 
 class VersionFileTest(unittest.TestCase):
     def test_round_trip_version_file(self) -> None:
@@ -357,11 +346,11 @@ class CheckUpdateTest(unittest.TestCase):
             ), mock.patch.object(
                 updater,
                 "remote_head",
-                side_effect=updater.UpdateError("can't reach the private repo"),
+                side_effect=updater.UpdateError("can't reach GitHub (HTTP 404)"),
             ):
                 result = updater.check_for_update(install)
             self.assertFalse(result.available)
-            self.assertIn("private repo", result.error)
+            self.assertIn("GitHub", result.error)
 
 
 class ArchiveSafetyTest(unittest.TestCase):
@@ -499,10 +488,17 @@ class InstallPiBinariesTest(unittest.TestCase):
 class StatusTextTest(unittest.TestCase):
     def test_format_status_mentions_user_data(self) -> None:
         text = updater.format_status_lines(None, pathlib.Path("/tmp/does-not-exist-midi-tone"))
+        self.assertIn("PiDI", text)
         self.assertIn("Running:", text)
-        self.assertIn("phrases", text)
-        self.assertIn("SSH deploy", text)
-        self.assertIn("dist/armv7", text)
+        self.assertIn("Remote:", text)
+
+    def test_running_version_line_includes_semver(self) -> None:
+        from pidi.constants import APP_VERSION
+
+        line = updater.format_running_version_line(
+            pathlib.Path("/tmp/does-not-exist-midi-tone")
+        )
+        self.assertIn(f"PiDI {APP_VERSION}", line)
 
 
 if __name__ == "__main__":
