@@ -63,6 +63,12 @@ from screensaver import (  # noqa: E402
     timeout_label,
 )
 import updater  # noqa: E402  (local module; SET screen software update)
+from jambox_client import (  # noqa: E402
+    JamboxClient,
+    connect_or_spawn,
+    midi_notice_to_message,
+    prefer_python_engine,
+)
 from kaoss import (  # noqa: E402
     GATE_PATTERNS,
     KAOSS_OUT_MODES,
@@ -76,6 +82,7 @@ from kaoss import (  # noqa: E402
     KaossEvent,
     KaossPad,
     KaossProgram,
+    clamp01,
     glow_radii,
     glow_step,
     grid_line_widths,
@@ -100,8 +107,10 @@ DEFAULT_MAX_VOICES = 12
 TABLE_SIZE = 2048
 TABLE_MASK = TABLE_SIZE - 1
 LOG_MAX = 60
-# Full-pad play mode: hold the top rail this long to get chrome back.
+# Full-pad: shove into the bottom edge and stay still this long to peek controls.
 KAOSS_PLAY_EXIT_MS = 700
+KAOSS_PLAY_BORDER_PX = 40
+KAOSS_PLAY_HOLD_SLOP_PX = 18
 EVENT_Q_MAX = 200
 # MIDI channel 10 (1-based) = index 9 — MPK drum pads
 DRUM_CHANNEL = 9
@@ -1160,6 +1169,8 @@ class SineEngine:
         # Reused per-callback accumulators keyed by wavetable / drum model name
         self._voice_fx_buckets: Dict[str, np.ndarray] = {}
         self._rebuild_morph_table_unlocked()
+        self._remote: Optional[JamboxClient] = None
+        self._echoing = False
 
     @property
     def voice_names(self) -> List[str]:
@@ -1186,11 +1197,182 @@ class SineEngine:
             b = self._voice_names[self._morph_b]
             return a, b, max(0.0, min(1.0, self._morph))
 
+    def attach_remote(self, client: Optional[JamboxClient]) -> None:
+        """Mirror notes/params to jambox-engine. None detaches."""
+        self._remote = client
+        if client is not None and client.connected:
+            self.sync_remote()
+            self._push_knob_map()
+
+    def using_remote(self) -> bool:
+        return self._remote is not None and self._remote.connected
+
+    def _r(self) -> Optional[JamboxClient]:
+        client = self._remote
+        if client is None or not client.connected:
+            return None
+        return client
+
+    def _push_knob_map(self) -> None:
+        """UI mode buttons tell ingest which bank hardware knobs address."""
+        client = self._r()
+        if client is None:
+            return
+        from jambox_client import DRUM_MODEL_NAMES
+
+        with self._lock:
+            if self._fx_mode or self._bus_fx_mode:
+                mode = "fx"
+                if self._fx_edit_kind == "bus" or self._bus_fx_mode:
+                    kind, index = "bus", 0
+                elif self._fx_edit_kind == "drums":
+                    kind, index = "drums", 0
+                elif self._fx_edit_kind == "drum":
+                    kind = "drum"
+                    try:
+                        index = DRUM_MODEL_NAMES.index(str(self._fx_edit_drum or "kick"))
+                    except ValueError:
+                        index = 0
+                else:
+                    kind = "voice"
+                    if self._morph_dirty:
+                        self._rebuild_morph_table_unlocked()
+                    index = self._morph_a if self._morph < 0.5 else self._morph_b
+            elif self._drum_mode:
+                mode, kind, index = "drums", None, 0
+            else:
+                mode, kind, index = "keys", None, 0
+        client.knob_map(mode, fx_kind=kind, fx_index=index)
+
+    @staticmethod
+    def _unit01(value: float) -> float:
+        v = float(value)
+        if v > 1.0:
+            v = v / 127.0
+        return max(0.0, min(1.0, v))
+
+    def _remote_synth(self, param: str, value: float) -> None:
+        if self._echoing:
+            return
+        client = self._r()
+        if client is not None:
+            client.synth(param, float(value))
+
+    def _remote_fx_target_unlocked(self) -> Dict[str, Any]:
+        if self._fx_edit_kind == "bus" or self._bus_fx_mode:
+            return JamboxClient.bus_target()
+        if self._fx_edit_kind == "drums":
+            return JamboxClient.drum_group_target()
+        if self._fx_edit_kind == "drum":
+            from jambox_client import DRUM_MODEL_NAMES
+
+            name = str(self._fx_edit_drum or "kick")
+            try:
+                index = DRUM_MODEL_NAMES.index(name)
+            except ValueError:
+                index = 0
+            return JamboxClient.drum_target(index)
+        if self._morph_dirty:
+            self._rebuild_morph_table_unlocked()
+        near = self._morph_a if self._morph < 0.5 else self._morph_b
+        return JamboxClient.voice_target(near)
+
+    def _remote_fx(self, target: Dict[str, Any], param: str, value: float) -> None:
+        if self._echoing:
+            return
+        client = self._r()
+        if client is not None:
+            client.fx(target, param, float(value))
+
+    def sync_remote(self) -> None:
+        """Push current Python synth/FX state to the engine (session restore)."""
+        client = self._r()
+        if client is None:
+            return
+        with self._lock:
+            morph_a, morph_b = self._morph_a, self._morph_b
+            morph = float(self._morph)
+            tone = float(self._tone)
+            level = float(self._synth_level)
+            attack = float(self._attack_sec)
+            release = float(self._release_sec)
+            vib_depth = float(self._vib_depth_semis)
+            vib_hz = float(self._vib_hz)
+            vib_always = float(self._vib_always)
+            vib_mod = float(self._mod)
+            bend = float(self._bend_semitones)
+            drum_pitch = float(self._drum_pitch)
+            drum_decay = float(self._drum_decay)
+            drum_noise = float(self._drum_noise)
+            drum_tone = float(self._drum_tone)
+            bus_snap = self._bus_fx.snapshot()
+            group_snap = self._drum_group_fx.snapshot()
+            voice_fx = {k: v.snapshot() for k, v in self._voice_fx.items()}
+            drum_fx = {k: v.snapshot() for k, v in self._drum_fx.items()}
+            names = list(self._voice_names)
+        client.morph_pair(morph_a, morph_b)
+        client.synth("morph", morph)
+        client.synth("tone", tone)
+        client.synth("level", level)
+        amin, amax = self.ATTACK_SEC_MIN, self.ATTACK_SEC_MAX
+        rmin, rmax = self.RELEASE_SEC_MIN, self.RELEASE_SEC_MAX
+        attack_u = 0.0
+        if attack > amin and amax > amin:
+            attack_u = math.log(max(amin, attack) / amin) / math.log(amax / amin)
+        release_u = 0.0
+        if release > rmin and rmax > rmin:
+            release_u = math.log(max(rmin, release) / rmin) / math.log(rmax / rmin)
+        client.synth("attack", max(0.0, min(1.0, attack_u)))
+        client.synth("release", max(0.0, min(1.0, release_u)))
+        client.synth("vibrato_depth", max(0.0, min(1.0, vib_depth / 2.0)))
+        client.synth("vibrato_rate", max(0.0, min(1.0, (vib_hz - 1.0) / 8.0)))
+        client.synth("vibrato_always", vib_always)
+        client.synth("vibrato_mod", vib_mod)
+        client.synth("pitch_bend", bend)
+        client.synth("drum_pitch", drum_pitch)
+        client.synth("drum_decay", drum_decay)
+        client.synth("drum_noise", drum_noise)
+        client.synth("drum_tone", drum_tone)
+        snap_to_param = {
+            "fx_drive": "drive",
+            "fx_delay_time": "delay_time",
+            "fx_delay_fb": "delay_fb",
+            "fx_delay_mix": "delay_mix",
+            "fx_reverb_size": "reverb_size",
+            "fx_reverb_mix": "reverb_mix",
+        }
+        for src, param in snap_to_param.items():
+            if src in bus_snap:
+                client.fx(JamboxClient.bus_target(), param, float(bus_snap[src]))
+            if src in group_snap:
+                client.fx(JamboxClient.drum_group_target(), param, float(group_snap[src]))
+        from jambox_client import DRUM_MODEL_NAMES
+
+        for i, name in enumerate(names):
+            snap = voice_fx.get(name)
+            if not snap:
+                continue
+            for src, param in snap_to_param.items():
+                if src in snap:
+                    client.fx(JamboxClient.voice_target(i), param, float(snap[src]))
+        for model, snap in drum_fx.items():
+            try:
+                index = DRUM_MODEL_NAMES.index(model)
+            except ValueError:
+                continue
+            for src, param in snap_to_param.items():
+                if src in snap:
+                    client.fx(JamboxClient.drum_target(index), param, float(snap[src]))
+        self._push_knob_map()
+
     def morph_pair_indices(self) -> Tuple[int, int]:
         with self._lock:
             return self._morph_a, self._morph_b
 
     def start(self) -> None:
+        if self.using_remote():
+            print("audio: jambox-engine (Python PortAudio skipped)", flush=True)
+            return
         if self._stream is not None:
             return
         try:
@@ -1302,6 +1484,10 @@ class SineEngine:
             return
         ch = channel & 0x0F
         n = note & 0x7F
+        client = self._r()
+        if client is not None:
+            client.midi("note_on", channel=ch, note=n, velocity=velocity)
+            return
         vel = velocity / 127.0
         if ch == DRUM_CHANNEL:
             self._drum_note_on(n, vel)
@@ -1332,23 +1518,23 @@ class SineEngine:
                 existing.fx_name = fx_name
                 existing.vib = vib
                 existing.vib_phase = 0.0
-                return
-            if len(self._voices) >= self.max_voices:
-                drop = self._steal_key()
-                if drop is not None:
-                    del self._voices[drop]
-            self._voices[key] = Voice(
-                note=n,
-                velocity=vel,
-                phase=0.0,
-                releasing=False,
-                amp=0.0,
-                target_amp=target,
-                age=serial,
-                timbre=timbre,
-                fx_name=fx_name,
-                vib=vib,
-            )
+            else:
+                if len(self._voices) >= self.max_voices:
+                    drop = self._steal_key()
+                    if drop is not None:
+                        del self._voices[drop]
+                self._voices[key] = Voice(
+                    note=n,
+                    velocity=vel,
+                    phase=0.0,
+                    releasing=False,
+                    amp=0.0,
+                    target_amp=target,
+                    age=serial,
+                    timbre=timbre,
+                    fx_name=fx_name,
+                    vib=vib,
+                )
 
     def _drum_note_on(self, note: int, velocity: float) -> None:
         with self._lock:
@@ -1374,6 +1560,10 @@ class SineEngine:
             )
 
     def note_off(self, channel: int, note: int) -> None:
+        client = self._r()
+        if client is not None:
+            client.midi("note_off", channel=channel & 0x0F, note=note & 0x7F)
+            return
         key = (channel & 0x0F, note & 0x7F)
         with self._lock:
             if (channel & 0x0F) == DRUM_CHANNEL:
@@ -1382,12 +1572,11 @@ class SineEngine:
                 hit = self._drums.get(key[1])
                 if hit is not None and hit.model == "hat_open":
                     hit.decay *= 0.35
-                return
-            v = self._voices.get(key)
-            if v is None:
-                return
-            v.releasing = True
-            v.target_amp = 0.0
+            else:
+                v = self._voices.get(key)
+                if v is not None:
+                    v.releasing = True
+                    v.target_amp = 0.0
 
     def all_notes_off(self) -> None:
         with self._lock:
@@ -1396,14 +1585,22 @@ class SineEngine:
             for v in self._voices.values():
                 v.releasing = True
                 v.target_amp = 0.0
+        if not self._echoing:
+            client = self._r()
+            if client is not None:
+                client.all_notes_off()
 
     def set_pitch_bend(self, pitch: int) -> None:
         with self._lock:
             self._bend_semitones = (pitch / 8192.0) * self._bend_range
+            semis = float(self._bend_semitones)
+        self._remote_synth("pitch_bend", semis)
 
     def set_mod_wheel(self, value: int) -> None:
         with self._lock:
             self._mod = max(0.0, min(1.0, value / 127.0))
+            mod = float(self._mod)
+        self._remote_synth("vibrato_mod", mod)
 
     def set_morph(self, value: float) -> None:
         """Blend A→B: 0..1 (or MIDI 0..127 if > 1)."""
@@ -1412,6 +1609,7 @@ class SineEngine:
         with self._lock:
             self._morph = max(0.0, min(1.0, float(value)))
             self._morph_dirty = True
+        self._remote_synth("morph", self._morph)
 
     def set_morph_pair(self, index_a: int, index_b: int, *, morph: Optional[float] = None) -> None:
         """Choose the two voices Knob 1 morphs between."""
@@ -1423,6 +1621,7 @@ class SineEngine:
                 self._morph = max(0.0, min(1.0, float(morph)))
             self._morph_dirty = True
             self._rebuild_morph_table_unlocked()
+        self._push_morph_pair()
 
     def set_morph_endpoint(self, which: str, index: int) -> None:
         """Set A or B without changing the other side."""
@@ -1436,6 +1635,7 @@ class SineEngine:
                 self._morph_a = idx
             self._morph_dirty = True
             self._rebuild_morph_table_unlocked()
+        self._push_morph_pair()
 
     def set_morph_index(self, index: int) -> None:
         """PREV/NEXT / VOICES: set A to this voice and park morph at pure A."""
@@ -1446,6 +1646,16 @@ class SineEngine:
             self._morph = 0.0
             self._morph_dirty = True
             self._rebuild_morph_table_unlocked()
+        self._push_morph_pair()
+
+    def _push_morph_pair(self) -> None:
+        client = self._r()
+        if client is None:
+            return
+        with self._lock:
+            a, b, m = self._morph_a, self._morph_b, float(self._morph)
+        client.morph_pair(a, b)
+        client.synth("morph", m)
 
     def set_tone(self, value: float) -> None:
         """Brightness 0..1 (MIDI 0..127 accepted)."""
@@ -1453,6 +1663,7 @@ class SineEngine:
             value = value / 127.0
         with self._lock:
             self._tone = max(0.0, min(1.0, float(value)))
+        self._remote_synth("tone", self._tone)
 
     @staticmethod
     def _knob_to_level(value: float) -> float:
@@ -1474,6 +1685,7 @@ class SineEngine:
         """Keys / morph soft-synth bus level (Knob 8 when not in DRUM MODE)."""
         with self._lock:
             self._synth_level = self._knob_to_level(value)
+        self._remote_synth("level", self._synth_level)
 
     def set_drum_level(self, value: float) -> None:
         """Channel-10 drum bus level (Knob 8 in DRUM MODE)."""
@@ -1500,6 +1712,7 @@ class SineEngine:
         sec = self.ATTACK_SEC_MIN * ((self.ATTACK_SEC_MAX / self.ATTACK_SEC_MIN) ** t)
         with self._lock:
             self._attack_sec = sec
+        self._remote_synth("attack", t)
 
     def set_release(self, value: float) -> None:
         if value > 1.0:
@@ -1508,6 +1721,7 @@ class SineEngine:
         sec = self.RELEASE_SEC_MIN * ((self.RELEASE_SEC_MAX / self.RELEASE_SEC_MIN) ** t)
         with self._lock:
             self._release_sec = sec
+        self._remote_synth("release", t)
 
     def set_vib_depth(self, value: float) -> None:
         if value > 1.0:
@@ -1515,6 +1729,7 @@ class SineEngine:
         with self._lock:
             # 0..2 semitones
             self._vib_depth_semis = max(0.0, min(1.0, float(value))) * 2.0
+        self._remote_synth("vibrato_depth", self._unit01(value))
 
     VIB_DEPTH_MAX = 2.0  # semitones — matches the knob's top end
     VIB_HZ_MIN = 1.0
@@ -1533,19 +1748,26 @@ class SineEngine:
         """0 = mod wheel gates vibrato (as before); 1 = always on at set depth."""
         with self._lock:
             self._vib_always = max(0.0, min(1.0, float(amount)))
-            return float(self._vib_always)
+            out = float(self._vib_always)
+        self._remote_synth("vibrato_always", out)
+        return out
 
     def nudge_vib_depth(self, delta_semis: float) -> float:
         with self._lock:
             depth = self._vib_depth_semis + float(delta_semis)
             self._vib_depth_semis = max(0.0, min(self.VIB_DEPTH_MAX, depth))
-            return float(self._vib_depth_semis)
+            out = float(self._vib_depth_semis)
+        self._remote_synth("vibrato_depth", out / self.VIB_DEPTH_MAX)
+        return out
 
     def nudge_vib_rate(self, delta_hz: float) -> float:
         with self._lock:
             hz = self._vib_hz + float(delta_hz)
             self._vib_hz = max(self.VIB_HZ_MIN, min(self.VIB_HZ_MAX, hz))
-            return float(self._vib_hz)
+            out = float(self._vib_hz)
+        span = self.VIB_HZ_MAX - self.VIB_HZ_MIN
+        self._remote_synth("vibrato_rate", (out - self.VIB_HZ_MIN) / span if span else 0.0)
+        return out
 
     def set_vib_rate(self, value: float) -> None:
         if value > 1.0:
@@ -1554,6 +1776,7 @@ class SineEngine:
         # ~1 Hz .. ~9 Hz
         with self._lock:
             self._vib_hz = 1.0 + t * 8.0
+        self._remote_synth("vibrato_rate", t)
 
     def set_pad_pressure(self, channel: int, note: Optional[int], value: int) -> None:
         """Live volume trim for held drum pads (aftertouch / pressure)."""
@@ -1586,6 +1809,7 @@ class SineEngine:
             if self._drum_mode:
                 self._fx_mode = False
                 self._bus_fx_mode = False
+        self._push_knob_map()
 
     def drum_mode(self) -> bool:
         with self._lock:
@@ -1605,6 +1829,7 @@ class SineEngine:
                 self._bus_fx_mode = False
                 if self._fx_edit_kind == "bus":
                     self._fx_edit_kind = "voice"
+        self._push_knob_map()
 
     def fx_mode(self) -> bool:
         with self._lock:
@@ -1624,6 +1849,7 @@ class SineEngine:
                 self._drum_mode = False
                 self._fx_mode = False
                 self._fx_edit_kind = "bus"
+        self._push_knob_map()
 
     def bus_fx_mode(self) -> bool:
         with self._lock:
@@ -1675,6 +1901,7 @@ class SineEngine:
                     self._rebuild_morph_table_unlocked()
                 near = self._morph_a if self._morph < 0.5 else self._morph_b
                 self._ensure_voice_fx_unlocked(self._voice_names[near])
+        self._push_knob_map()
 
     def set_fx_edit_drum(self, model: str) -> None:
         """Point insert-FX knobs at a drum model insert (kick, snare, …)."""
@@ -1682,16 +1909,19 @@ class SineEngine:
             self._fx_edit_kind = "drum"
             self._fx_edit_drum = str(model or "kick")
             self._ensure_drum_fx_unlocked(self._fx_edit_drum)
+        self._push_knob_map()
 
     def set_fx_edit_drums(self) -> None:
         """Point insert-FX knobs at the shared all-drums group bus."""
         with self._lock:
             self._fx_edit_kind = "drums"
+        self._push_knob_map()
 
     def set_fx_edit_bus(self) -> None:
         """Point knobs at the master mix-bus FX."""
         with self._lock:
             self._fx_edit_kind = "bus"
+        self._push_knob_map()
 
     def fx_edit_kind(self) -> str:
         with self._lock:
@@ -1732,6 +1962,8 @@ class SineEngine:
         with self._lock:
             slot = self._fx_edit_slot_unlocked()
             setattr(slot, attr, value)
+            target = self._remote_fx_target_unlocked()
+        self._remote_fx(target, attr, value)
 
     def set_fx_drive(self, value: float) -> None:
         self._set_fx_param("drive", value)
@@ -1787,6 +2019,20 @@ class SineEngine:
             value = max(0.0, min(1.0, float(value)))
             with self._lock:
                 setattr(self._bus_fx, name, value)
+            self._remote_fx(JamboxClient.bus_target(), name, value)
+
+    def wipe_kaoss_bus_fx(self) -> None:
+        """Clear mix-bus pad FX (and delay/reverb memory) and tell the engine."""
+        with self._lock:
+            self._bus_fx.reset_to_defaults()
+        self.set_vib_always(0.0)
+        snap = self.bus_fx_snapshot()
+        self._remote_fx(JamboxClient.bus_target(), "drive", float(snap["fx_drive"]))
+        self._remote_fx(JamboxClient.bus_target(), "delay_time", float(snap["fx_delay_time"]))
+        self._remote_fx(JamboxClient.bus_target(), "delay_fb", float(snap["fx_delay_fb"]))
+        self._remote_fx(JamboxClient.bus_target(), "delay_mix", float(snap["fx_delay_mix"]))
+        self._remote_fx(JamboxClient.bus_target(), "reverb_size", float(snap["fx_reverb_size"]))
+        self._remote_fx(JamboxClient.bus_target(), "reverb_mix", float(snap["fx_reverb_mix"]))
 
     def bus_fx_snapshot(self) -> Dict[str, float]:
         with self._lock:
@@ -1805,6 +2051,7 @@ class SineEngine:
             value = value / 127.0
         with self._lock:
             self._drum_pitch = max(0.0, min(1.0, float(value)))
+        self._remote_synth("drum_pitch", self._drum_pitch)
 
     def set_drum_decay(self, value: float) -> None:
         """Stretch / body length."""
@@ -1812,18 +2059,21 @@ class SineEngine:
             value = value / 127.0
         with self._lock:
             self._drum_decay = max(0.0, min(1.0, float(value)))
+        self._remote_synth("drum_decay", self._drum_decay)
 
     def set_drum_noise(self, value: float) -> None:
         if value > 1.0:
             value = value / 127.0
         with self._lock:
             self._drum_noise = max(0.0, min(1.0, float(value)))
+        self._remote_synth("drum_noise", self._drum_noise)
 
     def set_drum_tone(self, value: float) -> None:
         if value > 1.0:
             value = value / 127.0
         with self._lock:
             self._drum_tone = max(0.0, min(1.0, float(value)))
+        self._remote_synth("drum_tone", self._drum_tone)
 
     def set_waveform(self, name: str) -> bool:
         name = name.lower().strip()
@@ -4099,6 +4349,9 @@ class MidiToneApp:
             pass
         self._tables = load_wavetables(self._waves_dir, self._user_waves_dir)
         self.engine = SineEngine(self._tables, max_voices=max_voices)
+        self._jambox: Optional[JamboxClient] = None
+        self._jambox_proc: Optional[subprocess.Popen] = None
+        self._jambox_owns_midi = False
         # Delay/reverb numbers beside user wavetables (drive/tone already in the wave)
         self._voice_fx_sidecars: Dict[str, Dict[str, float]] = load_user_voice_fx_map(
             self._user_waves_dir
@@ -4288,6 +4541,7 @@ class MidiToneApp:
         self._kaoss_trail: List[Tuple[float, float, float]] = []
         self._kaoss_canvas: Optional[tk.Canvas] = None
         self._kaoss_status_var = tk.StringVar(value="")
+        self._kaoss_axis_label_cache: Optional[Tuple[str, str]] = None
         self._kaoss_prog_btn: Optional[tk.Button] = None
         self._kaoss_scale_btn: Optional[tk.Button] = None
         self._kaoss_key_btn: Optional[tk.Button] = None
@@ -4311,16 +4565,18 @@ class MidiToneApp:
         self._kaoss_settings_frame: Optional[tk.Frame] = None
         self._kaoss_settings_all_btn: Optional[tk.Button] = None
         self._kaoss_settings_axes_btn: Optional[tk.Button] = None
+        self._kaoss_settings_grid_btn: Optional[tk.Button] = None
         self._kaoss_settings_grid_lbl: Optional[tk.Label] = None
         self._kaoss_settings_viz_btns: Dict[str, tk.Button] = {}
         self._kaoss_settings_out_btns: Dict[str, tk.Button] = {}
         self._kaoss_settings_ch_btns: Dict[int, tk.Button] = {}
         self._kaoss_play = False
+        self._kaoss_play_footer = False
         self._kaoss_header: Optional[tk.Frame] = None
         self._kaoss_footer: Optional[tk.Frame] = None
-        self._kaoss_exit_bar: Optional[tk.Frame] = None
-        self._kaoss_exit_lbl: Optional[tk.Label] = None
         self._kaoss_exit_after_id: Optional[str] = None
+        self._kaoss_play_exit_from_inside = False
+        self._kaoss_play_exit_anchor: Optional[Tuple[float, float]] = None
         self._pads_view = "edit"  # play | edit
         self._phrase_out_mode = "local"  # local | usb | both (shares Songs USB port)
         self._phrases.set_output_hooks(
@@ -4629,6 +4885,8 @@ class MidiToneApp:
             self._append_log("No settings.json yet — changes will autosave.")
         self._append_log("If knobs do nothing: Prog Select + Pad 1 (MPC program).")
 
+        self._attach_jambox()
+
         # Start audio after Tk chrome exists so construction can't starve the callback.
         # Re-resolve MIDI in case the MPK finished enumerating after our earlier pick.
         port_name = (
@@ -4639,13 +4897,19 @@ class MidiToneApp:
         )
         self.engine.start()
         print("midi: audio engine started", flush=True)
-        self._inport = mido.open_input(port_name)
-        print(f"midi: input port open ({port_name})", flush=True)
-        self._poll_thread = threading.Thread(target=self._midi_loop, daemon=True)
-        self._poll_thread.start()
-        print("midi: poll thread started", flush=True)
-        if self.port_filter and self.port_filter not in port_name.lower():
-            self.root.after(1500, self._maybe_reopen_midi)
+        if self._jambox_owns_midi:
+            print("midi: input via jambox-engine (mido skipped)", flush=True)
+            self._poll_thread = threading.Thread(target=self._midi_loop, daemon=True)
+            self._poll_thread.start()
+            print("midi: poll thread started", flush=True)
+        else:
+            self._inport = mido.open_input(port_name)
+            print(f"midi: input port open ({port_name})", flush=True)
+            self._poll_thread = threading.Thread(target=self._midi_loop, daemon=True)
+            self._poll_thread.start()
+            print("midi: poll thread started", flush=True)
+            if self.port_filter and self.port_filter not in port_name.lower():
+                self.root.after(1500, self._maybe_reopen_midi)
 
         print("ui: construction complete", flush=True)
         # Reveal chrome only after first layout pass
@@ -7594,20 +7858,6 @@ class MidiToneApp:
 
         pad_wrap = tk.Frame(body, bg="#111111")
         pad_wrap.pack(fill=tk.BOTH, expand=True)
-        self._kaoss_exit_bar = tk.Frame(pad_wrap, bg="#1d2021", height=40)
-        self._kaoss_exit_bar.pack_propagate(False)
-        self._kaoss_exit_lbl = tk.Label(
-            self._kaoss_exit_bar,
-            text="HOLD TO EXIT",
-            font=("DejaVu Sans", 13, "bold"),
-            fg="#fbf1c7",
-            bg="#1d2021",
-        )
-        self._kaoss_exit_lbl.pack(fill=tk.BOTH, expand=True)
-        for widget in (self._kaoss_exit_bar, self._kaoss_exit_lbl):
-            widget.bind("<ButtonPress-1>", self._kaoss_exit_press)
-            widget.bind("<ButtonRelease-1>", self._kaoss_exit_release)
-            widget.bind("<Leave>", self._kaoss_exit_release)
         self._kaoss_canvas = tk.Canvas(
             pad_wrap,
             bg="#08040a",
@@ -7621,7 +7871,7 @@ class MidiToneApp:
         self._kaoss_canvas.bind("<ButtonPress-1>", self._kaoss_on_press)
         self._kaoss_canvas.bind("<B1-Motion>", self._kaoss_on_move)
         self._kaoss_canvas.bind("<ButtonRelease-1>", self._kaoss_on_release)
-        # Finger leaving the widget still counts as a lift
+        # Finger leaving chrome still counts as a lift; full-pad uses the screen edge to exit.
         self._kaoss_canvas.bind("<Leave>", self._kaoss_on_leave)
 
         row_a = tk.Frame(footer, bg="#111111")
@@ -7672,7 +7922,7 @@ class MidiToneApp:
             row_b, "BPM +", lambda: self._kaoss_nudge_bpm(5), bg="#3c3836"
         )
         self._kaoss_play_btn = self._mk_touch_btn(
-            row_b, "FULL PAD", self._kaoss_enter_play, bg="#689d6a"
+            row_b, "FULL PAD", self._kaoss_on_full_pad_btn, bg="#689d6a"
         )
         self._kaoss_gear_btn = self._mk_touch_btn(
             row_b, "⚙", self._open_kaoss_settings, bg="#504945"
@@ -7705,6 +7955,7 @@ class MidiToneApp:
         if self._mode != "kaoss":
             self._switch_mode("kaoss")
         self._kaoss_play = True
+        self._kaoss_play_footer = False
         try:
             self._nav.pack_forget()
         except tk.TclError:
@@ -7713,22 +7964,18 @@ class MidiToneApp:
             self._kaoss_header.pack_forget()
         if self._kaoss_footer is not None:
             self._kaoss_footer.pack_forget()
-        if self._kaoss_exit_bar is not None and self._kaoss_canvas is not None:
-            self._kaoss_canvas.pack_forget()
-            self._kaoss_exit_bar.pack(side=tk.TOP, fill=tk.X)
-            self._kaoss_canvas.pack(fill=tk.BOTH, expand=True)
-        self._kaoss_paint_exit_bar(holding=False)
         self._kaoss_draw_grid()
         self._kaoss_arm_viz()
-        self._append_log("KAOSS FULL PAD — hold the top bar to exit")
+        self._append_log("KAOSS FULL PAD — hold the bottom edge for controls")
 
     def _kaoss_leave_play(self) -> None:
         if not self._kaoss_play:
             return
         self._kaoss_cancel_exit_hold()
         self._kaoss_play = False
-        if self._kaoss_exit_bar is not None:
-            self._kaoss_exit_bar.pack_forget()
+        self._kaoss_play_footer = False
+        self._kaoss_play_exit_from_inside = False
+        self._kaoss_play_exit_anchor = None
         try:
             self._nav.pack(side=tk.TOP, fill=tk.X, before=self._mode_host)
         except tk.TclError:
@@ -7746,41 +7993,111 @@ class MidiToneApp:
         self._kaoss_draw_grid()
         self._kaoss_arm_viz()
 
-    def _kaoss_paint_exit_bar(self, *, holding: bool) -> None:
-        bar = self._kaoss_exit_bar
-        lbl = self._kaoss_exit_lbl
-        if bar is None or lbl is None:
+    def _kaoss_on_full_pad_btn(self) -> None:
+        if self._kaoss_play:
+            self._kaoss_leave_play()
             return
-        color = "#9d0006" if holding else "#1d2021"
+        self._kaoss_enter_play()
+
+    def _kaoss_show_play_footer(self) -> None:
+        if not self._kaoss_play or self._kaoss_play_footer:
+            return
+        footer = self._kaoss_footer
+        if footer is None:
+            return
+        self._kaoss_play_footer = True
+        footer.pack(side=tk.BOTTOM, fill=tk.X, padx=6, pady=6)
+        self._paint_kaoss()
+        self._kaoss_draw_grid()
+
+    def _kaoss_hide_play_footer(self) -> None:
+        if not self._kaoss_play or not self._kaoss_play_footer:
+            return
+        self._kaoss_play_footer = False
+        if self._kaoss_footer is not None:
+            self._kaoss_footer.pack_forget()
+        self._paint_kaoss()
+        self._kaoss_draw_grid()
+
+    def _kaoss_event_in_play_bottom(self, event: object) -> bool:
+        canvas = self._kaoss_canvas
+        if canvas is None:
+            return False
+        h = max(1, int(canvas.winfo_height()))
+        y = float(getattr(event, "y", 0))
+        return y >= (h - KAOSS_PLAY_BORDER_PX)
+
+    def _kaoss_paint_play_exit(self, *, dwelling: bool) -> None:
+        canvas = self._kaoss_canvas
+        if canvas is None:
+            return
         try:
-            bar.configure(bg=color)
-            lbl.configure(
-                text="EXIT…" if holding else "HOLD TO EXIT",
-                bg=color,
-                fg="#fbf1c7",
-            )
+            canvas.delete("play-exit")
+            if dwelling:
+                w = max(1, int(canvas.winfo_width()))
+                h = max(1, int(canvas.winfo_height()))
+                canvas.create_rectangle(
+                    0,
+                    max(0, h - 8),
+                    w,
+                    h,
+                    fill="#fabd2f",
+                    outline="",
+                    tags="play-exit",
+                )
+                canvas.tag_raise("play-exit")
         except tk.TclError:
             pass
 
-    def _kaoss_exit_press(self, _event: object = None) -> str:
+    def _kaoss_watch_play_exit(self, event: object, *, touching: bool) -> None:
         if not self._kaoss_play:
-            return "break"
+            return
+        if not touching:
+            self._kaoss_play_exit_from_inside = False
+            self._kaoss_play_exit_anchor = None
+            self._kaoss_cancel_exit_hold()
+            return
+        in_bottom = self._kaoss_event_in_play_bottom(event)
+        if in_bottom:
+            if not self._kaoss_play_exit_from_inside:
+                return
+            x = float(getattr(event, "x", 0))
+            y = float(getattr(event, "y", 0))
+            anchor = self._kaoss_play_exit_anchor
+            if self._kaoss_exit_after_id is None or anchor is None:
+                self._kaoss_play_exit_anchor = (x, y)
+                self._kaoss_arm_play_exit()
+                return
+            slop = KAOSS_PLAY_HOLD_SLOP_PX
+            dx = x - anchor[0]
+            dy = y - anchor[1]
+            if (dx * dx + dy * dy) > (slop * slop):
+                self._kaoss_cancel_exit_hold()
+                self._kaoss_play_exit_anchor = (x, y)
+                self._kaoss_arm_play_exit()
+            return
+        self._kaoss_play_exit_from_inside = True
+        self._kaoss_play_exit_anchor = None
         self._kaoss_cancel_exit_hold()
-        self._kaoss_paint_exit_bar(holding=True)
+
+    def _kaoss_arm_play_exit(self) -> None:
+        if not self._kaoss_play or self._kaoss_exit_after_id is not None:
+            return
+        self._kaoss_paint_play_exit(dwelling=True)
         self._kaoss_exit_after_id = self.root.after(
             KAOSS_PLAY_EXIT_MS, self._kaoss_exit_hold_done
         )
-        return "break"
-
-    def _kaoss_exit_release(self, _event: object = None) -> str:
-        if self._kaoss_exit_after_id is not None:
-            self._kaoss_cancel_exit_hold()
-            self._kaoss_paint_exit_bar(holding=False)
-        return "break"
 
     def _kaoss_exit_hold_done(self) -> None:
         self._kaoss_exit_after_id = None
-        self._kaoss_leave_play()
+        self._kaoss_play_exit_anchor = None
+        self._kaoss_paint_play_exit(dwelling=False)
+        if self._kaoss.touching:
+            self._kaoss_on_release()
+        if self._kaoss_play_footer:
+            self._kaoss_hide_play_footer()
+        else:
+            self._kaoss_show_play_footer()
 
     def _kaoss_cancel_exit_hold(self) -> None:
         aid = self._kaoss_exit_after_id
@@ -7790,6 +8107,7 @@ class MidiToneApp:
                 self.root.after_cancel(aid)
             except Exception:
                 pass
+        self._kaoss_paint_play_exit(dwelling=False)
 
     def _kaoss_xy(self, event: tk.Event) -> Tuple[float, float]:  # type: ignore[name-defined]
         canvas = self._kaoss_canvas
@@ -7802,6 +8120,13 @@ class MidiToneApp:
         return x, y
 
     def _kaoss_on_press(self, event: tk.Event) -> str:  # type: ignore[name-defined]
+        if self._kaoss_play:
+            in_bottom = self._kaoss_event_in_play_bottom(event)
+            self._kaoss_play_exit_from_inside = not in_bottom
+            self._kaoss_play_exit_anchor = None
+            self._kaoss_cancel_exit_hold()
+            if self._kaoss_play_footer and not in_bottom:
+                self._kaoss_hide_play_footer()
         x, y = self._kaoss_xy(event)
         now = time.monotonic()
         self._kaoss_apply(self._kaoss.touch(x, y, now=now), began=True)
@@ -7821,9 +8146,11 @@ class MidiToneApp:
         self._kaoss_push_trail(x, y)
         if self._kaoss.viz_style != "glow":
             self._kaoss_draw_cursor(x, y, active=True)
+        self._kaoss_watch_play_exit(event, touching=True)
         return "break"
 
     def _kaoss_on_release(self, _event: object = None) -> str:
+        self._kaoss_watch_play_exit(_event or object(), touching=False)
         self._kaoss_apply(self._kaoss.release(), ended=not self._kaoss.is_active())
         if self._kaoss.is_active():
             self._kaoss_arm_tick()
@@ -7832,6 +8159,9 @@ class MidiToneApp:
         return "break"
 
     def _kaoss_on_leave(self, event: tk.Event) -> str:  # type: ignore[name-defined]
+        # Full-pad: the screen edge is the exit gesture — don't treat Leave as lift.
+        if self._kaoss_play:
+            return "break"
         # Leave fires when crossing chrome; only treat as lift if button is down
         if getattr(event, "state", 0) & 0x0100 and self._kaoss.touching:
             return self._kaoss_on_release(event)
@@ -7969,6 +8299,20 @@ class MidiToneApp:
             self.engine.apply_bus_fx_snapshot(current)
         self._q_put(("mod",))
 
+    def _kaoss_wipe_fx(self) -> None:
+        """Kill leftover pad delay/reverb/drive and drop a held KAOSS note."""
+        self._kaoss_apply(
+            self._kaoss.release(force=True), ended=True, restore=False
+        )
+        self._kaoss_fx_snap = None
+        self.engine.wipe_kaoss_bus_fx()
+        self._q_put(("mod",))
+        self._mark_settings_dirty()
+        self._append_log("KAOSS FX wiped")
+        if self._mode == "kaoss":
+            self._paint_kaoss_status()
+            self._kaoss_refresh_axis_labels()
+
     def _kaoss_midi_send(self, msg: mido.Message) -> None:
         if self._kaoss.out_mode not in ("usb", "both"):
             return
@@ -7995,10 +8339,13 @@ class MidiToneApp:
             self._kaoss_fx_snap = self._kaoss_capture_fx()
         ch = self._kaoss.channel & 0x0F
         want_local = self._kaoss.out_mode in ("local", "both")
+        remote = self.engine.using_remote()
         for ev in events:
             if ev.kind == "note_on":
                 vel = max(1, min(127, int(ev.velocity)))
-                if want_local:
+                if remote:
+                    self.engine.note_on(ch, ev.note, vel)
+                elif want_local:
                     self.engine.note_on(ch, ev.note, vel)
                     self._seq.record_note(True, ch, ev.note, vel)
                     self._q_put(("on", ch, ev.note, vel))
@@ -8006,7 +8353,9 @@ class MidiToneApp:
                     mido.Message("note_on", channel=ch, note=ev.note & 0x7F, velocity=vel)
                 )
             elif ev.kind == "note_off":
-                if want_local:
+                if remote:
+                    self.engine.note_off(ch, ev.note)
+                elif want_local:
                     self.engine.note_off(ch, ev.note)
                     self._seq.record_note(False, ch, ev.note, 0)
                     self._q_put(("off", ch, ev.note))
@@ -8014,6 +8363,15 @@ class MidiToneApp:
                     mido.Message("note_off", channel=ch, note=ev.note & 0x7F, velocity=0)
                 )
             elif ev.kind in ("cc", "touch"):
+                if remote:
+                    client = getattr(self, "_jambox", None)
+                    if client is not None:
+                        client.midi(
+                            "control_change",
+                            channel=ch,
+                            control=ev.control & 0x7F,
+                            value=ev.value & 0x7F,
+                        )
                 self._kaoss_midi_send(
                     mido.Message(
                         "control_change",
@@ -8032,6 +8390,7 @@ class MidiToneApp:
             self._kaoss_restore_fx()
         if self._mode == "kaoss":
             self._paint_kaoss_status()
+            self._kaoss_refresh_axis_labels()
 
     def _kaoss_apply_program(self, program_id: str) -> None:
         keep_hold = bool(self._kaoss.hold and self._kaoss.is_active())
@@ -8152,6 +8511,9 @@ class MidiToneApp:
         self._kaoss_picker_inner = inner
         self._kaoss_picker_drag = drag
         self._fill_kaoss_picker()
+        binder = drag.get("_bind_tree")
+        if callable(binder):
+            binder(inner)
 
         self._mk_touch_btn(
             footer, "CLOSE", self._close_kaoss_picker, bg="#9d0006"
@@ -8185,6 +8547,9 @@ class MidiToneApp:
             inner.grid_columnconfigure(col, weight=1)
         if self._kaoss_picker_kind == "scale":
             self._kaoss_scale_btns = self._kaoss_picker_btns
+        binder = drag.get("_bind_tree")
+        if callable(binder):
+            binder(inner)
         self._paint_kaoss_picker()
 
     def _kaoss_picker_current(self) -> str:
@@ -8333,7 +8698,13 @@ class MidiToneApp:
             bg="#111111",
         ).pack(side=tk.RIGHT)
 
-        _wrap, _canvas, inner, drag = self._build_touch_scroll_area(body)
+        _wrap, canvas, inner, drag = self._build_touch_scroll_area(body)
+
+        wipe = self._mk_scroll_select_btn(
+            inner, "WIPE FX", self._kaoss_wipe_fx, drag, bg="#9d0006"
+        )
+        wipe.configure(font=("DejaVu Sans", 13, "bold"), pady=14)
+        wipe.pack(fill=tk.X, pady=(0, 8))
 
         toggles = tk.Frame(inner, bg="#111111")
         toggles.pack(fill=tk.X, pady=(0, 8))
@@ -8341,14 +8712,21 @@ class MidiToneApp:
             toggles, "SHOW ALL", self._kaoss_toggle_show_all, drag, bg="#3c3836"
         )
         self._kaoss_settings_all_btn.configure(font=("DejaVu Sans", 13, "bold"), pady=14)
-        self._kaoss_settings_all_btn.pack(
-            side=tk.LEFT, expand=True, fill=tk.BOTH, padx=(0, 4)
-        )
+        self._kaoss_settings_all_btn.pack(fill=tk.X)
+        overlay = tk.Frame(inner, bg="#111111")
+        overlay.pack(fill=tk.X, pady=(0, 8))
         self._kaoss_settings_axes_btn = self._mk_scroll_select_btn(
-            toggles, "AXES: ON", self._kaoss_toggle_axis_labels, drag, bg="#3c3836"
+            overlay, "AXES: ON", self._kaoss_toggle_axis_labels, drag, bg="#3c3836"
         )
         self._kaoss_settings_axes_btn.configure(font=("DejaVu Sans", 13, "bold"), pady=14)
         self._kaoss_settings_axes_btn.pack(
+            side=tk.LEFT, expand=True, fill=tk.BOTH, padx=(0, 4)
+        )
+        self._kaoss_settings_grid_btn = self._mk_scroll_select_btn(
+            overlay, "GRID: ON", self._kaoss_toggle_grid_lines, drag, bg="#3c3836"
+        )
+        self._kaoss_settings_grid_btn.configure(font=("DejaVu Sans", 13, "bold"), pady=14)
+        self._kaoss_settings_grid_btn.pack(
             side=tk.LEFT, expand=True, fill=tk.BOTH, padx=(4, 0)
         )
 
@@ -8456,6 +8834,11 @@ class MidiToneApp:
         for c in range(4):
             ch_grid.grid_columnconfigure(c, weight=1)
 
+        binder = drag.get("_bind_tree")
+        if callable(binder):
+            binder(inner)
+        self.root.after_idle(lambda: inner.event_generate("<Configure>"))
+
         self._mk_touch_btn(
             footer, "CLOSE", self._close_kaoss_settings, bg="#9d0006"
         ).pack(fill=tk.X, ipady=14)
@@ -8470,6 +8853,7 @@ class MidiToneApp:
             self._kaoss_settings_frame = None
         self._kaoss_settings_all_btn = None
         self._kaoss_settings_axes_btn = None
+        self._kaoss_settings_grid_btn = None
         self._kaoss_settings_grid_lbl = None
         self._kaoss_settings_viz_btns = {}
         self._kaoss_settings_out_btns = {}
@@ -8498,6 +8882,14 @@ class MidiToneApp:
                 text="AXES: ON" if axes else "AXES: OFF",
                 bg=axes_color,
                 activebackground=axes_color,
+            )
+        grid_on = bool(self._kaoss.show_grid_lines)
+        grid_color = "#458588" if grid_on else "#3c3836"
+        if self._kaoss_settings_grid_btn is not None:
+            self._kaoss_settings_grid_btn.configure(
+                text="GRID: ON" if grid_on else "GRID: OFF",
+                bg=grid_color,
+                activebackground=grid_color,
             )
         if self._kaoss_settings_grid_lbl is not None:
             n = int(self._kaoss.grid_width)
@@ -8564,6 +8956,13 @@ class MidiToneApp:
         self._mark_settings_dirty()
         self._append_log(f"KAOSS axis labels → {'ON' if on else 'OFF'}")
 
+    def _kaoss_toggle_grid_lines(self) -> None:
+        on = self._kaoss.toggle_show_grid_lines()
+        self._paint_kaoss_settings()
+        self._kaoss_draw_grid()
+        self._mark_settings_dirty()
+        self._append_log(f"KAOSS grid lines → {'ON' if on else 'OFF'}")
+
     def _kaoss_set_viz_style(self, style: str) -> None:
         self._kaoss.set_viz_style(style)
         self._kaoss_led_geom = None
@@ -8598,10 +8997,15 @@ class MidiToneApp:
     def _paint_kaoss_status(self) -> None:
         morph = None
         tone = None
+        live = bool(self._kaoss.touching or self._kaoss.hold)
         if self._kaoss.program_id == "morph":
-            morph = self.engine.morph_neighbors()
+            a, b, frac = self.engine.morph_neighbors()
+            morph = (a, b, self._kaoss.y if live else frac)
         elif self._kaoss.program_id == "lead":
-            tone = float(self.engine.modulation_state().get("tone", 1.0))
+            if live:
+                tone = float(self._kaoss.y)
+            else:
+                tone = float(self.engine.modulation_state().get("tone", 1.0))
         self._kaoss_status_var.set(self._kaoss.header_line(morph=morph, tone=tone))
 
     def _paint_kaoss(self) -> None:
@@ -8642,6 +9046,15 @@ class MidiToneApp:
             )
         if self._kaoss_bpm_lbl is not None:
             self._kaoss_bpm_lbl.configure(text=str(int(round(self._kaoss.bpm))))
+        if self._kaoss_play_btn is not None:
+            if self._kaoss_play:
+                self._kaoss_play_btn.configure(
+                    text="EXIT", bg="#9d0006", activebackground="#9d0006"
+                )
+            else:
+                self._kaoss_play_btn.configure(
+                    text="FULL PAD", bg="#689d6a", activebackground="#689d6a"
+                )
 
     def _kaoss_draw_grid(self) -> None:
         canvas = self._kaoss_canvas
@@ -8649,32 +9062,43 @@ class MidiToneApp:
             return
         canvas.delete("grid")
         canvas.delete("axis")
+        canvas.delete("axis-label")
+        self._kaoss_axis_label_cache = None
         w = max(1, int(canvas.winfo_width()))
         h = max(1, int(canvas.winfo_height()))
         self._kaoss_ensure_leds(w, h)
         prog = self._kaoss.program()
-        regular, octave_w = grid_line_widths(self._kaoss.grid_width)
-        # Faint overlay so scale degrees stay readable on top of the LEDs
-        for frac, color in ((0.25, "#3a1528"), (0.5, "#5b203c"), (0.75, "#3a1528")):
-            y = int(h * (1.0 - frac))
-            stroke = octave_w if frac == 0.5 else regular
-            canvas.create_line(0, y, w, y, fill=color, width=stroke, tags="grid")
-        if prog.kind == "note":
-            notes = self._kaoss.notes()
-            key = self._kaoss.key % 12
-            xs = note_grid_xs(len(notes), w)
-            for i, x in enumerate(xs):
-                starts = notes[i] if i < len(notes) else None
-                octave = starts is not None and (starts % 12) == key
-                color = "#fb4934" if octave else "#4a2040"
-                canvas.create_line(
-                    x, 0, x, h, fill=color, width=octave_w if octave else regular, tags="grid"
-                )
-        else:
-            for frac in (0.25, 0.5, 0.75):
-                x = int(w * frac)
+        if self._kaoss.show_grid_lines:
+            regular, octave_w = grid_line_widths(self._kaoss.grid_width)
+            # Faint overlay so scale degrees stay readable on top of the LEDs
+            for frac, color in ((0.25, "#3a1528"), (0.5, "#5b203c"), (0.75, "#3a1528")):
+                y = int(h * (1.0 - frac))
                 stroke = octave_w if frac == 0.5 else regular
-                canvas.create_line(x, 0, x, h, fill="#3a1528", width=stroke, tags="grid")
+                canvas.create_line(0, y, w, y, fill=color, width=stroke, tags="grid")
+            if prog.kind == "note":
+                notes = self._kaoss.notes()
+                key = self._kaoss.key % 12
+                xs = note_grid_xs(len(notes), w)
+                for i, x in enumerate(xs):
+                    starts = notes[i] if i < len(notes) else None
+                    octave = starts is not None and (starts % 12) == key
+                    color = "#fb4934" if octave else "#4a2040"
+                    canvas.create_line(
+                        x,
+                        0,
+                        x,
+                        h,
+                        fill=color,
+                        width=octave_w if octave else regular,
+                        tags="grid",
+                    )
+            else:
+                for frac in (0.25, 0.5, 0.75):
+                    x = int(w * frac)
+                    stroke = octave_w if frac == 0.5 else regular
+                    canvas.create_line(
+                        x, 0, x, h, fill="#3a1528", width=stroke, tags="grid"
+                    )
         self._kaoss_draw_axes(canvas, w, h, prog)
         self._kaoss_paint_leds()
         if self._kaoss.is_active() or self._kaoss.hold:
@@ -8684,54 +9108,116 @@ class MidiToneApp:
         canvas.tag_raise("grid")
         canvas.tag_raise("ripple")
         canvas.tag_raise("axis")
+        canvas.tag_raise("axis-label")
         canvas.tag_raise("cursor")
+        canvas.tag_raise("play-exit")
 
-    def _kaoss_draw_axes(self, canvas: tk.Canvas, w: int, h: int, prog) -> None:
-        """L-shaped XY legend — labels sit on the edge they control, not both left."""
-        spine = "#d3869b"
+    def _kaoss_axis_pct(self, param: Optional[str], pad_axis: float) -> Optional[int]:
+        """0–100 for a pad-mapped 0..1 param. None = this axis is not a mix amount."""
+        if not param or param == "octave":
+            return None
+        if self._kaoss.touching or self._kaoss.hold:
+            return int(round(clamp01(pad_axis) * 100.0))
+        if param == "morph":
+            return int(round(clamp01(self.engine.morph_neighbors()[2]) * 100.0))
+        if param == "tone":
+            return int(round(clamp01(self.engine.modulation_state().get("tone", 0.0)) * 100.0))
+        if param == "level":
+            return int(
+                round(clamp01(self.engine.modulation_state().get("synth_level", 0.0)) * 100.0)
+            )
+        bus = self.engine.bus_fx_snapshot()
+        if param in bus:
+            return int(round(clamp01(float(bus.get(param, 0.0))) * 100.0))
+        return None
+
+    def _kaoss_axis_label_texts(self) -> Tuple[str, str]:
+        prog = self._kaoss.program()
+        x_label = f"X  {prog.x_axis}"
+        y_label = f"Y  {prog.y_axis}"
+        xp = self._kaoss_axis_pct(prog.x_param, self._kaoss.x)
+        yp = self._kaoss_axis_pct(prog.y_param, self._kaoss.y)
+        if xp is not None:
+            x_label = f"X  {prog.x_axis} {xp}%"
+        if prog.y_param == "morph":
+            a, b, frac = self.engine.morph_neighbors()
+            if self._kaoss.touching or self._kaoss.hold:
+                frac = self._kaoss.y
+            pct = int(round(clamp01(frac) * 100.0))
+            y_label = f"Y  {a[:6]} {pct}% {b[:6]}"
+        elif yp is not None:
+            y_label = f"Y  {prog.y_axis} {yp}%"
+        return x_label, y_label
+
+    def _kaoss_refresh_axis_labels(self) -> None:
+        canvas = self._kaoss_canvas
+        if canvas is None or self._mode != "kaoss":
+            return
+        if not self._kaoss.show_axis_labels:
+            if self._kaoss_axis_label_cache is not None:
+                canvas.delete("axis-label")
+                self._kaoss_axis_label_cache = None
+            return
+        x_label, y_label = self._kaoss_axis_label_texts()
+        if (x_label, y_label) == self._kaoss_axis_label_cache and canvas.find_withtag(
+            "axis-label"
+        ):
+            canvas.tag_raise("axis-label")
+            canvas.tag_raise("cursor")
+            return
+        self._kaoss_axis_label_cache = (x_label, y_label)
+        canvas.delete("axis-label")
+        w = max(1, int(canvas.winfo_width()))
+        h = max(1, int(canvas.winfo_height()))
         left = 22
         bottom = max(28, h - 18)
-        top = 16
         right = max(left + 40, w - 16)
-        canvas.create_line(
-            left,
-            bottom,
-            right,
-            bottom,
-            fill=spine,
-            width=2,
-            arrow=tk.LAST,
-            arrowshape=(10, 12, 5),
-            tags="axis",
-        )
-        canvas.create_line(
-            left,
-            bottom,
-            left,
-            top,
-            fill=spine,
-            width=2,
-            arrow=tk.LAST,
-            arrowshape=(10, 12, 5),
-            tags="axis",
-        )
-        if not self._kaoss.show_axis_labels:
-            return
         self._kaoss_axis_caption(
-            canvas, (left + right) // 2, bottom - 13, f"X  {prog.x_axis}"
+            canvas, (left + right) // 2, bottom - 13, x_label
         )
-        y_label = f"Y  {prog.y_axis}"
-        if prog.id == "morph":
-            a, b, frac = self.engine.morph_neighbors()
-            pct = int(round(max(0.0, min(1.0, frac)) * 100.0))
-            y_label = f"Y  {a[:6]} {pct}% {b[:6]}"
-        elif prog.id == "lead":
-            pct = int(round(float(self.engine.modulation_state().get("tone", 1.0)) * 100.0))
-            y_label = f"Y  TONE {pct}%"
         try:
-            self._kaoss_axis_caption(canvas, left + 15, h // 2, y_label, angle=90.0)
+            self._kaoss_axis_caption(
+                canvas, left + 15, h // 2, y_label, angle=90.0
+            )
         except tk.TclError:
-            self._kaoss_axis_caption(canvas, left + 30, h // 2, f"Y ↑ {y_label[2:].strip()}")
+            self._kaoss_axis_caption(
+                canvas, left + 30, h // 2, f"Y ↑ {y_label[2:].strip()}"
+            )
+        canvas.tag_raise("axis-label")
+        canvas.tag_raise("cursor")
+
+    def _kaoss_draw_axes(self, canvas: tk.Canvas, w: int, h: int, _prog) -> None:
+        """L-shaped XY legend — labels sit on the edge they control, not both left."""
+        if self._kaoss.show_grid_lines:
+            spine = "#d3869b"
+            left = 22
+            bottom = max(28, h - 18)
+            top = 16
+            right = max(left + 40, w - 16)
+            canvas.create_line(
+                left,
+                bottom,
+                right,
+                bottom,
+                fill=spine,
+                width=2,
+                arrow=tk.LAST,
+                arrowshape=(10, 12, 5),
+                tags="axis",
+            )
+            canvas.create_line(
+                left,
+                bottom,
+                left,
+                top,
+                fill=spine,
+                width=2,
+                arrow=tk.LAST,
+                arrowshape=(10, 12, 5),
+                tags="axis",
+            )
+        self._kaoss_axis_label_cache = None
+        self._kaoss_refresh_axis_labels()
 
     def _kaoss_axis_caption(
         self,
@@ -8749,7 +9235,7 @@ class MidiToneApp:
             fill="#fbf1c7",
             font=("DejaVu Sans", 13, "bold"),
             angle=angle,
-            tags="axis",
+            tags=("axis", "axis-label"),
         )
         box = canvas.bbox(item)
         if box is None:
@@ -8763,7 +9249,7 @@ class MidiToneApp:
             fill="#0c060a",
             outline="#5b203c",
             width=1,
-            tags="axis",
+            tags=("axis", "axis-label"),
         )
         canvas.tag_raise(item, bg)
 
@@ -8899,6 +9385,7 @@ class MidiToneApp:
         canvas.tag_raise("grid")
         canvas.tag_raise("ripple")
         canvas.tag_raise("axis")
+        canvas.tag_raise("axis-label")
         canvas.tag_raise("cursor")
 
     def _kaoss_paint_glow(
@@ -9451,10 +9938,14 @@ class MidiToneApp:
         window_id = canvas.create_window((0, 0), window=inner, anchor="nw")
 
         def _on_inner_configure(_event: object = None) -> None:
-            canvas.configure(scrollregion=canvas.bbox("all"))
+            canvas.update_idletasks()
+            req_h = max(1, int(inner.winfo_reqheight()))
+            req_w = max(int(canvas.winfo_width()), int(inner.winfo_reqwidth()), 1)
+            canvas.configure(scrollregion=(0, 0, req_w, req_h))
 
         def _on_canvas_configure(event: tk.Event) -> None:  # type: ignore[name-defined]
             canvas.itemconfigure(window_id, width=event.width)
+            _on_inner_configure()
 
         inner.bind("<Configure>", _on_inner_configure)
         canvas.bind("<Configure>", _on_canvas_configure)
@@ -9525,11 +10016,42 @@ class MidiToneApp:
 
         _bind_empty_drag(canvas)
         _bind_empty_drag(inner)
+
+        def _on_wheel(event: tk.Event) -> str:  # type: ignore[name-defined]
+            delta = int(getattr(event, "delta", 0) or 0)
+            if delta == 0:
+                num = int(getattr(event, "num", 0) or 0)
+                steps = -1 if num == 4 else 1 if num == 5 else 0
+            else:
+                steps = -1 if delta > 0 else 1
+            if steps:
+                canvas.yview_scroll(steps, "units")
+            return "break"
+
+        canvas.bind("<MouseWheel>", _on_wheel)
+        canvas.bind("<Button-4>", _on_wheel)
+        canvas.bind("<Button-5>", _on_wheel)
+        inner.bind("<MouseWheel>", _on_wheel)
+        inner.bind("<Button-4>", _on_wheel)
+        inner.bind("<Button-5>", _on_wheel)
         drag["_move"] = _drag_move
         drag["_start"] = _drag_start
         drag["_end"] = _drag_end
         drag["_release_grab"] = _release_grab
+        drag["_bind_tree"] = lambda widget: self._bind_touch_scroll_tree(widget, drag)
         return wrap, canvas, inner, drag
+
+    def _bind_touch_scroll_tree(self, widget: tk.Misc, drag: Dict[str, object]) -> None:
+        """Let nested labels/frames drag-scroll; buttons already have their own bind."""
+        starter = drag.get("_start")
+        mover = drag.get("_move")
+        ender = drag.get("_end")
+        if not isinstance(widget, tk.Button) and callable(starter) and callable(mover) and callable(ender):
+            widget.bind("<ButtonPress-1>", starter)  # type: ignore[arg-type]
+            widget.bind("<B1-Motion>", mover)  # type: ignore[arg-type]
+            widget.bind("<ButtonRelease-1>", ender)  # type: ignore[arg-type]
+        for child in widget.winfo_children():
+            self._bind_touch_scroll_tree(child, drag)
 
     def _arm_overlay_guard(self, sec: float = 0.40) -> None:
         """Ignore the finger-up that opened a grid so it cannot pick a tile."""
@@ -10287,9 +10809,27 @@ class MidiToneApp:
             print(f"  [{i}] {n}")
         print(f"Wavetables ({len(self._voice_names)}): {', '.join(self._voice_names)}")
 
+    def _attach_jambox(self) -> None:
+        """Connect to jambox-engine (spawn if MIDI_TONE_SPAWN=1)."""
+        if prefer_python_engine():
+            return
+        client, proc = connect_or_spawn(
+            waves=self._waves_dir,
+            user_waves=self._user_waves_dir,
+            midi_in=self.port_filter or "MPK",
+        )
+        self._jambox = client
+        self._jambox_proc = proc
+        self._jambox_owns_midi = client is not None and client.connected
+        if not self._jambox_owns_midi:
+            return
+        self.engine.attach_remote(client)
+        self._append_log("Sound + MIDI: jambox-engine")
+        print("midi: using jambox-engine (Python audio/MIDI fallback idle)", flush=True)
+
     def _maybe_reopen_midi(self) -> None:
         """If we started without the filtered device, adopt it when it appears."""
-        if self._stop.is_set() or not self.port_filter:
+        if self._stop.is_set() or not self.port_filter or self._jambox_owns_midi:
             return
         try:
             current = ""
@@ -10359,11 +10899,16 @@ class MidiToneApp:
         return None
 
     def _midi_loop(self) -> None:
-        assert self._inport is not None
         while not self._stop.is_set():
             try:
-                for msg in self._inport.iter_pending():
-                    self._handle_midi(msg)
+                if self._inport is not None:
+                    for msg in self._inport.iter_pending():
+                        self._handle_midi(msg)
+                elif self._jambox is not None:
+                    for notice in self._jambox.drain_midi():
+                        msg = midi_notice_to_message(notice)
+                        if msg is not None:
+                            self._handle_midi(msg, from_engine=True)
             except Exception as exc:
                 tb = __import__("traceback").format_exc()
                 print(tb, flush=True)
@@ -10507,7 +11052,16 @@ class MidiToneApp:
             return f"SynLvl {value}"
         return None
 
-    def _handle_midi(self, msg: mido.Message) -> None:
+    def _handle_midi(self, msg: mido.Message, *, from_engine: bool = False) -> None:
+        if from_engine:
+            self.engine._echoing = True
+        try:
+            self._handle_midi_body(msg, from_engine=from_engine)
+        finally:
+            if from_engine:
+                self.engine._echoing = False
+
+    def _handle_midi_body(self, msg: mido.Message, *, from_engine: bool = False) -> None:
         continuous = msg.type == "pitchwheel" or (
             msg.type == "control_change"
             and (msg.control == 1 or msg.control in KNOB_CCS)
@@ -10543,7 +11097,8 @@ class MidiToneApp:
             if self._kit_ui_open and is_drum and phrase_cell_for_note(msg.note) is not None:
                 self._q_put(("kit_sel", msg.note))
             vel = msg.velocity if is_drum or not self._full_vel else 127
-            self.engine.note_on(msg.channel, msg.note, vel)
+            if not from_engine:
+                self.engine.note_on(msg.channel, msg.note, vel)
             self._seq.record_note(True, msg.channel, msg.note, vel)
             if pads_mode or phrase_recording:
                 self._phrases.record_note(True, msg.channel, msg.note, vel)
@@ -10575,7 +11130,8 @@ class MidiToneApp:
                 cell = phrase_cell_for_note(msg.note)
                 if cell is not None and self._drum_pad_is_phrase_control(cell):
                     return
-            self.engine.note_off(msg.channel, msg.note)
+            if not from_engine:
+                self.engine.note_off(msg.channel, msg.note)
             self._seq.record_note(False, msg.channel, msg.note, 0)
             if pads_mode or self._phrases.is_recording():
                 self._phrases.record_note(False, msg.channel, msg.note, 0)
@@ -11282,6 +11838,19 @@ class MidiToneApp:
                 self._inport.close()
             except Exception:
                 pass
+        if self._jambox is not None:
+            try:
+                self._jambox.close()
+            except Exception:
+                pass
+            self._jambox = None
+        proc = self._jambox_proc
+        if proc is not None:
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+            self._jambox_proc = None
         self.engine.stop()
         self.root.destroy()
 

@@ -85,8 +85,8 @@ pub struct DrumMacros {
 impl Default for DrumMacros {
     fn default() -> Self {
         Self {
-            pitch: 0.5,
-            decay: 0.5,
+            pitch: 0.45,
+            decay: 0.40,
             noise: 0.55,
             tone: 0.60,
         }
@@ -112,6 +112,8 @@ struct Hit {
     freq_end: f32,
     freq_tau: f32,
     noise_lp: f32,
+    elapsed: f32,
+    body_amp: f32,
     age: u64,
 }
 
@@ -131,6 +133,8 @@ impl Hit {
             freq_end: 40.0,
             freq_tau: 0.02,
             noise_lp: 0.0,
+            elapsed: 0.0,
+            body_amp: 0.38,
             age: 0,
         }
     }
@@ -244,11 +248,19 @@ impl DrumKit {
                         0.045 + 0.22 * m.decay,
                     ),
                 };
-                hit.freq = base * 2f32.powf((m.pitch - 0.5) * 1.8);
+                hit.freq = base
+                    * 2f32.powf((m.pitch - 0.5) * if matches!(model, KickTight) { 1.6 } else { 1.8 });
                 hit.freq_end = end_lo + end_span * m.pitch;
                 hit.freq_tau = drop;
                 hit.body_tau = body;
                 hit.noise_tau = body;
+                hit.body_amp = match model {
+                    Kick => 0.38,
+                    KickTight => 0.34,
+                    TomLo => 0.32,
+                    TomMid => 0.30,
+                    _ => 0.28,
+                };
             }
             Snare | Rimshot => {
                 let f0 = if model == Rimshot { 200.0 } else { 175.0 };
@@ -281,20 +293,29 @@ impl DrumKit {
                 };
                 hit.freq = 40.0 + 80.0 * m.pitch; // shaker grain rate
             }
-            Rim | Clave => {
-                hit.freq =
-                    if model == Clave { 640.0 } else { 520.0 } * 2f32.powf((m.pitch - 0.5) * 1.2);
+            Rim => {
+                hit.freq = 520.0 * 2f32.powf((m.pitch - 0.5) * 1.2);
                 hit.freq_end = hit.freq;
                 hit.freq_tau = 1.0;
                 hit.body_tau = 0.012 + 0.05 * m.decay;
                 hit.noise_tau = 0.004;
+                hit.body_amp = 0.22;
+            }
+            Clave => {
+                hit.freq = 1800.0 * 2f32.powf((m.pitch - 0.5) * 0.8);
+                hit.freq_end = hit.freq;
+                hit.freq_tau = 1.0;
+                hit.body_tau = 0.008 + 0.035 * m.decay;
+                hit.noise_tau = 0.004;
+                hit.body_amp = 0.20;
             }
             Cowbell => {
                 hit.freq = 540.0 * 2f32.powf((m.pitch - 0.5) * 1.0);
-                hit.freq_end = hit.freq;
+                hit.freq_end = 800.0 * 2f32.powf((m.pitch - 0.5) * 1.0);
                 hit.freq_tau = 1.0;
-                hit.body_tau = 0.05 + 0.25 * m.decay;
+                hit.body_tau = 0.05 + 0.28 * m.decay;
                 hit.noise_tau = 0.01;
+                hit.body_amp = 0.18;
             }
         }
         self.hits[slot] = hit;
@@ -358,7 +379,7 @@ impl DrumKit {
                     | DrumModel::TomHi => {
                         hit.freq += (hit.freq_end - hit.freq) * freq_coef;
                         hit.phase += (hit.freq as f64 / sr as f64) * std::f64::consts::TAU;
-                        let body = (hit.phase.sin() as f32) * hit.body_env * 0.38 * vel;
+                        let body = (hit.phase.sin() as f32) * hit.body_env * hit.body_amp * vel;
                         let click = hit.click_env * 0.18 * vel * white;
                         body + click + noise * 0.05 * noise_amt * vel * hit.body_env
                     }
@@ -374,17 +395,30 @@ impl DrumKit {
                         } else {
                             0.18 + 0.40 * noise_amt
                         };
+                        let click_amp = if hit.model == DrumModel::Rimshot {
+                            0.25
+                        } else {
+                            0.12
+                        };
                         let body = (hit.phase.sin() as f32) * hit.body_env * body_amp * vel;
                         body + noise * hit.noise_env * noise_amp * vel
-                            + hit.click_env * 0.12 * vel * white
+                            + hit.click_env * click_amp * vel * white
                     }
-                    DrumModel::Clap => noise * hit.noise_env * (0.28 + 0.4 * noise_amt) * vel,
+                    DrumModel::Clap => {
+                        let t = hit.elapsed;
+                        let bursts = (-(t * t) / 0.0000008).exp()
+                            + (-((t - 0.012) * (t - 0.012)) / 0.0000010).exp()
+                            + (-((t - 0.024) * (t - 0.024)) / 0.0000012).exp();
+                        noise
+                            * (bursts * 0.45 + hit.noise_env * 0.28)
+                            * (0.28 + 0.4 * noise_amt)
+                            * vel
+                    }
                     DrumModel::HatClosed
                     | DrumModel::HatOpen
                     | DrumModel::HatPedal
                     | DrumModel::Ride
                     | DrumModel::Shaker => {
-                        // Bright = white minus its own low-passed version.
                         let bright = white - noise * 0.85;
                         let amp = match hit.model {
                             DrumModel::HatOpen => 0.14 + 0.30 * noise_amt,
@@ -400,16 +434,25 @@ impl DrumKit {
                             1.0
                         };
                         bright * hit.noise_env * grain * amp * vel * (0.35 + 0.65 * tone)
+                            + noise * hit.noise_env * 0.10 * (1.0 - tone) * vel
                     }
-                    DrumModel::Rim | DrumModel::Clave | DrumModel::Cowbell => {
+                    DrumModel::Rim => {
                         hit.phase += (hit.freq as f64 / sr as f64) * std::f64::consts::TAU;
-                        let amp = if hit.model == DrumModel::Cowbell {
-                            0.18
-                        } else {
-                            0.22
-                        };
-                        (hit.phase.sin() as f32) * hit.body_env * amp * vel
+                        (hit.phase.sin() as f32) * hit.body_env * hit.body_amp * vel
                             + hit.click_env * 0.18 * vel * white
+                    }
+                    DrumModel::Clave => {
+                        hit.phase += (hit.freq as f64 / sr as f64) * std::f64::consts::TAU;
+                        (hit.phase.sin() as f32) * hit.body_env * hit.body_amp * vel
+                    }
+                    DrumModel::Cowbell => {
+                        hit.phase += (hit.freq as f64 / sr as f64) * std::f64::consts::TAU;
+                        let p2 = hit.phase * (hit.freq_end as f64 / hit.freq.max(1.0) as f64);
+                        ((hit.phase.sin() as f32) + 0.7 * (p2.sin() as f32))
+                            * hit.body_env
+                            * hit.body_amp
+                            * vel
+                            + noise * hit.body_env * 0.04 * noise_amt * vel
                     }
                 };
 
@@ -418,6 +461,7 @@ impl DrumKit {
                 hit.body_env *= body_coef;
                 hit.noise_env *= noise_coef;
                 hit.click_env *= click_coef;
+                hit.elapsed += 1.0 / sr;
             }
 
             if hit.phase.abs() > 1e9 {

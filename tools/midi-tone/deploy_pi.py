@@ -51,6 +51,7 @@ FILES = [
     "pi-power.sh",
     "updater.py",
     "kaoss.py",
+    "jambox_client.py",
 ]
 
 # Extra trees copied recursively

@@ -44,11 +44,16 @@ pub enum SynthParam {
     Release,
     VibratoDepth,
     VibratoRate,
+    /// 0..1 mod-wheel amount. Vibrato depth is scaled by max(this, VibratoAlways).
+    VibratoMod,
+    /// 0..1 always-on vibrato amount (Kaoss VIB). Combined with the mod wheel.
+    VibratoAlways,
     PitchBend,
     DrumPitch,
     DrumDecay,
     DrumNoise,
     DrumTone,
+    DrumLevel,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

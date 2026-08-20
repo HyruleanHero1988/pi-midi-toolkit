@@ -17,6 +17,12 @@ export GDK_BACKEND=x11
 unset WAYLAND_DISPLAY || true
 export PULSE_LATENCY_MSEC="${PULSE_LATENCY_MSEC:-100}"
 export PIPEWIRE_LATENCY="${PIPEWIRE_LATENCY:-1536/44100}"
+# Spawn jambox-engine if the systemd unit is not already on /tmp/jambox.sock.
+export MIDI_TONE_SPAWN="${MIDI_TONE_SPAWN:-1}"
+export MIDI_TONE_JAMBOX_RT="${MIDI_TONE_JAMBOX_RT:-1}"
+if [[ -x "$HOME/pi-midi-toolkit/bin/jambox-engine" ]]; then
+  export MIDI_TONE_JAMBOX_BIN="${MIDI_TONE_JAMBOX_BIN:-$HOME/pi-midi-toolkit/bin/jambox-engine}"
+fi
 
 LOG=/tmp/midi-tone-kiosk.log
 echo "==== midi-tone kiosk $(date -Is) pid=$$ display=$DISPLAY ====" >>"$LOG"

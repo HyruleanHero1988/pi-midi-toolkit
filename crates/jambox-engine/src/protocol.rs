@@ -70,6 +70,28 @@ pub enum Request {
     },
     StopAllClips,
     Status,
+    /// Inject MIDI as if it arrived on the hardware input (touch/KAOSS, tests).
+    Midi {
+        kind: String,
+        #[serde(default)]
+        channel: u8,
+        #[serde(default)]
+        note: Option<u8>,
+        #[serde(default)]
+        velocity: Option<u8>,
+        #[serde(default)]
+        control: Option<u8>,
+        #[serde(default)]
+        value: Option<u16>,
+    },
+    /// Tell ingest which bank hardware knobs currently address.
+    KnobMap {
+        mode: String,
+        #[serde(default)]
+        fx_kind: Option<String>,
+        #[serde(default)]
+        fx_index: u16,
+    },
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -130,6 +152,103 @@ pub enum Response {
     Ok,
     Error { message: String },
     Status(StatusReply),
+    /// Unsolicited: a MIDI event the engine heard (notes already went to DSP).
+    Midi(MidiNotice),
+}
+
+/// UI-facing MIDI echo. DSP already applied the mapped command.
+#[derive(Debug, Clone, Serialize)]
+pub struct MidiNotice {
+    pub kind: String,
+    pub channel: u8,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub velocity: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub control: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<u16>,
+}
+
+impl MidiNotice {
+    pub fn from_event(event: midi_core::MidiEvent) -> Self {
+        use midi_core::MidiEvent::*;
+        match event {
+            NoteOn {
+                channel,
+                note,
+                velocity,
+            } => Self {
+                kind: "note_on".into(),
+                channel,
+                note: Some(note),
+                velocity: Some(velocity as u16),
+                control: None,
+                value: None,
+            },
+            NoteOff {
+                channel,
+                note,
+                velocity,
+            } => Self {
+                kind: "note_off".into(),
+                channel,
+                note: Some(note),
+                velocity: Some(velocity as u16),
+                control: None,
+                value: None,
+            },
+            ControlChange {
+                channel,
+                controller,
+                value,
+            } => Self {
+                kind: "control_change".into(),
+                channel,
+                note: None,
+                velocity: None,
+                control: Some(controller),
+                value: Some(value as u16),
+            },
+            PitchBend { channel, value } => Self {
+                kind: "pitch_bend".into(),
+                channel,
+                note: None,
+                velocity: None,
+                control: None,
+                value: Some(value),
+            },
+            PolyPressure {
+                channel,
+                note,
+                pressure,
+            } => Self {
+                kind: "poly_pressure".into(),
+                channel,
+                note: Some(note),
+                velocity: None,
+                control: None,
+                value: Some(pressure as u16),
+            },
+            ChannelPressure { channel, pressure } => Self {
+                kind: "channel_pressure".into(),
+                channel,
+                note: None,
+                velocity: None,
+                control: None,
+                value: Some(pressure as u16),
+            },
+            ProgramChange { channel, program } => Self {
+                kind: "program_change".into(),
+                channel,
+                note: None,
+                velocity: None,
+                control: None,
+                value: Some(program as u16),
+            },
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Default)]
@@ -156,6 +275,14 @@ pub enum Decoded {
     },
     /// Answer without touching audio.
     StatusRequest,
+    /// Same path as USB MIDI in (notes, CC, bend).
+    MidiIn(midi_core::MidiEvent),
+    /// UI mode buttons: keys / drums / fx.
+    KnobMap {
+        mode: String,
+        fx_kind: Option<String>,
+        fx_index: u16,
+    },
 }
 
 pub fn parse_quantize(value: Option<&str>) -> Quantize {
@@ -182,13 +309,62 @@ fn parse_synth_param(name: &str) -> Option<SynthParam> {
         "release" => SynthParam::Release,
         "vibrato_depth" => SynthParam::VibratoDepth,
         "vibrato_rate" => SynthParam::VibratoRate,
+        "vibrato_mod" => SynthParam::VibratoMod,
+        "vibrato_always" => SynthParam::VibratoAlways,
         "pitch_bend" => SynthParam::PitchBend,
         "drum_pitch" => SynthParam::DrumPitch,
         "drum_decay" => SynthParam::DrumDecay,
         "drum_noise" => SynthParam::DrumNoise,
         "drum_tone" => SynthParam::DrumTone,
+        "drum_level" => SynthParam::DrumLevel,
         _ => return None,
     })
+}
+
+fn midi_event_from_parts(
+    kind: &str,
+    channel: u8,
+    note: Option<u8>,
+    velocity: Option<u8>,
+    control: Option<u8>,
+    value: Option<u16>,
+) -> Result<midi_core::MidiEvent, String> {
+    let channel = channel & 0x0f;
+    match kind {
+        "note_on" => Ok(midi_core::MidiEvent::NoteOn {
+            channel,
+            note: note.unwrap_or(0) & 0x7f,
+            velocity: velocity.unwrap_or(0).min(127),
+        }),
+        "note_off" => Ok(midi_core::MidiEvent::NoteOff {
+            channel,
+            note: note.unwrap_or(0) & 0x7f,
+            velocity: velocity.unwrap_or(0).min(127),
+        }),
+        "control_change" | "cc" => Ok(midi_core::MidiEvent::ControlChange {
+            channel,
+            controller: control.unwrap_or(0) & 0x7f,
+            value: (value.unwrap_or(0) as u8) & 0x7f,
+        }),
+        "pitch_bend" | "pitchwheel" => Ok(midi_core::MidiEvent::PitchBend {
+            channel,
+            value: value.unwrap_or(8192).min(16383),
+        }),
+        "channel_pressure" | "aftertouch" => Ok(midi_core::MidiEvent::ChannelPressure {
+            channel,
+            pressure: (value.unwrap_or(0) as u8) & 0x7f,
+        }),
+        "poly_pressure" | "polytouch" => Ok(midi_core::MidiEvent::PolyPressure {
+            channel,
+            note: note.unwrap_or(0) & 0x7f,
+            pressure: (value.unwrap_or(0) as u8) & 0x7f,
+        }),
+        "program_change" => Ok(midi_core::MidiEvent::ProgramChange {
+            channel,
+            program: (value.unwrap_or(0) as u8) & 0x7f,
+        }),
+        other => Err(format!("unknown midi kind {other}")),
+    }
 }
 
 fn parse_fx_param(name: &str) -> Option<FxParam> {
@@ -210,15 +386,35 @@ pub fn decode(request: Request) -> Result<Decoded, String> {
             channel,
             note,
             velocity,
-        } => Decoded::Command(Command::NoteOn {
+        } => Decoded::MidiIn(midi_core::MidiEvent::NoteOn {
             channel: channel & 0x0f,
             note: note & 0x7f,
             velocity: velocity.min(127),
         }),
-        Request::NoteOff { channel, note } => Decoded::Command(Command::NoteOff {
+        Request::NoteOff { channel, note } => Decoded::MidiIn(midi_core::MidiEvent::NoteOff {
             channel: channel & 0x0f,
             note: note & 0x7f,
+            velocity: 0,
         }),
+        Request::Midi {
+            kind,
+            channel,
+            note,
+            velocity,
+            control,
+            value,
+        } => Decoded::MidiIn(midi_event_from_parts(
+            &kind, channel, note, velocity, control, value,
+        )?),
+        Request::KnobMap {
+            mode,
+            fx_kind,
+            fx_index,
+        } => Decoded::KnobMap {
+            mode,
+            fx_kind,
+            fx_index,
+        },
         Request::AllNotesOff => Decoded::Command(Command::AllNotesOff),
         Request::Panic => Decoded::Command(Command::Panic),
         Request::Synth { param, value } => {
@@ -290,7 +486,7 @@ mod tests {
     fn note_on_round_trips_from_json() {
         let d = decode_line(r#"{"cmd":"note_on","channel":0,"note":60,"velocity":100}"#);
         match d {
-            Decoded::Command(Command::NoteOn {
+            Decoded::MidiIn(midi_core::MidiEvent::NoteOn {
                 channel,
                 note,
                 velocity,
@@ -305,7 +501,7 @@ mod tests {
     fn channel_and_note_are_masked_to_midi_range() {
         let d = decode_line(r#"{"cmd":"note_on","channel":99,"note":200,"velocity":250}"#);
         match d {
-            Decoded::Command(Command::NoteOn {
+            Decoded::MidiIn(midi_core::MidiEvent::NoteOn {
                 channel,
                 note,
                 velocity,
@@ -370,5 +566,20 @@ mod tests {
         }))
         .unwrap();
         assert!(json.contains("bpm"));
+    }
+
+    #[test]
+    fn midi_notice_is_externally_tagged() {
+        let json = serde_json::to_string(&Response::Midi(MidiNotice::from_event(
+            midi_core::MidiEvent::ControlChange {
+                channel: 0,
+                controller: 71,
+                value: 64,
+            },
+        )))
+        .unwrap();
+        assert!(json.contains("\"midi\""));
+        assert!(json.contains("control_change"));
+        assert!(json.contains("71"));
     }
 }

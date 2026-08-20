@@ -121,6 +121,7 @@ PROGRAMS: Tuple[KaossProgram, ...] = (
     KaossProgram("delay", "DELAY", "note", y_param="delay_mix", x_axis="PITCH", y_axis="DLY MIX"),
     KaossProgram("filter", "FILTER", "fx", x_param="tone", y_param="morph", x_axis="TONE", y_axis="MORPH", curated=True),
     KaossProgram("echo", "ECHO", "fx", x_param="delay_time", y_param="delay_mix", x_axis="DLY T", y_axis="DLY MIX", curated=True),
+    KaossProgram("swell", "SWELL", "fx", x_param="attack", y_param="delay_mix", x_axis="ATTACK", y_axis="DLY MIX", curated=True),
     KaossProgram("drive", "DRIVE", "fx", x_param="drive", y_param="reverb_mix", x_axis="DRIVE", y_axis="REVERB", curated=True),
     KaossProgram("space", "SPACE", "fx", x_param="delay_mix", y_param="reverb_mix", x_axis="ECHO", y_axis="REVERB", curated=True),
     KaossProgram("reso", "RESO", "fx", x_param="tone", y_param="delay_fb", x_axis="TONE", y_axis="FB"),
@@ -409,6 +410,7 @@ class KaossPad:
         self.hold: bool = False
         self.show_all: bool = False
         self.show_axis_labels: bool = True
+        self.show_grid_lines: bool = True
         self.viz_style: str = DEFAULT_VIZ_STYLE
         self.grid_width: int = DEFAULT_GRID_WIDTH
         self.out_mode: str = "local"
@@ -494,6 +496,7 @@ class KaossPad:
             "hold": bool(self.hold),
             "show_all": bool(self.show_all),
             "show_axis_labels": bool(self.show_axis_labels),
+            "show_grid_lines": bool(self.show_grid_lines),
             "viz_style": self.viz_style,
             "grid_width": int(self.grid_width),
             "out_mode": self.out_mode,
@@ -514,6 +517,8 @@ class KaossPad:
             self.show_all = bool(data.get("show_all"))
         if "show_axis_labels" in data:
             self.show_axis_labels = bool(data.get("show_axis_labels"))
+        if "show_grid_lines" in data:
+            self.show_grid_lines = bool(data.get("show_grid_lines"))
         if "viz_style" in data:
             self.viz_style = normalize_viz_style(data.get("viz_style"))
         if "grid_width" in data:
@@ -579,6 +584,13 @@ class KaossPad:
 
     def toggle_show_axis_labels(self) -> bool:
         return self.set_show_axis_labels(not self.show_axis_labels)
+
+    def set_show_grid_lines(self, enabled: bool) -> bool:
+        self.show_grid_lines = bool(enabled)
+        return self.show_grid_lines
+
+    def toggle_show_grid_lines(self) -> bool:
+        return self.set_show_grid_lines(not self.show_grid_lines)
 
     def set_viz_style(self, style: str) -> str:
         self.viz_style = normalize_viz_style(style)

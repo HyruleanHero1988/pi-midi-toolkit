@@ -132,6 +132,7 @@ class KaossScreenTest(unittest.TestCase):
         app._kaoss.scale_id = "ionian"
         app._kaoss.show_all = False
         app._kaoss.show_axis_labels = True
+        app._kaoss.show_grid_lines = True
         app._kaoss.viz_style = "glow"
         app._kaoss_led_geom = None
         if app._kaoss_picker_open:
@@ -317,7 +318,29 @@ class KaossScreenTest(unittest.TestCase):
         self.assertNotIn("PITCH", names)
         self.assertNotIn("TONE", names)
 
-    def test_full_pad_hides_chrome_hold_exit_restores(self) -> None:
+    def test_settings_can_hide_grid_lines(self) -> None:
+        app = self.app
+        app._switch_mode("kaoss")
+        self.pump()
+        app._open_kaoss_settings()
+        self.pump()
+        app._kaoss_toggle_grid_lines()
+        self.pump()
+        self.assertFalse(app._kaoss.show_grid_lines)
+        self.assertIn("OFF", app._kaoss_settings_grid_btn.cget("text"))
+        app._close_kaoss_settings()
+        self.pump()
+        canvas = app._kaoss_canvas
+        app._kaoss_draw_grid()
+        self.assertFalse(canvas.find_withtag("grid"))
+        lines = [
+            item
+            for item in canvas.find_withtag("axis")
+            if canvas.type(item) == "line"
+        ]
+        self.assertFalse(lines)
+
+    def test_full_pad_hides_chrome_bottom_hold_peeks_footer(self) -> None:
         app = self.app
         app._switch_mode("kaoss")
         self.pump()
@@ -326,15 +349,53 @@ class KaossScreenTest(unittest.TestCase):
         self.pump()
         self.assertTrue(app._kaoss_play)
         self.assertFalse(bool(app._nav.winfo_ismapped()))
-        self.assertTrue(bool(app._kaoss_exit_bar.winfo_ismapped()))
-        app._kaoss_exit_press()
-        app._kaoss_exit_release()
+        canvas = app._kaoss_canvas
+        canvas.update_idletasks()
+        w = max(80, int(canvas.winfo_width()))
+        h = max(80, int(canvas.winfo_height()))
+
+        class Ev:
+            def __init__(self, x: int, y: int) -> None:
+                self.x = x
+                self.y = y
+                self.state = 0x0100
+
+        # Press on the edge and wait — still playing, not an exit.
+        app._kaoss_on_press(Ev(8, h // 2))
+        self.pump(0.85)
+        self.assertTrue(app._kaoss_play)
+        app._kaoss_on_release()
+        self.pump()
+
+        # Drag from the middle onto the left edge and stay — stay in full pad.
+        app._kaoss_on_press(Ev(w // 2, h // 2))
+        app._kaoss_on_move(Ev(w // 2, h // 2))
+        self.pump(0.2)
+        self.assertTrue(app._kaoss_play)
+        app._kaoss_on_move(Ev(8, h // 2))
+        self.pump(0.85)
+        self.assertTrue(app._kaoss_play)
+        self.assertFalse(bool(app._nav.winfo_ismapped()))
+        self.assertFalse(app._kaoss_play_footer)
+        app._kaoss_on_release()
+        self.pump()
+
+        # Drag onto the bottom edge and stay still — footer peeks, nav stays gone.
+        app._kaoss_on_press(Ev(w // 2, h // 2))
+        app._kaoss_on_move(Ev(w // 2, h // 2))
+        app._kaoss_on_move(Ev(w // 2, h - 8))
+        self.pump(0.85)
+        self.assertTrue(app._kaoss_play)
+        self.assertTrue(app._kaoss_play_footer)
+        self.assertTrue(bool(app._kaoss_footer.winfo_ismapped()))
+        self.assertFalse(bool(app._nav.winfo_ismapped()))
+        self.assertEqual(app._kaoss_play_btn.cget("text"), "EXIT")
+
+        # Touch the pad again — footer hides, still full pad.
+        app._kaoss_on_press(Ev(w // 2, h // 2))
         self.pump()
         self.assertTrue(app._kaoss_play)
-        app._kaoss_exit_press()
-        self.pump(0.85)
-        self.assertFalse(app._kaoss_play)
-        self.assertTrue(bool(app._nav.winfo_ismapped()))
+        self.assertFalse(app._kaoss_play_footer)
 
     def test_axis_labels_sit_on_bottom_and_left(self) -> None:
         app = self.app
@@ -359,6 +420,44 @@ class KaossScreenTest(unittest.TestCase):
         y_item = next(coords for text, coords in texts if "TONE" in text and "PITCH" not in text)
         self.assertGreater(x_item[1], h * 0.65)
         self.assertLess(y_item[0], w * 0.35)
+
+    def test_tone_percent_updates_while_sliding(self) -> None:
+        app = self.app
+        app._switch_mode("kaoss")
+        self.pump()
+        canvas = app._kaoss_canvas
+        canvas.update_idletasks()
+        app._kaoss_draw_grid()
+        w = max(40, int(canvas.winfo_width()))
+        h = max(40, int(canvas.winfo_height()))
+
+        class Ev:
+            def __init__(self, x: int, y: int, state: int = 0x0100) -> None:
+                self.x = x
+                self.y = y
+                self.state = state
+
+        def axis_blob() -> str:
+            texts = []
+            for item in canvas.find_withtag("axis-label"):
+                if canvas.type(item) != "text":
+                    continue
+                texts.append(canvas.itemcget(item, "text"))
+            return " ".join(texts)
+
+        app._kaoss_on_press(Ev(4, h))
+        self.pump()
+        low = axis_blob()
+        self.assertRegex(low, r"TONE\s+0%")
+        self.assertIn("0%", app._kaoss_status_var.get())
+
+        app._kaoss_on_move(Ev(4, 0))
+        self.pump()
+        high = axis_blob()
+        self.assertRegex(high, r"TONE\s+100%")
+        self.assertIn("100%", app._kaoss_status_var.get())
+        self.assertNotEqual(low, high)
+        app._kaoss_on_release()
 
     def test_scale_button_opens_named_grid(self) -> None:
         app = self.app
@@ -458,6 +557,35 @@ class KaossScreenTest(unittest.TestCase):
         ]
         self.assertTrue(widths)
         self.assertGreaterEqual(max(widths), 3)
+
+    def test_wipe_fx_clears_bus_delay_and_drops_hold(self) -> None:
+        app = self.app
+        app._switch_mode("kaoss")
+        self.pump()
+        app.engine.set_kaoss_param("delay_mix", 0.8)
+        app.engine.set_kaoss_param("reverb_mix", 0.6)
+        app.engine.set_kaoss_param("drive", 0.5)
+        app._kaoss.set_hold(True)
+        canvas = app._kaoss_canvas
+        canvas.update_idletasks()
+
+        class Ev:
+            def __init__(self, x: int, y: int) -> None:
+                self.x = x
+                self.y = y
+                self.state = 0x0100
+
+        app._kaoss_on_press(Ev(40, 40))
+        app._kaoss_on_release()
+        self.pump()
+        self.assertTrue(app._kaoss.is_active())
+        app._kaoss_wipe_fx()
+        self.pump()
+        self.assertFalse(app._kaoss.is_active())
+        bus = app.engine.bus_fx_snapshot()
+        self.assertLessEqual(bus["fx_delay_mix"], 0.001)
+        self.assertLessEqual(bus["fx_reverb_mix"], 0.001)
+        self.assertLessEqual(bus["fx_drive"], 0.001)
 
     @staticmethod
     def _luma(color: str) -> int:

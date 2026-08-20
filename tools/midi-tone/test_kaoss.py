@@ -229,6 +229,15 @@ class PadPlayTest(unittest.TestCase):
         self.assertAlmostEqual(params["delay_time"], 0.2, places=3)
         self.assertAlmostEqual(params["delay_mix"], 0.8, places=3)
 
+    def test_swell_maps_attack_and_delay_mix(self) -> None:
+        self.pad.program_id = "swell"
+        events = self.pad.touch(0.15, 0.9)
+        self.assertNotIn("note_on", self.kinds(events))
+        params = {e.param: e.param_value for e in events if e.kind == "param"}
+        self.assertAlmostEqual(params["attack"], 0.15, places=3)
+        self.assertAlmostEqual(params["delay_mix"], 0.9, places=3)
+        self.assertIn("swell", PROGRAM_IDS)
+
     def test_retune_after_key_change(self) -> None:
         self.pad.touch(0.0, 0.5)
         self.assertEqual(self.pad.sounding_note(), 48)
@@ -327,6 +336,9 @@ class ShowAllCatalogTest(unittest.TestCase):
         pad.set_show_axis_labels(False)
         self.assertFalse(pad.show_axis_labels)
         self.assertFalse(pad.snapshot()["show_axis_labels"])
+        pad.set_show_grid_lines(False)
+        self.assertFalse(pad.show_grid_lines)
+        self.assertFalse(pad.snapshot()["show_grid_lines"])
 
     def test_exotic_scale_still_quantizes(self) -> None:
         notes = scale_notes("egyptian", 0, root_midi=48, octaves=1)

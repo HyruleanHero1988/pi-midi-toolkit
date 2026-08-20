@@ -26,7 +26,7 @@ mod wavetable;
 pub use clip::{Clip, ClipEvent, ClipEventKind, ClipSlot, LaunchMode, Sequencer, MAX_CLIPS};
 pub use command::{Command, FxParam, FxTarget, ScheduledCommand, SynthParam, MAX_BLOCK_COMMANDS};
 pub use drums::{drum_model_for_note, DrumKit, DrumModel, DRUM_MODEL_COUNT};
-pub use engine::{EngineStatus, JamboxEngine, MidiOutSink, MAX_MIDI_OUT};
+pub use engine::{EngineStatus, JamboxEngine, MidiOutSink, MAX_MIDI_OUT, MAX_RENDER_BLOCK};
 pub use fx::{FxParams, FxUnit};
 pub use transport::{Quantize, Transport, PPQ};
 pub use voice::{VoicePool, MAX_VOICES};

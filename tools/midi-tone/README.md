@@ -224,8 +224,8 @@ the onboard wavetable engine **and** a hardware synth on USB→DIN.
 | Slide | Legato to the next scale degree; Y keeps sculpting |
 | Lift | Note-off — unless **HOLD** is on (last XY stays sounding) |
 | **PROG** / **SCALE** / **KEY** / **OCT** / **GATE** | Each opens a tap-to-pick grid instead of cycling. PROG picks a pad mapping (see **Programs** below). SCALE / KEY / OCT lock the note grid. GATE is a note-program arp only |
-| **FULL PAD** | Hides nav + buttons so the XY surface fills the 800×480 panel. **HOLD TO EXIT** on the slim top rail (~0.7s) brings chrome back |
-| **⚙** | KAOSS settings: SHOW ALL (every factory scale + program), X/Y axis labels, GRID LINES 1–5 px, PAD VIZ (GLOW / CELLS), OUT `LOCAL` / `USB` / `BOTH`, MIDI channel 1–16 |
+| **FULL PAD** | Hides nav + buttons so the XY surface fills the 800×480 panel. Hold still on the **bottom** edge (~0.7s) to peek the control bar; tap the pad to hide it. **EXIT** on that bar leaves full pad. |
+| **⚙** | KAOSS settings: **WIPE FX**, SHOW ALL, X/Y axis labels on/off, grid lines on/off (thickness 1–5 px), PAD VIZ (GLOW / CELLS), OUT `LOCAL` / `USB` / `BOTH`, MIDI channel 1–16. Drag to scroll. |
 
 External synths see the original Kaoss Pad factory map: **CC#12 = X**, **CC#13 = Y**,
 **CC#92 = pad touch** (127 down / 0 up), plus note-on/off on the chosen channel.
@@ -274,6 +274,7 @@ selected. ⚙ **SHOW ALL** adds the extra mappings; the starter set is first.
 |------|---|---|---------------|
 | **FILTER** | TONE | MORPH | Filter cutoff vs voice blend. See the latch recipe above. |
 | **ECHO** | DLY T | DLY MIX | Delay time (~50–750 ms) vs how much delay you hear. |
+| **SWELL** | ATTACK | DLY MIX | Attack time (snappy left → slow swell right) vs echo send. Latch a note first, same as FILTER. |
 | **DRIVE** | DRIVE | REVERB | Saturation vs reverb send. |
 | **SPACE** | ECHO | REVERB | Delay mix vs reverb mix (washes without touching pitch). |
 | **RESO** | TONE | FB | Filter cutoff vs delay feedback (resonant repeats). |

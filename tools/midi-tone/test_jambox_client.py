@@ -16,7 +16,12 @@ import threading
 import time
 import unittest
 
-from jambox_client import JamboxClient, PPQ, seconds_to_ticks
+from jambox_client import (
+    JamboxClient,
+    PPQ,
+    midi_notice_to_message,
+    seconds_to_ticks,
+)
 
 
 class FakeEngine:
@@ -26,9 +31,10 @@ class FakeEngine:
     stream does and what broke an earlier one-read-per-send client.
     """
 
-    def __init__(self, path: str, fragment: bool = False) -> None:
+    def __init__(self, path: str, fragment: bool = False, midi_after_status: bool = False) -> None:
         self.path = path
         self.fragment = fragment
+        self.midi_after_status = midi_after_status
         self.lines: list[dict] = []
         self._server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self._server.bind(path)
@@ -78,6 +84,21 @@ class FakeEngine:
                                 conn.sendall(payload[-1:])
                             else:
                                 conn.sendall(payload)
+                            if self.midi_after_status and message.get("cmd") == "status":
+                                extra = (
+                                    json.dumps(
+                                        {
+                                            "midi": {
+                                                "kind": "control_change",
+                                                "channel": 0,
+                                                "control": 71,
+                                                "value": 64,
+                                            }
+                                        }
+                                    )
+                                    + "\n"
+                                )
+                                conn.sendall(extra.encode("utf-8"))
                         except OSError:
                             break
 
@@ -97,6 +118,16 @@ class FakeEngine:
             pass
 
 
+class NoticeConvertTest(unittest.TestCase):
+    def test_pitch_bend_notice_becomes_mido_pitchwheel(self) -> None:
+        msg = midi_notice_to_message(
+            {"kind": "pitch_bend", "channel": 2, "value": 8192}
+        )
+        self.assertEqual(msg.type, "pitchwheel")
+        self.assertEqual(msg.channel, 2)
+        self.assertEqual(msg.pitch, 0)
+
+
 class TicksTest(unittest.TestCase):
     def test_a_beat_at_120bpm_is_one_quarter(self) -> None:
         self.assertEqual(seconds_to_ticks(0.5, 120.0), PPQ)
@@ -108,6 +139,7 @@ class TicksTest(unittest.TestCase):
         self.assertEqual(seconds_to_ticks(-3.0, 120.0), 0)
 
 
+@unittest.skipUnless(hasattr(socket, "AF_UNIX"), "Unix sockets not available")
 class ClientProtocolTest(unittest.TestCase):
     def setUp(self) -> None:
         self.dir = tempfile.mkdtemp()
@@ -123,7 +155,8 @@ class ClientProtocolTest(unittest.TestCase):
         self.client.note_on(99, 200, 250)
         self.assertTrue(self.engine.wait_for(1))
         message = self.engine.lines[0]
-        self.assertEqual(message["cmd"], "note_on")
+        self.assertEqual(message["cmd"], "midi")
+        self.assertEqual(message["kind"], "note_on")
         self.assertLessEqual(message["channel"], 15)
         self.assertLessEqual(message["note"], 127)
         self.assertLessEqual(message["velocity"], 127)
@@ -159,6 +192,33 @@ class ClientProtocolTest(unittest.TestCase):
         self.assertEqual(status["position"], 4242)
 
 
+@unittest.skipUnless(hasattr(socket, "AF_UNIX"), "Unix sockets not available")
+class MidiFanoutTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.dir = tempfile.mkdtemp()
+        self.path = os.path.join(self.dir, "jambox.sock")
+        self.engine = FakeEngine(self.path, midi_after_status=True)
+        self.client = JamboxClient(self.path)
+
+    def tearDown(self) -> None:
+        self.client.close()
+        self.engine.close()
+
+    def test_unsolicited_midi_lands_on_the_drain_queue(self) -> None:
+        self.assertIsNotNone(self.client.status(timeout=1.0))
+        notices: list[dict] = []
+        deadline = time.time() + 1.0
+        while time.time() < deadline:
+            notices.extend(self.client.drain_midi())
+            if notices:
+                break
+            time.sleep(0.01)
+        self.assertTrue(notices)
+        self.assertEqual(notices[0]["kind"], "control_change")
+        self.assertEqual(notices[0]["control"], 71)
+
+
+@unittest.skipUnless(hasattr(socket, "AF_UNIX"), "Unix sockets not available")
 class FragmentedReplyTest(unittest.TestCase):
     """Status must survive replies that arrive split across reads."""
 
