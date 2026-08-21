@@ -19,7 +19,12 @@ Never touches user data: ``settings.json``, ``songs/``, ``phrases/``,
 ``user-presets/``, ``user-wavetables/``, ``.venv/``, credentials,
 ``presets/active.json``. Live ``bin/`` is not overlay-copied; after the
 tree is in place, committed ``dist/armv7/{midi-engine,jambox-engine}``
-are copied onto ``bin/`` (same paths systemd uses).
+are installed onto ``bin/`` via stop + atomic rename (same paths
+systemd uses; avoids ETXTBSY on a running engine).
+
+Component digests (``ui``, ``engines``, ``requirements``) are stamped in
+``version.json``. After the tree is updated, pip / engine install /
+kiosk sync are skipped when that component's digest is unchanged.
 
 Does **not** cargo-build on the Pi (Pi 2 is too slow). Rebuild those
 ELFs on a PC or cloud-agent VM with ``./deploy/build-pi-bins.sh`` and
@@ -30,6 +35,7 @@ Public GitHub CHECK/UPDATE uses anonymous HTTPS (no token).
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import pathlib
@@ -39,10 +45,11 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable, Dict, Iterable, List, Optional, Sequence
 
 
@@ -80,6 +87,28 @@ KEEP_KIOSK = frozenset(
 KEEP_NAMES = KEEP_KIOSK  # alias used by tests / kiosk-only overlay
 PI_ENGINE_BINS = ("midi-engine", "jambox-engine")
 STAGED_BIN_DIR = pathlib.Path("dist") / "armv7"
+# Paths under the kiosk root that count as the ``ui`` component digest.
+# ``requirements.txt`` is hashed separately so pip can be skipped alone.
+UI_DIGEST_PATHS: Sequence[str] = (
+    "midi_tone.py",
+    "VERSION",
+    "pidi",
+    "scripts",
+    "kiosk",
+    "branding",
+    "wavetables",
+    "demo-songs",
+    "run.sh",
+    "kiosk.sh",
+    "launch-desktop.sh",
+    "setup-venv.sh",
+    "install-kiosk.sh",
+    "disable-kiosk.sh",
+    "midi-tone.desktop",
+    "README.md",
+    "KIOSK.md",
+    "ARCHITECTURE.md",
+)
 KEEP_REPO = frozenset(
     {
         ".git",
@@ -99,12 +128,148 @@ class UpdateError(RuntimeError):
     """User-facing update failure (network, auth, git, overlay)."""
 
 
+# Rough OTA timeline markers (message substring → approximate %).
+# More specific needles first. Percentages only move forward.
+_UPDATE_PCT_MARKERS: Sequence[tuple[str, int]] = (
+    ("Already on latest", 100),
+    ("(full repo)", 100),
+    ("Engines unchanged", 95),
+    ("Requirements unchanged", 75),
+    ("UI unchanged", 65),
+    ("unchanged — skip", 90),
+    ("Restarting", 95),
+    ("→ bin/", 90),
+    ("Stopping", 88),
+    ("Installing Python packages", 72),
+    ("Updating kiosk copy", 62),
+    ("Installing full repo", 52),
+    ("Unpacking", 42),
+    ("Downloading latest code", 12),
+    ("git pull skipped", 10),
+    ("Fast-forwarding", 28),
+    ("Fetching from GitHub", 12),
+    ("Fetching ", 8),
+)
+
+
+def format_elapsed(seconds: float) -> str:
+    """Format a duration as ``m:ss`` or ``h:mm:ss``."""
+    total = max(0, int(seconds))
+    hours, rem = divmod(total, 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{secs:02d}"
+    return f"{minutes}:{secs:02d}"
+
+
+def estimate_update_pct(msg: str) -> int:
+    """Map a progress message to a rough completion percentage (0–100)."""
+    text = (msg or "").strip()
+    if not text:
+        return 0
+    # Download byte progress: "Downloading latest code… 3.1/12.0 MB"
+    if text.startswith("Downloading latest code"):
+        m = re.search(
+            r"([\d.]+)\s*/\s*([\d.]+)\s*MB",
+            text,
+            flags=re.IGNORECASE,
+        )
+        if m:
+            try:
+                done = float(m.group(1))
+                total = float(m.group(2))
+            except ValueError:
+                return 12
+            if total > 0:
+                frac = min(1.0, max(0.0, done / total))
+                # Map download into ~12%–40% of the overall bar.
+                return 12 + int(28 * frac)
+        return 12
+    for needle, pct in _UPDATE_PCT_MARKERS:
+        if needle in text:
+            return pct
+    return 0
+
+
+class ProgressTracker:
+    """Wrap a progress sink with ``[pct% · elapsed]`` prefixes.
+
+    Call ``tick()`` from the UI once a second so elapsed time advances
+    even while a long download/pip step is silent.
+    """
+
+    def __init__(self, sink: ProgressCb) -> None:
+        self._sink = sink
+        self._t0 = time.monotonic()
+        self._pct = 0
+        self._msg = "Starting…"
+        self._lock = threading.Lock()
+
+    @property
+    def started_at(self) -> float:
+        return self._t0
+
+    @property
+    def elapsed_sec(self) -> float:
+        return max(0.0, time.monotonic() - self._t0)
+
+    def __call__(self, msg: str) -> None:
+        text = (msg or "").strip() or "Working…"
+        with self._lock:
+            guessed = estimate_update_pct(text)
+            if guessed:
+                self._pct = max(self._pct, guessed)
+            self._msg = text
+            line = self._format_locked()
+        self._sink(line)
+
+    def tick(self) -> None:
+        with self._lock:
+            line = self._format_locked()
+        self._sink(line)
+
+    def _format_locked(self) -> str:
+        elapsed = format_elapsed(time.monotonic() - self._t0)
+        return f"[{self._pct}% · {elapsed}] {self._msg}"
+
+
+@dataclass
+class ComponentDigests:
+    """Content hashes for independently skippable update pieces."""
+
+    ui: str = ""
+    engines: str = ""
+    requirements: str = ""
+
+    def as_dict(self) -> Dict[str, str]:
+        return {
+            "ui": self.ui,
+            "engines": self.engines,
+            "requirements": self.requirements,
+        }
+
+    @classmethod
+    def from_mapping(cls, data: object) -> "ComponentDigests":
+        if not isinstance(data, dict):
+            return cls()
+        return cls(
+            ui=str(data.get("ui") or "").strip(),
+            engines=str(data.get("engines") or "").strip(),
+            requirements=str(data.get("requirements") or "").strip(),
+        )
+
+    @property
+    def any(self) -> bool:
+        return bool(self.ui or self.engines or self.requirements)
+
+
 @dataclass
 class VersionInfo:
     sha: str = ""
     branch: str = ""
     source: str = ""  # git | file | remote | unknown
     repo_url: str = ""
+    components: ComponentDigests = field(default_factory=ComponentDigests)
 
     @property
     def short(self) -> str:
@@ -281,6 +446,7 @@ def read_version_file(install: pathlib.Path) -> VersionInfo:
         branch=str(data.get("branch") or "").strip(),
         source=str(data.get("source") or "file"),
         repo_url=str(data.get("repo_url") or "").strip(),
+        components=ComponentDigests.from_mapping(data.get("components")),
     )
 
 
@@ -291,11 +457,138 @@ def write_version_file(install: pathlib.Path, info: VersionInfo) -> None:
         "source": info.source,
         "repo_url": redact_url(info.repo_url),
         "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "components": info.components.as_dict(),
     }
     path = install / VERSION_NAME
     tmp = path.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     tmp.replace(path)
+
+
+def _sha256_file(path: pathlib.Path) -> bytes:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while True:
+            chunk = handle.read(1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.digest()
+
+
+def _files_identical(left: pathlib.Path, right: pathlib.Path) -> bool:
+    try:
+        if not left.is_file() or not right.is_file():
+            return False
+        if left.stat().st_size != right.stat().st_size:
+            return False
+        return _sha256_file(left) == _sha256_file(right)
+    except OSError:
+        return False
+
+
+def _iter_digest_files(root: pathlib.Path, rel: str) -> Iterable[pathlib.Path]:
+    path = root / rel
+    if path.is_file():
+        yield path
+        return
+    if not path.is_dir():
+        return
+    for child in sorted(path.rglob("*")):
+        if not child.is_file():
+            continue
+        parts = child.relative_to(root).parts
+        if any(part == "__pycache__" or part.endswith(".pyc") for part in parts):
+            continue
+        posix = child.relative_to(root).as_posix()
+        if any(posix == item or posix.startswith(item + "/") for item in KEEP_KIOSK):
+            continue
+        yield child
+
+
+def _digest_named_paths(root: pathlib.Path, names: Sequence[str]) -> str:
+    digest = hashlib.sha256()
+    found = False
+    for name in names:
+        for path in _iter_digest_files(root, name):
+            found = True
+            rel = path.relative_to(root).as_posix()
+            digest.update(rel.encode("utf-8"))
+            digest.update(b"\0")
+            digest.update(_sha256_file(path))
+            digest.update(b"\0")
+    return digest.hexdigest() if found else ""
+
+
+def kiosk_root_for(
+    install: pathlib.Path,
+    repo_root: Optional[pathlib.Path] = None,
+) -> pathlib.Path:
+    """Resolve the running kiosk tree (``~/midi-tone`` or ``apps/pidi``)."""
+    if (install / "midi_tone.py").is_file():
+        return install
+    if repo_root is not None:
+        candidate = repo_root / MIDI_TONE_REL
+        if (candidate / "midi_tone.py").is_file():
+            return candidate
+    return install
+
+
+def digest_engines(repo_root: pathlib.Path) -> str:
+    """Hash staged ``dist/armv7`` engines (fallback: live ``bin/``)."""
+    digest = hashlib.sha256()
+    found = False
+    for name in PI_ENGINE_BINS:
+        staged = repo_root / STAGED_BIN_DIR / name
+        live = repo_root / "bin" / name
+        path = staged if staged.is_file() else live
+        digest.update(name.encode("utf-8"))
+        digest.update(b"\0")
+        if path.is_file():
+            found = True
+            digest.update(_sha256_file(path))
+        else:
+            digest.update(b"missing")
+        digest.update(b"\0")
+    return digest.hexdigest() if found else ""
+
+
+def digest_requirements(kiosk: pathlib.Path) -> str:
+    path = kiosk / "requirements.txt"
+    if not path.is_file():
+        return ""
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def digest_ui(kiosk: pathlib.Path) -> str:
+    return _digest_named_paths(kiosk, UI_DIGEST_PATHS)
+
+
+def compute_component_digests(
+    repo_root: pathlib.Path,
+    install: Optional[pathlib.Path] = None,
+    *,
+    from_live_kiosk: bool = False,
+) -> ComponentDigests:
+    """Content digests for ui / engines / requirements under this layout.
+
+    By default prefers ``repo_root/apps/pidi`` (what the commit ships) so
+    post-pull digests see new UI/requirements before the live kiosk is
+    synced. Pass ``from_live_kiosk=True`` when capturing the running box
+    before an update (fallback when ``version.json`` has no stamp yet).
+    """
+    repo_kiosk = repo_root / MIDI_TONE_REL
+    if from_live_kiosk:
+        kiosk = kiosk_root_for(install or repo_root, repo_root)
+    elif (repo_kiosk / "midi_tone.py").is_file():
+        kiosk = repo_kiosk
+    else:
+        kiosk = kiosk_root_for(install or repo_root, repo_root)
+    return ComponentDigests(
+        ui=digest_ui(kiosk),
+        engines=digest_engines(repo_root),
+        requirements=digest_requirements(kiosk),
+    )
 
 
 def local_version(install: pathlib.Path = HERE) -> VersionInfo:
@@ -570,6 +863,90 @@ def _sync_kiosk_from_repo(
     overlay_tree(src, install, keep=KEEP_KIOSK)
 
 
+def _engine_unit_enabled(unit: str) -> bool:
+    try:
+        enabled = subprocess.run(
+            ["systemctl", "is-enabled", unit],
+            capture_output=True,
+            text=True,
+            timeout=8,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return enabled.returncode == 0
+
+
+def _systemctl(action: str, unit: str) -> None:
+    try:
+        subprocess.run(
+            ["sudo", "-n", "systemctl", action, unit],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+
+def _stop_engines(progress: ProgressCb = _noop_progress) -> None:
+    """Stop live engines so ``bin/`` can be replaced without ETXTBSY.
+
+    Handles both systemd units and kiosk-spawned children (``MIDI_TONE_SPAWN``).
+    """
+    if os.name == "nt":
+        return
+    stopped = False
+    for unit in PI_ENGINE_BINS:
+        if not _engine_unit_enabled(unit):
+            continue
+        progress(f"Stopping {unit}…")
+        _systemctl("stop", unit)
+        stopped = True
+    for name in PI_ENGINE_BINS:
+        try:
+            result = subprocess.run(
+                ["pkill", "-x", name],
+                capture_output=True,
+                text=True,
+                timeout=8,
+                check=False,
+            )
+            if result.returncode == 0:
+                stopped = True
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+    if stopped:
+        # Brief pause so the kernel releases the mapped text segment.
+        time.sleep(0.35)
+
+
+def _install_one_binary(src: pathlib.Path, dest: pathlib.Path) -> None:
+    """Install ``src`` onto ``dest`` without truncating a busy executable.
+
+    ``shutil.copy2(src, dest)`` opens the existing path for write and hits
+    ``Errno 26 (ETXTBSY)`` while systemd/kiosk still has the binary mapped.
+    Writing beside it and ``os.replace`` swaps the directory entry; the old
+    inode stays alive for any still-running process until it exits.
+    """
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_name(dest.name + ".ota-new")
+    try:
+        if tmp.exists():
+            tmp.unlink()
+        shutil.copy2(src, tmp)
+        if os.name != "nt":
+            tmp.chmod(tmp.stat().st_mode | 0o111)
+        os.replace(tmp, dest)
+    finally:
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+
+
 def install_pi_binaries(
     repo_root: pathlib.Path,
     progress: ProgressCb = _noop_progress,
@@ -580,27 +957,37 @@ def install_pi_binaries(
     cannot clobber the running systemd paths with a host-arch file.
     Missing staged files leave the existing binary in place — same as
     SSH deploy when you only rebuilt one crate.
+
+    Stops running engines first, then installs via atomic rename so a
+    still-busy binary cannot raise ``[Errno 26] Text file busy``.
     """
     src_dir = repo_root / STAGED_BIN_DIR
     dest_dir = repo_root / "bin"
     if not src_dir.is_dir():
         progress("No dist/armv7 engines in this build — leaving existing bin/.")
         return []
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    installed: List[str] = []
+    pending: List[str] = []
     for name in PI_ENGINE_BINS:
         src = src_dir / name
         if not src.is_file():
             continue
         dest = dest_dir / name
-        shutil.copy2(src, dest)
-        # Execute bits are meaningful on POSIX; Windows ignores them for this use.
-        if os.name != "nt":
-            dest.chmod(dest.stat().st_mode | 0o111)
+        if _files_identical(src, dest):
+            progress(f"{name} unchanged — skip")
+            continue
+        pending.append(name)
+    if not pending:
+        progress("Engines unchanged — leaving bin/")
+        return []
+    _stop_engines(progress)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    installed: List[str] = []
+    for name in pending:
+        src = src_dir / name
+        dest = dest_dir / name
+        _install_one_binary(src, dest)
         installed.append(name)
         progress(f"Installed {name} → bin/")
-    if not installed:
-        progress("dist/armv7 has no engine binaries — leaving existing bin/.")
     return installed
 
 
@@ -622,30 +1009,11 @@ def _restart_engines(progress: ProgressCb) -> None:
     Matches SSH deploy's ``systemctl restart``. Fails soft: kiosk sudoers
     may only allow poweroff/reboot, and a unit may not be installed yet.
     """
-    for unit in ("midi-engine", "jambox-engine"):
-        try:
-            enabled = subprocess.run(
-                ["systemctl", "is-enabled", unit],
-                capture_output=True,
-                text=True,
-                timeout=8,
-                check=False,
-            )
-        except (OSError, subprocess.TimeoutExpired):
-            return
-        if enabled.returncode != 0:
+    for unit in PI_ENGINE_BINS:
+        if not _engine_unit_enabled(unit):
             continue
         progress(f"Restarting {unit}…")
-        try:
-            subprocess.run(
-                ["sudo", "-n", "systemctl", "restart", unit],
-                capture_output=True,
-                text=True,
-                timeout=30,
-                check=False,
-            )
-        except (OSError, subprocess.TimeoutExpired):
-            continue
+        _systemctl("restart", unit)
 
 
 def _chmod_scripts(install: pathlib.Path) -> None:
@@ -757,7 +1125,38 @@ def _download_archive(
     progress("Downloading latest code…")
     try:
         with urllib.request.urlopen(req, timeout=DOWNLOAD_TIMEOUT_SEC) as resp:
-            dest_tar.write_bytes(resp.read())
+            total = 0
+            try:
+                total = int(resp.headers.get("Content-Length") or 0)
+            except (TypeError, ValueError):
+                total = 0
+            chunk_size = 256 * 1024
+            read = 0
+            last_report = -1.0
+            with dest_tar.open("wb") as out:
+                while True:
+                    chunk = resp.read(chunk_size)
+                    if not chunk:
+                        break
+                    out.write(chunk)
+                    read += len(chunk)
+                    now = time.monotonic()
+                    if total > 0 and (now - last_report) >= 0.4:
+                        last_report = now
+                        mb = read / (1024 * 1024)
+                        total_mb = total / (1024 * 1024)
+                        progress(
+                            f"Downloading latest code… {mb:.1f}/{total_mb:.1f} MB"
+                        )
+                    elif total <= 0 and (now - last_report) >= 1.0:
+                        last_report = now
+                        mb = read / (1024 * 1024)
+                        progress(f"Downloading latest code… {mb:.1f} MB")
+            if total > 0:
+                progress(
+                    f"Downloading latest code… "
+                    f"{read / (1024 * 1024):.1f}/{total / (1024 * 1024):.1f} MB"
+                )
     except urllib.error.HTTPError as exc:
         if exc.code in (401, 403, 404):
             raise UpdateError(
@@ -795,6 +1194,8 @@ def apply_from_archive(
     token: str,
     progress: ProgressCb,
     repo_root: Optional[pathlib.Path] = None,
+    *,
+    sync_kiosk: bool = True,
 ) -> str:
     with tempfile.TemporaryDirectory(prefix="midi-tone-update-") as tmp:
         tmp_path = pathlib.Path(tmp)
@@ -808,8 +1209,25 @@ def apply_from_archive(
         progress("Installing full repo…")
         overlay_tree(src_root, dest_root, keep=KEEP_REPO)
         _ensure_active_preset(dest_root)
-        _sync_kiosk_from_repo(dest_root, install, progress)
+        if sync_kiosk:
+            _sync_kiosk_from_repo(dest_root, install, progress)
         return ""
+
+
+def _capture_prior_components(
+    install: pathlib.Path,
+    repo_root: pathlib.Path,
+) -> ComponentDigests:
+    """Digests from the last stamp, or computed from disk before mutation."""
+    stamped = read_version_file(install)
+    if stamped.components.any:
+        return stamped.components
+    try:
+        return compute_component_digests(
+            repo_root, install=install, from_live_kiosk=True
+        )
+    except OSError:
+        return ComponentDigests()
 
 
 def apply_update(
@@ -826,13 +1244,15 @@ def apply_update(
     remote = remote_head(repo_url, branch, creds.token)
     if expected_sha and remote.sha != expected_sha:
         raise UpdateError("remote moved while checking — tap UPDATE again")
+    dest_root = repo_root_for(install)
+    prior = _capture_prior_components(install, dest_root)
     local = local_version(install)
     if local.sha and local.sha == remote.sha:
+        remote.components = compute_component_digests(dest_root, install=install)
         write_version_file(install, remote)
         log("Already on latest.")
         return remote
 
-    dest_root = repo_root_for(install)
     git = git_root(dest_root) or git_root(install)
     used_git = False
     if git is not None:
@@ -842,28 +1262,69 @@ def apply_update(
             remote.sha = sha
             remote.source = "git"
             dest_root = git
-            _sync_kiosk_from_repo(git, install, log)
         except UpdateError as exc:
             log(f"git pull skipped ({exc}); downloading archive…")
 
     if not used_git:
         apply_from_archive(
-            install, repo_url, branch, creds.token, log, repo_root=dest_root
+            install,
+            repo_url,
+            branch,
+            creds.token,
+            log,
+            repo_root=dest_root,
+            sync_kiosk=False,
         )
         remote.source = "archive"
 
-    _chmod_scripts(install)
-    _chmod_scripts(dest_root / MIDI_TONE_REL)
-    _pip_install(install, log)
+    new = compute_component_digests(dest_root, install=install)
+    remote.components = new
+    changed: List[str] = []
+    skipped: List[str] = []
+
+    if new.ui != prior.ui:
+        _sync_kiosk_from_repo(dest_root, install, log)
+        _chmod_scripts(install)
+        _chmod_scripts(dest_root / MIDI_TONE_REL)
+        changed.append("ui")
+    else:
+        log("UI unchanged — skipping kiosk copy")
+        skipped.append("ui")
+
     _ensure_active_preset(dest_root)
-    install_pi_binaries(dest_root, log)
-    _restart_engines(log)
+
+    if new.requirements != prior.requirements:
+        _pip_install(install, log)
+        changed.append("requirements")
+    else:
+        log("Requirements unchanged — skipping pip")
+        skipped.append("requirements")
+
+    if new.engines != prior.engines:
+        installed = install_pi_binaries(dest_root, log)
+        if installed:
+            _restart_engines(log)
+            changed.append("engines")
+        else:
+            # Digests differed (e.g. missing stamp) but live files already match.
+            log("Engines already match staged binaries — skip restart")
+            skipped.append("engines")
+    else:
+        log("Engines unchanged — leaving bin/")
+        skipped.append("engines")
+
     write_version_file(install, remote)
     try:
         write_version_file(dest_root / MIDI_TONE_REL, remote)
     except OSError:
         pass
-    log(f"Installed {branch} {remote.short} (full repo)")
+    parts = []
+    if changed:
+        parts.append("updated " + "+".join(changed))
+    if skipped:
+        parts.append("skipped " + "+".join(skipped))
+    summary = "; ".join(parts) if parts else "no component changes"
+    log(f"Installed {branch} {remote.short} ({summary})")
     return remote
 
 
@@ -935,7 +1396,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         def _print(msg: str) -> None:
             print(msg, flush=True)
 
-        info = apply_update(HERE, progress=_print)
+        info = apply_update(HERE, progress=ProgressTracker(_print))
         print(f"now {info.short} ({info.branch})")
         return 0
     if args.check:

@@ -114,13 +114,20 @@ class VersionFileTest(unittest.TestCase):
                 branch="master",
                 source="file",
                 repo_url="https://x-access-token:secret@github.com/Acme/box.git",
+                components=updater.ComponentDigests(
+                    ui="aaa", engines="bbb", requirements="ccc"
+                ),
             )
             updater.write_version_file(install, info)
             loaded = updater.read_version_file(install)
             self.assertEqual(loaded.sha, "deadbeefcafebabe")
             self.assertEqual(loaded.short, "deadbee")
+            self.assertEqual(loaded.components.ui, "aaa")
+            self.assertEqual(loaded.components.engines, "bbb")
+            self.assertEqual(loaded.components.requirements, "ccc")
             data = json.loads((install / "version.json").read_text(encoding="utf-8"))
             self.assertNotIn("secret", json.dumps(data))
+            self.assertEqual(data["components"]["requirements"], "ccc")
 
 
 class OverlayTest(unittest.TestCase):
@@ -483,6 +490,166 @@ class InstallPiBinariesTest(unittest.TestCase):
             self.assertEqual(installed, ["midi-engine"])
             self.assertEqual((root / "bin" / "midi-engine").read_bytes(), b"NEW_MIDI")
             self.assertEqual((root / "bin" / "jambox-engine").read_bytes(), b"OLD_JAM")
+
+    def test_install_uses_atomic_replace_and_cleans_temp(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            (root / "bin").mkdir()
+            (root / "dist" / "armv7").mkdir(parents=True)
+            (root / "bin" / "jambox-engine").write_bytes(b"OLD")
+            (root / "dist" / "armv7" / "jambox-engine").write_bytes(b"NEW")
+            with mock.patch.object(updater, "_stop_engines"):
+                installed = updater.install_pi_binaries(root)
+            self.assertEqual(installed, ["jambox-engine"])
+            self.assertEqual((root / "bin" / "jambox-engine").read_bytes(), b"NEW")
+            self.assertFalse((root / "bin" / "jambox-engine.ota-new").exists())
+
+    def test_identical_staged_and_live_skips_without_stop(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            (root / "bin").mkdir()
+            (root / "dist" / "armv7").mkdir(parents=True)
+            payload = b"SAME_ENGINE"
+            (root / "bin" / "midi-engine").write_bytes(payload)
+            (root / "dist" / "armv7" / "midi-engine").write_bytes(payload)
+            notes: list[str] = []
+            with mock.patch.object(
+                updater, "_stop_engines", side_effect=AssertionError("should not stop")
+            ):
+                installed = updater.install_pi_binaries(root, notes.append)
+            self.assertEqual(installed, [])
+            self.assertTrue(any("unchanged" in n.lower() for n in notes))
+
+
+class ComponentDigestTest(unittest.TestCase):
+    def test_requirements_change_does_not_change_engines(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            kiosk = root / "apps" / "pidi"
+            kiosk.mkdir(parents=True)
+            (kiosk / "midi_tone.py").write_text("app\n", encoding="utf-8")
+            (kiosk / "requirements.txt").write_text("mido==1.0\n", encoding="utf-8")
+            (root / "dist" / "armv7").mkdir(parents=True)
+            (root / "dist" / "armv7" / "jambox-engine").write_bytes(b"ENG")
+            before = updater.compute_component_digests(root, install=kiosk)
+            (kiosk / "requirements.txt").write_text("mido==2.0\n", encoding="utf-8")
+            after = updater.compute_component_digests(root, install=kiosk)
+            self.assertEqual(before.engines, after.engines)
+            self.assertNotEqual(before.requirements, after.requirements)
+
+    def test_ui_change_does_not_change_requirements(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            kiosk = root / "apps" / "pidi"
+            kiosk.mkdir(parents=True)
+            (kiosk / "midi_tone.py").write_text("app\n", encoding="utf-8")
+            (kiosk / "requirements.txt").write_text("mido==1.0\n", encoding="utf-8")
+            before = updater.compute_component_digests(root, install=kiosk)
+            (kiosk / "midi_tone.py").write_text("app2\n", encoding="utf-8")
+            after = updater.compute_component_digests(root, install=kiosk)
+            self.assertEqual(before.requirements, after.requirements)
+            self.assertNotEqual(before.ui, after.ui)
+
+
+class SelectiveApplyTest(unittest.TestCase):
+    def test_skips_pip_and_engines_when_only_ui_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            install = root / "midi-tone"
+            install.mkdir()
+            (install / "midi_tone.py").write_text("OLD\n", encoding="utf-8")
+            (install / "requirements.txt").write_text("mido==1.0\n", encoding="utf-8")
+            repo = root / "repo"
+            kiosk = repo / "apps" / "pidi"
+            kiosk.mkdir(parents=True)
+            (kiosk / "midi_tone.py").write_text("NEW\n", encoding="utf-8")
+            (kiosk / "requirements.txt").write_text("mido==1.0\n", encoding="utf-8")
+            (repo / "dist" / "armv7").mkdir(parents=True)
+            (repo / "dist" / "armv7" / "jambox-engine").write_bytes(b"ENG")
+            (repo / "bin").mkdir()
+            (repo / "bin" / "jambox-engine").write_bytes(b"ENG")
+
+            prior = updater.compute_component_digests(
+                repo, install=install, from_live_kiosk=True
+            )
+            # Stamp prior as if last deploy had matching req/engines but old UI.
+            updater.write_version_file(
+                install,
+                updater.VersionInfo(
+                    sha="oldold1",
+                    branch="master",
+                    source="file",
+                    components=prior,
+                ),
+            )
+            # Live kiosk UI is old; repo already has new UI (simulating post-fetch).
+            remote = updater.VersionInfo(
+                sha="newnew2bbbb", branch="master", source="remote"
+            )
+            notes: list[str] = []
+            pip = mock.Mock()
+            engines = mock.Mock(return_value=[])
+            restart = mock.Mock()
+
+            with mock.patch.object(updater, "load_credentials", return_value=updater.Credentials()), mock.patch.object(
+                updater, "detect_branch", return_value="master"
+            ), mock.patch.object(updater, "remote_head", return_value=remote), mock.patch.object(
+                updater, "repo_root_for", return_value=repo
+            ), mock.patch.object(
+                updater, "git_root", return_value=repo
+            ), mock.patch.object(
+                updater, "_git_fast_forward", return_value="newnew2bbbb"
+            ), mock.patch.object(
+                updater, "_pip_install", pip
+            ), mock.patch.object(
+                updater, "install_pi_binaries", engines
+            ), mock.patch.object(
+                updater, "_restart_engines", restart
+            ):
+                info = updater.apply_update(install, progress=notes.append)
+
+            self.assertEqual(info.sha, "newnew2bbbb")
+            pip.assert_not_called()
+            engines.assert_not_called()
+            restart.assert_not_called()
+            self.assertEqual((install / "midi_tone.py").read_text(encoding="utf-8"), "NEW\n")
+            self.assertTrue(any("Requirements unchanged" in n for n in notes))
+            self.assertTrue(any("Engines unchanged" in n for n in notes))
+            stamped = updater.read_version_file(install)
+            self.assertEqual(stamped.components.requirements, prior.requirements)
+            self.assertEqual(stamped.components.engines, prior.engines)
+            self.assertNotEqual(stamped.components.ui, prior.ui)
+
+
+class ProgressTrackerTest(unittest.TestCase):
+    def test_format_elapsed(self) -> None:
+        self.assertEqual(updater.format_elapsed(0), "0:00")
+        self.assertEqual(updater.format_elapsed(65), "1:05")
+        self.assertEqual(updater.format_elapsed(3661), "1:01:01")
+
+    def test_estimate_pct_advances_and_download_scales(self) -> None:
+        self.assertEqual(updater.estimate_update_pct("Fetching master…"), 8)
+        self.assertEqual(updater.estimate_update_pct("Unpacking…"), 42)
+        self.assertGreater(
+            updater.estimate_update_pct("Downloading latest code… 6.0/12.0 MB"),
+            updater.estimate_update_pct("Downloading latest code…"),
+        )
+        self.assertEqual(
+            updater.estimate_update_pct("Installed master abc1234 (full repo)"),
+            100,
+        )
+
+    def test_tracker_prefixes_pct_and_elapsed(self) -> None:
+        lines: list[str] = []
+        tracker = updater.ProgressTracker(lines.append)
+        tracker("Fetching master…")
+        self.assertTrue(lines[-1].startswith("[8% · "))
+        self.assertIn("Fetching master…", lines[-1])
+        tracker("Unpacking…")
+        self.assertTrue(lines[-1].startswith("[42% · "))
+        # Percentages never go backwards.
+        tracker("Fetching master…")
+        self.assertTrue(lines[-1].startswith("[42% · "))
 
 
 class StatusTextTest(unittest.TestCase):

@@ -152,11 +152,17 @@ Matches the cyan-on-black mockup (overlapping squares + **PiDI** + subtitle).
 | Stage | When | How |
 | --- | --- | --- |
 | Plymouth | Kernel / initramfs, before login | `install-pidi-splash.sh` |
-| (no text login) | Between Plymouth and X | mask `getty@tty1`, drop `console=tty1`, `--retain-splash` |
-| X splash | Right after LightDM starts X | `kiosk.sh` → `splash-x11.py` |
-| App splash | Until UI chrome is ready | `midi_tone.py` boot splash |
+| (no text login) | Between Plymouth and X | mask `getty@tty1`, drop `console=tty1` |
+| X splash | Right after LightDM starts X | `display-setup.sh` → `splash-x11.py`, then `kiosk.sh` |
+| App splash | Until UI chrome is ready | in-app boot splash |
 
 Art lives in `branding/pidi-splash.png` (see `branding/README.md`).
+
+Plymouth is installed by `install-pidi-splash.sh` (optional after kiosk install).
+The X splash also needs `display-setup-script` in the **main**
+`/etc/lightdm/lightdm.conf` (drop-ins alone lose to raspi-config’s
+`dispsetup.sh`). Re-run `./install-kiosk.sh --boot-only` after pulling
+fixes so that line points at `kiosk/display-setup.sh`.
 
 ---
 

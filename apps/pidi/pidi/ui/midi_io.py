@@ -19,6 +19,7 @@ from pidi.constants import (
     KNOB_CCS,
 )
 from pidi.jambox_client import connect_or_spawn, midi_notice_to_message, prefer_python_engine
+from pidi import updater
 
 
 class MidiIoMixin:
@@ -495,21 +496,37 @@ class MidiIoMixin:
                         self._refresh_settings_status()
                     if result is not None and result.message:
                         self._append_log(result.message)
+                elif kind == "update_progress_start":
+                    self._start_update_progress_tick()
                 elif kind == "update_progress":
                     self._settings_status_var.set(str(item[1]))
                     self.last_var.set(str(item[1]))
                 elif kind == "update_done":
+                    tracker = getattr(self, "_update_progress", None)
+                    elapsed = ""
+                    if tracker is not None:
+                        try:
+                            elapsed = updater.format_elapsed(tracker.elapsed_sec)
+                        except Exception:
+                            elapsed = ""
+                    self._stop_update_progress_tick()
+                    self._update_progress = None
                     self._update_busy = False
                     info, err = item[1], item[2]
                     if err:
                         self._update_confirming = False
-                        self._settings_status_var.set(f"Update failed: {err}")
+                        suffix = f" after {elapsed}" if elapsed else ""
+                        self._settings_status_var.set(f"Update failed{suffix}: {err}")
                         self._paint_settings_buttons()
                         self._append_log(f"Update failed: {err}")
                     else:
                         short = getattr(info, "short", "latest")
-                        self._settings_status_var.set(f"Installed {short} — restarting…")
-                        self._append_log(f"Update installed {short}")
+                        if elapsed:
+                            msg = f"Installed {short} in {elapsed} — restarting…"
+                        else:
+                            msg = f"Installed {short} — restarting…"
+                        self._settings_status_var.set(msg)
+                        self._append_log(msg)
                         self.root.after(250, self._restart_after_update)
                 elif kind == "wifi":
                     self._update_busy = False
@@ -520,9 +537,45 @@ class MidiIoMixin:
                         self._append_log(f"Wi-Fi failed: {detail}")
                     self._refresh_settings_status()
                     if not ok and detail:
-                        # Keep the failure visible above the refreshed status briefly
                         base = self._settings_status_var.get()
                         self._settings_status_var.set(f"Wi-Fi: {detail}\n{base}")
+                elif kind == "wifi_scan":
+                    self._update_busy = False
+                    networks = item[1] if isinstance(item[1], list) else []
+                    err = str(item[2] or "")
+                    self._wifi_networks = networks
+                    self._wifi_scroll = 0
+                    if err and not networks:
+                        self._settings_status_var.set(f"Wi-Fi: {err}")
+                    else:
+                        self._settings_status_var.set(
+                            f"Wi-Fi: {len(networks)} network(s) — tap one to join"
+                            + (f" ({err})" if err else "")
+                        )
+                    if getattr(self, "_settings_panel", "") == "wifi":
+                        try:
+                            self._paint_wifi_network_rows()
+                        except Exception:
+                            pass
+                    self._paint_settings_buttons()
+                elif kind == "wifi_join":
+                    self._update_busy = False
+                    ok = bool(item[1])
+                    detail = str(item[2] or "")
+                    ssid = str(item[3] or "")
+                    if ok:
+                        self._append_log(f"Wi-Fi joined {ssid}: {detail}")
+                        self._close_wifi_password_overlay(restore=True)
+                        self._settings_status_var.set(f"Wi-Fi: {detail}")
+                        self._paint_settings_buttons()
+                    else:
+                        self._append_log(f"Wi-Fi join failed: {detail}")
+                        kb = getattr(self, "_touch_keyboard", None)
+                        if kb is not None:
+                            kb.set_status(f"Join failed: {detail}")
+                        else:
+                            self._settings_status_var.set(f"Join failed: {detail}")
+                            self._paint_settings_buttons()
                 elif kind == "settings_hub":
                     wifi_line, build = str(item[1] or ""), str(item[2] or "")
                     self._settings_hub_wifi_cache = wifi_line

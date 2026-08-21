@@ -239,7 +239,9 @@ class MidiToneApp(
         # PiDI branded splash while audio + UI chrome build (covers full window
         # until construction finishes — avoids a blank gap after destroy).
         self._boot_splash_photo = None
-        splash_path = pathlib.Path(__file__).resolve().parent / "branding" / "pidi-splash.png"
+        splash_path = (
+            pathlib.Path(__file__).resolve().parents[2] / "branding" / "pidi-splash.png"
+        )
         splash = tk.Frame(self.root, bg="#000000", highlightthickness=0, borderwidth=0)
         if splash_path.is_file():
             try:
@@ -465,6 +467,8 @@ class MidiToneApp(
         self._update_check: Optional[updater.UpdateCheck] = None
         self._update_busy = False
         self._update_confirming = False
+        self._update_progress: Optional[updater.ProgressTracker] = None
+        self._update_progress_tick_after: Optional[str] = None
         self._settings_panel = "hub"  # hub | update | wifi
         self._settings_keep_panel = False
         self._settings_hub_wifi_cache = "Wi-Fi: …"
@@ -474,6 +478,16 @@ class MidiToneApp(
         self._settings_update_btn: Optional[tk.Button] = None
         self._settings_wifi_btn: Optional[tk.Button] = None
         self._settings_version_lbl: Optional[tk.Label] = None
+        self._settings_back_btn: Optional[tk.Button] = None
+        self._wifi_view = "list"  # list only; password is TouchKeyboardOverlay
+        self._wifi_networks: List = []
+        self._wifi_scroll = 0
+        self._wifi_row_btns: List[tk.Button] = []
+        self._wifi_selected_ssid = ""
+        self._wifi_selected_open = False
+        self._wifi_password_frame: Optional[tk.Frame] = None  # legacy
+        self._wifi_password_entry: Optional[tk.Entry] = None  # legacy
+        self._touch_keyboard = None  # Optional[TouchKeyboardOverlay]
         self._diagnostics_on = False
         self._diag_sampler = DiagnosticsSampler()
         self._diag_tick_after: Optional[str] = None
@@ -911,6 +925,14 @@ class MidiToneApp(
 
     def _switch_mode(self, mode: str) -> None:
         mode = mode if mode in UI_MODES else "synth"
+        # OTA / Wi‑Fi work continues in a background thread; leaving Settings
+        # does not cancel it (and a finished install still restarts).
+        if (
+            getattr(self, "_update_busy", False)
+            and getattr(self, "_mode", None) == "settings"
+            and mode != "settings"
+        ):
+            return
         # Close synth-only overlays before swapping shells
         if self._fx_ui_open:
             self._close_fx_panel(restore_main=False)
@@ -982,6 +1004,14 @@ class MidiToneApp(
                 self._save_voice_frame.pack_forget()
             except Exception:
                 pass
+        if getattr(self, "_wifi_password_frame", None) is not None:
+            try:
+                self._wifi_password_frame.destroy()
+            except Exception:
+                pass
+            self._wifi_password_frame = None
+            self._wifi_password_entry = None
+        self._close_touch_keyboard()
 
         if mode == "home":
             self._home_shell.pack(fill=tk.BOTH, expand=True)
@@ -1083,6 +1113,38 @@ class MidiToneApp(
         # No command= callback: resistive panels often never complete a click.
         btn.bind("<ButtonPress-1>", _fire)
         return btn
+
+    def _open_touch_keyboard(
+        self,
+        options,
+        *,
+        on_submit,
+        on_cancel=None,
+        host=None,
+    ):
+        """Open the reusable Switch-style keyboard overlay on ``mode_host``."""
+        from pidi.ui.touch_keyboard import TouchKeyboardOverlay
+
+        self._close_touch_keyboard()
+        kb = TouchKeyboardOverlay(
+            host if host is not None else self._mode_host,
+            mk_button=self._mk_touch_btn,
+            on_submit=on_submit,
+            on_cancel=on_cancel,
+            options=options,
+        )
+        self._touch_keyboard = kb
+        kb.open()
+        return kb
+
+    def _close_touch_keyboard(self) -> None:
+        kb = getattr(self, "_touch_keyboard", None)
+        if kb is not None:
+            try:
+                kb.close()
+            except Exception:
+                pass
+        self._touch_keyboard = None
 
 
     def _select_voice_index(self, idx: int, *, close_grid: bool = False) -> None:
