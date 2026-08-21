@@ -12,8 +12,8 @@ ExecStart=/home/pi/pi-midi-toolkit/bin/jambox-engine run \
   --midi-in MPK \
   --output headphone \
   --control /tmp/jambox.sock \
-  --waves /home/pi/pi-midi-toolkit/tools/midi-tone/wavetables \
-  --user-waves /home/pi/pi-midi-toolkit/tools/midi-tone/user-wavetables \
+  --waves /home/pi/pi-midi-toolkit/apps/pidi/wavetables \
+  --user-waves /home/pi/pi-midi-toolkit/apps/pidi/user-wavetables \
   --rt
 Restart=on-failure
 RestartSec=2
