@@ -16,6 +16,7 @@ class SessionIoMixin:
         self._paint_drum_lock_btn()
         self._paint_fx_mode_btn()
         self._paint_bus_fx_mode_btn()
+        self._paint_diag_btn()
         self._sync_voice_index_from_morph()
         self._build_pads_mode()
         self._paint_kaoss()
@@ -61,6 +62,7 @@ class SessionIoMixin:
                 "out_mode": self._songs.out_mode(),
             },
             "screensaver_sec": float(self._idle.timeout_sec),
+            "diagnostics": bool(getattr(self, "_diagnostics_on", False)),
             "kaoss": self._kaoss.snapshot(),
         }
 
@@ -74,6 +76,11 @@ class SessionIoMixin:
                 try:
                     self._idle.timeout_sec = max(0.0, float(data["screensaver_sec"]))
                 except (TypeError, ValueError):
+                    pass
+            if "diagnostics" in data:
+                try:
+                    self._set_diagnostics(bool(data["diagnostics"]))
+                except Exception:
                     pass
             if "active_preset" in data:
                 name = data["active_preset"]

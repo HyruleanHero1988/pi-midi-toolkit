@@ -26,6 +26,7 @@ except ImportError as e:  # pragma: no cover
     sys.exit("mido required: pip install mido python-rtmidi\n" + str(e))
 
 from pidi import updater
+from pidi.diagnostics import DiagnosticsSampler
 from pidi.audio.drums import (
     downsample_waveform,
     drum_model_for_note,
@@ -473,6 +474,11 @@ class MidiToneApp(
         self._settings_update_btn: Optional[tk.Button] = None
         self._settings_wifi_btn: Optional[tk.Button] = None
         self._settings_version_lbl: Optional[tk.Label] = None
+        self._diagnostics_on = False
+        self._diag_sampler = DiagnosticsSampler()
+        self._diag_tick_after: Optional[str] = None
+        self._diag_var = tk.StringVar(value="")
+        self._settings_diag_btn: Optional[tk.Button] = None
 
         # Keep PiDI splash on top while chrome is packed underneath
         splash = getattr(self, "_boot_splash", None)
@@ -521,6 +527,20 @@ class MidiToneApp(
         # Mode content host
         self._mode_host = tk.Frame(self.root, bg="#111111")
         self._mode_host.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+
+        # Diagnostics strip (packed at bottom only when enabled from Settings).
+        self._diag_bar = tk.Frame(self.root, bg="#0a0a0a", height=28)
+        self._diag_lbl = tk.Label(
+            self._diag_bar,
+            textvariable=self._diag_var,
+            font=("DejaVu Sans Mono", 11, "bold"),
+            fg="#83a598",
+            bg="#0a0a0a",
+            anchor="w",
+            padx=8,
+            pady=4,
+        )
+        self._diag_lbl.pack(fill=tk.X)
 
         self._synth_shell = tk.Frame(self._mode_host, bg="#111111")
         self._seq_shell = tk.Frame(self._mode_host, bg="#111111")
@@ -2261,9 +2281,105 @@ class MidiToneApp(
             ).pack(fill=tk.X, padx=12, pady=8)
 
 
+    def _set_diagnostics(self, enabled: bool) -> None:
+        self._diagnostics_on = bool(enabled)
+        bar = getattr(self, "_diag_bar", None)
+        if bar is None:
+            self._paint_diag_btn()
+            return
+        if self._diagnostics_on:
+            if not bar.winfo_ismapped():
+                bar.pack(side=tk.BOTTOM, fill=tk.X)
+            self._diag_tick()
+        else:
+            self._cancel_diag_tick()
+            try:
+                bar.pack_forget()
+            except Exception:
+                pass
+            self._diag_var.set("")
+        self._paint_diag_btn()
+
+    def _toggle_diagnostics(self) -> None:
+        self._set_diagnostics(not bool(getattr(self, "_diagnostics_on", False)))
+        self._mark_settings_dirty()
+
+    def _paint_diag_btn(self) -> None:
+        btn = getattr(self, "_settings_diag_btn", None)
+        if btn is None:
+            return
+        on = bool(getattr(self, "_diagnostics_on", False))
+        color = "#458588" if on else "#504945"
+        try:
+            btn.configure(
+                text="DIAG ON" if on else "DIAG",
+                bg=color,
+                activebackground=color,
+            )
+        except tk.TclError:
+            pass
+
+    def _cancel_diag_tick(self) -> None:
+        aid = getattr(self, "_diag_tick_after", None)
+        self._diag_tick_after = None
+        if aid is not None:
+            try:
+                self.root.after_cancel(aid)
+            except Exception:
+                pass
+
+    def _arm_diag_tick(self) -> None:
+        self._cancel_diag_tick()
+        if not getattr(self, "_diagnostics_on", False):
+            return
+        try:
+            self._diag_tick_after = self.root.after(1000, self._diag_tick)
+        except Exception:
+            self._diag_tick_after = None
+
+    def _diag_tick(self) -> None:
+        if not getattr(self, "_diagnostics_on", False):
+            return
+        try:
+            sample = self._diag_sampler.sample()
+            line = sample.format_line()
+            # Optional engine load hints when available.
+            try:
+                voices = getattr(self.engine, "active_voice_count", None)
+                if callable(voices):
+                    line = f"{line}  V {int(voices())}"
+            except Exception:
+                pass
+            try:
+                playing = 0
+                if getattr(self, "_phrases", None) is not None:
+                    playing = len(self._phrases.playing_cells())
+                if playing:
+                    line = f"{line}  PH {playing}"
+            except Exception:
+                pass
+            self._diag_var.set(line)
+            # Warm colors when hot / saturated.
+            fg = "#83a598"
+            if sample.cpu_pct is not None and sample.cpu_pct >= 85:
+                fg = "#fb4934"
+            elif sample.temp_c is not None and sample.temp_c >= 70:
+                fg = "#fe8019"
+            elif sample.mem_pct is not None and sample.mem_pct >= 85:
+                fg = "#fabd2f"
+            try:
+                self._diag_lbl.configure(fg=fg)
+            except Exception:
+                pass
+        except Exception:
+            self._diag_var.set("diagnostics error")
+        self._arm_diag_tick()
+
+
     def _on_close(self) -> None:
         self._stop.set()
         self._cancel_screensaver_tick()
+        self._cancel_diag_tick()
         try:
             self._hide_screensaver()
         except Exception:

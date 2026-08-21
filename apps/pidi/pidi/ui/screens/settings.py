@@ -32,6 +32,7 @@ class SettingsScreenMixin:
         self._settings_check_btn = None
         self._settings_update_btn = None
         self._settings_wifi_btn = None
+        self._settings_diag_btn = None
 
         header, body, _footer = self._pack_screen_regions(
             shell,
@@ -75,17 +76,21 @@ class SettingsScreenMixin:
         grid = tk.Frame(body, bg="#111111")
         grid.pack(fill=tk.BOTH, expand=True)
         grid.rowconfigure(0, weight=1, uniform="set_row")
-        for c in range(2):
+        for c in range(3):
             grid.columnconfigure(c, weight=1, uniform="set_col")
 
         tiles = (
             ("UPDATE", "#689d6a", lambda: self._settings_open_panel("update")),
             ("WIFI", "#d79921", lambda: self._settings_open_panel("wifi")),
+            ("DIAG", "#504945", self._toggle_diagnostics),
         )
         for i, (title, color, cmd) in enumerate(tiles):
             btn = self._mk_touch_btn(grid, title, cmd, bg=color)
             btn.configure(font=("DejaVu Sans", 18, "bold"), pady=8, justify=tk.CENTER)
             btn.grid(row=0, column=i, sticky="nsew", padx=4, pady=4)
+            if title == "DIAG":
+                self._settings_diag_btn = btn
+        self._paint_diag_btn()
 
         self._refresh_settings_hub_detail()
 
