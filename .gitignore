@@ -36,6 +36,7 @@ apps/pidi/songs/
 apps/pidi/phrases/
 apps/pidi/archive/debug/
 apps/pidi/_pi-user-backup/
+apps/pidi/_icon_build/
 __pycache__/
 *.pyc
 
