@@ -18,6 +18,7 @@ from pidi.constants import (
     DRUM_CHANNEL,
     KNOB_CCS,
 )
+from pidi.domain.songs import format_message
 from pidi.jambox_client import connect_or_spawn, midi_notice_to_message, prefer_python_engine
 from pidi import updater
 
