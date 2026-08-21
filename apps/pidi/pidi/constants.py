@@ -35,8 +35,10 @@ TABLE_MASK = TABLE_SIZE - 1
 LOG_MAX = 60
 # Full-pad: shove into the bottom edge and stay still this long to peek controls.
 KAOSS_PLAY_EXIT_MS = 700
-KAOSS_PLAY_BORDER_PX = 40
-KAOSS_PLAY_HOLD_SLOP_PX = 18
+KAOSS_PLAY_BORDER_PX = 36
+KAOSS_PLAY_HOLD_SLOP_PX = 20
+# Must pass through this band above the strip before a bottom hold peeks.
+KAOSS_PLAY_SHOVE_PX = 28
 EVENT_Q_MAX = 200
 # MIDI channel 10 (1-based) = index 9 — MPK drum pads
 DRUM_CHANNEL = 9

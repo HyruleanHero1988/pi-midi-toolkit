@@ -13,6 +13,7 @@ from pidi.constants import (
     KAOSS_PLAY_BORDER_PX,
     KAOSS_PLAY_EXIT_MS,
     KAOSS_PLAY_HOLD_SLOP_PX,
+    KAOSS_PLAY_SHOVE_PX,
     NOTE_NAMES,
 )
 from pidi.kaoss import (
@@ -176,6 +177,8 @@ class KaossScreenMixin:
             self._switch_mode("kaoss")
         self._kaoss_play = True
         self._kaoss_play_footer = False
+        self._kaoss_play_exit_ready = False
+        self._kaoss_play_exit_last = None
         try:
             self._nav.pack_forget()
         except tk.TclError:
@@ -186,7 +189,7 @@ class KaossScreenMixin:
             self._kaoss_footer.pack_forget()
         self._kaoss_draw_grid()
         self._kaoss_arm_viz()
-        self._append_log("KAOSS FULL PAD — hold the bottom edge for controls")
+        self._append_log("KAOSS FULL PAD — shove + hold the bottom edge for controls")
 
 
     def _kaoss_leave_play(self) -> None:
@@ -197,6 +200,8 @@ class KaossScreenMixin:
         self._kaoss_play_footer = False
         self._kaoss_play_exit_from_inside = False
         self._kaoss_play_exit_anchor = None
+        self._kaoss_play_exit_ready = False
+        self._kaoss_play_exit_last = None
         try:
             self._nav.pack(side=tk.TOP, fill=tk.X, before=self._mode_host)
         except tk.TclError:
@@ -252,6 +257,14 @@ class KaossScreenMixin:
         y = float(getattr(event, "y", 0))
         return y >= (h - KAOSS_PLAY_BORDER_PX)
 
+    def _kaoss_event_above_shove(self, event: object) -> bool:
+        """True when the finger is clearly above the bottom peek strip."""
+        canvas = self._kaoss_canvas
+        if canvas is None:
+            return False
+        h = max(1, int(canvas.winfo_height()))
+        y = float(getattr(event, "y", 0))
+        return y < (h - KAOSS_PLAY_BORDER_PX - KAOSS_PLAY_SHOVE_PX)
 
     def _kaoss_paint_play_exit(self, *, dwelling: bool) -> None:
         canvas = self._kaoss_canvas
@@ -282,14 +295,17 @@ class KaossScreenMixin:
         if not touching:
             self._kaoss_play_exit_from_inside = False
             self._kaoss_play_exit_anchor = None
+            self._kaoss_play_exit_ready = False
             self._kaoss_cancel_exit_hold()
             return
         in_bottom = self._kaoss_event_in_play_bottom(event)
         if in_bottom:
-            if not self._kaoss_play_exit_from_inside:
+            # Only arm after a shove that started clearly above the strip.
+            if not getattr(self, "_kaoss_play_exit_ready", False):
                 return
             x = float(getattr(event, "x", 0))
             y = float(getattr(event, "y", 0))
+            self._kaoss_play_exit_last = (x, y)
             anchor = self._kaoss_play_exit_anchor
             if self._kaoss_exit_after_id is None or anchor is None:
                 self._kaoss_play_exit_anchor = (x, y)
@@ -303,6 +319,10 @@ class KaossScreenMixin:
                 self._kaoss_play_exit_anchor = (x, y)
                 self._kaoss_arm_play_exit()
             return
+        # Outside the strip: latch readiness when clearly above; do not clear it
+        # in the gap between shove-height and the strip (that broke real shoves).
+        if self._kaoss_event_above_shove(event):
+            self._kaoss_play_exit_ready = True
         self._kaoss_play_exit_from_inside = True
         self._kaoss_play_exit_anchor = None
         self._kaoss_cancel_exit_hold()
@@ -321,12 +341,27 @@ class KaossScreenMixin:
         self._kaoss_exit_after_id = None
         self._kaoss_play_exit_anchor = None
         self._kaoss_paint_play_exit(dwelling=False)
-        if self._kaoss.touching:
-            self._kaoss_on_release()
+        if not self._kaoss_play:
+            return
         if self._kaoss_play_footer:
             self._kaoss_hide_play_footer()
-        else:
-            self._kaoss_show_play_footer()
+            return
+        # Peek only if the finger is still parked on the bottom strip.
+        if not self._kaoss.touching:
+            return
+        last = getattr(self, "_kaoss_play_exit_last", None)
+        if last is None:
+            return
+        class _Ev:
+            def __init__(self, x: float, y: float) -> None:
+                self.x = x
+                self.y = y
+
+        if not self._kaoss_event_in_play_bottom(_Ev(last[0], last[1])):
+            return
+        if self._kaoss.touching:
+            self._kaoss_on_release()
+        self._kaoss_show_play_footer()
 
 
     def _kaoss_cancel_exit_hold(self) -> None:
@@ -355,6 +390,9 @@ class KaossScreenMixin:
         if self._kaoss_play:
             in_bottom = self._kaoss_event_in_play_bottom(event)
             self._kaoss_play_exit_from_inside = not in_bottom
+            self._kaoss_play_exit_ready = (
+                False if in_bottom else self._kaoss_event_above_shove(event)
+            )
             self._kaoss_play_exit_anchor = None
             self._kaoss_cancel_exit_hold()
             if self._kaoss_play_footer and not in_bottom:
@@ -768,10 +806,9 @@ class KaossScreenMixin:
         if callable(binder):
             binder(inner)
 
-        self._mk_touch_btn(
-            footer, "CLOSE", self._close_kaoss_picker, bg="#9d0006"
-        ).pack(fill=tk.X, ipady=14)
+        footer.pack_forget()
         self._arm_overlay_guard()
+        self._paint_nav_back()
 
 
     def _kaoss_picker_current(self) -> str:
@@ -876,6 +913,7 @@ class KaossScreenMixin:
             self._kaoss_draw_grid()
             self._kaoss_arm_tick()
             self._kaoss_arm_viz()
+        self._paint_nav_back()
 
 
     def _close_kaoss_scale_grid(self, restore_main: bool = True) -> None:
@@ -1068,11 +1106,10 @@ class KaossScreenMixin:
             binder(inner)
         self.root.after_idle(lambda: inner.event_generate("<Configure>"))
 
-        self._mk_touch_btn(
-            footer, "CLOSE", self._close_kaoss_settings, bg="#9d0006"
-        ).pack(fill=tk.X, ipady=14)
+        footer.pack_forget()
         self._paint_kaoss_settings()
         self._arm_overlay_guard()
+        self._paint_nav_back()
 
 
     def _close_kaoss_settings(self, restore_main: bool = True) -> None:
@@ -1095,6 +1132,7 @@ class KaossScreenMixin:
             self._kaoss_draw_grid()
             self._kaoss_arm_tick()
             self._kaoss_arm_viz()
+        self._paint_nav_back()
 
 
     def _paint_kaoss_settings(self) -> None:
