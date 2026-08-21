@@ -422,6 +422,7 @@
         <tr><th>Version</th><td>Product semver (<code>VERSION</code>) plus local commit from git or <code>version.json</code>.</td></tr>
         <tr><th>UPDATE</th><td>Nested panel: CHECK asks GitHub whether <code>master</code> is ahead; UPDATE deploys (confirm → INSTALL NOW), then restarts.</td></tr>
         <tr><th>WIFI</th><td>Nested panel: CONNECT joins the saved NetworkManager profile (or <code>.wifi-credentials</code>).</td></tr>
+        <tr><th>DIAG</th><td>Toggle a CPU / RAM / temp strip along the bottom of <em>every</em> screen (saved in <code>settings.json</code>). Turn it off from Settings again.</td></tr>
         <tr><th>BLANK / TIMEOUT</th><td>Force the burn-in screensaver, or cycle idle timeout.</td></tr>
       </table>
       <p class="note">Same as SSH deploy: never overwrites <code>settings.json</code>, <code>songs/</code>, <code>phrases/</code> (pad recordings), <code>user-presets/</code>, <code>user-wavetables/</code>, or <code>presets/active.json</code>. Does not cargo-build on the Pi — engines are the committed <code>dist/armv7</code> binaries (rebuild with <code>./deploy/build-pi-bins.sh</code> before pushing crate changes).</p>

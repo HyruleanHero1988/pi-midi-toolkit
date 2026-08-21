@@ -35,7 +35,7 @@ class SettingsScreenTest(unittest.TestCase):
         mido.open_output = lambda name: seq_harness.FakePort(name)  # type: ignore[assignment]
 
         import midi_tone
-        import updater
+        from pidi import updater
 
         midi_tone.SETTINGS_PATH = tmp / "settings.json"
         midi_tone.PRESETS_DIR = tmp / "presets"
@@ -142,6 +142,41 @@ class SettingsScreenTest(unittest.TestCase):
         self.pump(0.05)
         self.assertFalse(app._update_confirming)
         self.assertEqual(app._settings_update_btn.cget("text"), "UPDATE")
+
+    def test_diagnostics_strip_stays_visible_across_modes(self) -> None:
+        """DIAG is global chrome, not a Home/Settings-only overlay."""
+        app = self.app
+        app.root.geometry("800x480")
+        app.root.update_idletasks()
+        app._set_diagnostics(True)
+        self.pump()
+        self.assertTrue(app._diagnostics_on)
+        self.assertTrue(app._diag_bar.winfo_ismapped())
+        modes = (
+            "home",
+            "synth",
+            "seq",
+            "pads",
+            "kaoss",
+            "songs",
+            "presets",
+            "log",
+            "settings",
+        )
+        for mode in modes:
+            app._switch_mode(mode)
+            self.pump()
+            app.root.update_idletasks()
+            self.assertTrue(app._diag_bar.winfo_ismapped(), mode)
+            self.assertGreaterEqual(int(app._diag_bar.winfo_height()), 20, mode)
+            bar_top = int(app._diag_bar.winfo_rooty())
+            host_bottom = int(app._mode_host.winfo_rooty()) + int(
+                app._mode_host.winfo_height()
+            )
+            self.assertLessEqual(host_bottom, bar_top + 2, mode)
+        app._set_diagnostics(False)
+        self.pump()
+        self.assertFalse(app._diag_bar.winfo_ismapped())
 
 
 if __name__ == "__main__":
