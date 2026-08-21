@@ -232,9 +232,8 @@ class FxScreenMixin:
             bg="#111111",
         ).pack(side=tk.RIGHT)
 
-        self._mk_touch_btn(
-            footer, "CLOSE", self._exit_fx_panel, bg="#504945"
-        ).pack(fill=tk.X, ipady=16)
+        # Leave via global ← (footer reserved then forgotten for more body space).
+        footer.pack_forget()
 
         self._fx_value_vars = {}
         rows = (
@@ -283,6 +282,7 @@ class FxScreenMixin:
         self._refresh_fx_panel()
         for line in self._fx_param_snapshot_lines():
             self._append_log(f"FX  {line}")
+        self._paint_nav_back()
 
 
     def _refresh_fx_panel(self) -> None:
@@ -363,3 +363,4 @@ class FxScreenMixin:
                 if prev in UI_MODES
                 else "synth"
             )
+        self._paint_nav_back()

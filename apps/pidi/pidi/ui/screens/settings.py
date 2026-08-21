@@ -32,12 +32,14 @@ class SettingsScreenMixin:
         self._close_wifi_password_overlay(restore=False)
         self._settings_panel = panel
         self._build_settings_mode()
+        self._paint_nav_back()
 
     def _settings_back_to_hub(self) -> None:
         if self._update_busy:
             return
         if getattr(self, "_touch_keyboard", None) is not None:
             self._close_wifi_password_overlay(restore=True)
+            self._paint_nav_back()
             return
         self._settings_open_panel("hub")
 
@@ -161,10 +163,7 @@ class SettingsScreenMixin:
             fg="#fbf1c7",
             bg="#111111",
         ).pack(side=tk.LEFT)
-        self._settings_back_btn = self._mk_touch_btn(
-            header, "BACK", self._settings_back_to_hub, bg="#504945"
-        )
-        self._settings_back_btn.pack(side=tk.RIGHT, padx=2, ipady=4)
+        self._settings_back_btn = None
 
         tk.Label(
             body,
@@ -226,10 +225,7 @@ class SettingsScreenMixin:
             fg="#fbf1c7",
             bg="#111111",
         ).pack(side=tk.LEFT)
-        self._settings_back_btn = self._mk_touch_btn(
-            header, "BACK", self._settings_back_to_hub, bg="#504945"
-        )
-        self._settings_back_btn.pack(side=tk.RIGHT, padx=2, ipady=4)
+        self._settings_back_btn = None
 
         tk.Label(
             body,
@@ -306,7 +302,7 @@ class SettingsScreenMixin:
                 subtitle=ssid,
                 password=True,
                 submit_label="JOIN",
-                cancel_label="CANCEL",
+                cancel_label="",
             ),
             on_submit=_on_submit,
             on_cancel=_on_cancel,
@@ -336,6 +332,7 @@ class SettingsScreenMixin:
             pass
         self._refresh_settings_status()
         self._paint_settings_buttons()
+        self._paint_nav_back()
 
     def _wifi_scroll_by(self, delta: int) -> None:
         networks = getattr(self, "_wifi_networks", []) or []
@@ -388,7 +385,6 @@ class SettingsScreenMixin:
         check_btn = self._settings_check_btn
         update_btn = self._settings_update_btn
         wifi_btn = getattr(self, "_settings_wifi_btn", None)
-        back_btn = getattr(self, "_settings_back_btn", None)
         busy = bool(self._update_busy)
 
         def _dim(btn: Optional[tk.Button], label: str, idle_bg: str) -> None:
@@ -413,10 +409,8 @@ class SettingsScreenMixin:
             _dim(check_btn, "CHECK", "#458588")
             _dim(update_btn, "UPDATE", "#689d6a")
             _dim(wifi_btn, "REJOIN", "#d79921")
-            _dim(back_btn, "BACK", "#504945")
             return
 
-        _dim(back_btn, "BACK", "#504945")
         if wifi_btn is not None and getattr(self, "_settings_panel", "") == "wifi":
             _dim(wifi_btn, "REJOIN", "#d79921")
         if check_btn is None or update_btn is None:

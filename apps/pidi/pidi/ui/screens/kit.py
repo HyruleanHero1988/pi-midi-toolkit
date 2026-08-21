@@ -212,12 +212,6 @@ class KitScreenMixin:
             self._mk_touch_btn(
                 footer, "PLAY", self._kit_audition_selected, bg="#458588"
             ).pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=12)
-            self._mk_touch_btn(
-                footer, "BACK", lambda: self._set_kit_view("grid"), bg="#504945"
-            ).pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=12)
-            self._mk_touch_btn(
-                footer, "CLOSE", self._close_kit_explorer, bg="#9d0006"
-            ).pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=12)
         else:
             self._kit_all_btn = self._mk_touch_btn(
                 footer, "ALL DRUMS", self._select_kit_all_drums, bg="#504945"
@@ -227,9 +221,6 @@ class KitScreenMixin:
             )
             self._mk_touch_btn(
                 footer, "WAVE", lambda: self._set_kit_view("wave"), bg="#689d6a"
-            ).pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=12)
-            self._mk_touch_btn(
-                footer, "CLOSE", self._close_kit_explorer, bg="#9d0006"
             ).pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=12)
 
         status = tk.Label(
@@ -278,6 +269,7 @@ class KitScreenMixin:
                 self._kit_btns[note] = btn
             self._paint_kit_pad_btns()
             self._refresh_kit_status()
+        self._paint_nav_back()
 
 
     def _close_kit_explorer(self, restore_main: bool = True) -> None:
@@ -303,3 +295,4 @@ class KitScreenMixin:
             self._touch.pack(side=tk.BOTTOM, fill=tk.X, padx=6, pady=6)
             self.mod_var.set(self._format_mod_line())
             self._paint_synth_waveform(force=True)
+        self._paint_nav_back()

@@ -107,7 +107,7 @@ class TouchKeyboardOptions:
     initial: str = ""
     password: bool = False
     submit_label: str = "OK"
-    cancel_label: str = "CANCEL"
+    cancel_label: str = ""  # empty → no footer cancel (use global ←)
     max_length: int = 0  # 0 = unlimited
 
 
@@ -230,11 +230,13 @@ class TouchKeyboardOverlay:
         self._build_page(self._page_abc, _abc_rows(shift=False), track_abc=True)
         self._build_page(self._page_sym, _sym_rows(), track_abc=False)
 
-        footer = tk.Frame(frame, bg="#111111")
-        footer.grid(row=4, column=0, sticky="ew", padx=8, pady=(2, 8))
-        self._mk_button(
-            footer, opts.cancel_label, self._cancel, bg="#9d0006"
-        ).pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=10)
+        # Optional cancel strip — Wi‑Fi uses the global ← instead.
+        if opts.cancel_label:
+            footer = tk.Frame(frame, bg="#111111")
+            footer.grid(row=4, column=0, sticky="ew", padx=8, pady=(2, 8))
+            self._mk_button(
+                footer, opts.cancel_label, self._cancel, bg="#9d0006"
+            ).pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=10)
 
         self._show_active_page()
 
