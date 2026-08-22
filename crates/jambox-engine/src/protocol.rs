@@ -5,7 +5,11 @@
 //! preallocated clip handed over as a `Box`.
 
 use jambox_core::{
-    Clip, ClipEvent, ClipEventKind, Command, FxParam, FxTarget, LaunchMode, Quantize, SynthParam,
+    Clip, ClipEvent, ClipEventKind, Command, FxParam, FxTarget, LaunchMode, Quantize,
+    RepeatDivision, SynthParam,
+};
+use jambox_protocol::{
+    HelloReply, RepeatDivision as WireRepeatDivision, RepeatPhase, TouchPhase,
 };
 use serde::{Deserialize, Serialize};
 
@@ -13,6 +17,12 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
 pub enum Request {
+    Hello {
+        protocol: u16,
+        client: String,
+        #[serde(default)]
+        realtime_owner: bool,
+    },
     NoteOn {
         channel: u8,
         note: u8,
@@ -92,6 +102,39 @@ pub enum Request {
         #[serde(default)]
         fx_index: u16,
     },
+    Touch {
+        gesture: u32,
+        phase: TouchPhase,
+        x: f32,
+        y: f32,
+        #[serde(default)]
+        channel: u8,
+        #[serde(default = "default_velocity")]
+        velocity: u8,
+    },
+    Repeat {
+        gesture: u32,
+        phase: RepeatPhase,
+        note: u8,
+        #[serde(default = "default_drum_channel")]
+        channel: u8,
+        #[serde(default = "default_velocity")]
+        velocity: u8,
+        #[serde(default = "default_repeat_division")]
+        division: WireRepeatDivision,
+    },
+}
+
+const fn default_velocity() -> u8 {
+    110
+}
+
+const fn default_drum_channel() -> u8 {
+    9
+}
+
+const fn default_repeat_division() -> WireRepeatDivision {
+    WireRepeatDivision::Quarter
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -150,6 +193,7 @@ impl From<WireClipEvent> for ClipEvent {
 #[serde(rename_all = "snake_case")]
 pub enum Response {
     Ok,
+    Hello(HelloReply),
     Error { message: String },
     Status(StatusReply),
     /// Unsolicited: a MIDI event the engine heard (notes already went to DSP).
@@ -257,14 +301,26 @@ pub struct StatusReply {
     pub bpm: f32,
     pub active_voices: u16,
     pub active_drums: u16,
+    pub active_repeats: u16,
     pub playing_clips: u16,
     pub peak: f32,
-    /// Blocks the audio callback could not fill in time.
+    pub callback_frames: u32,
+    pub callback_micros: u32,
+    pub callback_peak_micros: u32,
+    /// Audio callback/backend errors or deadline misses.
     pub xruns: u64,
+    pub command_drops: u64,
+    pub emergency_releases: u64,
+    pub touch_overwrites: u64,
 }
 
 /// What the control thread decides to do with a request.
 pub enum Decoded {
+    Hello {
+        protocol: u16,
+        client: String,
+        realtime_owner: bool,
+    },
     /// Plain command for the audio thread.
     Command(Command),
     /// Clip swap — allocated here, freed here; the audio thread only moves a pointer.
@@ -282,6 +338,22 @@ pub enum Decoded {
         mode: String,
         fx_kind: Option<String>,
         fx_index: u16,
+    },
+    Touch {
+        gesture: u32,
+        phase: TouchPhase,
+        x: f32,
+        y: f32,
+        channel: u8,
+        velocity: u8,
+    },
+    Repeat {
+        gesture: u32,
+        phase: RepeatPhase,
+        note: u8,
+        channel: u8,
+        velocity: u8,
+        division: RepeatDivision,
     },
 }
 
@@ -470,7 +542,55 @@ pub fn decode(request: Request) -> Result<Decoded, String> {
         }),
         Request::StopAllClips => Decoded::Command(Command::StopAllClips),
         Request::Status => Decoded::StatusRequest,
+        Request::Hello {
+            protocol,
+            client,
+            realtime_owner,
+        } => Decoded::Hello {
+            protocol,
+            client,
+            realtime_owner,
+        },
+        Request::Touch {
+            gesture,
+            phase,
+            x,
+            y,
+            channel,
+            velocity,
+        } => Decoded::Touch {
+            gesture,
+            phase,
+            x,
+            y,
+            channel,
+            velocity,
+        },
+        Request::Repeat {
+            gesture,
+            phase,
+            note,
+            channel,
+            velocity,
+            division,
+        } => Decoded::Repeat {
+            gesture,
+            phase,
+            note,
+            channel,
+            velocity,
+            division: map_repeat_division(division),
+        },
     })
+}
+
+fn map_repeat_division(division: WireRepeatDivision) -> RepeatDivision {
+    match division {
+        WireRepeatDivision::Quarter => RepeatDivision::Quarter,
+        WireRepeatDivision::Eighth => RepeatDivision::Eighth,
+        WireRepeatDivision::EighthTriplet => RepeatDivision::EighthTriplet,
+        WireRepeatDivision::Sixteenth => RepeatDivision::Sixteenth,
+    }
 }
 
 #[cfg(test)]
@@ -581,5 +701,43 @@ mod tests {
         assert!(json.contains("\"midi\""));
         assert!(json.contains("control_change"));
         assert!(json.contains("71"));
+    }
+
+    #[test]
+    fn hello_is_a_handshake_not_a_command() {
+        let d = decode_line(r#"{"cmd":"hello","protocol":1,"client":"pidi-native"}"#);
+        match d {
+            Decoded::Hello {
+                protocol,
+                realtime_owner,
+                ..
+            } => {
+                assert_eq!(protocol, 1);
+                assert!(!realtime_owner);
+            }
+            _ => panic!("wrong decode"),
+        }
+    }
+
+    #[test]
+    fn touch_and_repeat_decode_from_json() {
+        let d = decode_line(
+            r#"{"cmd":"touch","gesture":41,"phase":"down","x":0.1,"y":0.9}"#,
+        );
+        assert!(matches!(d, Decoded::Touch { gesture: 41, .. }));
+        let d = decode_line(r#"{"cmd":"repeat","gesture":7,"phase":"down","note":36}"#);
+        match d {
+            Decoded::Repeat {
+                note,
+                channel,
+                division,
+                ..
+            } => {
+                assert_eq!(note, 36);
+                assert_eq!(channel, 9);
+                assert_eq!(division, RepeatDivision::Quarter);
+            }
+            _ => panic!("wrong decode"),
+        }
     }
 }

@@ -7,10 +7,15 @@
 //!   thread only swaps a pointer and hands the old one back through `garbage`.
 //! * MIDI out is queued, not written, from the callback; a sender thread does the
 //!   syscall.
+//! * Continuous XY uses [`LatestMailbox`], not the reliable command ring.
+
+use std::sync::Arc;
 
 use jambox_core::{Clip, Command, EngineStatus, LaunchMode};
 use midi_core::MidiEvent;
 use rtrb::{Consumer, Producer, RingBuffer};
+
+use crate::mailbox::LatestMailbox;
 
 /// Commands queued between two audio blocks.
 const COMMAND_CAPACITY: usize = 1024;
@@ -28,12 +33,23 @@ pub struct ClipUpdate {
     pub mode: Option<LaunchMode>,
 }
 
+/// Musical snapshot plus the host callback counters (not DSP state).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct StatusPacket {
+    pub engine: EngineStatus,
+    pub callback_frames: u32,
+    pub callback_micros: u32,
+    pub callback_peak_micros: u32,
+    pub xruns: u64,
+}
+
 /// Producer half held by the control (IPC) thread.
 pub struct ControlSide {
     pub commands: Producer<Command>,
     pub clips: Producer<ClipUpdate>,
-    pub status: Consumer<EngineStatus>,
+    pub status: Consumer<StatusPacket>,
     pub garbage: Consumer<Box<Clip>>,
+    pub latest: Arc<LatestMailbox>,
 }
 
 impl ControlSide {
@@ -47,7 +63,7 @@ impl ControlSide {
     }
 
     /// Newest status the audio thread published, if any.
-    pub fn latest_status(&mut self) -> Option<EngineStatus> {
+    pub fn latest_status(&mut self) -> Option<StatusPacket> {
         let mut latest = None;
         while let Ok(status) = self.status.pop() {
             latest = Some(status);
@@ -82,9 +98,10 @@ pub struct AudioSide {
     pub control_commands: Consumer<Command>,
     pub midi_commands: Consumer<Command>,
     pub clips: Consumer<ClipUpdate>,
-    pub status: Producer<EngineStatus>,
+    pub status: Producer<StatusPacket>,
     pub garbage: Producer<Box<Clip>>,
     pub midi_out: Producer<MidiEvent>,
+    pub latest: Arc<LatestMailbox>,
 }
 
 /// Build every ring and split it into thread-owned halves.
@@ -92,9 +109,10 @@ pub fn channel() -> (ControlSide, MidiInSide, MidiOutSide, AudioSide) {
     let (control_tx, control_rx) = RingBuffer::<Command>::new(COMMAND_CAPACITY);
     let (midi_tx, midi_rx) = RingBuffer::<Command>::new(COMMAND_CAPACITY);
     let (clip_tx, clip_rx) = RingBuffer::<ClipUpdate>::new(CLIP_CAPACITY);
-    let (status_tx, status_rx) = RingBuffer::<EngineStatus>::new(STATUS_CAPACITY);
+    let (status_tx, status_rx) = RingBuffer::<StatusPacket>::new(STATUS_CAPACITY);
     let (garbage_tx, garbage_rx) = RingBuffer::<Box<Clip>>::new(CLIP_CAPACITY);
     let (midi_out_tx, midi_out_rx) = RingBuffer::<MidiEvent>::new(MIDI_OUT_CAPACITY);
+    let latest = Arc::new(LatestMailbox::new());
 
     (
         ControlSide {
@@ -102,6 +120,7 @@ pub fn channel() -> (ControlSide, MidiInSide, MidiOutSide, AudioSide) {
             clips: clip_tx,
             status: status_rx,
             garbage: garbage_rx,
+            latest: Arc::clone(&latest),
         },
         MidiInSide { commands: midi_tx },
         MidiOutSide {
@@ -114,6 +133,7 @@ pub fn channel() -> (ControlSide, MidiInSide, MidiOutSide, AudioSide) {
             status: status_tx,
             garbage: garbage_tx,
             midi_out: midi_out_tx,
+            latest,
         },
     )
 }
@@ -175,7 +195,6 @@ mod tests {
             mode: None,
         });
         let update = audio.clips.pop().unwrap();
-        // Audio thread "swaps" and hands the old allocation back.
         audio.garbage.push(update.clip.unwrap()).unwrap();
         control.collect_garbage();
     }
@@ -186,13 +205,16 @@ mod tests {
         for position in 0..3u64 {
             audio
                 .status
-                .push(EngineStatus {
-                    position,
+                .push(StatusPacket {
+                    engine: EngineStatus {
+                        position,
+                        ..Default::default()
+                    },
                     ..Default::default()
                 })
                 .unwrap();
         }
-        assert_eq!(control.latest_status().unwrap().position, 2);
+        assert_eq!(control.latest_status().unwrap().engine.position, 2);
         assert!(control.latest_status().is_none());
     }
 }

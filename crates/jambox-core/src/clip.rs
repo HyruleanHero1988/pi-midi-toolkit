@@ -85,7 +85,7 @@ enum SlotState {
 
 /// A phrase pad: the clip plus its playback state.
 pub struct ClipSlot {
-    clip: Option<Clip>,
+    clip: Option<Box<Clip>>,
     state: SlotState,
     mode: LaunchMode,
     held: [(u8, u8); MAX_SLOT_NOTES],
@@ -106,20 +106,30 @@ impl Default for ClipSlot {
 
 impl ClipSlot {
     pub fn set_clip(&mut self, clip: Option<Clip>) {
+        self.clip = clip.map(Box::new);
+        self.state = SlotState::Idle;
+        self.held_len = 0;
+    }
+
+    /// Swap a pre-boxed clip. The audio thread must use this so the previous
+    /// allocation is returned, not dropped, inside the callback.
+    pub fn swap_boxed(&mut self, clip: Option<Box<Clip>>) -> Option<Box<Clip>> {
+        let previous = self.clip.take();
         self.clip = clip;
         self.state = SlotState::Idle;
         self.held_len = 0;
+        previous
     }
 
     /// Move the clip out so its allocation can be freed off the audio thread.
     pub fn take_clip(&mut self) -> Option<Clip> {
         self.state = SlotState::Idle;
         self.held_len = 0;
-        self.clip.take()
+        self.clip.take().map(|b| *b)
     }
 
     pub fn clip(&self) -> Option<&Clip> {
-        self.clip.as_ref()
+        self.clip.as_deref()
     }
 
     pub fn mode(&self) -> LaunchMode {
@@ -635,5 +645,18 @@ mod tests {
             .set_clip(Some(Clip::new(vec![], 0)));
         seq.launch(0, 0, Quantize::Off, &t);
         assert!(!seq.slot(0).unwrap().is_active());
+    }
+
+    #[test]
+    fn boxed_clip_swap_returns_the_previous_allocation() {
+        let mut slot = ClipSlot::default();
+        let first = Box::new(four_on_the_floor());
+        let second = Box::new(four_on_the_floor());
+        assert!(slot.swap_boxed(Some(first)).is_none());
+        let previous = slot.swap_boxed(Some(second)).expect("first clip");
+        assert!(!previous.is_empty());
+        let cleared = slot.swap_boxed(None).expect("second clip");
+        assert!(!cleared.is_empty());
+        assert!(slot.clip().is_none());
     }
 }

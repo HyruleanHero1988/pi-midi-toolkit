@@ -6,6 +6,7 @@
 //! the next buffer boundary.
 
 use crate::clip::LaunchMode;
+use crate::repeat::RepeatDivision;
 use crate::transport::Quantize;
 
 /// Commands applied per block. Anything beyond this in one block is applied at the
@@ -103,6 +104,39 @@ pub enum Command {
         slot: u8,
         mode: LaunchMode,
     },
+    StartRepeat {
+        owner: u32,
+        channel: u8,
+        note: u8,
+        velocity: u8,
+        division: RepeatDivision,
+    },
+    StopRepeat {
+        owner: u32,
+    },
+    StopAllRepeats,
+    /// Internal event produced by the repeat rack. Keeping the owner attached
+    /// lets a stop command earlier in the same block invalidate a queued hit.
+    RepeatHit {
+        owner: u32,
+        channel: u8,
+        note: u8,
+        velocity: u8,
+    },
+    /// KAOSS contact down. `x`/`y` are 0..65535 so the command stays `Copy`.
+    TouchDown {
+        owner: u32,
+        x: u16,
+        y: u16,
+        channel: u8,
+        velocity: u8,
+    },
+    TouchUp {
+        owner: u32,
+    },
+    TouchCancel {
+        owner: u32,
+    },
 }
 
 /// A command plus the frame within the block where it takes effect.
@@ -132,6 +166,8 @@ mod tests {
     #[test]
     fn command_stays_small_enough_for_a_ring() {
         // Guard against someone adding a String or Vec to the hot-path type.
-        assert!(std::mem::size_of::<Command>() <= 16);
+        // TouchDown packs two u16 coordinates; keep this well under a cache line
+        // so a String/Vec cannot sneak onto the audio ring.
+        assert!(std::mem::size_of::<Command>() <= 24);
     }
 }
