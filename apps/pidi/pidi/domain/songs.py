@@ -18,6 +18,7 @@ from pidi.constants import (
     SONG_SEED_MARKER,
     SONGS_DIR,
 )
+from pidi.audio.drums import midi_note_name
 
 def list_song_files(directory: pathlib.Path = SONGS_DIR) -> List[pathlib.Path]:
     """All Standard MIDI Files in songs/ (sorted, case-insensitive)."""

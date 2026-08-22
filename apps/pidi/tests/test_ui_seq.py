@@ -306,6 +306,23 @@ class SeqScreenTest(unittest.TestCase):
         self.assertIsNotNone(app._song_play_btn)
         self.assertEqual(app._song_play_btn.cget("text"), "PLAY")
 
+    def test_kit_wave_draws_a_drum_trace(self) -> None:
+        app = self.app
+        app._switch_mode("synth")
+        self.pump()
+        app._open_kit_explorer()
+        self.pump()
+        app._set_kit_view("wave")
+        self.pump(0.2)
+        canvas = app._kit_wave_canvas
+        self.assertIsNotNone(canvas)
+        canvas.update_idletasks()
+        self.assertGreaterEqual(int(canvas.winfo_width()), 8)
+        self.assertGreaterEqual(int(canvas.winfo_height()), 8)
+        self.assertTrue(canvas.find_withtag("wave"), "drum WAVE scope should draw a trace")
+        app._close_kit_explorer()
+        self.pump()
+
 
 if __name__ == "__main__":
     sys.exit(unittest.main())

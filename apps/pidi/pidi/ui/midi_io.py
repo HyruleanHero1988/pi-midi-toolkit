@@ -18,6 +18,9 @@ from pidi.constants import (
     DRUM_CHANNEL,
     KNOB_CCS,
 )
+from pidi.audio.drums import drum_model_for_note, midi_note_name
+from pidi.domain.phrases import phrase_cell_for_note, phrase_pad_label
+from pidi.domain.songs import format_message
 from pidi.jambox_client import connect_or_spawn, midi_notice_to_message, prefer_python_engine
 
 

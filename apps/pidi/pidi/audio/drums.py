@@ -1,6 +1,7 @@
 """Procedural drum models and kit helpers."""
 from __future__ import annotations
 
+import math
 from typing import Dict, Optional, Tuple
 
 import numpy as np

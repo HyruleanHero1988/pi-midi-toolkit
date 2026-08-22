@@ -54,9 +54,8 @@ class KitScreenMixin:
             self._scope_blanked = self._scope_blanked_synth
             self._scope_dirty_drum = False
             self._refresh_kit_status()
-        except Exception:
-            if force:
-                pass
+        except Exception as exc:
+            print(f"kit wave paint failed: {exc}", flush=True)
 
 
     def _paint_kit_pad_btns(self) -> None:
@@ -255,8 +254,13 @@ class KitScreenMixin:
             self._kit_wave_canvas.pack(
                 side=tk.TOP, fill=tk.BOTH, expand=True, padx=4, pady=2
             )
+            self._kit_scope_size = None
             self._kit_wave_canvas.bind("<Configure>", self._on_kit_scope_configure)
             self._paint_kit_waveform(force=True)
+            try:
+                self.root.after_idle(lambda: self._paint_kit_waveform(force=True))
+            except Exception:
+                pass
         else:
             grid = tk.Frame(body, bg="#111111")
             grid.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
