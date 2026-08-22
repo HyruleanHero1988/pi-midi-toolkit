@@ -593,7 +593,7 @@ Only when you want “flash SD → boots straight into the MIDI box” without S
 
 ### Multi-unit / OTA (parked — only one unit today)
 
-Not building this yet. Capture the ladder so we don’t overbuild or forget it when a second box (e.g. brother’s clone) appears.
+Not building this yet. When the first box is stable and you’re pleased with it, clone it for your brother. Until then, one unit. Capture the ladder so we don’t overbuild or forget it.
 
 **Reality check:** daily SSH push (`tools/midi-tone/deploy_pi.py`, `deploy/deploy.sh`) already *is* the update path for a LAN appliance. True “finds the Pi anywhere” OTA is a different product tier. The instrument can stay offline forever; network is only needed **when you choose to update**.
 
@@ -620,7 +620,7 @@ Living inventory and prices: [PARTS.md](PARTS.md).
 
 **Compute (today):** Raspberry Pi 2 Model B v1.1. MIDI itself is tiny; the Pi 2 is enough **if we stay disciplined**. Architecture must not assume Pi 2 forever — if audio/FX/sequencer or DSI bring-up hits a wall, same software moves to Pi 4/5.
 
-**Display (ordered → target):** [BigTreeTech Pi TFT70 V2.1](https://kb-3d.com/store/controllers-displays-drivers/2677-bigtreetech-pi-tft43-tft50-tft70-v21-touchscreen-panel-for-raspberry-pi-pi-2-1734017888380.html) — 7″ DSI panel, **800×480**, **5-point capacitive** (GT911). This replaces the current scrap/resistive HDMI+ADS7846 setup (dropped taps, outdated feel). Investing in the panel is intentional: the jambox is a real instrument surface, not a temporary diagnostic.
+**Display (have):** [BigTreeTech Pi TFT70 V2.1](https://kb-3d.com/store/controllers-displays-drivers/2677-bigtreetech-pi-tft43-tft50-tft70-v21-touchscreen-panel-for-raspberry-pi-pi-2-1734017888380.html) — 7″ DSI panel (largest kb-3d variant), **800×480**, **5-point capacitive** (GT911), **$72.38** all-in. This replaces the current scrap/resistive HDMI+ADS7846 setup (dropped taps, outdated feel). Investing in the panel is intentional: the jambox is a real instrument surface, not a temporary diagnostic.
 
 | | Current (desk) | Target (TFT70 V2.1) |
 |--|----------------|---------------------|
@@ -667,7 +667,7 @@ flowchart LR
 |------------|------|
 | CPU / 1GB RAM | Hot path in Rust only; no browser; defer or keep touch UI minimal |
 | 32-bit `armv7` | Cross-compile from the PC; avoid on-device `cargo build` |
-| No onboard Wi‑Fi | Ethernet (or USB Wi‑Fi) for SSH deploy |
+| No onboard Wi‑Fi | Ethernet or LOTEKOO RT5370 USB Wi‑Fi dongle for SSH / SET updates |
 | Latency | Optimize + measure on Pi 2; don’t assume Pi 4/5 numbers |
 | Dual USB MIDI | Explicit in/out port selection; never assume a single combined device |
 
