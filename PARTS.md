@@ -15,10 +15,10 @@ A second copy of this box is the plan once the first one is stable and you’re 
 | BigTreeTech Pi TFT70 V2.1 (7″, largest kb-3d variant) | $72.38 | [kb-3d](https://kb-3d.com/store/controllers-displays-drivers/2677-bigtreetech-pi-tft43-tft50-tft70-v21-touchscreen-panel-for-raspberry-pi-pi-2-1734017888380.html) |
 | Otdorpatio ABS project box (for now) | $9.62 | [Amazon](https://www.amazon.com/dp/B08N1DD5WJ) |
 | LOTEKOO RT5370 USB Wi‑Fi dongle | $25.90 | [Amazon](https://www.amazon.com/dp/B06Y2HKT75) |
-| Akai MPK mini mk3 | $99.00 | [Amazon](https://www.amazon.com/dp/B0886KWVYR) |
+| Akai MPK mini mk3 | $105.93 | [Amazon](https://www.amazon.com/dp/B0886KWVYR) |
 | Headphones or powered speakers | owned | |
 
-Receipts so far: **$107.90** (screen + case + dongle). MPK is catalog, not a receipt.
+Receipts so far: **$213.83** (screen + case + dongle + MPK).
 
 ## Future
 
