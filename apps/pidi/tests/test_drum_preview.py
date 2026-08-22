@@ -88,6 +88,34 @@ class DrumPreviewTest(unittest.TestCase):
         self.assertGreater(crossings, 40)
         self.assertGreater(float(np.max(np.abs(cow))), 0.08)
 
+    def test_clap_stutters_and_is_not_a_snare(self) -> None:
+        clap = self._preview("clap")
+        snare = self._preview("snare")
+        sr = SAMPLE_RATE
+        first = float(np.sqrt(np.mean(clap[:90] ** 2)))
+        dip = float(np.sqrt(np.mean(clap[200:320] ** 2)))
+        second = float(np.sqrt(np.mean(clap[420:520] ** 2)))
+        self.assertGreater(first, 0.02)
+        self.assertLess(dip, first * 0.55)
+        self.assertGreater(second, dip * 1.6)
+
+        n = min(3500, len(clap), len(snare))
+
+        def goertzel(buf: np.ndarray, freq: float) -> float:
+            w = 2.0 * np.pi * freq / sr
+            coeff = 2.0 * np.cos(w)
+            s0 = s1 = s2 = 0.0
+            for x in buf[:n]:
+                s0 = float(x) + coeff * s1 - s2
+                s2, s1 = s1, s0
+            return s1 * s1 + s2 * s2 - coeff * s1 * s2
+
+        clap_body = goertzel(clap, 175.0)
+        snare_body = goertzel(snare, 175.0)
+        clap_mid = goertzel(clap, 1200.0)
+        self.assertGreater(snare_body, clap_body * 4.0)
+        self.assertGreater(clap_mid, clap_body)
+
 
 if __name__ == "__main__":
     raise SystemExit(unittest.main())

@@ -119,6 +119,8 @@ struct Hit {
     noise_lp: f32,
     /// Cowbell presence filter — must not share `noise_lp` with the noise tone LP.
     color_lp: f32,
+    /// Clap bandpass (upper pole). Cowbell unused.
+    bp_lp: f32,
     elapsed: f32,
     body_amp: f32,
     age: u64,
@@ -143,6 +145,7 @@ impl Hit {
             freq2: 0.0,
             noise_lp: 0.0,
             color_lp: 0.0,
+            bp_lp: 0.0,
             elapsed: 0.0,
             body_amp: 0.38,
             age: 0,
@@ -289,8 +292,12 @@ impl DrumKit {
                 };
             }
             Clap => {
-                hit.body_tau = 0.01;
-                hit.noise_tau = 0.03 + 0.22 * m.decay;
+                // 808 clap: four short slaps through a ~1 kHz bandpass, then a
+                // delayed quieter wash. Not a snare (no tonal body, no wire from t=0).
+                hit.freq = 700.0 * 2f32.powf((m.pitch - 0.5) * 1.0);
+                hit.freq_end = 2600.0 * 2f32.powf((m.pitch - 0.5) * 0.6 + (m.tone - 0.5) * 0.9);
+                hit.body_tau = 0.0018; // slap width
+                hit.noise_tau = 0.045 + 0.14 * m.decay; // verb after the slaps
             }
             HatClosed | HatOpen | HatPedal | Shaker => {
                 hit.body_tau = 0.01;
@@ -386,6 +393,8 @@ impl DrumKit {
             let click_coef = decay_coef(0.0035, sr);
             let freq_coef = decay_coef(hit.freq_tau, sr);
             let vel = hit.velocity;
+            let clap_hp_coef = (std::f32::consts::TAU * hit.freq / sr).clamp(0.03, 0.45);
+            let clap_lp_coef = (std::f32::consts::TAU * hit.freq_end / sr).clamp(0.10, 0.85);
 
             for sample in out.iter_mut() {
                 let white = self.next_noise();
@@ -426,14 +435,18 @@ impl DrumKit {
                             + hit.click_env * click_amp * vel * white
                     }
                     DrumModel::Clap => {
+                        // Bandpass ~0.7–2.6 kHz (palms), not the kit tone LP (snare wire).
+                        hit.color_lp += (white - hit.color_lp) * clap_hp_coef;
+                        let hp = white - hit.color_lp;
+                        hit.bp_lp += (hp - hit.bp_lp) * clap_lp_coef;
                         let t = hit.elapsed;
-                        let bursts = (-(t * t) / 0.0000008).exp()
-                            + (-((t - 0.012) * (t - 0.012)) / 0.0000010).exp()
-                            + (-((t - 0.024) * (t - 0.024)) / 0.0000012).exp();
-                        noise
-                            * (bursts * 0.45 + hit.noise_env * 0.28)
-                            * (0.28 + 0.4 * noise_amt)
-                            * vel
+                        let slap_tau = hit.body_tau;
+                        let slaps = clap_slap(t, 0.000, slap_tau)
+                            + 0.82 * clap_slap(t, 0.010, slap_tau * 1.10)
+                            + 0.64 * clap_slap(t, 0.019, slap_tau * 1.20)
+                            + 0.48 * clap_slap(t, 0.029, slap_tau * 1.30);
+                        let verb = clap_slap(t, 0.024, hit.noise_tau) * (0.20 + 0.18 * noise_amt);
+                        hit.bp_lp * (slaps * 0.70 + verb) * vel * 0.85
                     }
                     DrumModel::HatClosed
                     | DrumModel::HatOpen
@@ -515,6 +528,16 @@ impl DrumKit {
         x ^= x << 5;
         self.rng = x;
         ((x >> 8) as f32 / 8_388_608.0) - 1.0
+    }
+}
+
+#[inline]
+fn clap_slap(t: f32, offset: f32, tau: f32) -> f32 {
+    let d = t - offset;
+    if d < 0.0 {
+        0.0
+    } else {
+        (-d / tau.max(0.0004)).exp()
     }
 }
 
@@ -665,5 +688,51 @@ mod tests {
         );
         let peak = cow.iter().copied().map(f32::abs).fold(0.0, f32::max);
         assert!(peak > 0.08, "cowbell should have some bite, peak {peak}");
+    }
+
+    fn goertzel_power(buf: &[f32], sr: f32, freq: f32) -> f32 {
+        let w = std::f32::consts::TAU * freq / sr;
+        let coeff = 2.0 * w.cos();
+        let mut s0 = 0.0f32;
+        let mut s1 = 0.0f32;
+        let mut s2 = 0.0f32;
+        for &x in buf {
+            s0 = x + coeff * s1 - s2;
+            s2 = s1;
+            s1 = s0;
+        }
+        s1 * s1 + s2 * s2 - coeff * s1 * s2
+    }
+
+    #[test]
+    fn clap_stutters_and_has_no_snare_body() {
+        let clap = render_note(DrumModel::Clap, 8_000);
+        let snare = render_note(DrumModel::Snare, 8_000);
+        let sr = 44_100.0f32;
+        // Distinct slaps: energy dips between the first two ~10 ms hits.
+        let first = rms(&clap, 0, 90);
+        let dip = rms(&clap, 200, 320); // ~4.5–7.3 ms
+        let second = rms(&clap, 420, 520); // ~9.5–11.8 ms
+        assert!(first > 0.02, "clap should speak, first-slap rms {first}");
+        assert!(
+            dip < first * 0.55,
+            "clap should stutter, dip {dip} vs first {first}"
+        );
+        assert!(
+            second > dip * 1.6,
+            "second slap should come back (second {second} vs dip {dip})"
+        );
+
+        let clap_body = goertzel_power(&clap[..3500], sr, 175.0);
+        let snare_body = goertzel_power(&snare[..3500], sr, 175.0);
+        assert!(
+            snare_body > clap_body * 4.0,
+            "snare keeps a 175 Hz body; clap must not (snare {snare_body} vs clap {clap_body})"
+        );
+        let clap_mid = goertzel_power(&clap[..3500], sr, 1200.0);
+        assert!(
+            clap_mid > clap_body,
+            "clap energy should sit in the mid band, not the kick/snare body"
+        );
     }
 }

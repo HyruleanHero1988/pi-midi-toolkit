@@ -77,6 +77,13 @@ def _one_pole_lp(x: np.ndarray, coef: float) -> np.ndarray:
     return y
 
 
+def _clap_slap(t: np.ndarray, offset: float, tau: float) -> np.ndarray:
+    d = t - np.float32(offset)
+    out = np.exp(-np.maximum(d, 0.0) / np.float32(max(tau, 0.0004)))
+    out = np.where(d < 0.0, np.float32(0.0), out)
+    return out.astype(np.float32, copy=False)
+
+
 def downsample_waveform(samples: np.ndarray, points: int) -> np.ndarray:
     """Reduce a sample buffer to `points` peaks for canvas drawing."""
     if samples is None or len(samples) == 0 or points <= 0:
@@ -223,16 +230,27 @@ def synthesize_drum(
         return sig.astype(np.float32, copy=False), max(body_tau, noise_tau) * 5.0, new_phase
 
     if model == "clap":
-        noise_tau = 0.03 + 0.22 * decay
-        noise_env = np.exp(-t / np.float32(noise_tau))
-        bursts = (
-            np.exp(-((t - 0.000) ** 2) / 0.0000008)
-            + np.exp(-((t - 0.012) ** 2) / 0.0000010)
-            + np.exp(-((t - 0.024) ** 2) / 0.0000012)
+        # 808 clap: four short slaps through a mid bandpass, then a delayed wash.
+        # Not a snare — no 175 Hz body, and no wire-noise from t=0.
+        hp_hz = 700.0 * (2.0 ** ((pitch - 0.5) * 1.0))
+        lp_hz = 2600.0 * (2.0 ** ((pitch - 0.5) * 0.6 + (tone - 0.5) * 0.9))
+        sr = 1.0 / inv_sr
+        hp_coef = max(0.03, min(0.45, two_pi * hp_hz / sr))
+        lp_coef = max(0.10, min(0.85, two_pi * lp_hz / sr))
+        rumble = _one_pole_lp(white, hp_coef)
+        band = _one_pole_lp(white - rumble, lp_coef)
+        slap_tau = 0.0018
+        slaps = (
+            _clap_slap(t, 0.000, slap_tau)
+            + 0.82 * _clap_slap(t, 0.010, slap_tau * 1.10)
+            + 0.64 * _clap_slap(t, 0.019, slap_tau * 1.20)
+            + 0.48 * _clap_slap(t, 0.029, slap_tau * 1.30)
         )
-        sig = noise * (bursts * np.float32(0.45) + noise_env * np.float32(0.28))
-        sig *= np.float32((0.28 + 0.4 * noise_amt) * vel)
-        return sig.astype(np.float32, copy=False), noise_tau * 5.0, phase
+        verb_tau = 0.045 + 0.14 * decay
+        verb = _clap_slap(t, 0.024, verb_tau) * np.float32(0.20 + 0.18 * noise_amt)
+        env = slaps * np.float32(0.70) + verb
+        sig = band * env * np.float32(0.85 * vel)
+        return sig.astype(np.float32, copy=False), verb_tau * 5.0, phase
 
     if model in ("hat_closed", "hat_open", "hat_pedal", "shaker"):
         if model == "hat_open":
