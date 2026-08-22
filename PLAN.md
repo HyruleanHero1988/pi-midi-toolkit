@@ -59,6 +59,9 @@ todos:
   - id: arp
     content: "Phase 4 (optional distinct mode): key-relative step pattern transposed by held root"
     status: pending
+  - id: portable-ups
+    content: "Parked: Geekworm X728 (or X1209) battery UPS beside TFT70, hooked to pi-power.sh. Not buying yet."
+    status: pending
 isProject: false
 ---
 
@@ -655,7 +658,7 @@ flowchart LR
 - **In:** MPK mini mk3 plugged straight into the Pi (class-compliant; shows up as an ALSA/`midir` input — no Akai Windows driver on the Pi).
 - **Out:** USB MIDI → DIN-5 cable/interface on a second USB port → synth.
 - **Engine job:** open those two ports by name substring (e.g. `MPK` / `U2MIDI`), run remap chain, send.
-- **Power note (Pi 2):** MPK + USB-DIN adapter are both bus-powered; if ports brown out or drop, use a **powered USB hub**. Pi 2 has enough port count (4× USB); power budget is the usual gotcha.
+- **Power note (Pi 2):** MPK + USB-DIN adapter are both bus-powered; if ports brown out or drop, use a **powered USB hub**. Pi 2 has enough port count (4× USB); power budget is the usual gotcha. A rechargeable pack is **parked** (not buying yet) — see [Portable battery UPS](#portable-battery-ups-parked).
 - Phase 1 preset example should document this pairing (channel force ch1→ch3, optional CC maps, full velocity) aimed at MPK quirks.
 
 | Constraint | Rule |
@@ -674,6 +677,92 @@ flowchart LR
 
 - Engine: `SCHED_FIFO` + `mlockall` via systemd where the kernel allows
 - Pi 4/5 = optional later upgrade, not required to ship the appliance
+
+### Portable battery UPS (parked)
+
+**Not current work.** Wall wart is enough. Capture the research so a later buy is one shopping list, not a redo. Target: rechargeable pack with % back to the Pi, a physical button that runs the existing kiosk shutdown (`tools/midi-tone/pi-power.sh`) *before* cutting 5 V, and enough current for Pi 2 + TFT70 + two bus-powered USB MIDI devices.
+
+#### Why this board (and not a power bank)
+
+| Need | Fit |
+|------|-----|
+| Pi 2 Model B + 40-pin GPIO | [Geekworm X728](https://wiki.geekworm.com/X728) (v2.3 / v2.5) is specified for every 40-pin Pi, including 2B. Feeds 5.1 V on GPIO pins 2/4. **Leave the Pi’s micro-USB unplugged** — dual 5 V sources fight. |
+| Battery % on the Pi | Maxim MAX17040 on I2C-1 (`0x36` fuel gauge, `0x68` RTC). TFT70 backlight/touch live on DSI I2C **bus 10** (`10-0045` in the kiosk) — no address clash. `enable-tft70-dsi.sh` already sets `dtparam=i2c_arm=on`. |
+| Current | **5.1 V @ 5 A**. PiJuice tops out ~2.5 A and would recreate the USB brown-out this box already warns about. |
+| Button → clean halt → power cut | Momentary: tap = on, 1–2 s = reboot, 3–7 s = safe shutdown, >8 s = force. Their GPIO script should call `sudo -n pi-power.sh poweroff` (kiosk sudoers already exist), not raw `shutdown`. After halt the HAT drops 5 V. PH2.0 header for a panel-mount switch. |
+| Capacity | 2× unprotected 18650 on the HAT (~26 Wh with Samsung 35E) → roughly **2–4 h** of jamming at this load. Extra holders exist if a later pack should last all day. |
+
+**Do not buy:** USB “passthrough” power banks (switchover dip kills SD + USB MIDI; no GPIO halt; fake %). **PiJuice HAT** (2.5 A ceiling, stock 1820 mAh). Pi 5-only Geekworm X120x boards while the machine is still a Pi 2. The [X728-C1 metal case](https://www.amazon.com/Geekworm-X728-C1-Cooling-Switch-Raspberry/dp/B09Z6C64NN) — it is a Pi 4 box and will not fit the TFT70.
+
+X728 GPIO used on current boards (5, 6, 12, 16, 20, 26) is free once the ADS7846 HDMI panel is gone. DSI + GT911 do not take those pins.
+
+#### Dimensions (do not stack the cells on the Pi)
+
+The 18650 **holder body** is the height, not just the cells. Emptying the clips does almost nothing. Relocating those same clips just moves the bulge. Do **not** desolder the through-hole holders to reuse them (v2.3+ pins are heat-sunk; easy to lift pads next to the charger). If holders ever come off, throw them away and feed a slim pack from the 2-pin battery header.
+
+| Piece | Outline | Thickness (useful) | Notes |
+|-------|---------|--------------------|--------|
+| TFT70 V2.1 | **165 × 100 mm** | panel + PCB ~8–12 mm | Active area 154 × 86 mm. M2.5 Pi holes on the back. Stock DSI cable is the short one for that mount. |
+| Pi 2 Model B | **85 × 56 mm** PCB | **~17 mm** with stacked USB | Same holes as B+/3B/4: **58 × 49 mm** centers, M2.5. USB+Ethernet add ~13–16 mm past one short edge; HDMI/AV ~10 mm past the other. |
+| X728 v2.x | **87 × 63.5 mm** PCB | **~20 mm+** with 18650s | GPIO along the 87 mm edge. USB-C + DC 5521 = charge. |
+
+Pi 2 ports with GPIO at the top: **right** = 4× USB + Ethernet (MPK, DIN, SSH); **left** = DSI (near GPIO), HDMI, 3.5 mm audio, unused micro-USB, microSD underside; **bottom** = CSI; **top** = 40-pin GPIO.
+
+**Fit on the 165 × 100 back**
+
+- GPIO-parallel, end to end: 85 + 87 = **172 > 165** — will not sit on the glass.
+- Above/below the Pi in the 100 mm height: leftover ~44 mm; X728 short side is 63.5 mm — no.
+- Rotated 90° beside the Pi: 85 + 63.5 = **148.5** wide, **87** tall — fits **only if** the Pi is shifted to one end (~80 mm free). A **centered** Pi leaves ~40 mm per side; then hang the pack off the GPIO edge instead.
+
+**DSI law:** Pi stays on the BTT studs. A DSI FPC may **fold 180°**; it must not **twist** (swaps pin 1, can kill the panel). Do not slide the Pi to make a pocket for the UPS.
+
+#### Arrangement (when buying)
+
+Treat it as a tablet: screen forward, boards on the back, one **dock edge** for USB + Ethernet + charge.
+
+1. Mount the Pi on the TFT70 posts first (short DSI, one 180° fold). Leave USB / Ethernet / HDMI / 3.5 mm hanging off panel edges — 3.5 mm is still headphone/speaker out.
+2. **If a ≥70 mm pocket exists beside the Pi:** set the X728 in it, rotated 90° (63.5 mm along the 165 mm). Short female–female 40-pin ribbon, one U-fold, red stripe = pin 1 on **both** ends. Face X728 USB-C / DC at the same dock edge as Pi USB+Ethernet.
+3. **If the Pi is centered (likely):** [G341 90° GPIO adapter](https://geekworm.com/products/gpio-1-to-2-extender) on the Pi GPIO long edge; hang the whole X728 off that edge in the plane of the Pi. Outline grows to ~165 × 165–170 mm. Charge on that “battery bar.” This is the layout that always works. Prefer G341 over a long 28 AWG ribbon for 5 V; a short ribbon will run a Pi 2 but is the weak link.
+4. Charge **only** the X728. Tape/ignore the Pi micro-USB.
+
+Optional: X728 XH2.54 5 V pads can feed a small powered USB hub (same brown-out workaround as the power note above).
+
+Kiosk work later (small): I2C % / voltage / charging on the POWER overlay; point the HAT halt path at `pi-power.sh`; low-battery watcher the same. Docs: [wiki.geekworm.com/X728](https://wiki.geekworm.com/X728).
+
+#### Buy list (when the budget is there)
+
+**HAT + charger**
+
+| Item | Link |
+|------|------|
+| X728 v2.5 (board only) | [Amazon](https://www.amazon.com/Geekworm-Raspberry-Management-Detection-Shutdown/dp/B087FXLZZH) · [Geekworm](https://geekworm.com/products/x728) · [Amazon UK](https://www.amazon.co.uk/Geekworm-Raspberry-Management-Detection-Shutdown/dp/B087J7WTYM) |
+| Easier: X728 + 5 V / 4 A USB-C brick | [Amazon combo](https://www.amazon.com/Geekworm-Raspberry-Adapter-Management-Compatible/dp/B09KMX7Z2P) |
+| PSU alone (if the board is bought solo) | [Amazon 20 W 5 V 4 A USB-C](https://www.amazon.com/Geekworm-Raspberry-Adapter-Charger-Support/dp/B09J856PND) |
+
+Plug that brick into the **X728**, not the Pi.
+
+**Cells — not Amazon.** Two **unprotected flat-top 18650s**, ~65 mm, **no** protection PCB (protected cells current-limit; the boost will not hold 5 A). Same brand/age. Geekworm names Samsung 35E / Panasonic NCR18650B.
+
+| Item | Link |
+|------|------|
+| Samsung 35E 3500 mAh (buy 2) | [18650BatteryStore](https://www.18650batterystore.com/products/samsung-35e-18650-3500mah-8a-battery) · [Orbtronic](https://www.orbtronic.com/samsung-35e-18650-battery-inr1865035e-flat-top) |
+
+Skip Amazon packs that say 5000–9900 mAh, “protected,” or “button top.”
+
+**Keep the pack off the Pi stack**
+
+| Item | Link |
+|------|------|
+| G341 90° GPIO adapter (preferred) | [Geekworm](https://geekworm.com/products/gpio-1-to-2-extender) · [Amazon UK](https://www.amazon.co.uk/dp/B0BD79QW8K) |
+| 40-pin F–F GPIO ribbon, 20 cm (only if G341 is unavailable) | [Amazon](https://www.amazon.com/NulSom-Inc-Ribbon-Cable-Raspberry/dp/B00QE3KZQ6) |
+| X728-A2 2-cell remote holder (discontinued, still listed; 2-pin lead) | [Amazon](https://www.amazon.com/Geekworm-X728-A2-Stackable-Batteries-Raspberry/dp/B08B5SW3TF) |
+| X708-A1 8-cell holder, 12 cm lead (all-day capacity; bulky) | [Amazon](https://www.amazon.com/Geekworm-X708-A1-8-Cell-Battery-Holder/dp/B08L5W8NJ3) · [wiki](https://wiki.geekworm.com/X708-A1) |
+
+Onboard X728 clips and an expansion holder are in parallel. Populate **one** pack, not mixed cells of different age. Confirm a generic XH2.54 2-cell lead goes on the **battery-in** header, not 5 V-out.
+
+#### Alternate HAT if we want zero clips on the GPIO board
+
+[Geekworm X1209](https://geekworm.com/products/x1209) ([wiki](https://wiki.geekworm.com/X1209)) is the thin HAT with **no** 18650 cage: 65 × 57 mm, two XH2.54 battery-in connectors, same I2C %, 5.1 V @ 6 A. Pair with a [2-cell XH2.54 holder (~15 cm)](https://geekworm.com/products/2-way-parallel-18650-battery-pack) or [X12-A1 4-cell](https://www.amazon.com/Geekworm-X12-A1-Stackable-Protection-Compatible/dp/B0GJZRWT25) ([Geekworm](https://geekworm.com/products/x12-a1), 30 cm leads). Officially **Pi 5 / 4 / 3B / 3B+**, not Pi 2 — same 40-pin 5 V + I2C so it would likely power a Pi 2, but it is not listed. The Pi 5-style power button needs a pogo pin; on older Pis the button is power-on + triple-press force-off, and clean halt is still `pi-power.sh`. Prefer X728 while the machine is a Pi 2; X1209 is the nicer mechanical if/when this box moves to Pi 4/5.
 
 ## Success criteria
 
