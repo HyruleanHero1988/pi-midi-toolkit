@@ -5,6 +5,10 @@ low-latency MIDI thru/remap to a hardware synth. **Not** related to play-my-synt
 
 **North star:** power on → kiosk → modes (Synth / Seq / Pads / Kaoss / Log / Map). See [PLAN.md](PLAN.md).
 
+**Architecture review:** [JAMBOX_ARCHITECTURE_NEXT.md](JAMBOX_ARCHITECTURE_NEXT.md)
+captures the measured problems in the transitional Tk/Rust design and the
+native vertical-slice prototype proposed before any full UI rewrite.
+
 - **Kiosk UI (active):** [`apps/pidi`](apps/pidi) — PiDI Tk surface over `jambox-engine` (Python audio fallback retained)
 - **Thru engine:** Rust `midi-engine` — channel/CC/velocity remap via CLI + JSON presets (Map mode UI next)
 - **Target hardware:** Pi 2 + MPK mini mk3 (+ USB-MIDI-DIN → synth when available)
