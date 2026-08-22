@@ -82,3 +82,72 @@ pub fn glyph(ch: char) -> &'static [u8; 5] {
         FONT[0]
     }
 }
+
+pub const ATLAS_COLS: u32 = 16;
+pub const ATLAS_ROWS: u32 = 4;
+pub const ATLAS_CELL: u32 = 8;
+
+pub fn atlas_size() -> (u32, u32) {
+    (ATLAS_COLS * ATLAS_CELL, ATLAS_ROWS * ATLAS_CELL)
+}
+
+/// White-on-transparent RGBA atlas for GLES text. One 8×8 cell per ASCII 32..95.
+pub fn atlas_rgba() -> (u32, u32, Vec<u8>) {
+    let (w, h) = atlas_size();
+    let mut data = vec![0u8; (w * h * 4) as usize];
+    for i in 0..64 {
+        let bits = FONT[i];
+        let col = (i as u32) % ATLAS_COLS;
+        let row = (i as u32) / ATLAS_COLS;
+        let ox = col * ATLAS_CELL + 1;
+        let oy = row * ATLAS_CELL + 1;
+        for gx in 0..GLYPH_W as u32 {
+            let column = bits[gx as usize];
+            for gy in 0..GLYPH_H as u32 {
+                if column & (1 << gy) != 0 {
+                    let px = ox + gx;
+                    let py = oy + gy;
+                    let idx = ((py * w + px) * 4) as usize;
+                    data[idx] = 255;
+                    data[idx + 1] = 255;
+                    data[idx + 2] = 255;
+                    data[idx + 3] = 255;
+                }
+            }
+        }
+    }
+    (w, h, data)
+}
+
+pub fn glyph_uv(ch: char) -> (f32, f32, f32, f32) {
+    let mut c = ch as u8;
+    if (b'a'..=b'z').contains(&c) {
+        c -= 32;
+    }
+    if !(32..96).contains(&c) {
+        c = b' ';
+    }
+    let i = (c - 32) as u32;
+    let col = i % ATLAS_COLS;
+    let row = i / ATLAS_COLS;
+    let (w, h) = atlas_size();
+    let ox = col * ATLAS_CELL + 1;
+    let oy = row * ATLAS_CELL + 1;
+    let u0 = ox as f32 / w as f32;
+    let v0 = oy as f32 / h as f32;
+    let u1 = (ox + GLYPH_W as u32) as f32 / w as f32;
+    let v1 = (oy + GLYPH_H as u32) as f32 / h as f32;
+    (u0, v0, u1, v1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn atlas_has_ink_for_a() {
+        let (w, h, data) = atlas_rgba();
+        assert_eq!((w, h), (128, 32));
+        assert!(data.chunks(4).any(|p| p[3] > 0));
+    }
+}

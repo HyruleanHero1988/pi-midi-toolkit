@@ -6,11 +6,18 @@
 
 pub mod client;
 pub mod font;
+#[cfg(feature = "sdl")]
+pub mod gles;
+pub mod input;
 pub mod layout;
 pub mod model;
 pub mod render;
+pub mod scene;
+#[cfg(feature = "sdl")]
+pub mod sdl_backend;
 
 pub use client::NativeClient;
+pub use input::TouchEvent;
 pub use layout::{Hit, Layout, Surface};
 pub use model::{NativeModel, RepeatDivisionChoice};
 pub use render::{Frame, SCREEN_H, SCREEN_W};

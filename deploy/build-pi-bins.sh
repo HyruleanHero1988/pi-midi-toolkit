@@ -102,16 +102,21 @@ ensure_apt_toolchain() {
      && [[ ! -f /usr/lib/pkgconfig/alsa.pc ]]; then
     missing=1
   fi
+  if [[ ! -f /usr/lib/arm-linux-gnueabihf/pkgconfig/sdl2.pc ]]; then
+    missing=1
+  fi
   if [[ "$missing" -eq 0 ]]; then
     return 0
   fi
-  log "installing armhf cross toolchain (gcc + libasound2-dev:armhf)…"
+  log "installing armhf cross toolchain (gcc + alsa + SDL2/GLES)…"
   if ! sudo -n true 2>/dev/null; then
     log "sudo is not passwordless; install manually:"
     log "  sudo dpkg --add-architecture armhf"
     log "  # Ubuntu: pin archive.ubuntu.com to amd64 and add ports.ubuntu.com for armhf"
     log "  sudo apt-get update"
-    log "  sudo apt-get install -y gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf pkg-config libasound2-dev:armhf"
+    log "  sudo apt-get install -y gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf pkg-config \\"
+    log "    libasound2-dev:armhf libsdl2-dev:armhf libgles2-mesa-dev:armhf \\"
+    log "    libegl1-mesa-dev:armhf libgbm-dev:armhf libdrm-dev:armhf"
     return 0
   fi
   sudo dpkg --add-architecture armhf
@@ -121,7 +126,12 @@ ensure_apt_toolchain() {
     gcc-arm-linux-gnueabihf \
     g++-arm-linux-gnueabihf \
     pkg-config \
-    libasound2-dev:armhf
+    libasound2-dev:armhf \
+    libsdl2-dev:armhf \
+    libgles2-mesa-dev:armhf \
+    libegl1-mesa-dev:armhf \
+    libgbm-dev:armhf \
+    libdrm-dev:armhf
 }
 
 ensure_rust_target() {

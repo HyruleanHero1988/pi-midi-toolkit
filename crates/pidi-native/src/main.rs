@@ -1,19 +1,24 @@
 //! Native KAOSS/drum vertical slice. Deploy beside jambox-engine on the Pi.
+//!
+//! Default presenter is SDL + OpenGL ES 2 (KMSDRM on the Pi). fbdev is an
+//! explicit fallback; dummy is for host tests and `--frames` dumps.
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use clap::Parser;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use pidi_native::client::NativeClient;
+use pidi_native::input::TouchEvent;
 use pidi_native::model::NativeModel;
-use pidi_native::render::{draw, Frame};
+use pidi_native::render::{rasterize, Frame};
+use pidi_native::scene;
 
 #[derive(Parser)]
 #[command(
     name = "pidi-native",
-    about = "Native 800x480 KAOSS + drum slice for jambox-engine"
+    about = "Native 800x480 KAOSS + drum slice for jambox-engine (SDL/GLES)"
 )]
 struct Cli {
     /// Control socket path or host:port.
@@ -22,10 +27,14 @@ struct Cli {
     /// Connect over TCP instead of a Unix socket.
     #[arg(long)]
     tcp: bool,
-    /// Presenter: dummy, fb, or auto.
+    /// Presenter: sdl, auto, dummy, or fb. auto prefers SDL, then fb, then dummy.
     #[arg(long, default_value = "auto")]
     display: String,
-    /// Linux framebuffer device.
+    /// Touch source: auto, sdl, evdev, or none.
+    /// auto uses SDL FingerId when the presenter is SDL, otherwise evdev.
+    #[arg(long, default_value = "auto")]
+    touch: String,
+    /// Linux framebuffer device (only for --display fb).
     #[arg(long, default_value = "/dev/fb0")]
     fb: String,
     /// Linux evdev node (empty = autodetect Goodix/touch).
@@ -40,6 +49,9 @@ struct Cli {
     /// Target refresh in Hz.
     #[arg(long, default_value_t = 60)]
     hz: u32,
+    /// Windowed host mode (default is fullscreen for the Pi kiosk).
+    #[arg(long)]
+    windowed: bool,
 }
 
 fn main() {
@@ -53,11 +65,20 @@ fn main() {
     let mut model = NativeModel::new();
     let mut frame = Frame::new();
     let mut client = NativeClient::new(cli.control.clone(), cli.tcp);
-    let mut presenter = Presenter::open(&cli.display, &cli.fb);
-    let mut input = Input::open(&cli.evdev);
+    let mut presenter = Presenter::open(&cli);
+    let sdl_touch = presenter.is_sdl() && matches!(cli.touch.as_str(), "auto" | "sdl");
+    let mut input = if matches!(cli.touch.as_str(), "evdev") || (cli.touch == "auto" && !sdl_touch)
+    {
+        Input::open(&cli.evdev)
+    } else {
+        Input::None
+    };
+    if cli.touch == "sdl" && !presenter.is_sdl() {
+        warn!("native: --touch sdl ignored without an SDL presenter");
+    }
     info!(
         display = presenter.name(),
-        input = input.name(),
+        input = if sdl_touch { "sdl" } else { input.name() },
         "pidi-native: starting"
     );
 
@@ -71,7 +92,12 @@ fn main() {
         let dt = (now - last).as_secs_f32();
         last = now;
 
-        for event in input.poll() {
+        let mut events = Vec::new();
+        if !presenter.poll_window(sdl_touch, &mut events) {
+            break;
+        }
+        events.extend(input.poll());
+        for event in events {
             match event {
                 TouchEvent::Down { id, x, y } => model.finger_down(id, x, y, &mut client.outbox),
                 TouchEvent::Move { id, x, y } => model.finger_move(id, x, y, &mut client.outbox),
@@ -87,8 +113,8 @@ fn main() {
         model.connected = client.connected;
         model.status = client.last_status;
         model.tick(dt);
-        draw(&mut frame, &model);
-        presenter.present(&frame);
+        let scene = scene::build(&model);
+        presenter.present(&scene, &mut frame);
 
         n += 1;
         if cli.frames > 0 && n >= cli.frames {
@@ -103,6 +129,7 @@ fn main() {
     model.cancel_all(&mut client.outbox);
     client.flush();
     if let Some(path) = cli.dump {
+        rasterize(&mut frame, &scene::build(&model));
         if let Err(err) = frame.write_ppm(&path) {
             warn!(%err, "native: dump failed");
         } else {
@@ -111,24 +138,65 @@ fn main() {
     }
 }
 
-enum TouchEvent {
-    Down { id: i32, x: i32, y: i32 },
-    Move { id: i32, x: i32, y: i32 },
-    Up { id: i32 },
-}
-
 enum Presenter {
     Dummy,
     #[cfg(target_os = "linux")]
     Fb(linux_fb::FbDev),
+    #[cfg(feature = "sdl")]
+    Sdl(pidi_native::sdl_backend::SdlDisplay),
 }
 
 impl Presenter {
-    fn open(kind: &str, fb: &str) -> Self {
-        match kind {
+    fn open(cli: &Cli) -> Self {
+        let fullscreen = !cli.windowed;
+        match cli.display.as_str() {
             "dummy" => Self::Dummy,
-            "fb" => Self::open_fb(fb).unwrap_or(Self::Dummy),
-            _ => Self::open_fb(fb).unwrap_or(Self::Dummy),
+            "fb" => Self::open_fb(&cli.fb).unwrap_or_else(|| {
+                warn!("native: framebuffer open failed; using dummy");
+                Self::Dummy
+            }),
+            "sdl" => match Self::open_sdl(fullscreen) {
+                Some(p) => p,
+                None if cli.frames > 0 => {
+                    warn!("native: SDL/GLES unavailable; dummy for --frames");
+                    Self::Dummy
+                }
+                None => {
+                    error!("native: SDL/GLES is required for --display sdl");
+                    std::process::exit(1);
+                }
+            },
+            _ => {
+                if let Some(p) = Self::open_sdl(fullscreen) {
+                    return p;
+                }
+                if cli.frames == 0 {
+                    if let Some(p) = Self::open_fb(&cli.fb) {
+                        warn!("native: SDL/GLES unavailable; falling back to fbdev");
+                        return p;
+                    }
+                }
+                warn!("native: SDL/GLES unavailable; using dummy");
+                Self::Dummy
+            }
+        }
+    }
+
+    fn open_sdl(fullscreen: bool) -> Option<Self> {
+        #[cfg(feature = "sdl")]
+        {
+            return match pidi_native::sdl_backend::SdlDisplay::open(fullscreen) {
+                Ok(d) => Some(Self::Sdl(d)),
+                Err(err) => {
+                    warn!(%err, "native: SDL/GLES open failed");
+                    None
+                }
+            };
+        }
+        #[cfg(not(feature = "sdl"))]
+        {
+            let _ = fullscreen;
+            None
         }
     }
 
@@ -144,19 +212,54 @@ impl Presenter {
         }
     }
 
+    fn is_sdl(&self) -> bool {
+        #[cfg(feature = "sdl")]
+        {
+            return matches!(self, Self::Sdl(_));
+        }
+        #[cfg(not(feature = "sdl"))]
+        {
+            false
+        }
+    }
+
     fn name(&self) -> &'static str {
         match self {
             Self::Dummy => "dummy",
             #[cfg(target_os = "linux")]
             Self::Fb(_) => "fbdev",
+            #[cfg(feature = "sdl")]
+            Self::Sdl(_) => "sdl-gles",
         }
     }
 
-    fn present(&mut self, frame: &Frame) {
+    fn poll_window(&mut self, collect_touch: bool, out: &mut Vec<TouchEvent>) -> bool {
+        #[cfg(feature = "sdl")]
+        {
+            if let Self::Sdl(dev) = self {
+                return dev.poll(collect_touch, out);
+            }
+        }
+        let _ = (collect_touch, out);
+        true
+    }
+
+    fn present(&mut self, scene: &scene::Scene, frame: &mut Frame) {
         match self {
-            Self::Dummy => {}
+            Self::Dummy => {
+                rasterize(frame, scene);
+            }
             #[cfg(target_os = "linux")]
-            Self::Fb(dev) => dev.blit(frame),
+            Self::Fb(dev) => {
+                rasterize(frame, scene);
+                dev.blit(frame);
+            }
+            #[cfg(feature = "sdl")]
+            Self::Sdl(dev) => {
+                if let Err(err) = dev.present(scene) {
+                    warn!(%err, "native: SDL present failed");
+                }
+            }
         }
     }
 }
@@ -388,7 +491,7 @@ mod linux_evdev {
     use std::os::unix::io::AsRawFd;
     use std::path::PathBuf;
 
-    use super::TouchEvent;
+    use pidi_native::input::TouchEvent;
 
     const EV_SYN: u16 = 0;
     const EV_ABS: u16 = 3;

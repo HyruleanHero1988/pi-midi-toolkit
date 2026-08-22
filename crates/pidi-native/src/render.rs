@@ -1,8 +1,10 @@
 //! CPU complete-frame renderer. The previous frame stays visible until this
-//! one is fully filled and presented.
+//! one is fully filled and presented. Dummy/PPM output rasterizes the same
+//! `scene::build` list that GLES submits, so the two paths stay aligned.
 
 use crate::font::{self, GLYPH_H, GLYPH_STRIDE, GLYPH_W};
-use crate::model::{NativeModel, RepeatDivisionChoice, LED_COLS, LED_ROWS};
+use crate::model::NativeModel;
+use crate::scene::{self, Scene};
 
 pub const SCREEN_W: usize = 800;
 pub const SCREEN_H: usize = 480;
@@ -81,70 +83,46 @@ impl Default for Frame {
 }
 
 pub fn draw(frame: &mut Frame, model: &NativeModel) {
-    frame.clear(0x101018);
-    let layout = model.layout;
+    rasterize(frame, &scene::build(model));
+}
 
-    frame.fill_rect(layout.hud.x, layout.hud.y, layout.hud.w, layout.hud.h, 0x1c1c28);
-    let hud = format!(
-        "PIDI NATIVE  fps {:>4.0}  cb {}/{}us  xrun {}  drop {}  rel {}  xy {}  rpt {}  {}",
-        model.fps,
-        model.status.callback_frames,
-        model.status.callback_micros,
-        model.status.xruns,
-        model.status.command_drops,
-        model.status.emergency_releases,
-        model.status.touch_overwrites,
-        model.status.active_repeats,
-        if model.connected { "ENG" } else { "NO ENGINE" },
-    );
-    frame.text(8, 14, &hud, 0xf2f2f2);
+pub fn rasterize(frame: &mut Frame, scene: &Scene) {
+    frame.clear(scene.clear);
+    for q in &scene.color {
+        frame.fill_rect(q.x as i32, q.y as i32, q.w as i32, q.h as i32, q.color);
+    }
+    let (aw, ah, atlas) = font::atlas_rgba();
+    for g in &scene.glyphs {
+        blit_glyph(frame, g, aw, ah, &atlas);
+    }
+}
 
-    // One pass over the 12×7 field — not 84 widget mutations.
-    for row in 0..LED_ROWS {
-        for col in 0..LED_COLS {
-            let cell = layout.kaoss_cell(col, row);
-            frame.fill_rect(cell.x, cell.y, cell.w - 1, cell.h - 1, model.cell(col, row));
+fn blit_glyph(frame: &mut Frame, g: &scene::GlyphQuad, aw: u32, ah: u32, atlas: &[u8]) {
+    let x0 = g.x as i32;
+    let y0 = g.y as i32;
+    let w = g.w.max(1.0) as i32;
+    let h = g.h.max(1.0) as i32;
+    for dy in 0..h {
+        for dx in 0..w {
+            let u = g.u0 + (g.u1 - g.u0) * ((dx as f32 + 0.5) / w as f32);
+            let v = g.v0 + (g.v1 - g.v0) * ((dy as f32 + 0.5) / h as f32);
+            let ax = (u * aw as f32)
+                .floor()
+                .clamp(0.0, aw as f32 - 1.0) as u32;
+            let ay = (v * ah as f32)
+                .floor()
+                .clamp(0.0, ah as f32 - 1.0) as u32;
+            let idx = ((ay * aw + ax) * 4) as usize;
+            if atlas[idx + 3] == 0 {
+                continue;
+            }
+            let px = x0 + dx;
+            let py = y0 + dy;
+            if px >= 0 && py >= 0 && px < SCREEN_W as i32 && py < SCREEN_H as i32 {
+                frame.pixels[py as usize * SCREEN_W + px as usize] = g.color;
+            }
         }
     }
-
-    const DRUM_LABELS: [&str; 16] = [
-        "KICK", "SNARE", "CLAP", "CHH", "OHH", "TOM L", "TOM M", "RIM", "KIK2", "RIM2", "SHKR",
-        "PED", "TOM H", "COW", "CLV", "RIDE",
-    ];
-    for index in 0..16 {
-        let cell = layout.drum_cell(index);
-        let color = if index == 0 { 0x3a2030 } else { 0x242436 };
-        frame.fill_rect(cell.x, cell.y, cell.w, cell.h, color);
-        frame.text(cell.x + 6, cell.y + cell.h / 2 - 3, DRUM_LABELS[index], 0xd0d0e0);
-    }
-
-    for index in 0..4 {
-        let cell = layout.division_cell(index);
-        let choice = RepeatDivisionChoice::from_index(index);
-        let on = choice == model.division;
-        frame.fill_rect(
-            cell.x,
-            cell.y,
-            cell.w,
-            cell.h,
-            if on { 0x5a3060 } else { 0x20202c },
-        );
-        frame.text(cell.x + 8, cell.y + 16, choice.label(), 0xffffff);
-    }
-
-    frame.fill_rect(
-        layout.footer.x,
-        layout.footer.y,
-        layout.footer.w,
-        layout.footer.h,
-        0x1c1c28,
-    );
-    frame.text(
-        8,
-        448,
-        "KAOSS LEFT  DRUMS RIGHT  HOLD KICK TO REPEAT  ENGINE OWNS TIME",
-        0xa0a0b8,
-    );
 }
 
 #[cfg(test)]

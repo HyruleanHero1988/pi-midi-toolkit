@@ -58,6 +58,11 @@ systemctl is-active jambox-engine 2>/dev/null || true
 systemctl is-active pidi-native 2>/dev/null || true
 ls -l /tmp/jambox.sock 2>/dev/null || echo "(no /tmp/jambox.sock — start jambox-engine)"
 echo
+echo "== SDL / KMS =="
+echo "pidi-native should log 'SDL/GL presenter' with SDL_VIDEODRIVER=kmsdrm."
+echo "LightDM/X must be stopped or KMSDRM cannot own the TFT70."
+echo "If finger IDs or coordinates are wrong, keep --display sdl and use --touch evdev."
+echo
 echo "Slice test matrix (after pidi-native is on the TFT):"
 echo "  1. Tap KAOSS — note starts; lift — note stops immediately"
 echo "  2. Diagonal drag — pitch steps, CELLS follow, no flash"

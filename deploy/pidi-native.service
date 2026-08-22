@@ -10,14 +10,13 @@ Group=pi
 WorkingDirectory=/home/pi/pi-midi-toolkit
 ExecStart=/home/pi/pi-midi-toolkit/bin/pidi-native \
   --control /tmp/jambox.sock \
-  --display auto \
-  --fb /dev/fb0
+  --display sdl \
+  --touch auto
 Restart=on-failure
 RestartSec=2
 Environment=RUST_LOG=info
-# Direct DRM/KMS if SDL is added later; harmless for the fbdev presenter.
 Environment=SDL_VIDEODRIVER=kmsdrm
-Environment=SDL_FRAMEBUFFER=/dev/fb0
+Environment=SDL_AUDIODRIVER=dummy
 
 [Install]
 WantedBy=multi-user.target

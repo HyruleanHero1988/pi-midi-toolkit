@@ -49,4 +49,6 @@ sudo systemctl status pidi-native --no-pager || true
 EOF
 
 echo "native slice deployed to $HOST"
-echo "On the Pi: $REMOTE_DIR/bin/hardware-check.sh"
+echo "On the Pi: install libsdl2-2.0-0 libgles2 libgbm1 libdrm2 if missing,"
+echo "stop LightDM so KMSDRM can own the panel, then:"
+echo "  $REMOTE_DIR/bin/hardware-check.sh"
