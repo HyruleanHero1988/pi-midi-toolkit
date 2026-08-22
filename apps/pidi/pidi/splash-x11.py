@@ -7,7 +7,9 @@ import sys
 import tkinter as tk
 
 HERE = pathlib.Path(__file__).resolve().parent
-SPLASH = HERE / "branding" / "pidi-splash.png"
+# Deploy root is apps/pidi (or ~/midi-tone); package lives one level under it.
+ROOT = HERE.parent
+SPLASH = ROOT / "branding" / "pidi-splash.png"
 BG = "#000000"
 
 

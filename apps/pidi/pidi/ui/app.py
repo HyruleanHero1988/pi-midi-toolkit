@@ -101,6 +101,7 @@ from pidi.sequencer import (
 )
 from pidi.ui.chrome import ChromeMixin
 from pidi.ui.midi_io import MidiIoMixin
+from pidi.ui.nav_icons import load_nav_icons, make_nav_icon_label, style_nav_icon_button
 from pidi.ui.session_io import SessionIoMixin
 from pidi.ui.scope import blank_waveform_on_canvas, draw_scope_grid, draw_waveform_on_canvas
 from pidi.ui.screens import (
@@ -239,7 +240,9 @@ class MidiToneApp(
         # PiDI branded splash while audio + UI chrome build (covers full window
         # until construction finishes — avoids a blank gap after destroy).
         self._boot_splash_photo = None
-        splash_path = pathlib.Path(__file__).resolve().parent / "branding" / "pidi-splash.png"
+        splash_path = (
+            pathlib.Path(__file__).resolve().parents[2] / "branding" / "pidi-splash.png"
+        )
         splash = tk.Frame(self.root, bg="#000000", highlightthickness=0, borderwidth=0)
         if splash_path.is_file():
             try:
@@ -398,6 +401,8 @@ class MidiToneApp(
         self._kaoss_exit_after_id: Optional[str] = None
         self._kaoss_play_exit_from_inside = False
         self._kaoss_play_exit_anchor: Optional[Tuple[float, float]] = None
+        self._kaoss_play_exit_ready = False
+        self._kaoss_play_exit_last: Optional[Tuple[float, float]] = None
         self._pads_view = "edit"  # play | edit
         self._phrase_out_mode = "local"  # local | usb | both (shares Songs USB port)
         self._phrases.set_output_hooks(
@@ -465,6 +470,8 @@ class MidiToneApp(
         self._update_check: Optional[updater.UpdateCheck] = None
         self._update_busy = False
         self._update_confirming = False
+        self._update_progress: Optional[updater.ProgressTracker] = None
+        self._update_progress_tick_after: Optional[str] = None
         self._settings_panel = "hub"  # hub | update | wifi
         self._settings_keep_panel = False
         self._settings_hub_wifi_cache = "Wi-Fi: …"
@@ -474,6 +481,16 @@ class MidiToneApp(
         self._settings_update_btn: Optional[tk.Button] = None
         self._settings_wifi_btn: Optional[tk.Button] = None
         self._settings_version_lbl: Optional[tk.Label] = None
+        self._settings_back_btn: Optional[tk.Button] = None
+        self._wifi_view = "list"  # list only; password is TouchKeyboardOverlay
+        self._wifi_networks: List = []
+        self._wifi_scroll = 0
+        self._wifi_row_btns: List[tk.Button] = []
+        self._wifi_selected_ssid = ""
+        self._wifi_selected_open = False
+        self._wifi_password_frame: Optional[tk.Frame] = None  # legacy
+        self._wifi_password_entry: Optional[tk.Entry] = None  # legacy
+        self._touch_keyboard = None  # Optional[TouchKeyboardOverlay]
         self._diagnostics_on = False
         self._diag_sampler = DiagnosticsSampler()
         self._diag_tick_after: Optional[str] = None
@@ -488,26 +505,43 @@ class MidiToneApp(
             except Exception:
                 pass
 
-        # Persistent chrome: title, HOME, POWER. Jam modes keep SYNTH/SEQ/PADS
-        # on the right; Settings and other screens are reached from HOME tiles.
+        # Persistent chrome: ← back, home, power (Font Awesome Free solid PNGs).
+        # Jam modes keep SYNTH/SEQ/PADS on the right; other screens from HOME tiles.
+        self._nav_stack: List[str] = []
+        self._nav_back_navigating = False
+        self._nav_icons = load_nav_icons()
+        self._nav_icon_back = self._nav_icons["back"]
+        self._nav_icon_back_off = self._nav_icons["back_off"]
+        self._nav_icon_home = self._nav_icons["home"]
+        self._nav_icon_home_on = self._nav_icons["home_on"]
+        self._nav_icon_power = self._nav_icons["power"]
+
         self._nav = tk.Frame(self.root, bg="#1d2021")
         self._nav.pack(side=tk.TOP, fill=tk.X, padx=0, pady=0)
         tk.Label(
             self._nav, text="PiDI", font=("DejaVu Sans", 14, "bold"),
             fg="#00d4ff", bg="#1d2021", padx=10, pady=8,
         ).pack(side=tk.LEFT)
-        home_btn = self._mk_touch_btn(
-            self._nav, "HOME", lambda: self._switch_mode("home"), bg="#3c3836"
+        back_btn = make_nav_icon_label(
+            self._nav, self._nav_icon_back_off, self._nav_back, bg="#1d2021"
         )
-        home_btn.configure(font=("DejaVu Sans", 10, "bold"), pady=8, padx=8)
-        home_btn.pack(side=tk.LEFT, padx=(0, 4))
-        self._mode_btns["home"] = home_btn
+        back_btn.pack(side=tk.LEFT, padx=(0, 4), pady=4)
+        self._back_btn = back_btn
+
+        home_btn = make_nav_icon_label(
+            self._nav,
+            self._nav_icon_home,
+            lambda: self._switch_mode("home"),
+            bg="#3c3836",
+        )
+        home_btn.pack(side=tk.LEFT, padx=(0, 4), pady=4)
+        self._mode_btns["home"] = home_btn  # type: ignore[assignment]
         self._home_btn = home_btn
-        power_btn = self._mk_touch_btn(
-            self._nav, "POWER", self._open_power_menu, bg="#9d0006"
+        power_btn = make_nav_icon_label(
+            self._nav, self._nav_icon_power, self._open_power_menu, bg="#9d0006"
         )
-        power_btn.configure(font=("DejaVu Sans", 10, "bold"), pady=8, padx=8)
-        power_btn.pack(side=tk.LEFT, padx=(0, 4))
+        power_btn.pack(side=tk.LEFT, padx=(0, 4), pady=4)
+        self._power_btn = power_btn
         nav_modes = tk.Frame(self._nav, bg="#1d2021")
         nav_modes.pack(side=tk.RIGHT, padx=4, pady=4)
         self._jam_btns: Dict[str, tk.Button] = {}
@@ -914,6 +948,14 @@ class MidiToneApp(
 
     def _switch_mode(self, mode: str) -> None:
         mode = mode if mode in UI_MODES else "synth"
+        # OTA / Wi‑Fi work continues in a background thread; leaving Settings
+        # does not cancel it (and a finished install still restarts).
+        if (
+            getattr(self, "_update_busy", False)
+            and getattr(self, "_mode", None) == "settings"
+            and mode != "settings"
+        ):
+            return
         # Close synth-only overlays before swapping shells
         if self._fx_ui_open:
             self._close_fx_panel(restore_main=False)
@@ -954,6 +996,16 @@ class MidiToneApp(
                 self._kaoss_restore_fx()
 
         prev_mode = self._mode
+        if (
+            not self._nav_back_navigating
+            and prev_mode
+            and prev_mode != mode
+            and prev_mode in UI_MODES
+        ):
+            if not self._nav_stack or self._nav_stack[-1] != prev_mode:
+                self._nav_stack.append(prev_mode)
+            if len(self._nav_stack) > 16:
+                self._nav_stack = self._nav_stack[-16:]
         self._mode = mode
         self._home_shell.pack_forget()
         self._synth_shell.pack_forget()
@@ -985,6 +1037,14 @@ class MidiToneApp(
                 self._save_voice_frame.pack_forget()
             except Exception:
                 pass
+        if getattr(self, "_wifi_password_frame", None) is not None:
+            try:
+                self._wifi_password_frame.destroy()
+            except Exception:
+                pass
+            self._wifi_password_frame = None
+            self._wifi_password_entry = None
+        self._close_touch_keyboard()
 
         if mode == "home":
             self._home_shell.pack(fill=tk.BOTH, expand=True)
@@ -1060,9 +1120,128 @@ class MidiToneApp(
             btn.configure(bg=color, activebackground=color)
         home = self._mode_btns.get("home")
         if home is not None:
-            color = "#458588" if self._mode == "home" else "#3c3836"
-            home.configure(bg=color, activebackground=color)
+            on_home = self._mode == "home"
+            color = "#458588" if on_home else "#3c3836"
+            icon = self._nav_icon_home_on if on_home else self._nav_icon_home
+            try:
+                style_nav_icon_button(home, icon, bg=color)
+            except tk.TclError:
+                pass
+        self._paint_nav_back()
 
+    def _overlay_nav_target(self) -> Optional[str]:
+        """Deepest leave-able overlay / nested panel, if any."""
+        if getattr(self, "_touch_keyboard", None) is not None:
+            return "keyboard"
+        if getattr(self, "_power_ui_open", False):
+            return "power"
+        if getattr(self, "_save_voice_open", False):
+            return "save_voice"
+        if getattr(self, "_save_preset_open", False):
+            return "save_preset"
+        if getattr(self, "_kaoss_settings_open", False):
+            return "kaoss_settings"
+        if getattr(self, "_kaoss_picker_open", False):
+            return "kaoss_picker"
+        if getattr(self, "_kit_ui_open", False):
+            return "kit"
+        if getattr(self, "_morph_ui_open", False):
+            return "morph"
+        if getattr(self, "_fx_ui_open", False):
+            return "fx"
+        if getattr(self, "_grid_open", False):
+            return "voices"
+        if (
+            getattr(self, "_mode", "") == "settings"
+            and getattr(self, "_settings_panel", "hub") != "hub"
+        ):
+            return "settings_panel"
+        return None
+
+    def _can_nav_back(self) -> bool:
+        if self._overlay_nav_target() is not None:
+            return True
+        return bool(self._nav_stack)
+
+    def _paint_nav_back(self) -> None:
+        btn = getattr(self, "_back_btn", None)
+        if btn is None:
+            return
+        active = self._can_nav_back()
+        icon = self._nav_icon_back if active else self._nav_icon_back_off
+        color = "#3c3836" if active else "#1d2021"
+        try:
+            style_nav_icon_button(btn, icon, bg=color)
+        except tk.TclError:
+            pass
+
+    def _nav_back(self) -> None:
+        """Global ← — dismiss deepest overlay, else pop mode history."""
+        if not self._can_nav_back():
+            return
+        target = self._overlay_nav_target()
+        if target == "keyboard":
+            kb = getattr(self, "_touch_keyboard", None)
+            if kb is not None:
+                try:
+                    kb._cancel()  # type: ignore[attr-defined]
+                except Exception:
+                    self._close_touch_keyboard()
+            self._paint_nav_back()
+            return
+        if target == "power":
+            self._close_power_menu(restore_main=True)
+            self._paint_nav_back()
+            return
+        if target == "save_voice":
+            self._close_save_voice(restore_main=True)
+            self._paint_nav_back()
+            return
+        if target == "save_preset":
+            self._close_save_preset(restore_main=True)
+            self._paint_nav_back()
+            return
+        if target == "kaoss_settings":
+            self._close_kaoss_settings(restore_main=True)
+            self._paint_nav_back()
+            return
+        if target == "kaoss_picker":
+            self._close_kaoss_picker(restore_main=True)
+            self._paint_nav_back()
+            return
+        if target == "kit":
+            if getattr(self, "_kit_view", "grid") == "wave":
+                self._set_kit_view("grid")
+            else:
+                self._close_kit_explorer(restore_main=True)
+            self._paint_nav_back()
+            return
+        if target == "morph":
+            self._cancel_morph_menu()
+            self._paint_nav_back()
+            return
+        if target == "fx":
+            self._exit_fx_panel()
+            self._paint_nav_back()
+            return
+        if target == "voices":
+            self._close_voice_grid(restore_main=True)
+            self._paint_nav_back()
+            return
+        if target == "settings_panel":
+            self._settings_back_to_hub()
+            self._paint_nav_back()
+            return
+        if not self._nav_stack:
+            self._paint_nav_back()
+            return
+        prev = self._nav_stack.pop()
+        self._nav_back_navigating = True
+        try:
+            self._switch_mode(prev if prev in UI_MODES else "home")
+        finally:
+            self._nav_back_navigating = False
+        self._paint_nav_back()
 
     def _mk_touch_btn(self, parent: tk.Misc, text: str, command, bg: str = "#3c3836") -> tk.Button:
         """Touch-friendly button: fire on press (resistive panels often miss click)."""
@@ -1088,6 +1267,40 @@ class MidiToneApp(
         # No command= callback: resistive panels often never complete a click.
         btn.bind("<ButtonPress-1>", _fire)
         return btn
+
+    def _open_touch_keyboard(
+        self,
+        options,
+        *,
+        on_submit,
+        on_cancel=None,
+        host=None,
+    ):
+        """Open the reusable Switch-style keyboard overlay on ``mode_host``."""
+        from pidi.ui.touch_keyboard import TouchKeyboardOverlay
+
+        self._close_touch_keyboard()
+        kb = TouchKeyboardOverlay(
+            host if host is not None else self._mode_host,
+            mk_button=self._mk_touch_btn,
+            on_submit=on_submit,
+            on_cancel=on_cancel,
+            options=options,
+        )
+        self._touch_keyboard = kb
+        kb.open()
+        self._paint_nav_back()
+        return kb
+
+    def _close_touch_keyboard(self) -> None:
+        kb = getattr(self, "_touch_keyboard", None)
+        if kb is not None:
+            try:
+                kb.close()
+            except Exception:
+                pass
+        self._touch_keyboard = None
+        self._paint_nav_back()
 
 
     def _select_voice_index(self, idx: int, *, close_grid: bool = False) -> None:
@@ -1226,15 +1439,11 @@ class MidiToneApp(
             opt, "CLR", lambda: self._save_voice_type("\x15"), bg="#504945"
         ).pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=8)
 
-        # SAVE/CANCEL claim their strip first — the keyboard shrinks, never the
-        # buttons that end the job.
+        # SAVE claims the strip first — the keyboard shrinks around it.
         footer = tk.Frame(self._save_voice_frame, bg="#111111")
         footer.pack(side=tk.BOTTOM, fill=tk.X, padx=6, pady=6)
         self._mk_touch_btn(
             footer, "SAVE", self._confirm_save_voice, bg="#689d6a"
-        ).pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=10)
-        self._mk_touch_btn(
-            footer, "CANCEL", self._close_save_voice, bg="#9d0006"
         ).pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=10)
 
         keys = tk.Frame(self._save_voice_frame, bg="#111111")
@@ -1242,6 +1451,7 @@ class MidiToneApp(
         self._save_voice_keys = keys
         self._paint_save_voice_keyboard()
         self._append_log("SAVE VOICE — bake wave shape + keep delay/reverb alongside")
+        self._paint_nav_back()
 
 
     def _paint_save_voice_keyboard(self) -> None:
@@ -1388,6 +1598,7 @@ class MidiToneApp(
                 self._voice_lbl.configure(text=self._voice_label_text())
             self.mod_var.set(self._format_mod_line())
             self._paint_synth_waveform(force=True)
+        self._paint_nav_back()
 
 
     def _open_voice_grid(self) -> None:
@@ -1481,12 +1692,10 @@ class MidiToneApp(
         self._mk_touch_btn(
             actions, "SAVE AS…", self._open_save_voice, bg="#689d6a"
         ).pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=12)
-        self._mk_touch_btn(actions, "CLOSE", self._close_voice_grid, bg="#9d0006").pack(
-            side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=12
-        )
         self._paint_vib_controls()
         self._paint_voice_grid()
         self._arm_overlay_guard()
+        self._paint_nav_back()
 
 
     def _paint_vib_controls(self) -> None:
@@ -1561,6 +1770,7 @@ class MidiToneApp(
                 self._voice_lbl.configure(text=self._voice_label_text())
             self.mod_var.set(self._format_mod_line())
             self._paint_synth_waveform(force=True)
+        self._paint_nav_back()
 
 
     def _open_morph_menu(self) -> None:
@@ -1662,11 +1872,9 @@ class MidiToneApp(
         self._mk_touch_btn(footer, "DONE", self._close_morph_menu, bg="#458588").pack(
             side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=12
         )
-        self._mk_touch_btn(footer, "CANCEL", self._cancel_morph_menu, bg="#9d0006").pack(
-            side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=12
-        )
         self._paint_morph_menu()
         self._arm_overlay_guard()
+        self._paint_nav_back()
 
 
     def _set_morph_pick_side(self, side: str) -> None:
@@ -1762,6 +1970,7 @@ class MidiToneApp(
                 self._voice_lbl.configure(text=self._voice_label_text())
             self.mod_var.set(self._format_mod_line())
             self._paint_synth_waveform(force=True)
+        self._paint_nav_back()
 
 
     def _prev_voice(self) -> None:
@@ -2020,6 +2229,9 @@ class MidiToneApp(
         """Nudge chrome a couple of pixels so bold boxes don't sit still."""
         if getattr(self, "_idle", None) is not None and self._idle.active:
             return
+        # Full-pad KAOSS hides nav; pack_configure can remount forgotten slaves.
+        if getattr(self, "_kaoss_play", False):
+            return
         elapsed = time.monotonic() - getattr(self, "_shift_started", time.monotonic())
         dx, dy = pixel_shift_xy(elapsed)
         if (dx, dy) == getattr(self, "_shift_xy", (None, None)):
@@ -2027,10 +2239,11 @@ class MidiToneApp(
         self._shift_xy = (dx, dy)
         gutter = PIXEL_SHIFT_AMPLITUDE
         try:
-            self._nav.pack_configure(
-                padx=(gutter + dx, gutter - dx),
-                pady=(gutter + dy, 0),
-            )
+            if self._nav.winfo_ismapped():
+                self._nav.pack_configure(
+                    padx=(gutter + dx, gutter - dx),
+                    pady=(gutter + dy, 0),
+                )
             bar = getattr(self, "_diag_bar", None)
             diag_mapped = bool(
                 getattr(self, "_diagnostics_on", False)
@@ -2181,13 +2394,9 @@ class MidiToneApp(
         self._saver_timeout_btn.pack(side=tk.RIGHT)
 
         footer.columnconfigure(0, weight=1)
-        footer.columnconfigure(1, weight=1)
-        self._mk_touch_btn(
-            footer, "CANCEL", self._close_power_menu, bg="#504945"
-        ).grid(row=0, column=0, sticky="ew", padx=(0, 4), ipady=18)
         self._mk_touch_btn(
             footer, "SCREEN OFF", self._blank_screen_now, bg="#1d2021"
-        ).grid(row=0, column=1, sticky="ew", padx=(4, 0), ipady=18)
+        ).grid(row=0, column=0, sticky="ew", ipady=18)
 
         tk.Label(
             body,
@@ -2218,6 +2427,7 @@ class MidiToneApp(
         )
         reboot.configure(font=("DejaVu Sans", 18, "bold"))
         reboot.grid(row=1, column=0, sticky="nsew", pady=(6, 0), ipady=12)
+        self._paint_nav_back()
 
 
     def _close_power_menu(self, restore_main: bool = True) -> None:
@@ -2231,6 +2441,7 @@ class MidiToneApp(
         self._power_ui_open = False
         if restore_main:
             self._switch_mode(prev if prev in UI_MODES else "synth")
+        self._paint_nav_back()
 
 
     def _pi_power(self, action: str) -> None:

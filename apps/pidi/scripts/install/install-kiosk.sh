@@ -166,11 +166,19 @@ fi
 # autologin-session=LXDE-pi-x in the main file wins unless we patch it too.
 if [[ -d /etc/lightdm ]]; then
   echo "    LightDM: force midi-tone-kiosk in main lightdm.conf + drop-in"
+  CONF_SRC="$DIR/kiosk/lightdm/99-midi-tone-kiosk.conf"
+  CONF_DST="/etc/lightdm/lightdm.conf.d/99-midi-tone-kiosk.conf"
+  DISPLAY_SETUP="$DIR/kiosk/display-setup.sh"
+  if [[ -f "$DISPLAY_SETUP" ]]; then
+    sed -i 's/\r$//' "$DISPLAY_SETUP" 2>/dev/null || true
+    chmod +x "$DISPLAY_SETUP" 2>/dev/null || true
+  fi
   if [[ -f /etc/lightdm/lightdm.conf ]]; then
     sudo_run sed -i -E \
       -e 's/^#?user-session=.*/user-session=midi-tone-kiosk/' \
       -e 's/^#?autologin-session=.*/autologin-session=midi-tone-kiosk/' \
       -e "s/^#?autologin-user=.*/autologin-user=$USER_NAME/" \
+      -e "s|^#?display-setup-script=.*|display-setup-script=$DISPLAY_SETUP|" \
       /etc/lightdm/lightdm.conf
     # Ensure keys exist if raspi-config left them commented/absent
     if ! grep -qE '^autologin-session=' /etc/lightdm/lightdm.conf; then
@@ -182,13 +190,9 @@ if [[ -d /etc/lightdm ]]; then
     if ! grep -qE '^autologin-user=' /etc/lightdm/lightdm.conf; then
       sudo_run sed -i "/^\[Seat:\*\]/a autologin-user=$USER_NAME" /etc/lightdm/lightdm.conf
     fi
-  fi
-  CONF_SRC="$DIR/kiosk/lightdm/99-midi-tone-kiosk.conf"
-  CONF_DST="/etc/lightdm/lightdm.conf.d/99-midi-tone-kiosk.conf"
-  DISPLAY_SETUP="$DIR/kiosk/display-setup.sh"
-  if [[ -f "$DISPLAY_SETUP" ]]; then
-    sed -i 's/\r$//' "$DISPLAY_SETUP" 2>/dev/null || true
-    chmod +x "$DISPLAY_SETUP" 2>/dev/null || true
+    if ! grep -qE '^display-setup-script=' /etc/lightdm/lightdm.conf; then
+      sudo_run sed -i "/^\[Seat:\*\]/a display-setup-script=$DISPLAY_SETUP" /etc/lightdm/lightdm.conf
+    fi
   fi
   TMP_L="$(mktemp)"
   sed -e "s|REPLACE_USER|$USER_NAME|g" \

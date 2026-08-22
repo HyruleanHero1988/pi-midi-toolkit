@@ -235,9 +235,6 @@ class PresetsScreenMixin:
         self._mk_touch_btn(
             footer, "SAVE", self._confirm_save_preset, bg="#689d6a"
         ).pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=10)
-        self._mk_touch_btn(
-            footer, "CANCEL", self._close_save_preset, bg="#9d0006"
-        ).pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=10)
 
         keys = tk.Frame(self._save_preset_frame, bg="#111111")
         keys.pack(fill=tk.BOTH, expand=True, padx=4, pady=2)
@@ -246,6 +243,7 @@ class PresetsScreenMixin:
         self._append_log(
             f"SAVE PRESET — name slot {self._preset_slot + 1} (full session)"
         )
+        self._paint_nav_back()
 
 
     def _paint_save_preset_keyboard(self) -> None:
@@ -360,6 +358,7 @@ class PresetsScreenMixin:
         if restore_main and self._mode == "presets":
             self._presets_shell.pack(fill=tk.BOTH, expand=True)
             self._paint_preset_slots()
+        self._paint_nav_back()
 
 
     def _preset_load_selected(self) -> None:

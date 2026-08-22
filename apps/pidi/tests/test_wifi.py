@@ -31,6 +31,32 @@ class WifiHelpersTest(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("nmcli", detail.lower())
 
+    def test_parse_wifi_list_dedupes_and_sorts(self) -> None:
+        raw = "\n".join(
+            [
+                ":Cafe:40:WPA2",
+                "yes:HomeNet:80:WPA2",
+                ":Cafe:55:WPA2",
+                ":OpenGuest:20:",
+                ":Weird\\:Name:10:WPA3",
+            ]
+        )
+        nets = wifi.parse_wifi_list(raw)
+        ssids = [n.ssid for n in nets]
+        self.assertEqual(ssids[0], "HomeNet")
+        self.assertTrue(nets[0].in_use)
+        cafe = next(n for n in nets if n.ssid == "Cafe")
+        self.assertEqual(cafe.signal, 55)
+        guest = next(n for n in nets if n.ssid == "OpenGuest")
+        self.assertTrue(guest.is_open)
+        weird = next(n for n in nets if n.ssid == "Weird:Name")
+        self.assertEqual(weird.signal, 10)
+
+    def test_connect_wifi_requires_ssid(self) -> None:
+        ok, detail = wifi.connect_wifi("")
+        self.assertFalse(ok)
+        self.assertIn("No network", detail)
+
 
 if __name__ == "__main__":
     raise SystemExit(unittest.main())
