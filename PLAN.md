@@ -59,6 +59,9 @@ todos:
   - id: arp
     content: "Phase 4 (optional distinct mode): key-relative step pattern transposed by held root"
     status: pending
+  - id: portable-ups
+    content: "Parked: Geekworm X728 battery UPS beside TFT70 via G341, hooked to pi-power.sh. Not buying yet."
+    status: pending
 isProject: false
 ---
 
@@ -590,7 +593,7 @@ Only when you want “flash SD → boots straight into the MIDI box” without S
 
 ### Multi-unit / OTA (parked — only one unit today)
 
-Not building this yet. Capture the ladder so we don’t overbuild or forget it when a second box (e.g. brother’s clone) appears.
+Not building this yet. When the first box is stable and you’re pleased with it, clone it for your brother. Until then, one unit. Capture the ladder so we don’t overbuild or forget it.
 
 **Reality check:** daily SSH push (`tools/midi-tone/deploy_pi.py`, `deploy/deploy.sh`) already *is* the update path for a LAN appliance. True “finds the Pi anywhere” OTA is a different product tier. The instrument can stay offline forever; network is only needed **when you choose to update**.
 
@@ -613,9 +616,11 @@ Not building this yet. Capture the ladder so we don’t overbuild or forget it w
 
 ## OS / hardware
 
+Living inventory and prices: [PARTS.md](PARTS.md).
+
 **Compute (today):** Raspberry Pi 2 Model B v1.1. MIDI itself is tiny; the Pi 2 is enough **if we stay disciplined**. Architecture must not assume Pi 2 forever — if audio/FX/sequencer or DSI bring-up hits a wall, same software moves to Pi 4/5.
 
-**Display (ordered → target):** [BigTreeTech Pi TFT70 V2.1](https://kb-3d.com/store/controllers-displays-drivers/2677-bigtreetech-pi-tft43-tft50-tft70-v21-touchscreen-panel-for-raspberry-pi-pi-2-1734017888380.html) — 7″ DSI panel, **800×480**, **5-point capacitive** (GT911). This replaces the current scrap/resistive HDMI+ADS7846 setup (dropped taps, outdated feel). Investing in the panel is intentional: the jambox is a real instrument surface, not a temporary diagnostic.
+**Display (have):** [BigTreeTech Pi TFT70 V2.1](https://kb-3d.com/store/controllers-displays-drivers/2677-bigtreetech-pi-tft43-tft50-tft70-v21-touchscreen-panel-for-raspberry-pi-pi-2-1734017888380.html) — 7″ DSI panel (largest kb-3d variant), **800×480**, **5-point capacitive** (GT911), **$72.38** all-in. This replaces the current scrap/resistive HDMI+ADS7846 setup (dropped taps, outdated feel). Investing in the panel is intentional: the jambox is a real instrument surface, not a temporary diagnostic.
 
 | | Current (desk) | Target (TFT70 V2.1) |
 |--|----------------|---------------------|
@@ -655,14 +660,14 @@ flowchart LR
 - **In:** MPK mini mk3 plugged straight into the Pi (class-compliant; shows up as an ALSA/`midir` input — no Akai Windows driver on the Pi).
 - **Out:** USB MIDI → DIN-5 cable/interface on a second USB port → synth.
 - **Engine job:** open those two ports by name substring (e.g. `MPK` / `U2MIDI`), run remap chain, send.
-- **Power note (Pi 2):** MPK + USB-DIN adapter are both bus-powered; if ports brown out or drop, use a **powered USB hub**. Pi 2 has enough port count (4× USB); power budget is the usual gotcha.
+- **Power note (Pi 2):** MPK + USB-DIN adapter are both bus-powered; if ports brown out or drop, use a **powered USB hub**. Pi 2 has enough port count (4× USB); power budget is the usual gotcha. A rechargeable pack is **parked** (not buying yet) — see [Portable battery UPS](#portable-battery-ups-parked).
 - Phase 1 preset example should document this pairing (channel force ch1→ch3, optional CC maps, full velocity) aimed at MPK quirks.
 
 | Constraint | Rule |
 |------------|------|
 | CPU / 1GB RAM | Hot path in Rust only; no browser; defer or keep touch UI minimal |
 | 32-bit `armv7` | Cross-compile from the PC; avoid on-device `cargo build` |
-| No onboard Wi‑Fi | Ethernet (or USB Wi‑Fi) for SSH deploy |
+| No onboard Wi‑Fi | Ethernet or LOTEKOO RT5370 USB Wi‑Fi dongle for SSH / SET updates |
 | Latency | Optimize + measure on Pi 2; don’t assume Pi 4/5 numbers |
 | Dual USB MIDI | Explicit in/out port selection; never assume a single combined device |
 
@@ -674,6 +679,38 @@ flowchart LR
 
 - Engine: `SCHED_FIFO` + `mlockall` via systemd where the kernel allows
 - Pi 4/5 = optional later upgrade, not required to ship the appliance
+
+### Portable battery UPS (parked)
+
+**Not current work.** Wall wart is enough. Chosen pack for later: [Geekworm X728](https://wiki.geekworm.com/X728) v2.5 beside the Pi (not stacked), button hooked to `tools/midi-tone/pi-power.sh`.
+
+- **Power:** 5.1 V @ 5 A on GPIO pins 2/4. Charge the X728 USB-C / DC 5521 only — leave the Pi micro-USB empty.
+- **Status:** MAX17040 on I2C-1 (`0x36` fuel gauge, `0x68` RTC). TFT70 touch/backlight is DSI I2C bus 10 (`10-0045`); `enable-tft70-dsi.sh` already turns on `i2c_arm`. X728 also uses GPIO 5, 6, 12, 16, 20, 26.
+- **Button:** tap = on, 1–2 s = reboot, 3–7 s = safe shutdown, >8 s = force. Point their GPIO halt at `sudo -n pi-power.sh poweroff` (kiosk sudoers already exist). After halt the HAT drops 5 V. PH2.0 header for a panel switch.
+- **Cells:** two unprotected flat-top 18650s (Samsung 35E), same brand/age, ~65 mm, no protection PCB. ~2–4 h at this load.
+- **Kiosk later:** % / voltage / charging on POWER; low-battery watcher also calls `pi-power.sh`. Optional: XH2.54 5 V pads can feed a powered USB hub.
+
+#### Layout
+
+| Piece | Outline | Notes |
+|-------|---------|--------|
+| TFT70 V2.1 | 165 × 100 mm | Active 154 × 86 mm. Pi on the BTT M2.5 studs. Short DSI: fold 180°, do not twist (twisting swaps pin 1). |
+| Pi 2 Model B | 85 × 56 mm, ~17 mm thick | Holes 58 × 49 mm centers. GPIO at top: USB+Ethernet right (~13–16 mm overhang); DSI / HDMI / 3.5 mm / micro-USB / microSD left; CSI bottom. 3.5 mm is headphone out. |
+| X728 v2.5 | 87 × 63.5 mm, ~20 mm+ with cells | GPIO along 87 mm. USB-C + DC 5521 = charge. |
+
+The X728 does not fit on top of the Pi (holder height) and does not fit GPIO-parallel on the 165 mm back (85 + 87 = 172). Hang it off the GPIO long edge with a [G341](https://geekworm.com/products/gpio-1-to-2-extender): Pi stays on the display posts, X728 in the same plane as a battery bar. Outline ~165 × 165–170 mm. Face USB-C at the same dock edge as Pi USB + Ethernet.
+
+#### Buy list
+
+| Item | Link |
+|------|------|
+| X728 + 5 V / 4 A USB-C brick | [Amazon](https://www.amazon.com/Geekworm-Raspberry-Adapter-Management-Compatible/dp/B09KMX7Z2P) |
+| X728 board only | [Amazon](https://www.amazon.com/Geekworm-Raspberry-Management-Detection-Shutdown/dp/B087FXLZZH) · [Geekworm](https://geekworm.com/products/x728) |
+| 5 V 4 A USB-C PSU | [Amazon](https://www.amazon.com/Geekworm-Raspberry-Adapter-Charger-Support/dp/B09J856PND) |
+| G341 90° GPIO adapter | [Geekworm](https://geekworm.com/products/gpio-1-to-2-extender) · [Amazon UK](https://www.amazon.co.uk/dp/B0BD79QW8K) |
+| Samsung 35E 3500 mAh × 2 | [18650BatteryStore](https://www.18650batterystore.com/products/samsung-35e-18650-3500mah-8a-battery) · [Orbtronic](https://www.orbtronic.com/samsung-35e-18650-battery-inr1865035e-flat-top) |
+
+Plug the brick into the **X728**, not the Pi.
 
 ## Success criteria
 
