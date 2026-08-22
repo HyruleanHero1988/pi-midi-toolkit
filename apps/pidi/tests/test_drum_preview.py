@@ -55,6 +55,39 @@ class DrumPreviewTest(unittest.TestCase):
         self.assertIn(36, engine._drums)
         self.assertEqual(engine._drums[36].model, "kick")
 
+    def _preview(self, model: str) -> np.ndarray:
+        return render_drum_preview(
+            model,
+            pitch=0.45,
+            decay=0.40,
+            noise_amt=0.55,
+            tone=0.60,
+            sample_rate=SAMPLE_RATE,
+            duration_sec=0.30,
+            velocity=110.0 / 127.0,
+        )
+
+    def test_cowbell_rings_after_clave_dies(self) -> None:
+        cow = self._preview("cowbell")
+        clav = self._preview("clave")
+        sr = SAMPLE_RATE
+        cow_early = float(np.sqrt(np.mean(cow[:256] ** 2)))
+        clav_early = float(np.sqrt(np.mean(clav[:256] ** 2)))
+        late = slice(int(0.09 * sr), int(0.12 * sr))
+        cow_late = float(np.sqrt(np.mean(cow[late] ** 2)))
+        clav_late = float(np.sqrt(np.mean(clav[late] ** 2)))
+        self.assertGreater(cow_early, 0.02)
+        self.assertGreater(clav_early, 0.02)
+        self.assertGreater(cow_late, clav_late * 4.0)
+        self.assertLess(clav_late, 0.002)
+
+    def test_cowbell_is_square_not_sine(self) -> None:
+        cow = self._preview("cowbell")[:2048]
+        signs = np.sign(cow)
+        crossings = int(np.count_nonzero(signs[1:] != signs[:-1]))
+        self.assertGreater(crossings, 40)
+        self.assertGreater(float(np.max(np.abs(cow))), 0.08)
+
 
 if __name__ == "__main__":
     raise SystemExit(unittest.main())
