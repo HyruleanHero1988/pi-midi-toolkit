@@ -693,11 +693,10 @@ mod tests {
     fn goertzel_power(buf: &[f32], sr: f32, freq: f32) -> f32 {
         let w = std::f32::consts::TAU * freq / sr;
         let coeff = 2.0 * w.cos();
-        let mut s0 = 0.0f32;
         let mut s1 = 0.0f32;
         let mut s2 = 0.0f32;
         for &x in buf {
-            s0 = x + coeff * s1 - s2;
+            let s0 = x + coeff * s1 - s2;
             s2 = s1;
             s1 = s0;
         }
