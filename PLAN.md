@@ -616,6 +616,8 @@ Not building this yet. Capture the ladder so we don’t overbuild or forget it w
 
 ## OS / hardware
 
+Living inventory and prices: [PARTS.md](PARTS.md).
+
 **Compute (today):** Raspberry Pi 2 Model B v1.1. MIDI itself is tiny; the Pi 2 is enough **if we stay disciplined**. Architecture must not assume Pi 2 forever — if audio/FX/sequencer or DSI bring-up hits a wall, same software moves to Pi 4/5.
 
 **Display (ordered → target):** [BigTreeTech Pi TFT70 V2.1](https://kb-3d.com/store/controllers-displays-drivers/2677-bigtreetech-pi-tft43-tft50-tft70-v21-touchscreen-panel-for-raspberry-pi-pi-2-1734017888380.html) — 7″ DSI panel, **800×480**, **5-point capacitive** (GT911). This replaces the current scrap/resistive HDMI+ADS7846 setup (dropped taps, outdated feel). Investing in the panel is intentional: the jambox is a real instrument surface, not a temporary diagnostic.
