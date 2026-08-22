@@ -10,7 +10,7 @@
 #   git add dist/armv7
 #   git commit -m "Rebuild Pi armv7 engines"
 #
-# Run this whenever crates/midi-engine, crates/jambox-engine, or their
+# Run this whenever crates/midi-engine, crates/jambox-engine, crates/pidi-native, or their
 # workspace deps change. Skipping it means SET→UPDATE ships new Rust *source*
 # but the box keeps running the old binaries.
 #
@@ -24,7 +24,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TARGET="${TARGET:-armv7-unknown-linux-gnueabihf}"
 STAGE="$ROOT/dist/armv7"
-PACKAGES="${PACKAGES:-midi-engine,jambox-engine}"
+PACKAGES="${PACKAGES:-midi-engine,jambox-engine,pidi-native}"
 SKIP_APT="${SKIP_APT:-}"
 ALLOW_PARTIAL="${ALLOW_PARTIAL:-}"
 

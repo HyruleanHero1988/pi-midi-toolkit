@@ -1,7 +1,7 @@
 # Pi armv7 engines (committed)
 
 These binaries are the **Raspberry Pi 2** (`armv7-unknown-linux-gnueabihf`)
-builds of `midi-engine` and `jambox-engine`.
+builds of `midi-engine`, `jambox-engine`, and `pidi-native`.
 
 The Pi never `cargo build`s. **SET → UPDATE** copies this directory into
 `~/pi-midi-toolkit/bin/` (the live systemd paths) after overlaying the rest

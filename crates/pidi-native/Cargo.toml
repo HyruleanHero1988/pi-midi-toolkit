@@ -1,29 +1,21 @@
 [package]
-name = "jambox-engine"
+name = "pidi-native"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Realtime jambox audio + sequencer daemon; the kiosk UI is a thin client"
+description = "Native KAOSS/drum vertical-slice UI for the Pi TFT70"
 
 [[bin]]
-name = "jambox-engine"
+name = "pidi-native"
 path = "src/main.rs"
 
 [dependencies]
-jambox-core = { workspace = true }
 jambox-protocol = { workspace = true }
-midi-core = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-thiserror = { workspace = true }
-midir = { workspace = true }
+clap = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
-clap = { workspace = true }
-ctrlc = { workspace = true }
-cpal = "0.15"
-rtrb = "0.3"
-hound = "3.5"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = { workspace = true }

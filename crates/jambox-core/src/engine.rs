@@ -14,6 +14,10 @@ use crate::drums::{
     drum_model_for_note, DrumKit, DrumMacros, DrumModel, DRUM_MODEL_COUNT, MAX_DRUM_HITS,
 };
 use crate::fx::{FxParams, FxUnit};
+use crate::kaoss::{unpack_xy, KaossMapper, LatestTouch, TouchDelta, tone_at_y};
+use crate::repeat::{
+    RepeatEvent, RepeatRack, MAX_REPEAT_EVENTS_PER_BLOCK,
+};
 use crate::transport::Transport;
 use crate::voice::{VoiceContext, VoicePool, MAX_VOICES};
 use crate::wavetable::WaveBank;
@@ -129,6 +133,7 @@ pub struct EngineStatus {
     pub bpm: f32,
     pub active_voices: u16,
     pub active_drums: u16,
+    pub active_repeats: u16,
     pub playing_clips: u16,
     pub peak: f32,
 }
@@ -139,6 +144,8 @@ pub struct JamboxEngine {
     voices: VoicePool,
     drums: DrumKit,
     sequencer: Sequencer,
+    repeats: RepeatRack,
+    kaoss: KaossMapper,
 
     voice_fx: Vec<FxUnit>,
     drum_fx: Vec<FxUnit>,
@@ -149,6 +156,7 @@ pub struct JamboxEngine {
     drum_bus: Vec<f32>,
     group_buf: Vec<f32>,
     seq_scratch: Vec<SeqEvent>,
+    repeat_scratch: [RepeatEvent; MAX_REPEAT_EVENTS_PER_BLOCK],
     timeline: Vec<(u32, Command)>,
 
     tone: f32,
@@ -183,6 +191,8 @@ impl JamboxEngine {
             voices: VoicePool::new(),
             drums: DrumKit::new(sr),
             sequencer: Sequencer::new(),
+            repeats: RepeatRack::new(),
+            kaoss: KaossMapper::new(),
             voice_fx,
             drum_fx,
             drum_group_fx: FxUnit::new(sr),
@@ -201,7 +211,14 @@ impl JamboxEngine {
                 };
                 MAX_BLOCK_COMMANDS
             ],
-            timeline: Vec::with_capacity(MAX_BLOCK_COMMANDS * 2),
+            repeat_scratch: [RepeatEvent {
+                frame: 0,
+                owner: 0,
+                channel: 0,
+                note: 0,
+                velocity: 0,
+            }; MAX_REPEAT_EVENTS_PER_BLOCK],
+            timeline: Vec::with_capacity(MAX_BLOCK_COMMANDS * 2 + MAX_REPEAT_EVENTS_PER_BLOCK),
             tone: 1.0,
             level: 1.0,
             drum_level: 1.0,
@@ -238,6 +255,10 @@ impl JamboxEngine {
 
     pub fn status(&self) -> EngineStatus {
         self.status
+    }
+
+    pub fn active_touches(&self) -> usize {
+        self.kaoss.active_count()
     }
 
     /// Make sure there is one FX insert per wavetable. Host thread (allocates).
@@ -349,6 +370,24 @@ impl JamboxEngine {
                 self.timeline.push((frame, command));
                 midi_out.push(frame, midi);
             }
+
+            let repeat_count = self.repeats.collect(
+                &self.transport,
+                block_start,
+                frames as u32,
+                &mut self.repeat_scratch,
+            );
+            for event in self.repeat_scratch.iter().take(repeat_count) {
+                self.timeline.push((
+                    event.frame.min(frames as u32 - 1),
+                    Command::RepeatHit {
+                        owner: event.owner,
+                        channel: event.channel,
+                        note: event.note,
+                        velocity: event.velocity,
+                    },
+                ));
+            }
         }
 
         self.timeline.sort_by_key(|(frame, _)| *frame);
@@ -372,7 +411,8 @@ impl JamboxEngine {
                 && (self.timeline[next].0 as usize).min(frames) <= cursor
             {
                 let command = self.timeline[next].1;
-                self.apply(command);
+                let absolute_frame = block_start.saturating_add(cursor as u64);
+                self.apply(command, absolute_frame);
                 next += 1;
             }
 
@@ -390,6 +430,7 @@ impl JamboxEngine {
             bpm: self.transport.bpm() as f32,
             active_voices: self.voices.active_count() as u16,
             active_drums: self.drums.active_count() as u16,
+            active_repeats: self.repeats.active_count() as u16,
             playing_clips: self.sequencer.playing_count() as u16,
             peak,
         };
@@ -507,7 +548,7 @@ impl JamboxEngine {
         }
     }
 
-    fn apply(&mut self, command: Command) {
+    fn apply(&mut self, command: Command, absolute_frame: u64) {
         match command {
             Command::NoteOn {
                 channel,
@@ -528,10 +569,16 @@ impl JamboxEngine {
                     self.voices.note_off(channel, note);
                 }
             }
-            Command::AllNotesOff => self.voices.all_notes_off(),
+            Command::AllNotesOff => {
+                self.voices.all_notes_off();
+                self.repeats.stop_all();
+                self.release_kaoss();
+            }
             Command::Panic => {
                 self.voices.silence();
                 self.drums.silence();
+                self.repeats.stop_all();
+                self.release_kaoss();
                 let mut flush = [SeqEvent {
                     frame: 0,
                     slot: 0,
@@ -561,14 +608,12 @@ impl JamboxEngine {
                 self.transport.set_beats_per_bar(beats as u32);
             }
             Command::LaunchClip { slot, quantize } => {
-                let now = self.transport.position();
                 self.sequencer
-                    .launch(slot as usize, now, quantize, &self.transport);
+                    .launch(slot as usize, absolute_frame, quantize, &self.transport);
             }
             Command::StopClip { slot, quantize } => {
-                let now = self.transport.position();
                 self.sequencer
-                    .stop(slot as usize, now, quantize, &self.transport);
+                    .stop(slot as usize, absolute_frame, quantize, &self.transport);
             }
             Command::StopAllClips => {
                 let mut flush = [SeqEvent {
@@ -591,6 +636,130 @@ impl JamboxEngine {
                     s.set_mode(mode);
                 }
             }
+            Command::StartRepeat {
+                owner,
+                channel,
+                note,
+                velocity,
+                division,
+            } => {
+                if channel == DRUM_CHANNEL {
+                    self.drums.trigger(drum_model_for_note(note), velocity);
+                } else {
+                    let group = self.bank.nearer_index();
+                    self.voices.note_on(channel, note, velocity, group);
+                    self.voices.note_off(channel, note);
+                }
+                self.repeats.start(
+                    owner,
+                    channel,
+                    note,
+                    velocity,
+                    division,
+                    absolute_frame,
+                    &self.transport,
+                );
+            }
+            Command::StopRepeat { owner } => self.repeats.stop(owner),
+            Command::StopAllRepeats => self.repeats.stop_all(),
+            Command::RepeatHit {
+                owner,
+                channel,
+                note,
+                velocity,
+            } => {
+                if !self.repeats.contains(owner) {
+                    return;
+                }
+                if channel == DRUM_CHANNEL {
+                    self.drums.trigger(drum_model_for_note(note), velocity);
+                } else {
+                    let group = self.bank.nearer_index();
+                    self.voices.note_on(channel, note, velocity, group);
+                    self.voices.note_off(channel, note);
+                }
+            }
+            Command::TouchDown {
+                owner,
+                x,
+                y,
+                channel,
+                velocity,
+            } => {
+                let (xf, yf) = unpack_xy(x, y);
+                self.set_synth(SynthParam::Tone, tone_at_y(yf));
+                match self.kaoss.down(owner, xf, yf, channel, velocity) {
+                    TouchDelta::Start {
+                        channel,
+                        note,
+                        velocity,
+                    } => self.start_touch_note(channel, note, velocity),
+                    other => self.apply_touch_delta(other),
+                }
+            }
+            Command::TouchUp { owner } => {
+                let delta = self.kaoss.up(owner);
+                self.apply_touch_delta(delta);
+            }
+            Command::TouchCancel { owner } => {
+                let delta = self.kaoss.up(owner);
+                self.apply_touch_delta(delta);
+            }
+        }
+    }
+
+    fn start_touch_note(&mut self, channel: u8, note: u8, velocity: u8) {
+        if channel == DRUM_CHANNEL {
+            self.drums.trigger(drum_model_for_note(note), velocity);
+        } else {
+            let group = self.bank.nearer_index();
+            self.voices.note_on(channel, note, velocity, group);
+        }
+    }
+
+    fn apply_touch_delta(&mut self, delta: TouchDelta) {
+        match delta {
+            TouchDelta::Idle => {}
+            TouchDelta::Start {
+                channel,
+                note,
+                velocity,
+            } => self.start_touch_note(channel, note, velocity),
+            TouchDelta::Retune {
+                channel,
+                old_note,
+                new_note,
+                velocity,
+            } => {
+                if channel != DRUM_CHANNEL {
+                    self.voices.note_off(channel, old_note);
+                }
+                self.start_touch_note(channel, new_note, velocity);
+            }
+            TouchDelta::Stop { channel, note } => {
+                if channel != DRUM_CHANNEL {
+                    self.voices.note_off(channel, note);
+                }
+            }
+        }
+    }
+
+    fn release_kaoss(&mut self) {
+        for delta in self.kaoss.stop_all() {
+            self.apply_touch_delta(delta);
+        }
+    }
+
+    /// Apply coalesced XY updates. Only active gestures move; a lift already
+    /// processed in this block wins because `KaossMapper::follow` is idle then.
+    pub fn sync_touches(&mut self, touches: &[LatestTouch]) {
+        for touch in touches {
+            let touch = touch.clamp();
+            self.set_synth(SynthParam::Tone, tone_at_y(touch.y));
+            let delta = self
+                .kaoss
+                .follow(touch.owner, touch.x, touch.y, touch.velocity);
+            self.apply_touch_delta(delta);
         }
     }
 
@@ -668,11 +837,12 @@ impl JamboxEngine {
 mod tests {
     use super::*;
     use crate::clip::{Clip, ClipEvent};
+    use crate::kaoss::LatestTouch;
     use crate::transport::{Quantize, PPQ};
 
     fn engine() -> JamboxEngine {
         let mut e = JamboxEngine::new(48_000.0);
-        e.apply(Command::SetTempo { bpm: 120.0 });
+        e.apply(Command::SetTempo { bpm: 120.0 }, 0);
         e
     }
 
@@ -754,10 +924,13 @@ mod tests {
             PPQ,
         );
         e.sequencer_mut().slot_mut(0).unwrap().set_clip(Some(clip));
-        e.apply(Command::LaunchClip {
-            slot: 0,
-            quantize: Quantize::Off,
-        });
+        e.apply(
+            Command::LaunchClip {
+                slot: 0,
+                quantize: Quantize::Off,
+            },
+            0,
+        );
 
         let mut out = vec![0.0f32; 256];
         let mut midi = MidiOutSink::new();
@@ -872,20 +1045,29 @@ mod tests {
         let mut dry = engine();
         let mut wet = engine();
         for e in [&mut dry, &mut wet] {
-            e.apply(Command::SetSynth {
-                param: SynthParam::VibratoDepth,
-                value: 1.0,
-            });
-            e.apply(Command::NoteOn {
-                channel: 0,
-                note: 69,
-                velocity: 127,
-            });
+            e.apply(
+                Command::SetSynth {
+                    param: SynthParam::VibratoDepth,
+                    value: 1.0,
+                },
+                0,
+            );
+            e.apply(
+                Command::NoteOn {
+                    channel: 0,
+                    note: 69,
+                    velocity: 127,
+                },
+                0,
+            );
         }
-        wet.apply(Command::SetSynth {
-            param: SynthParam::VibratoAlways,
-            value: 1.0,
-        });
+        wet.apply(
+            Command::SetSynth {
+                param: SynthParam::VibratoAlways,
+                value: 1.0,
+            },
+            0,
+        );
         let mut dry_buf = vec![0.0f32; 2048];
         let mut wet_buf = vec![0.0f32; 2048];
         let mut midi = MidiOutSink::new();
@@ -917,10 +1099,13 @@ mod tests {
             PPQ * 4,
         );
         e.sequencer_mut().slot_mut(0).unwrap().set_clip(Some(clip));
-        e.apply(Command::LaunchClip {
-            slot: 0,
-            quantize: Quantize::Off,
-        });
+        e.apply(
+            Command::LaunchClip {
+                slot: 0,
+                quantize: Quantize::Off,
+            },
+            0,
+        );
 
         let beat = e.transport().samples_per_beat() as u64;
         let mut out = vec![0.0f32; 128];
@@ -948,5 +1133,113 @@ mod tests {
         }
         let expected: Vec<u64> = (0..8).map(|i| i * beat).collect();
         assert_eq!(hits, expected);
+    }
+
+    #[test]
+    fn a_kaoss_touch_starts_and_releases_a_voice() {
+        let mut e = engine();
+        let mut out = vec![0.0f32; 512];
+        let mut midi = MidiOutSink::new();
+        let (x, y) = crate::kaoss::pack_xy(0.0, 1.0);
+        e.render(
+            &mut out,
+            &[ScheduledCommand::now(Command::TouchDown {
+                owner: 7,
+                x,
+                y,
+                channel: 0,
+                velocity: 120,
+            })],
+            &mut midi,
+        );
+        assert_eq!(e.status().active_voices, 1);
+        assert!(peak(&out) > 0.01);
+        e.render(
+            &mut out,
+            &[ScheduledCommand::now(Command::TouchUp { owner: 7 })],
+            &mut midi,
+        );
+        assert_eq!(e.active_touches(), 0);
+    }
+
+    #[test]
+    fn coalesced_moves_cannot_keep_a_note_after_lift() {
+        let mut e = engine();
+        let mut out = vec![0.0f32; 256];
+        let mut midi = MidiOutSink::new();
+        let (x, y) = crate::kaoss::pack_xy(0.0, 0.8);
+        e.render(
+            &mut out,
+            &[ScheduledCommand::now(Command::TouchDown {
+                owner: 3,
+                x,
+                y,
+                channel: 0,
+                velocity: 110,
+            })],
+            &mut midi,
+        );
+        let moves: Vec<LatestTouch> = (0..100)
+            .map(|i| LatestTouch {
+                owner: 3,
+                x: i as f32 / 99.0,
+                y: 0.8,
+                channel: 0,
+                velocity: 110,
+            })
+            .collect();
+        e.sync_touches(&moves);
+        e.render(
+            &mut out,
+            &[ScheduledCommand::now(Command::TouchUp { owner: 3 })],
+            &mut midi,
+        );
+        e.sync_touches(&moves[50..]);
+        assert_eq!(e.active_touches(), 0);
+    }
+
+    #[test]
+    fn a_held_repeat_keeps_time_while_other_pads_fire() {
+        let mut e = engine();
+        let mut out = vec![0.0f32; 128];
+        let mut midi = MidiOutSink::new();
+        e.render(
+            &mut out,
+            &[ScheduledCommand::now(Command::StartRepeat {
+                owner: 41,
+                channel: DRUM_CHANNEL,
+                note: 36,
+                velocity: 110,
+                division: crate::RepeatDivision::Quarter,
+            })],
+            &mut midi,
+        );
+        assert_eq!(e.status().active_repeats, 1);
+        assert_eq!(e.status().active_drums, 1);
+
+        let beat = e.transport().samples_per_beat() as u64;
+        let mut pos = 128u64;
+        let mut extra_hits = 0u32;
+        while pos < beat {
+            e.render(
+                &mut out,
+                &[ScheduledCommand::now(Command::NoteOn {
+                    channel: DRUM_CHANNEL,
+                    note: 38,
+                    velocity: 120,
+                })],
+                &mut midi,
+            );
+            extra_hits += 1;
+            pos += 128;
+        }
+        assert!(extra_hits > 0);
+        assert_eq!(e.status().active_repeats, 1);
+        e.render(
+            &mut out,
+            &[ScheduledCommand::now(Command::StopRepeat { owner: 41 })],
+            &mut midi,
+        );
+        assert_eq!(e.status().active_repeats, 0);
     }
 }

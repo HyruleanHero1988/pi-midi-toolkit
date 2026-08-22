@@ -1,0 +1,23 @@
+[Unit]
+Description=PiDI native KAOSS/drum vertical slice
+After=jambox-engine.service sound.target
+Wants=jambox-engine.service
+
+[Service]
+Type=simple
+User=pi
+Group=pi
+WorkingDirectory=/home/pi/pi-midi-toolkit
+ExecStart=/home/pi/pi-midi-toolkit/bin/pidi-native \
+  --control /tmp/jambox.sock \
+  --display auto \
+  --fb /dev/fb0
+Restart=on-failure
+RestartSec=2
+Environment=RUST_LOG=info
+# Direct DRM/KMS if SDL is added later; harmless for the fbdev presenter.
+Environment=SDL_VIDEODRIVER=kmsdrm
+Environment=SDL_FRAMEBUFFER=/dev/fb0
+
+[Install]
+WantedBy=multi-user.target
