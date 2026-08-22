@@ -1,7 +1,9 @@
 # Jambox architecture: findings and next direction
 
-Status: **architecture recommendation / prototype brief**  
-Research snapshot: **2026-08-22**  
+Status: **architecture recommendation / prototype brief**
+
+Research snapshot: **2026-08-22**
+
 Target: Raspberry Pi 2 Model B v1.1 + BigTreeTech Pi TFT70 V2.1 + Akai MPK mini mk3
 
 This document records the clean-slate architecture review prompted by the gap
