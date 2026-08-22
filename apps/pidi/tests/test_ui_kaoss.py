@@ -381,8 +381,10 @@ class KaossScreenTest(unittest.TestCase):
         self.pump()
 
         # Drag onto the bottom edge and stay still — footer peeks, nav stays gone.
+        # Must shove from well above the thin strip (not linger while playing low Y).
         app._kaoss_on_press(Ev(w // 2, h // 2))
         app._kaoss_on_move(Ev(w // 2, h // 2))
+        app._kaoss_on_move(Ev(w // 2, max(0, h // 2 - 40)))
         app._kaoss_on_move(Ev(w // 2, h - 8))
         self.pump(0.85)
         self.assertTrue(app._kaoss_play)
@@ -394,6 +396,13 @@ class KaossScreenTest(unittest.TestCase):
         # Touch the pad again — footer hides, still full pad.
         app._kaoss_on_press(Ev(w // 2, h // 2))
         self.pump()
+        self.assertTrue(app._kaoss_play)
+        self.assertFalse(app._kaoss_play_footer)
+
+        # Lingering in the bottom band without a shove must not peek.
+        app._kaoss_on_press(Ev(w // 2, h - 8))
+        app._kaoss_on_move(Ev(w // 2, h - 8))
+        self.pump(0.85)
         self.assertTrue(app._kaoss_play)
         self.assertFalse(app._kaoss_play_footer)
 

@@ -11,7 +11,11 @@ xset s noblank 2>/dev/null || true
 
 SETUP_DIR=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
 APP_DIR=$(CDPATH= cd -- "$SETUP_DIR/.." && pwd)
-SPLASH_PY="$APP_DIR/splash-x11.py"
+if [ -f "$APP_DIR/pidi/splash-x11.py" ]; then
+  SPLASH_PY="$APP_DIR/pidi/splash-x11.py"
+else
+  SPLASH_PY="$APP_DIR/splash-x11.py"
+fi
 PIDFILE=/tmp/pidi-splash.pid
 
 AUTH_USER=""

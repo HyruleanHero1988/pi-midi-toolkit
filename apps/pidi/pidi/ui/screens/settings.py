@@ -4,11 +4,14 @@ from __future__ import annotations
 import sys
 import threading
 import tkinter as tk
-from typing import Optional
+from typing import List, Optional
 
 from pidi import updater
 from pidi import wifi as wifi_mod
-from pidi.constants import APP_VERSION, SETTINGS_PATH
+from pidi.constants import APP_VERSION, HERE, SETTINGS_PATH
+from pidi.ui.touch_keyboard import TouchKeyboardOptions
+
+WIFI_LIST_VISIBLE = 4
 
 
 class SettingsScreenMixin:
@@ -22,8 +25,23 @@ class SettingsScreenMixin:
             self._build_settings_hub()
 
     def _settings_open_panel(self, panel: str) -> None:
+        # Leaving Update/Wi‑Fi mid-flight does not cancel the worker — and an
+        # install that finishes will still restart. Keep the user on this screen.
+        if self._update_busy and panel != getattr(self, "_settings_panel", None):
+            return
+        self._close_wifi_password_overlay(restore=False)
         self._settings_panel = panel
         self._build_settings_mode()
+        self._paint_nav_back()
+
+    def _settings_back_to_hub(self) -> None:
+        if self._update_busy:
+            return
+        if getattr(self, "_touch_keyboard", None) is not None:
+            self._close_wifi_password_overlay(restore=True)
+            self._paint_nav_back()
+            return
+        self._settings_open_panel("hub")
 
     def _build_settings_hub(self) -> None:
         shell = self._settings_shell
@@ -33,6 +51,7 @@ class SettingsScreenMixin:
         self._settings_update_btn = None
         self._settings_wifi_btn = None
         self._settings_diag_btn = None
+        self._settings_back_btn = None
 
         header, body, _footer = self._pack_screen_regions(
             shell,
@@ -144,9 +163,7 @@ class SettingsScreenMixin:
             fg="#fbf1c7",
             bg="#111111",
         ).pack(side=tk.LEFT)
-        self._mk_touch_btn(
-            header, "BACK", lambda: self._settings_open_panel("hub"), bg="#504945"
-        ).pack(side=tk.RIGHT, padx=2, ipady=4)
+        self._settings_back_btn = None
 
         tk.Label(
             body,
@@ -189,15 +206,17 @@ class SettingsScreenMixin:
             w.destroy()
         self._settings_check_btn = None
         self._settings_update_btn = None
+        self._settings_wifi_btn = None
+        self._wifi_row_btns = []
 
         header, body, footer = self._pack_screen_regions(
             shell,
             header_padx=8,
-            header_pady=(10, 4),
-            body_padx=10,
-            body_pady=4,
+            header_pady=(8, 2),
+            body_padx=8,
+            body_pady=2,
             footer_padx=8,
-            footer_pady=8,
+            footer_pady=6,
         )
         tk.Label(
             header,
@@ -206,64 +225,223 @@ class SettingsScreenMixin:
             fg="#fbf1c7",
             bg="#111111",
         ).pack(side=tk.LEFT)
-        self._mk_touch_btn(
-            header, "BACK", lambda: self._settings_open_panel("hub"), bg="#504945"
-        ).pack(side=tk.RIGHT, padx=2, ipady=4)
+        self._settings_back_btn = None
 
         tk.Label(
             body,
             textvariable=self._settings_status_var,
-            font=("DejaVu Sans", 13, "bold"),
+            font=("DejaVu Sans", 12, "bold"),
             fg="#fabd2f",
             bg="#111111",
             wraplength=760,
             justify=tk.LEFT,
             anchor="nw",
-        ).pack(fill=tk.BOTH, expand=True, pady=(4, 8))
+        ).pack(fill=tk.X, pady=(0, 4))
 
+        list_wrap = tk.Frame(body, bg="#111111")
+        list_wrap.pack(fill=tk.BOTH, expand=True)
+
+        pager = tk.Frame(list_wrap, bg="#111111")
+        pager.pack(side=tk.RIGHT, fill=tk.Y, padx=(6, 0))
+        self._mk_touch_btn(
+            pager, "▲", lambda: self._wifi_scroll_by(-WIFI_LIST_VISIBLE), bg="#504945"
+        ).pack(side=tk.TOP, expand=True, fill=tk.BOTH, pady=(0, 2), ipady=8)
+        self._mk_touch_btn(
+            pager, "▼", lambda: self._wifi_scroll_by(WIFI_LIST_VISIBLE), bg="#504945"
+        ).pack(side=tk.BOTTOM, expand=True, fill=tk.BOTH, pady=(2, 0), ipady=8)
+
+        rows = tk.Frame(list_wrap, bg="#111111")
+        rows.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self._wifi_row_btns = []
+        for i in range(WIFI_LIST_VISIBLE):
+            btn = self._mk_touch_btn(
+                rows,
+                "",
+                lambda idx=i: self._wifi_select_row(idx),
+                bg="#3c3836",
+            )
+            btn.configure(
+                font=("DejaVu Sans", 13, "bold"),
+                anchor="w",
+                padx=10,
+            )
+            btn.pack(fill=tk.BOTH, expand=True, pady=2, ipady=6)
+            self._wifi_row_btns.append(btn)
+
+        self._mk_touch_btn(
+            footer, "SCAN", self._settings_wifi_scan, bg="#458588"
+        ).pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=12)
         self._settings_wifi_btn = self._mk_touch_btn(
-            footer, "CONNECT", self._settings_wifi, bg="#d79921"
+            footer, "REJOIN", self._settings_wifi, bg="#d79921"
         )
-        self._settings_wifi_btn.pack(fill=tk.BOTH, expand=True, ipady=16)
+        self._settings_wifi_btn.pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2, ipady=12)
+
         self._refresh_settings_status()
+        self._paint_wifi_network_rows()
+        if not getattr(self, "_wifi_networks", None):
+            self._settings_wifi_scan()
+
+    def _open_wifi_password_overlay(self) -> None:
+        """Switch-style password keyboard (reusable TouchKeyboardOverlay)."""
+        self._close_wifi_password_overlay(restore=False)
+        ssid = getattr(self, "_wifi_selected_ssid", "") or "network"
+        try:
+            self._settings_shell.pack_forget()
+        except Exception:
+            pass
+
+        def _on_submit(password: str) -> None:
+            self._settings_wifi_join_with_password(password)
+
+        def _on_cancel() -> None:
+            self._close_wifi_password_overlay(restore=True)
+
+        kb = self._open_touch_keyboard(
+            TouchKeyboardOptions(
+                title="JOIN WI‑FI",
+                subtitle=ssid,
+                password=True,
+                submit_label="JOIN",
+                cancel_label="",
+            ),
+            on_submit=_on_submit,
+            on_cancel=_on_cancel,
+        )
+        kb.set_status(f"Enter password for {ssid}")
+
+    def _close_wifi_password_overlay(self, restore: bool = True) -> None:
+        self._close_touch_keyboard()
+        # Legacy cleanup if an older frame is still around.
+        frame = getattr(self, "_wifi_password_frame", None)
+        if frame is not None:
+            try:
+                frame.destroy()
+            except Exception:
+                pass
+        self._wifi_password_frame = None
+        self._wifi_password_entry = None
+        if restore:
+            self._wifi_selected_ssid = ""
+        if not restore:
+            return
+        if getattr(self, "_mode", "") != "settings":
+            return
+        try:
+            self._settings_shell.pack(fill=tk.BOTH, expand=True)
+        except Exception:
+            pass
+        self._refresh_settings_status()
+        self._paint_settings_buttons()
+        self._paint_nav_back()
+
+    def _wifi_scroll_by(self, delta: int) -> None:
+        networks = getattr(self, "_wifi_networks", []) or []
+        if not networks:
+            return
+        max_scroll = max(0, len(networks) - WIFI_LIST_VISIBLE)
+        self._wifi_scroll = max(0, min(max_scroll, self._wifi_scroll + delta))
+        self._paint_wifi_network_rows()
+
+    def _paint_wifi_network_rows(self) -> None:
+        networks: List = getattr(self, "_wifi_networks", []) or []
+        btns = getattr(self, "_wifi_row_btns", []) or []
+        scroll = int(getattr(self, "_wifi_scroll", 0) or 0)
+        for i, btn in enumerate(btns):
+            idx = scroll + i
+            if idx >= len(networks):
+                btn.configure(text="", state=tk.DISABLED, bg="#1d2021")
+                continue
+            net = networks[idx]
+            btn.configure(
+                text=net.label(),
+                state=tk.NORMAL,
+                bg="#689d6a" if net.in_use else "#3c3836",
+                activebackground="#689d6a" if net.in_use else "#504945",
+            )
+
+    def _wifi_select_row(self, row_idx: int) -> None:
+        if self._update_busy:
+            return
+        networks = getattr(self, "_wifi_networks", []) or []
+        idx = int(getattr(self, "_wifi_scroll", 0) or 0) + row_idx
+        if idx < 0 or idx >= len(networks):
+            return
+        net = networks[idx]
+        self._wifi_selected_ssid = net.ssid
+        self._wifi_selected_open = bool(net.is_open)
+        if net.is_open:
+            self._settings_status_var.set(f"Joining open network {net.ssid}…")
+            self._update_busy = True
+            self._paint_settings_buttons()
+            threading.Thread(
+                target=self._settings_wifi_join_worker,
+                args=(net.ssid, ""),
+                daemon=True,
+            ).start()
+            return
+        self._open_wifi_password_overlay()
 
     def _paint_settings_buttons(self) -> None:
         check_btn = self._settings_check_btn
         update_btn = self._settings_update_btn
         wifi_btn = getattr(self, "_settings_wifi_btn", None)
-        if self._update_busy:
-            if check_btn is not None:
-                check_btn.configure(
-                    text="WORKING…", bg="#3c3836", activebackground="#3c3836"
+        busy = bool(self._update_busy)
+
+        def _dim(btn: Optional[tk.Button], label: str, idle_bg: str) -> None:
+            if btn is None:
+                return
+            if busy:
+                btn.configure(
+                    text=label,
+                    bg="#3c3836",
+                    activebackground="#3c3836",
+                    state=tk.DISABLED,
                 )
-            if update_btn is not None:
-                update_btn.configure(
-                    text="WORKING…", bg="#3c3836", activebackground="#3c3836"
+            else:
+                btn.configure(
+                    text=label,
+                    bg=idle_bg,
+                    activebackground=idle_bg,
+                    state=tk.NORMAL,
                 )
-            if wifi_btn is not None:
-                wifi_btn.configure(
-                    text="WORKING…", bg="#3c3836", activebackground="#3c3836"
-                )
+
+        if busy:
+            _dim(check_btn, "CHECK", "#458588")
+            _dim(update_btn, "UPDATE", "#689d6a")
+            _dim(wifi_btn, "REJOIN", "#d79921")
             return
+
         if wifi_btn is not None and getattr(self, "_settings_panel", "") == "wifi":
-            wifi_btn.configure(text="CONNECT", bg="#d79921", activebackground="#d79921")
+            _dim(wifi_btn, "REJOIN", "#d79921")
         if check_btn is None or update_btn is None:
             return
-        check_btn.configure(text="CHECK", bg="#458588", activebackground="#458588")
         if self._update_confirming:
-            update_btn.configure(
-                text="INSTALL NOW", bg="#9d0006", activebackground="#9d0006"
+            check_btn.configure(
+                text="CANCEL",
+                bg="#504945",
+                activebackground="#504945",
+                state=tk.NORMAL,
             )
-            check_btn.configure(text="CANCEL", bg="#504945", activebackground="#504945")
+            update_btn.configure(
+                text="INSTALL NOW",
+                bg="#9d0006",
+                activebackground="#9d0006",
+                state=tk.NORMAL,
+            )
             return
         available = bool(self._update_check and self._update_check.available)
         color = "#689d6a" if available or self._update_check is None else "#3c3836"
-        update_btn.configure(text="UPDATE", bg=color, activebackground=color)
+        check_btn.configure(
+            text="CHECK", bg="#458588", activebackground="#458588", state=tk.NORMAL
+        )
+        update_btn.configure(text="UPDATE", bg=color, activebackground=color, state=tk.NORMAL)
 
     def _refresh_settings_status(self) -> None:
         panel = getattr(self, "_settings_panel", "hub")
         if panel == "hub":
             self._refresh_settings_hub_detail()
+            return
+        if getattr(self, "_touch_keyboard", None) is not None:
             return
         lines = updater.format_status_lines(self._update_check)
         try:
@@ -280,7 +458,7 @@ class SettingsScreenMixin:
         if self._update_busy or self._update_confirming:
             return
         self._update_busy = True
-        self._settings_status_var.set("Connecting Wi-Fi…")
+        self._settings_status_var.set("Rejoining saved / preconfigured Wi‑Fi…")
         self._paint_settings_buttons()
         threading.Thread(target=self._settings_wifi_worker, daemon=True).start()
 
@@ -290,6 +468,48 @@ class SettingsScreenMixin:
             self._q_put(("wifi", ok, detail))
         except Exception as exc:
             self._q_put(("wifi", False, str(exc)))
+
+    def _settings_wifi_scan(self) -> None:
+        if self._update_busy or self._update_confirming:
+            return
+        self._update_busy = True
+        self._settings_status_var.set("Scanning for networks…")
+        self._paint_settings_buttons()
+        threading.Thread(target=self._settings_wifi_scan_worker, daemon=True).start()
+
+    def _settings_wifi_scan_worker(self) -> None:
+        try:
+            networks, err = wifi_mod.scan_wifi_networks(rescan=True)
+            self._q_put(("wifi_scan", networks, err))
+        except Exception as exc:
+            self._q_put(("wifi_scan", [], str(exc)))
+
+    def _settings_wifi_join_with_password(self, password: str) -> None:
+        if self._update_busy:
+            return
+        ssid = getattr(self, "_wifi_selected_ssid", "") or ""
+        kb = getattr(self, "_touch_keyboard", None)
+        if not ssid:
+            if kb is not None:
+                kb.set_status("No network selected")
+            return
+        self._update_busy = True
+        if kb is not None:
+            kb.set_status(f"Joining {ssid}…")
+        threading.Thread(
+            target=self._settings_wifi_join_worker,
+            args=(ssid, password),
+            daemon=True,
+        ).start()
+
+    def _settings_wifi_join_worker(self, ssid: str, password: str) -> None:
+        try:
+            ok, detail = wifi_mod.connect_wifi(
+                ssid, password, install=HERE, remember=True
+            )
+            self._q_put(("wifi_join", ok, detail, ssid))
+        except Exception as exc:
+            self._q_put(("wifi_join", False, str(exc), ssid))
 
     def _settings_check(self) -> None:
         if self._update_confirming:
@@ -350,7 +570,7 @@ class SettingsScreenMixin:
             return
         self._update_confirming = False
         self._update_busy = True
-        self._settings_status_var.set("Installing update…")
+        self._settings_status_var.set("[0% · 0:00] Starting install…")
         self._paint_settings_buttons()
         threading.Thread(target=self._settings_apply_worker, daemon=True).start()
 
@@ -359,14 +579,46 @@ class SettingsScreenMixin:
         if self._update_check and self._update_check.remote.sha:
             expected = self._update_check.remote.sha
 
-        def progress(msg: str) -> None:
-            self._q_put(("update_progress", msg))
+        tracker = updater.ProgressTracker(
+            lambda msg: self._q_put(("update_progress", msg))
+        )
+        self._update_progress = tracker
+        self._q_put(("update_progress_start",))
 
         try:
-            info = updater.apply_update(progress=progress, expected_sha=expected)
+            info = updater.apply_update(progress=tracker, expected_sha=expected)
             self._q_put(("update_done", info, None))
         except Exception as exc:
             self._q_put(("update_done", None, str(exc)))
+
+    def _start_update_progress_tick(self) -> None:
+        self._stop_update_progress_tick()
+        self._tick_update_progress()
+
+    def _stop_update_progress_tick(self) -> None:
+        aid = getattr(self, "_update_progress_tick_after", None)
+        self._update_progress_tick_after = None
+        if aid is not None:
+            try:
+                self.root.after_cancel(aid)
+            except Exception:
+                pass
+
+    def _tick_update_progress(self) -> None:
+        tracker = getattr(self, "_update_progress", None)
+        if not getattr(self, "_update_busy", False) or tracker is None:
+            self._update_progress_tick_after = None
+            return
+        try:
+            tracker.tick()
+        except Exception:
+            pass
+        try:
+            self._update_progress_tick_after = self.root.after(
+                1000, self._tick_update_progress
+            )
+        except Exception:
+            self._update_progress_tick_after = None
 
     def _restart_after_update(self) -> None:
         """Stop audio, keep the singleton lock, exec the new midi_tone.py.
