@@ -284,6 +284,7 @@ selected. ⚙ **SHOW ALL** adds the extra mappings; the starter set is first.
 | **FILTER** | TONE | MORPH | Filter cutoff vs voice blend. See the latch recipe above. |
 | **ECHO** | DLY T | DLY MIX | Delay time (~50–750 ms) vs how much delay you hear. |
 | **SWELL** | ATTACK | DLY MIX | Attack time (snappy left → slow swell right) vs echo send. Latch a note first, same as FILTER. |
+| **ENV** | ATTACK | DECAY | Attack time vs release/decay. Latch a note first, same as FILTER. |
 | **DRIVE** | DRIVE | REVERB | Saturation vs reverb send. |
 | **SPACE** | ECHO | REVERB | Delay mix vs reverb mix (washes without touching pitch). |
 | **RESO** | TONE | FB | Filter cutoff vs delay feedback (resonant repeats). |
@@ -343,7 +344,7 @@ Transport:
 
 - Set **BPM** (− / + / ±5); optional **SONG LOOP**
 - **OUT:** **LOCAL** (soft-synth) → **USB** (MIDI out / DIN) → **BOTH**
-- **PLAY** / **STOP** / **DELETE**
+- **PLAY** (toggles to **■ STOP** while playing) / **DELETE**
 
 Song USB out is a file-player path (not live thru remap).
 

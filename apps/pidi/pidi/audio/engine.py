@@ -17,7 +17,7 @@ except ImportError as e:  # pragma: no cover
         "On Pi you may also need: sudo apt install libportaudio2\n" + str(e)
     ) from e
 
-from pidi.audio.drums import midi_to_hz, synthesize_drum
+from pidi.audio.drums import drum_model_for_note, midi_to_hz, render_drum_preview, synthesize_drum
 from pidi.audio.fx import MixBusFx
 from pidi.audio.tone import apply_tone_lowpass
 from pidi.audio.wavetable import (
@@ -35,6 +35,7 @@ from pidi.constants import (
     DEFAULT_MAX_VOICES,
     DRUM_BUS_GAIN,
     DRUM_CHANNEL,
+    DRUM_SCOPE_SEC,
     LATENCY_SEC,
     OUTPUT_MAKEUP,
     SAMPLE_RATE,
@@ -1269,6 +1270,7 @@ class SineEngine:
             noise_amt=noise,
             tone=tone,
             sample_rate=self.sample_rate,
+            duration_sec=DRUM_SCOPE_SEC,
         )
 
     def modulation_state(self) -> Dict[str, float]:

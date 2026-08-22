@@ -108,7 +108,7 @@ class SongsScreenMixin:
         status.pack(fill=tk.X, padx=10, pady=(2, 4))
 
         # Transport is packed from the bottom *before* the list, so a short panel
-        # shrinks the song rows instead of pushing PLAY/STOP off the screen.
+        # shrinks the song rows instead of pushing PLAY off the screen.
         row_b = tk.Frame(shell, bg="#111111")
         row_b.pack(side=tk.BOTTOM, fill=tk.X, padx=8, pady=(3, 8))
         self._mk_touch_btn(
@@ -132,9 +132,6 @@ class SongsScreenMixin:
             row_a, "PLAY", self._song_toggle_play, bg="#689d6a"
         )
         self._song_play_btn.pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=10)
-        self._mk_touch_btn(row_a, "STOP", self._song_stop, bg="#d79921").pack(
-            side=tk.LEFT, expand=True, fill=tk.BOTH, padx=3, ipady=10
-        )
 
         # Chunky list with dedicated scroll targets (no tiny scrollbar). They sit
         # in a side column so paging costs width, which is plentiful, not height.
@@ -409,14 +406,6 @@ class SongsScreenMixin:
             else:
                 self._q_put(("log", "Song PLAY start", False))
         self._q_put(("song",))
-        self._refresh_song_status()
-
-
-    def _song_stop(self) -> None:
-        if self._songs.is_playing():
-            self._songs.stop()
-            self._q_put(("log", "Song STOP", False))
-            self._q_put(("song",))
         self._refresh_song_status()
 
 

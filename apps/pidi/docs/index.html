@@ -323,6 +323,8 @@
       <table>
         <tr><th>FILTER</th><td><strong>X = TONE</strong> (filter cutoff), <strong>Y = MORPH</strong> (voice blend, momentary). Use the HOLD recipe above — this is the KP-style filter pad, not a keyboard.</td></tr>
         <tr><th>ECHO</th><td><strong>X = DLY T</strong> (~50–750 ms), <strong>Y = DLY MIX</strong> (how loud the repeats are).</td></tr>
+        <tr><th>SWELL</th><td><strong>X = ATTACK</strong> (snappy left → slow swell right), <strong>Y = DLY MIX</strong> (echo send). Latch a note first, same as FILTER.</td></tr>
+        <tr><th>ENV</th><td><strong>X = ATTACK</strong> (snappy left → slow swell right), <strong>Y = DECAY</strong> (release time). Latch a note first, same as FILTER.</td></tr>
         <tr><th>DRIVE</th><td><strong>X = DRIVE</strong> (saturation), <strong>Y = REVERB</strong> (reverb send).</td></tr>
         <tr><th>SPACE</th><td><strong>X = ECHO</strong> (delay mix), <strong>Y = REVERB</strong> (reverb mix) — wash without touching pitch.</td></tr>
         <tr><th>RESO</th><td><strong>X = TONE</strong>, <strong>Y = FB</strong> (delay feedback) — resonant repeats.</td></tr>
@@ -368,7 +370,7 @@
       <table>
         <tr><th>BPM − / + / −5 / +5</th><td>Nudge playback tempo relative to the file.</td></tr>
         <tr><th>Song list + ▲ / ▼</th><td>Tap a <code>.mid</code> row to select; page with the chunky ▲ / ▼ buttons.</td></tr>
-        <tr><th>PLAY / STOP</th><td>Start or stop song playback.</td></tr>
+        <tr><th>PLAY / ■ STOP</th><td>Start or stop song playback. The same button flips to STOP while a song is running.</td></tr>
         <tr><th>SAVE SEQ</th><td>Export the current sequencer arrangement into <code>songs/</code> as a MIDI file.</td></tr>
         <tr><th>DELETE</th><td>Remove the selected file from <code>songs/</code>.</td></tr>
         <tr><th>OUT</th><td>LOCAL / USB / BOTH — soft-synth and/or hardware DIN via USB MIDI adapter.</td></tr>
@@ -420,6 +422,7 @@
         <tr><th>Version</th><td>Product semver (<code>VERSION</code>) plus local commit from git or <code>version.json</code>.</td></tr>
         <tr><th>UPDATE</th><td>Nested panel: CHECK asks GitHub whether <code>master</code> is ahead; UPDATE deploys (confirm → INSTALL NOW), then restarts.</td></tr>
         <tr><th>WIFI</th><td>Nested panel: CONNECT joins the saved NetworkManager profile (or <code>.wifi-credentials</code>).</td></tr>
+        <tr><th>DIAG</th><td>Toggle a CPU / RAM / temp strip along the bottom of <em>every</em> screen (saved in <code>settings.json</code>). Turn it off from Settings again.</td></tr>
         <tr><th>BLANK / TIMEOUT</th><td>Force the burn-in screensaver, or cycle idle timeout.</td></tr>
       </table>
       <p class="note">Same as SSH deploy: never overwrites <code>settings.json</code>, <code>songs/</code>, <code>phrases/</code> (pad recordings), <code>user-presets/</code>, <code>user-wavetables/</code>, or <code>presets/active.json</code>. Does not cargo-build on the Pi — engines are the committed <code>dist/armv7</code> binaries (rebuild with <code>./deploy/build-pi-bins.sh</code> before pushing crate changes).</p>

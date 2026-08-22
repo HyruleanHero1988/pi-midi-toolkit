@@ -1,6 +1,7 @@
 """Procedural drum models and kit helpers."""
 from __future__ import annotations
 
+import math
 from typing import Dict, Optional, Tuple
 
 import numpy as np
@@ -59,6 +60,28 @@ def drum_model_for_note(note: int) -> str:
     # Unknown note: cycle through the kit so every pad still sounds distinct
     models = list(dict.fromkeys(MPK_PAD_KIT.values()))
     return models[n % len(models)]
+
+
+def _cheap_square(phases: np.ndarray, two_pi: float) -> np.ndarray:
+    """Naive bipolar square; matches jambox-core `cheap_square`."""
+    return np.where(np.mod(phases, two_pi) < math.pi, 1.0, -1.0).astype(np.float32)
+
+
+def _one_pole_lp(x: np.ndarray, coef: float) -> np.ndarray:
+    y = np.empty_like(x, dtype=np.float32)
+    acc = 0.0
+    c = float(coef)
+    for i, s in enumerate(x):
+        acc += (float(s) - acc) * c
+        y[i] = acc
+    return y
+
+
+def _clap_slap(t: np.ndarray, offset: float, tau: float) -> np.ndarray:
+    d = t - np.float32(offset)
+    out = np.exp(-np.maximum(d, 0.0) / np.float32(max(tau, 0.0004)))
+    out = np.where(d < 0.0, np.float32(0.0), out)
+    return out.astype(np.float32, copy=False)
 
 
 def downsample_waveform(samples: np.ndarray, points: int) -> np.ndarray:
@@ -207,27 +230,35 @@ def synthesize_drum(
         return sig.astype(np.float32, copy=False), max(body_tau, noise_tau) * 5.0, new_phase
 
     if model == "clap":
-        noise_tau = 0.03 + 0.22 * decay
-        noise_env = np.exp(-t / np.float32(noise_tau))
-        bursts = (
-            np.exp(-((t - 0.000) ** 2) / 0.0000008)
-            + np.exp(-((t - 0.012) ** 2) / 0.0000010)
-            + np.exp(-((t - 0.024) ** 2) / 0.0000012)
+        # 808 clap: four short slaps through a mid bandpass, then a delayed wash.
+        # Not a snare — no 175 Hz body, and no wire-noise from t=0.
+        hp_hz = 700.0 * (2.0 ** ((pitch - 0.5) * 1.0))
+        lp_hz = 2600.0 * (2.0 ** ((pitch - 0.5) * 0.6 + (tone - 0.5) * 0.9))
+        sr = 1.0 / inv_sr
+        hp_coef = max(0.03, min(0.45, two_pi * hp_hz / sr))
+        lp_coef = max(0.10, min(0.85, two_pi * lp_hz / sr))
+        rumble = _one_pole_lp(white, hp_coef)
+        band = _one_pole_lp(white - rumble, lp_coef)
+        slap_tau = 0.0018
+        slaps = (
+            _clap_slap(t, 0.000, slap_tau)
+            + 0.82 * _clap_slap(t, 0.010, slap_tau * 1.10)
+            + 0.64 * _clap_slap(t, 0.019, slap_tau * 1.20)
+            + 0.48 * _clap_slap(t, 0.029, slap_tau * 1.30)
         )
-        sig = noise * (bursts * np.float32(0.45) + noise_env * np.float32(0.28))
-        sig *= np.float32((0.28 + 0.4 * noise_amt) * vel)
-        return sig.astype(np.float32, copy=False), noise_tau * 5.0, phase
+        verb_tau = 0.045 + 0.14 * decay
+        verb = _clap_slap(t, 0.024, verb_tau) * np.float32(0.20 + 0.18 * noise_amt)
+        env = slaps * np.float32(0.70) + verb
+        sig = band * env * np.float32(0.85 * vel)
+        return sig.astype(np.float32, copy=False), verb_tau * 5.0, phase
 
-    if model in ("hat_closed", "hat_open", "hat_pedal", "ride", "shaker"):
+    if model in ("hat_closed", "hat_open", "hat_pedal", "shaker"):
         if model == "hat_open":
             noise_tau = 0.05 + 0.40 * decay
             amp = 0.14 + 0.30 * noise_amt
         elif model == "hat_pedal":
             noise_tau = 0.008 + 0.04 * decay
             amp = 0.12 + 0.22 * noise_amt
-        elif model == "ride":
-            noise_tau = 0.12 + 0.55 * decay
-            amp = 0.10 + 0.22 * noise_amt
         elif model == "shaker":
             noise_tau = 0.02 + 0.10 * decay
             amp = 0.12 + 0.28 * noise_amt
@@ -247,6 +278,26 @@ def synthesize_drum(
         )
         return sig.astype(np.float32, copy=False), noise_tau * 5.5, phase
 
+    if model == "ride":
+        # Metallic ding + wash, not a lower open hat.
+        f0 = 3200.0 * (2.0 ** ((pitch - 0.5) * 0.45))
+        body_tau = 0.08 + 0.32 * decay
+        noise_tau = 0.12 + 0.55 * decay
+        phase_inc = two_pi * f0 * inv_sr
+        phases = phase + phase_inc * (arange + 1.0)
+        new_phase = float(phases[-1] % two_pi)
+        body_env = np.exp(-t / np.float32(body_tau))
+        noise_env = np.exp(-t / np.float32(noise_tau))
+        ding = np.sin(phases) * body_env * np.float32(0.09 * vel)
+        bright = white - noise * np.float32(0.85)
+        wash_amp = 0.10 + 0.22 * noise_amt
+        wash = bright * noise_env * np.float32(wash_amp * vel)
+        wash = wash * np.float32(0.35 + 0.65 * tone) + noise * noise_env * np.float32(
+            0.10 * (1.0 - tone) * vel
+        )
+        sig = ding + wash
+        return sig.astype(np.float32, copy=False), max(body_tau, noise_tau) * 5.5, new_phase
+
     if model == "rim":
         # Short woodblock / stick click
         f0 = 520.0 * (2.0 ** ((pitch - 0.5) * 1.2))
@@ -260,28 +311,30 @@ def synthesize_drum(
         return sig.astype(np.float32, copy=False), body_tau * 5.0, new_phase
 
     if model == "cowbell":
-        # Two inharmonic partials (classic analog cowbell trick)
+        # TR-808: two inharmonic square partials (~540 Hz + ~800 Hz), not a sine clave.
         f1 = 540.0 * (2.0 ** ((pitch - 0.5) * 1.0))
         f2 = 800.0 * (2.0 ** ((pitch - 0.5) * 1.0))
-        body_tau = 0.05 + 0.28 * decay
+        body_tau = 0.08 + 0.32 * decay
         env = np.exp(-t / np.float32(body_tau))
-        phase_inc1 = two_pi * f1 * inv_sr
-        phase_inc2 = two_pi * f2 * inv_sr
-        p1 = phase + phase_inc1 * (arange + 1.0)
-        p2 = phase * 1.37 + phase_inc2 * (arange + 1.0)
-        new_phase = float(p1[-1] % two_pi)
-        sig = (np.sin(p1) + 0.7 * np.sin(p2)) * env * np.float32(0.18 * vel)
-        sig += noise * env * np.float32(0.04 * noise_amt * vel)
-        return sig.astype(np.float32, copy=False), body_tau * 5.0, new_phase
+        p1 = two_pi * f1 * t
+        p2 = two_pi * f2 * t
+        mix = _cheap_square(p1, two_pi) + np.float32(0.72) * _cheap_square(p2, two_pi)
+        color_lp = _one_pole_lp(mix, 0.16)
+        colored = mix - np.float32(0.55) * color_lp
+        sig = colored * env * np.float32(0.13 * vel)
+        sig += noise * env * np.float32(0.03 * noise_amt * vel)
+        return sig.astype(np.float32, copy=False), body_tau * 5.0, float(p1[-1] % two_pi)
 
     if model == "clave":
-        f0 = 1800.0 * (2.0 ** ((pitch - 0.5) * 0.8))
-        body_tau = 0.008 + 0.035 * decay
+        # Short woody tick — distinct from cowbell (higher, much shorter).
+        f0 = 2450.0 * (2.0 ** ((pitch - 0.5) * 0.55))
+        body_tau = 0.006 + 0.016 * decay
         phase_inc = two_pi * f0 * inv_sr
         phases = phase + phase_inc * (arange + 1.0)
         new_phase = float(phases[-1] % two_pi)
         env = np.exp(-t / np.float32(body_tau))
-        sig = np.sin(phases) * env * np.float32(0.20 * vel)
+        sig = np.sin(phases) * env * np.float32(0.22 * vel)
+        sig += white * np.exp(-t / np.float32(0.0035)) * np.float32(0.22 * vel)
         return sig.astype(np.float32, copy=False), body_tau * 6.0, new_phase
 
     # Fallback: short closed hat

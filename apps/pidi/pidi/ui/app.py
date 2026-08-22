@@ -562,8 +562,11 @@ class MidiToneApp(
         self._mode_host = tk.Frame(self.root, bg="#111111")
         self._mode_host.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
 
-        # Diagnostics strip (packed at bottom only when enabled from Settings).
+        # Diagnostics strip — packed at the window bottom *before* the expanding
+        # mode host so SYNTH/SEQ/PADS/KAOSS footers cannot cover it. Hidden
+        # until Settings → DIAG turns it on.
         self._diag_bar = tk.Frame(self.root, bg="#0a0a0a", height=28)
+        self._diag_bar.pack_propagate(False)
         self._diag_lbl = tk.Label(
             self._diag_bar,
             textvariable=self._diag_var,
@@ -574,7 +577,7 @@ class MidiToneApp(
             padx=8,
             pady=4,
         )
-        self._diag_lbl.pack(fill=tk.X)
+        self._diag_lbl.pack(fill=tk.BOTH, expand=True)
 
         self._synth_shell = tk.Frame(self._mode_host, bg="#111111")
         self._seq_shell = tk.Frame(self._mode_host, bg="#111111")
@@ -1100,6 +1103,8 @@ class MidiToneApp(
                 pass
             self._paint_synth_waveform(force=True)
         self._paint_mode_btns()
+        if getattr(self, "_diagnostics_on", False):
+            self._pack_diag_bar()
 
 
     def _paint_mode_btns(self) -> None:
@@ -2239,10 +2244,26 @@ class MidiToneApp(
                     padx=(gutter + dx, gutter - dx),
                     pady=(gutter + dy, 0),
                 )
-            self._mode_host.pack_configure(
-                padx=(gutter + dx, gutter - dx),
-                pady=(0, gutter - dy),
+            bar = getattr(self, "_diag_bar", None)
+            diag_mapped = bool(
+                getattr(self, "_diagnostics_on", False)
+                and bar is not None
+                and bar.winfo_ismapped()
             )
+            if diag_mapped:
+                self._mode_host.pack_configure(
+                    padx=(gutter + dx, gutter - dx),
+                    pady=0,
+                )
+                bar.pack_configure(
+                    padx=(gutter + dx, gutter - dx),
+                    pady=(0, gutter - dy),
+                )
+            else:
+                self._mode_host.pack_configure(
+                    padx=(gutter + dx, gutter - dx),
+                    pady=(0, gutter - dy),
+                )
         except Exception:
             pass
 
@@ -2492,6 +2513,31 @@ class MidiToneApp(
             ).pack(fill=tk.X, padx=12, pady=8)
 
 
+    def _pack_diag_bar(self) -> None:
+        """Keep the strip at the window bottom, reserved before the mode host.
+
+        Pack order on an 800×480 panel matters: if the expanding ``_mode_host``
+        is packed first, busy screens (SYNTH/SEQ/PADS/KAOSS) take the leftover
+        cavity and the strip disappears. Home/Settings look empty enough that
+        the bar can still peek through — which is why DIAG looked local to those
+        two screens. Same rule as ``_pack_screen_regions``: BOTTOM chrome first.
+        """
+        bar = getattr(self, "_diag_bar", None)
+        if bar is None:
+            return
+        kwargs = {"side": tk.BOTTOM, "fill": tk.X}
+        host = getattr(self, "_mode_host", None)
+        if host is not None:
+            kwargs["before"] = host
+        try:
+            bar.pack(**kwargs)
+            bar.lift()
+        except tk.TclError:
+            try:
+                bar.pack(side=tk.BOTTOM, fill=tk.X)
+            except tk.TclError:
+                pass
+
     def _set_diagnostics(self, enabled: bool) -> None:
         self._diagnostics_on = bool(enabled)
         bar = getattr(self, "_diag_bar", None)
@@ -2499,8 +2545,7 @@ class MidiToneApp(
             self._paint_diag_btn()
             return
         if self._diagnostics_on:
-            if not bar.winfo_ismapped():
-                bar.pack(side=tk.BOTTOM, fill=tk.X)
+            self._pack_diag_bar()
             self._diag_tick()
         else:
             self._cancel_diag_tick()

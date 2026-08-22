@@ -243,6 +243,17 @@ class PadPlayTest(unittest.TestCase):
         self.assertAlmostEqual(params["delay_mix"], 0.9, places=3)
         self.assertIn("swell", PROGRAM_IDS)
 
+    def test_env_maps_attack_and_decay(self) -> None:
+        self.pad.program_id = "env"
+        events = self.pad.touch(0.2, 0.75)
+        self.assertNotIn("note_on", self.kinds(events))
+        params = {e.param: e.param_value for e in events if e.kind == "param"}
+        self.assertAlmostEqual(params["attack"], 0.2, places=3)
+        self.assertAlmostEqual(params["release"], 0.75, places=3)
+        self.assertEqual(self.pad.program().x_axis, "ATTACK")
+        self.assertEqual(self.pad.program().y_axis, "DECAY")
+        self.assertIn("env", PROGRAM_IDS)
+
     def test_retune_after_key_change(self) -> None:
         self.pad.touch(0.0, 0.5)
         self.assertEqual(self.pad.sounding_note(), 48)
