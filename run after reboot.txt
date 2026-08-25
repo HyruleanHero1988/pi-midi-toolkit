@@ -1,4 +1,0 @@
-cd /mnt/c/Users/Raymond/Documents/Development/pi-midi-toolkit
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-source "$HOME/.cargo/env"
-PACKAGES=jambox-engine,pidi-native ./deploy/build-pi-bins.sh
