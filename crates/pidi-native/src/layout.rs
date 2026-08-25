@@ -15,6 +15,10 @@ pub enum Hit {
     Division(usize),
     PhrasePad(usize),
     StopAllClips,
+    PadsPlayView,
+    PadsEditView,
+    PadsClearArm,
+    PadsTrig,
     HomeTile(UiMode),
     SynthSlider(usize),
     SynthKey(usize),
@@ -91,6 +95,10 @@ pub struct Layout {
     pub divisions: Rect,
     pub phrase_grid: Rect,
     pub stop_all: Rect,
+    pub pads_play: Rect,
+    pub pads_edit: Rect,
+    pub pads_clear: Rect,
+    pub pads_trig: Rect,
     pub synth_sliders: Rect,
     pub synth_keys: Rect,
     pub synth_wave_a: Rect,
@@ -237,15 +245,39 @@ impl Layout {
             },
             phrase_grid: Rect {
                 x: 16,
-                y: HUD_H + 16,
+                y: HUD_H + 56,
                 w: 640,
-                h: content_h - 80,
+                h: content_h - 120,
             },
             stop_all: Rect {
                 x: 668,
-                y: HUD_H + 16,
+                y: HUD_H + content_h - 56,
                 w: 116,
-                h: 64,
+                h: 48,
+            },
+            pads_play: Rect {
+                x: 520,
+                y: HUD_H + 8,
+                w: 120,
+                h: 40,
+            },
+            pads_edit: Rect {
+                x: 648,
+                y: HUD_H + 8,
+                w: 136,
+                h: 40,
+            },
+            pads_clear: Rect {
+                x: 16,
+                y: HUD_H + content_h - 56,
+                w: 0,
+                h: 48,
+            },
+            pads_trig: Rect {
+                x: 224,
+                y: HUD_H + content_h - 56,
+                w: 0,
+                h: 48,
             },
             synth_sliders: Rect {
                 x: 24,
@@ -733,6 +765,18 @@ impl Layout {
     }
 
     fn hit_pads(&self, px: i32, py: i32) -> Hit {
+        if self.pads_play.contains(px, py) {
+            return Hit::PadsPlayView;
+        }
+        if self.pads_edit.contains(px, py) {
+            return Hit::PadsEditView;
+        }
+        if self.pads_clear.w > 0 && self.pads_clear.contains(px, py) {
+            return Hit::PadsClearArm;
+        }
+        if self.pads_trig.w > 0 && self.pads_trig.contains(px, py) {
+            return Hit::PadsTrig;
+        }
         if self.stop_all.contains(px, py) {
             return Hit::StopAllClips;
         }

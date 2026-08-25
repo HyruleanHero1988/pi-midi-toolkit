@@ -2,7 +2,7 @@
 
 use crate::client::Outbox;
 use crate::kaoss_ui::{self, KaossPicker, KAOSS_PROGRAMS};
-use crate::layout::{Hit, Layout, Surface};
+use crate::layout::{Hit, Layout, Rect, Surface};
 use crate::mode::UiMode;
 use crate::phrases::{self, PhrasePad};
 use crate::presets::{self, PresetSnapshot};
@@ -93,6 +93,9 @@ pub struct NativeModel {
     pub bpm: f32,
     pub phrases: [PhrasePad; 16],
     pub phrase_playing: [bool; 16],
+    pub pads_edit: bool,
+    pub pads_clear_armed: bool,
+    pub pads_selected: usize,
     pub status_line: String,
     pub synth_params: [f32; 5],
     pub wave_names: Vec<String>,
@@ -144,6 +147,9 @@ impl NativeModel {
             bpm: 120.0,
             phrases: std::array::from_fn(|_| PhrasePad::default()),
             phrase_playing: [false; 16],
+            pads_edit: false,
+            pads_clear_armed: false,
+            pads_selected: 0,
             status_line: String::new(),
             synth_params: [0.5, 0.5, 0.8, 0.05, 0.3],
             wave_names: waves::list_wave_names(&waves::waves_dirs_from_env()),
@@ -393,7 +399,69 @@ impl NativeModel {
                     py,
                     surface: Surface::Phrase { slot: index },
                 };
-                self.toggle_phrase(index, outbox);
+                if self.pads_edit && self.pads_clear_armed {
+                    self.clear_phrase(index, outbox);
+                } else if self.pads_edit {
+                    self.pads_selected = index;
+                    self.status_line = format!(
+                        "{} · {}",
+                        phrases::pad_label(index),
+                        if self.phrases[index].empty {
+                            "empty"
+                        } else if self.phrases[index].loop_mode {
+                            "LOOP"
+                        } else {
+                            "1SHOT"
+                        }
+                    );
+                } else {
+                    self.toggle_phrase(index, outbox);
+                }
+            }
+            Hit::PadsPlayView => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.pads_edit = false;
+                self.pads_clear_armed = false;
+                self.layout.pads_clear.w = 0;
+                self.layout.pads_trig.w = 0;
+                self.status_line = "pads PLAY".into();
+            }
+            Hit::PadsEditView => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.pads_edit = true;
+                self.layout.pads_clear = Rect {
+                    x: 16,
+                    y: crate::layout::HUD_H + (crate::layout::SCREEN_H
+                        - crate::layout::HUD_H
+                        - crate::layout::NAV_H)
+                        - 56,
+                    w: 200,
+                    h: 48,
+                };
+                self.layout.pads_trig = Rect {
+                    x: 224,
+                    y: self.layout.pads_clear.y,
+                    w: 200,
+                    h: 48,
+                };
+                self.status_line = "pads EDIT — CLEAR then tap a pad, or TRIG for loop/1shot".into();
+            }
+            Hit::PadsClearArm => {
+                self.tap_ui(slot, id, gesture, px, py);
+                if !self.pads_edit {
+                    self.status_line = "switch to EDIT first".into();
+                } else {
+                    self.pads_clear_armed = !self.pads_clear_armed;
+                    self.status_line = if self.pads_clear_armed {
+                        "CLEAR armed — tap a pad".into()
+                    } else {
+                        "CLEAR disarmed".into()
+                    };
+                }
+            }
+            Hit::PadsTrig => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.toggle_phrase_trig(outbox);
             }
             Hit::StopAllClips => {
                 self.fingers[slot] = Finger {
@@ -933,6 +1001,44 @@ impl NativeModel {
             self.phrase_playing[index] = true;
             self.status_line = format!("{} launch", phrases::pad_label(index));
         }
+    }
+
+    fn clear_phrase(&mut self, index: usize, outbox: &mut Outbox) {
+        if index >= 16 {
+            return;
+        }
+        self.pads_clear_armed = false;
+        self.phrases[index] = PhrasePad::default();
+        self.phrase_playing[index] = false;
+        outbox.clip_clear(index as u8);
+        outbox.clip_stop(index as u8, "off");
+        self.pads_selected = index;
+        self.status_line = format!("{} cleared", phrases::pad_label(index));
+    }
+
+    fn toggle_phrase_trig(&mut self, outbox: &mut Outbox) {
+        if !self.pads_edit {
+            self.status_line = "switch to EDIT first".into();
+            return;
+        }
+        let index = self.pads_selected.min(15);
+        if self.phrases[index].empty {
+            self.status_line = format!("{} empty — nothing to TRIG", phrases::pad_label(index));
+            return;
+        }
+        self.phrases[index].loop_mode = !self.phrases[index].loop_mode;
+        let mode = if self.phrases[index].loop_mode {
+            "loop"
+        } else {
+            "oneshot"
+        };
+        outbox.clip_load(
+            index as u8,
+            self.phrases[index].length_ticks,
+            mode,
+            self.phrases[index].events.clone(),
+        );
+        self.status_line = format!("{} → {}", phrases::pad_label(index), mode.to_ascii_uppercase());
     }
 
     const SYNTH_PARAM_NAMES: [&'static str; 5] =

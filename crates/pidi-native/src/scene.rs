@@ -252,15 +252,57 @@ fn draw_kaoss(scene: &mut Scene, model: &NativeModel) {
 
 fn draw_pads(scene: &mut Scene, model: &NativeModel) {
     let layout = model.layout;
+    scene.text(16, HUD_H + 16, "Phrase Pads", 0xfbf1c7);
+    scene.fill_rect(
+        layout.pads_play,
+        if !model.pads_edit { 0x689d6a } else { 0x3c3836 },
+    );
+    scene.text(layout.pads_play.x + 32, layout.pads_play.y + 12, "PLAY", 0xffffff);
+    scene.fill_rect(
+        layout.pads_edit,
+        if model.pads_edit { 0xd79921 } else { 0x3c3836 },
+    );
+    scene.text(layout.pads_edit.x + 36, layout.pads_edit.y + 12, "EDIT", 0xffffff);
+
+    if model.pads_edit {
+        scene.fill_rect(
+            layout.pads_clear,
+            if model.pads_clear_armed {
+                0xcc241d
+            } else {
+                0x9d0006
+            },
+        );
+        scene.text(
+            layout.pads_clear.x + 48,
+            layout.pads_clear.y + 16,
+            if model.pads_clear_armed {
+                "CLEAR?"
+            } else {
+                "CLEAR"
+            },
+            0xffffff,
+        );
+        let trig = if model.phrases[model.pads_selected.min(15)].loop_mode {
+            "TRIG LOOP"
+        } else {
+            "TRIG 1SHOT"
+        };
+        scene.fill_rect(layout.pads_trig, 0x458588);
+        scene.text(layout.pads_trig.x + 36, layout.pads_trig.y + 16, trig, 0xffffff);
+    }
+
     scene.fill_rect(layout.stop_all, 0x3c3836);
-    scene.text(layout.stop_all.x + 10, layout.stop_all.y + 24, "STOP", 0xffffff);
-    scene.text(layout.stop_all.x + 10, layout.stop_all.y + 40, "ALL", 0xffffff);
+    scene.text(layout.stop_all.x + 18, layout.stop_all.y + 16, "STOP", 0xffffff);
 
     for index in 0..16 {
         let cell = layout.phrase_cell(index);
         let pad = &model.phrases[index];
+        let selected = model.pads_edit && index == model.pads_selected;
         let color = if model.phrase_playing[index] {
             0x689d6a
+        } else if selected {
+            0xd79921
         } else if pad.empty {
             0x3c3836
         } else if pad.loop_mode {
