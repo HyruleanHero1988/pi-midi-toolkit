@@ -4,7 +4,7 @@
 //! rasterizer uses the same list so dummy/PPM output matches the GPU path.
 
 use crate::font::{self, GLYPH_H, GLYPH_STRIDE, GLYPH_W};
-use crate::layout::Rect;
+use crate::layout::{Rect, HUD_H};
 use crate::mode::UiMode;
 use crate::model::{NativeModel, RepeatDivisionChoice, LED_COLS, LED_ROWS};
 use crate::phrases;
@@ -264,45 +264,90 @@ fn draw_synth(scene: &mut Scene, model: &NativeModel) {
 }
 
 fn draw_seq(scene: &mut Scene, model: &NativeModel) {
-    use crate::seq::SeqPhase;
     let layout = model.layout;
-    let rec_bg = if model.seq.phase == SeqPhase::Recording {
-        0x9d0006
-    } else {
-        0x5a2020
-    };
-    let play_bg = if model.seq.phase == SeqPhase::Playing {
-        0x689d6a
-    } else {
-        0x3a5040
-    };
-    scene.fill_rect(layout.seq_rec, rec_bg);
-    scene.text(layout.seq_rec.x + 40, layout.seq_rec.y + 42, "REC", 0xffffff);
-    scene.fill_rect(layout.seq_play, play_bg);
-    scene.text(layout.seq_play.x + 36, layout.seq_play.y + 42, "PLAY", 0xffffff);
-    scene.fill_rect(layout.seq_stop, 0x3c3836);
-    scene.text(layout.seq_stop.x + 24, layout.seq_stop.y + 42, "STOP", 0xffffff);
-    scene.fill_rect(layout.seq_clear, 0x3c3836);
-    scene.text(layout.seq_clear.x + 16, layout.seq_clear.y + 42, "CLEAR", 0xffffff);
-    scene.fill_rect(layout.seq_bpm_down, 0x282838);
-    scene.text(layout.seq_bpm_down.x + 36, layout.seq_bpm_down.y + 22, "-BPM", 0xffffff);
-    scene.fill_rect(layout.seq_bpm_up, 0x282838);
-    scene.text(layout.seq_bpm_up.x + 36, layout.seq_bpm_up.y + 22, "+BPM", 0xffffff);
+    let seq = &model.seq;
+
+    scene.text(16, HUD_H + 10, "Sequencer", 0xfbf1c7);
     scene.text(
-        300,
-        layout.seq_bpm_up.y + 22,
-        &format!("{:.0} BPM  {}", model.seq.bpm, model.seq.status),
-        0xd5c4a1,
+        160,
+        HUD_H + 12,
+        &format!("{:.0} BPM · drums on-screen", seq.bpm),
+        0xa89984,
+    );
+    scene.text(16, HUD_H + 30, &seq.status, 0xfabd2f);
+    scene.text(16, HUD_H + 44, &seq.layer_line, 0x83a598);
+
+    let (rec_label, rec_bg) = seq.rec_label();
+    let (play_label, play_bg) = seq.play_label();
+    scene.fill_rect(layout.seq_rec, rec_bg);
+    scene.text(layout.seq_rec.x + 48, layout.seq_rec.y + 30, rec_label, 0xffffff);
+    scene.fill_rect(layout.seq_play, play_bg);
+    scene.text(layout.seq_play.x + 140, layout.seq_play.y + 30, play_label, 0xffffff);
+
+    let pending = seq.has_pending();
+    let keep_bg = if pending { 0x458588 } else { 0x3c3836 };
+    let drop_bg = if pending { 0x665c54 } else { 0x3c3836 };
+    let undo_bg = if seq.layer_count() > 1 {
+        0x665c54
+    } else {
+        0x3c3836
+    };
+    scene.fill_rect(layout.seq_keep, keep_bg);
+    scene.text(layout.seq_keep.x + 88, layout.seq_keep.y + 18, "KEEP", 0xffffff);
+    scene.fill_rect(layout.seq_drop, drop_bg);
+    scene.text(layout.seq_drop.x + 88, layout.seq_drop.y + 18, "DROP", 0xffffff);
+    scene.fill_rect(layout.seq_undo, undo_bg);
+    scene.text(layout.seq_undo.x + 88, layout.seq_undo.y + 18, "UNDO", 0xffffff);
+
+    scene.fill_rect(layout.seq_len_double, 0x504945);
+    scene.text(
+        layout.seq_len_double.x + 44,
+        layout.seq_len_double.y + 14,
+        "LEN x2",
+        0xffffff,
+    );
+    scene.fill_rect(layout.seq_len_halve, 0x504945);
+    scene.text(
+        layout.seq_len_halve.x + 44,
+        layout.seq_len_halve.y + 14,
+        "LEN /2",
+        0xffffff,
+    );
+    let extend_bg = if seq.extend_mode { 0x689d6a } else { 0x3c3836 };
+    let extend_label = if seq.extend_mode {
+        "OVERDUB: EXTEND"
+    } else {
+        "OVERDUB: WRAP"
+    };
+    scene.fill_rect(layout.seq_extend, extend_bg);
+    scene.text(
+        layout.seq_extend.x + 100,
+        layout.seq_extend.y + 14,
+        extend_label,
+        0xffffff,
     );
 
-    const DRUM_LABELS: [&str; 16] = [
-        "KICK", "SNARE", "CLAP", "CHH", "OHH", "TOM L", "TOM M", "RIM", "KIK2", "RIM2", "SHKR",
-        "PED", "TOM H", "COW", "CLV", "RIDE",
+    scene.fill_rect(layout.seq_stop, 0x504945);
+    scene.text(layout.seq_stop.x + 52, layout.seq_stop.y + 14, "STOP ALL", 0xffffff);
+    scene.fill_rect(layout.seq_clear, 0x3c3836);
+    scene.text(layout.seq_clear.x + 64, layout.seq_clear.y + 14, "CLEAR", 0xffffff);
+    scene.fill_rect(layout.seq_bpm_down, 0x282828);
+    scene.text(layout.seq_bpm_down.x + 58, layout.seq_bpm_down.y + 14, "- BPM", 0xffffff);
+    scene.fill_rect(layout.seq_bpm_up, 0x282828);
+    scene.text(layout.seq_bpm_up.x + 58, layout.seq_bpm_up.y + 14, "+ BPM", 0xffffff);
+
+    const DRUM_LABELS: [&str; 8] = [
+        "KICK", "SNARE", "CLAP", "CHH", "OHH", "TOM L", "TOM M", "RIM",
     ];
-    for index in 0..16 {
+    for index in 0..8 {
         let cell = layout.seq_drum_cell(index);
-        scene.fill_rect(cell, 0x242436);
-        scene.text(cell.x + 8, cell.y + cell.h / 2 - 3, DRUM_LABELS[index], 0xd0d0e0);
+        let bg = if seq.is_recording() {
+            0x3a2828
+        } else {
+            0x242436
+        };
+        scene.fill_rect(cell, bg);
+        scene.text(cell.x + 16, cell.y + cell.h / 2 - 3, DRUM_LABELS[index], 0xd0d0e0);
     }
 }
 

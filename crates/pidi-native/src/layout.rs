@@ -23,6 +23,12 @@ pub enum Hit {
     KaossFull,
     SeqRec,
     SeqPlay,
+    SeqKeep,
+    SeqDrop,
+    SeqUndo,
+    SeqLenDouble,
+    SeqLenHalve,
+    SeqExtend,
     SeqStop,
     SeqClear,
     SeqBpmUp,
@@ -77,6 +83,12 @@ pub struct Layout {
     pub kaoss_full: Rect,
     pub seq_rec: Rect,
     pub seq_play: Rect,
+    pub seq_keep: Rect,
+    pub seq_drop: Rect,
+    pub seq_undo: Rect,
+    pub seq_len_double: Rect,
+    pub seq_len_halve: Rect,
+    pub seq_extend: Rect,
     pub seq_stop: Rect,
     pub seq_clear: Rect,
     pub seq_bpm_up: Rect,
@@ -182,47 +194,86 @@ impl Layout {
                 w: 84,
                 h: 40,
             },
+            // Tk-like transport chrome, plus a compact drum strip for live capture
+            // (improvement vs Tk — no need to leave SEQ to hit drums).
+            // Content top: status/layer (~52px), then rows, then drums.
             seq_rec: Rect {
-                x: 24,
-                y: HUD_H + 24,
-                w: 240,
-                h: 100,
+                x: 12,
+                y: HUD_H + 56,
+                w: 384,
+                h: 78,
             },
             seq_play: Rect {
-                x: 280,
-                y: HUD_H + 24,
-                w: 240,
-                h: 100,
+                x: 404,
+                y: HUD_H + 56,
+                w: 384,
+                h: 78,
+            },
+            seq_keep: Rect {
+                x: 12,
+                y: HUD_H + 142,
+                w: 252,
+                h: 52,
+            },
+            seq_drop: Rect {
+                x: 274,
+                y: HUD_H + 142,
+                w: 252,
+                h: 52,
+            },
+            seq_undo: Rect {
+                x: 536,
+                y: HUD_H + 142,
+                w: 252,
+                h: 52,
+            },
+            seq_len_double: Rect {
+                x: 12,
+                y: HUD_H + 202,
+                w: 168,
+                h: 44,
+            },
+            seq_len_halve: Rect {
+                x: 188,
+                y: HUD_H + 202,
+                w: 168,
+                h: 44,
+            },
+            seq_extend: Rect {
+                x: 364,
+                y: HUD_H + 202,
+                w: 424,
+                h: 44,
             },
             seq_stop: Rect {
-                x: 536,
-                y: HUD_H + 24,
-                w: 120,
-                h: 100,
+                x: 12,
+                y: HUD_H + 254,
+                w: 200,
+                h: 44,
             },
             seq_clear: Rect {
-                x: 668,
-                y: HUD_H + 24,
-                w: 108,
-                h: 100,
+                x: 220,
+                y: HUD_H + 254,
+                w: 200,
+                h: 44,
             },
             seq_bpm_down: Rect {
-                x: 24,
-                y: HUD_H + 140,
-                w: 120,
-                h: 56,
+                x: 428,
+                y: HUD_H + 254,
+                w: 176,
+                h: 44,
             },
             seq_bpm_up: Rect {
-                x: 156,
-                y: HUD_H + 140,
-                w: 120,
-                h: 56,
+                x: 612,
+                y: HUD_H + 254,
+                w: 176,
+                h: 44,
             },
             seq_drums: Rect {
-                x: 24,
-                y: HUD_H + 220,
-                w: 752,
-                h: content_h - 240,
+                x: 12,
+                y: HUD_H + 306,
+                w: 776,
+                h: content_h - 314,
             },
             preset_grid: Rect {
                 x: 24,
@@ -431,10 +482,11 @@ impl Layout {
     }
 
     pub fn seq_drum_cell(&self, index: usize) -> Rect {
+        // Eight fat pads (kick→ohh) — easier on 800×480 than a cramped 4×4.
         let col = (index % 4) as i32;
         let row = (index / 4) as i32;
         let gw = self.seq_drums.w / 4;
-        let gh = self.seq_drums.h / 4;
+        let gh = self.seq_drums.h / 2;
         Rect {
             x: self.seq_drums.x + col * gw + 3,
             y: self.seq_drums.y + row * gh + 3,
@@ -625,6 +677,24 @@ impl Layout {
         if self.seq_play.contains(px, py) {
             return Hit::SeqPlay;
         }
+        if self.seq_keep.contains(px, py) {
+            return Hit::SeqKeep;
+        }
+        if self.seq_drop.contains(px, py) {
+            return Hit::SeqDrop;
+        }
+        if self.seq_undo.contains(px, py) {
+            return Hit::SeqUndo;
+        }
+        if self.seq_len_double.contains(px, py) {
+            return Hit::SeqLenDouble;
+        }
+        if self.seq_len_halve.contains(px, py) {
+            return Hit::SeqLenHalve;
+        }
+        if self.seq_extend.contains(px, py) {
+            return Hit::SeqExtend;
+        }
         if self.seq_stop.contains(px, py) {
             return Hit::SeqStop;
         }
@@ -637,7 +707,7 @@ impl Layout {
         if self.seq_bpm_down.contains(px, py) {
             return Hit::SeqBpmDown;
         }
-        for index in 0..16 {
+        for index in 0..8 {
             if self.seq_drum_cell(index).contains(px, py) {
                 return Hit::Drum {
                     index,

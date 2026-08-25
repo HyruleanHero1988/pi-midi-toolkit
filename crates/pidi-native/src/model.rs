@@ -5,7 +5,7 @@ use crate::layout::{Hit, Layout, Surface};
 use crate::mode::UiMode;
 use crate::phrases::{self, PhrasePad};
 use crate::presets::{self, PresetSnapshot};
-use crate::seq::{SeqModel, SeqPhase, SeqPlayAction, SeqRecAction, SEQ_CLIP_SLOT};
+use crate::seq::{SeqAction, SeqModel, SEQ_CLIP_SLOT};
 use crate::songs::{self, SONG_CLIP_SLOT};
 use jambox_protocol::{RepeatDivision, RepeatPhase, StatusReply, TouchPhase};
 use std::path::PathBuf;
@@ -428,7 +428,8 @@ impl NativeModel {
                     py,
                     surface: Surface::UiTap,
                 };
-                self.handle_seq_rec(outbox);
+                let action = self.seq.toggle_record();
+                self.apply_seq_action(action, outbox);
             }
             Hit::SeqPlay => {
                 self.fingers[slot] = Finger {
@@ -441,7 +442,92 @@ impl NativeModel {
                     py,
                     surface: Surface::UiTap,
                 };
-                self.handle_seq_play(outbox);
+                let action = self.seq.toggle_play();
+                self.apply_seq_action(action, outbox);
+            }
+            Hit::SeqKeep => {
+                self.fingers[slot] = Finger {
+                    active: true,
+                    id,
+                    gesture,
+                    x: 0.0,
+                    y: 0.0,
+                    px,
+                    py,
+                    surface: Surface::UiTap,
+                };
+                let action = self.seq.keep();
+                self.apply_seq_action(action, outbox);
+            }
+            Hit::SeqDrop => {
+                self.fingers[slot] = Finger {
+                    active: true,
+                    id,
+                    gesture,
+                    x: 0.0,
+                    y: 0.0,
+                    px,
+                    py,
+                    surface: Surface::UiTap,
+                };
+                let action = self.seq.drop();
+                self.apply_seq_action(action, outbox);
+            }
+            Hit::SeqUndo => {
+                self.fingers[slot] = Finger {
+                    active: true,
+                    id,
+                    gesture,
+                    x: 0.0,
+                    y: 0.0,
+                    px,
+                    py,
+                    surface: Surface::UiTap,
+                };
+                let action = self.seq.undo();
+                self.apply_seq_action(action, outbox);
+            }
+            Hit::SeqLenDouble => {
+                self.fingers[slot] = Finger {
+                    active: true,
+                    id,
+                    gesture,
+                    x: 0.0,
+                    y: 0.0,
+                    px,
+                    py,
+                    surface: Surface::UiTap,
+                };
+                let action = self.seq.double_len();
+                self.apply_seq_action(action, outbox);
+            }
+            Hit::SeqLenHalve => {
+                self.fingers[slot] = Finger {
+                    active: true,
+                    id,
+                    gesture,
+                    x: 0.0,
+                    y: 0.0,
+                    px,
+                    py,
+                    surface: Surface::UiTap,
+                };
+                let action = self.seq.halve_len();
+                self.apply_seq_action(action, outbox);
+            }
+            Hit::SeqExtend => {
+                self.fingers[slot] = Finger {
+                    active: true,
+                    id,
+                    gesture,
+                    x: 0.0,
+                    y: 0.0,
+                    px,
+                    py,
+                    surface: Surface::UiTap,
+                };
+                self.seq.toggle_extend();
+                self.status_line = self.seq.status.clone();
             }
             Hit::SeqStop => {
                 self.fingers[slot] = Finger {
@@ -454,10 +540,8 @@ impl NativeModel {
                     py,
                     surface: Surface::UiTap,
                 };
-                outbox.clip_stop(SEQ_CLIP_SLOT, "off");
-                self.seq.phase = SeqPhase::Idle;
-                self.seq.status = "stopped".into();
-                self.status_line = self.seq.status.clone();
+                let action = self.seq.stop_all();
+                self.apply_seq_action(action, outbox);
             }
             Hit::SeqClear => {
                 self.fingers[slot] = Finger {
@@ -470,11 +554,8 @@ impl NativeModel {
                     py,
                     surface: Surface::UiTap,
                 };
-                if self.seq.clear() {
-                    outbox.clip_clear(SEQ_CLIP_SLOT);
-                    outbox.clip_stop(SEQ_CLIP_SLOT, "off");
-                }
-                self.status_line = self.seq.status.clone();
+                let action = self.seq.clear();
+                self.apply_seq_action(action, outbox);
             }
             Hit::SeqBpmUp => {
                 self.fingers[slot] = Finger {
@@ -702,6 +783,7 @@ impl NativeModel {
                         self.division.as_wire(),
                     );
                 } else {
+                    outbox.note_off(DRUM_CHANNEL, note);
                     self.seq.push_note(false, DRUM_CHANNEL, note, 0);
                 }
             }
@@ -791,32 +873,28 @@ impl NativeModel {
         self.status_line = format!("key {}", jambox_core::NOTE_NAMES[self.kaoss_key as usize]);
     }
 
-    fn handle_seq_rec(&mut self, outbox: &mut Outbox) {
-        match self.seq.toggle_record() {
-            SeqRecAction::Started => {
+    fn apply_seq_action(&mut self, action: SeqAction, outbox: &mut Outbox) {
+        match action {
+            SeqAction::None => {}
+            SeqAction::Stop => {
                 outbox.clip_stop(SEQ_CLIP_SLOT, "off");
             }
-            SeqRecAction::Empty => {}
-            SeqRecAction::Finished {
+            SeqAction::Clear => {
+                outbox.clip_clear(SEQ_CLIP_SLOT);
+                outbox.clip_stop(SEQ_CLIP_SLOT, "off");
+            }
+            SeqAction::Upload {
                 events,
                 length_ticks,
+                launch,
             } => {
-                outbox.clip_load(SEQ_CLIP_SLOT, length_ticks, "loop", events);
-            }
-        }
-        self.status_line = self.seq.status.clone();
-    }
-
-    fn handle_seq_play(&mut self, outbox: &mut Outbox) {
-        match self.seq.toggle_play() {
-            SeqPlayAction::Start => {
                 outbox.tempo(self.seq.bpm);
-                outbox.clip_launch(SEQ_CLIP_SLOT, "bar");
+                self.bpm = self.seq.bpm;
+                outbox.clip_load(SEQ_CLIP_SLOT, length_ticks, "loop", events);
+                if launch {
+                    outbox.clip_launch(SEQ_CLIP_SLOT, "bar");
+                }
             }
-            SeqPlayAction::Stop => {
-                outbox.clip_stop(SEQ_CLIP_SLOT, "off");
-            }
-            SeqPlayAction::None => {}
         }
         self.status_line = self.seq.status.clone();
     }
