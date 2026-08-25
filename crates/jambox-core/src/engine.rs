@@ -8,7 +8,7 @@ use midi_core::MidiEvent;
 
 use crate::clip::{ClipEventKind, LaunchMode, SeqEvent, Sequencer};
 use crate::command::{
-    Command, FxParam, FxTarget, ScheduledCommand, SynthParam, MAX_BLOCK_COMMANDS,
+    Command, EmitMode, FxParam, FxTarget, ScheduledCommand, SynthParam, MAX_BLOCK_COMMANDS,
 };
 use crate::drums::{
     drum_model_for_note, DrumKit, DrumMacros, DrumModel, DRUM_MODEL_COUNT, MAX_DRUM_HITS,
@@ -172,6 +172,8 @@ pub struct JamboxEngine {
     bend_semis: f32,
     tone_lp: f32,
     tone_bp: f32,
+    clip_emit: EmitMode,
+    kaoss_emit: EmitMode,
     status: EngineStatus,
 }
 
@@ -232,6 +234,8 @@ impl JamboxEngine {
             bend_semis: 0.0,
             tone_lp: 0.0,
             tone_bp: 0.0,
+            clip_emit: EmitMode::Both,
+            kaoss_emit: EmitMode::Local,
             status: EngineStatus::default(),
         }
     }
@@ -259,6 +263,14 @@ impl JamboxEngine {
 
     pub fn active_touches(&self) -> usize {
         self.kaoss.active_count()
+    }
+
+    pub fn clip_emit(&self) -> EmitMode {
+        self.clip_emit
+    }
+
+    pub fn kaoss_emit(&self) -> EmitMode {
+        self.kaoss_emit
     }
 
     /// Make sure there is one FX insert per wavetable. Host thread (allocates).
@@ -367,8 +379,12 @@ impl JamboxEngine {
                         },
                     ),
                 };
-                self.timeline.push((frame, command));
-                midi_out.push(frame, midi);
+                if self.clip_emit.includes_local() {
+                    self.timeline.push((frame, command));
+                }
+                if self.clip_emit.includes_usb() {
+                    midi_out.push(frame, midi);
+                }
             }
 
             let repeat_count = self.repeats.collect(
@@ -412,7 +428,7 @@ impl JamboxEngine {
             {
                 let command = self.timeline[next].1;
                 let absolute_frame = block_start.saturating_add(cursor as u64);
-                self.apply(command, absolute_frame);
+                self.apply(command, absolute_frame, cursor as u32, midi_out);
                 next += 1;
             }
 
@@ -548,7 +564,13 @@ impl JamboxEngine {
         }
     }
 
-    fn apply(&mut self, command: Command, absolute_frame: u64) {
+    fn apply(
+        &mut self,
+        command: Command,
+        absolute_frame: u64,
+        relative_frame: u32,
+        midi_out: &mut MidiOutSink,
+    ) {
         match command {
             Command::NoteOn {
                 channel,
@@ -714,6 +736,19 @@ impl JamboxEngine {
                 self.kaoss
                     .configure(scale_index, key, root_midi, octaves);
             }
+            Command::SetEmitMode { target, mode } => {
+                let mode = EmitMode::from_u8(mode);
+                if target == 1 {
+                    self.kaoss_emit = mode;
+                } else {
+                    self.clip_emit = mode;
+                }
+            }
+            Command::MidiEmit { status, d1, d2 } => {
+                if let Some(ev) = MidiEvent::parse(&[status, d1, d2]) {
+                    midi_out.push(relative_frame, ev);
+                }
+            }
         }
     }
 
@@ -851,8 +886,13 @@ mod tests {
 
     fn engine() -> JamboxEngine {
         let mut e = JamboxEngine::new(48_000.0);
-        e.apply(Command::SetTempo { bpm: 120.0 }, 0);
+        apply_now(&mut e, Command::SetTempo { bpm: 120.0 });
         e
+    }
+
+    fn apply_now(e: &mut JamboxEngine, command: Command) {
+        let mut midi = MidiOutSink::new();
+        e.apply(command, 0, 0, &mut midi);
     }
 
     fn peak(buf: &[f32]) -> f32 {
@@ -933,12 +973,12 @@ mod tests {
             PPQ,
         );
         e.sequencer_mut().slot_mut(0).unwrap().set_clip(Some(clip));
-        e.apply(
+        apply_now(
+            &mut e,
             Command::LaunchClip {
                 slot: 0,
                 quantize: Quantize::Off,
             },
-            0,
         );
 
         let mut out = vec![0.0f32; 256];
@@ -946,6 +986,106 @@ mod tests {
         e.render(&mut out, &[], &mut midi);
         assert_eq!(midi.len(), 1);
         assert!(matches!(midi.as_slice()[0].1, MidiEvent::NoteOn { .. }));
+    }
+
+    #[test]
+    fn clip_local_only_plays_locally_without_midi_out() {
+        let mut e = engine();
+        apply_now(
+            &mut e,
+            Command::SetEmitMode {
+                target: 0,
+                mode: EmitMode::Local as u8,
+            },
+        );
+        let clip = Clip::new(
+            vec![ClipEvent {
+                tick: 0,
+                kind: ClipEventKind::NoteOn {
+                    channel: 0,
+                    note: 60,
+                    velocity: 100,
+                },
+            }],
+            PPQ,
+        );
+        e.sequencer_mut().slot_mut(0).unwrap().set_clip(Some(clip));
+        apply_now(
+            &mut e,
+            Command::LaunchClip {
+                slot: 0,
+                quantize: Quantize::Off,
+            },
+        );
+        let mut out = vec![0.0f32; 512];
+        let mut midi = MidiOutSink::new();
+        e.render(&mut out, &[], &mut midi);
+        assert!(midi.is_empty());
+        assert!(peak(&out) > 0.01);
+        assert_eq!(e.status().active_voices, 1);
+    }
+
+    #[test]
+    fn clip_usb_only_emits_midi_without_local_voices() {
+        let mut e = engine();
+        apply_now(
+            &mut e,
+            Command::SetEmitMode {
+                target: 0,
+                mode: EmitMode::Usb as u8,
+            },
+        );
+        let clip = Clip::new(
+            vec![ClipEvent {
+                tick: 0,
+                kind: ClipEventKind::NoteOn {
+                    channel: 0,
+                    note: 60,
+                    velocity: 100,
+                },
+            }],
+            PPQ,
+        );
+        e.sequencer_mut().slot_mut(0).unwrap().set_clip(Some(clip));
+        apply_now(
+            &mut e,
+            Command::LaunchClip {
+                slot: 0,
+                quantize: Quantize::Off,
+            },
+        );
+        let mut out = vec![0.0f32; 512];
+        let mut midi = MidiOutSink::new();
+        e.render(&mut out, &[], &mut midi);
+        assert_eq!(midi.len(), 1);
+        assert!(matches!(midi.as_slice()[0].1, MidiEvent::NoteOn { .. }));
+        assert_eq!(e.status().active_voices, 0);
+        assert_eq!(peak(&out), 0.0);
+    }
+
+    #[test]
+    fn midi_emit_appears_in_sink() {
+        let mut e = engine();
+        let mut out = vec![0.0f32; 64];
+        let mut midi = MidiOutSink::new();
+        e.render(
+            &mut out,
+            &[ScheduledCommand::now(Command::MidiEmit {
+                status: 0xb0,
+                d1: 12,
+                d2: 64,
+            })],
+            &mut midi,
+        );
+        assert_eq!(midi.len(), 1);
+        assert!(matches!(
+            midi.as_slice()[0].1,
+            MidiEvent::ControlChange {
+                controller: 12,
+                value: 64,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -1054,28 +1194,28 @@ mod tests {
         let mut dry = engine();
         let mut wet = engine();
         for e in [&mut dry, &mut wet] {
-            e.apply(
+            apply_now(
+                e,
                 Command::SetSynth {
                     param: SynthParam::VibratoDepth,
                     value: 1.0,
                 },
-                0,
             );
-            e.apply(
+            apply_now(
+                e,
                 Command::NoteOn {
                     channel: 0,
                     note: 69,
                     velocity: 127,
                 },
-                0,
             );
         }
-        wet.apply(
+        apply_now(
+            &mut wet,
             Command::SetSynth {
                 param: SynthParam::VibratoAlways,
                 value: 1.0,
             },
-            0,
         );
         let mut dry_buf = vec![0.0f32; 2048];
         let mut wet_buf = vec![0.0f32; 2048];
@@ -1108,12 +1248,12 @@ mod tests {
             PPQ * 4,
         );
         e.sequencer_mut().slot_mut(0).unwrap().set_clip(Some(clip));
-        e.apply(
+        apply_now(
+            &mut e,
             Command::LaunchClip {
                 slot: 0,
                 quantize: Quantize::Off,
             },
-            0,
         );
 
         let beat = e.transport().samples_per_beat() as u64;

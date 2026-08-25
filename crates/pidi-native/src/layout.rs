@@ -39,7 +39,11 @@ pub enum Hit {
     SynthPickPrev,
     SynthPickNext,
     SynthPickWave(usize),
+    SynthSaveAs,
     DrumMacro(usize),
+    MapThruOn,
+    MapThruOff,
+    MapRefresh,
     KaossProg,
     KaossScale,
     KaossKey,
@@ -153,6 +157,11 @@ pub struct Layout {
     pub synth_pick_prev: Rect,
     pub synth_pick_next: Rect,
     pub synth_pick_grid: Rect,
+    pub synth_save_as: Rect,
+    pub synth_pick_save_as: Rect,
+    pub map_thru_on: Rect,
+    pub map_thru_off: Rect,
+    pub map_refresh: Rect,
     pub kaoss_prog: Rect,
     pub kaoss_scale: Rect,
     pub kaoss_key: Rect,
@@ -448,33 +457,39 @@ impl Layout {
                 h: content_h - 296,
             },
             synth_wave_a: Rect {
-                x: 24,
+                x: 16,
                 y: HUD_H + 12,
-                w: 240,
+                w: 200,
                 h: 48,
             },
             synth_wave_b: Rect {
-                x: 272,
+                x: 224,
                 y: HUD_H + 12,
-                w: 240,
+                w: 200,
                 h: 48,
             },
             synth_swap: Rect {
-                x: 520,
+                x: 432,
                 y: HUD_H + 12,
-                w: 100,
+                w: 88,
+                h: 48,
+            },
+            synth_save_as: Rect {
+                x: 528,
+                y: HUD_H + 12,
+                w: 120,
                 h: 48,
             },
             synth_vib_down: Rect {
-                x: 628,
+                x: 656,
                 y: HUD_H + 12,
-                w: 76,
+                w: 64,
                 h: 48,
             },
             synth_vib_up: Rect {
-                x: 712,
+                x: 728,
                 y: HUD_H + 12,
-                w: 76,
+                w: 56,
                 h: 48,
             },
             synth_pick_grid: Rect {
@@ -486,20 +501,44 @@ impl Layout {
             synth_pick_prev: Rect {
                 x: 16,
                 y: HUD_H + content_h - 56,
-                w: 160,
+                w: 140,
                 h: 48,
             },
             synth_pick_next: Rect {
-                x: 184,
+                x: 164,
                 y: HUD_H + content_h - 56,
-                w: 160,
+                w: 140,
+                h: 48,
+            },
+            synth_pick_save_as: Rect {
+                x: 312,
+                y: HUD_H + content_h - 56,
+                w: 140,
                 h: 48,
             },
             synth_pick_done: Rect {
-                x: 360,
+                x: 460,
                 y: HUD_H + content_h - 56,
-                w: 424,
+                w: 324,
                 h: 48,
+            },
+            map_thru_on: Rect {
+                x: 24,
+                y: HUD_H + 120,
+                w: 240,
+                h: 72,
+            },
+            map_thru_off: Rect {
+                x: 280,
+                y: HUD_H + 120,
+                w: 240,
+                h: 72,
+            },
+            map_refresh: Rect {
+                x: 536,
+                y: HUD_H + 120,
+                w: 240,
+                h: 72,
             },
             // Tk-like transport chrome, plus a compact drum strip for live capture
             // (improvement vs Tk — no need to leave SEQ to hit drums).
@@ -745,11 +784,12 @@ impl Layout {
     pub fn apply_kaoss_full(&mut self, full: bool) {
         let content_h = SCREEN_H - HUD_H - NAV_H;
         if full {
+            // Fill the content area; FULL button hidden (exit via bottom-edge hold).
             self.kaoss = Rect {
                 x: 8,
                 y: HUD_H + 8,
                 w: SCREEN_W - 16,
-                h: content_h - 56,
+                h: content_h - 16,
             };
             self.drums = Rect {
                 x: 0,
@@ -763,7 +803,6 @@ impl Layout {
                 w: 0,
                 h: 0,
             };
-            // Thin exit strip — tap FULL again to leave (clearer than Tk edge-hold).
             self.kaoss_prog = Rect {
                 x: 0,
                 y: 0,
@@ -843,10 +882,10 @@ impl Layout {
                 h: 0,
             };
             self.kaoss_full = Rect {
-                x: 280,
-                y: HUD_H + content_h - 48,
-                w: 240,
-                h: 40,
+                x: 0,
+                y: 0,
+                w: 0,
+                h: 0,
             };
         } else {
             *self = Self::new();
@@ -865,10 +904,11 @@ impl Layout {
     }
 
     pub fn home_tile(&self, index: usize) -> Rect {
-        let cols = 3i32;
-        let rows = 3i32;
+        let n = UiMode::ALL.len() as i32;
+        let cols = 5i32;
+        let rows = (n + cols - 1) / cols;
         let gw = (self.content.w - 24) / cols;
-        let gh = (self.content.h - 24) / rows;
+        let gh = (self.content.h - 24) / rows.max(1);
         let col = (index as i32) % cols;
         let row = (index as i32) / cols;
         Rect {
@@ -995,6 +1035,7 @@ impl Layout {
             UiMode::Songs => self.hit_songs(px, py),
             UiMode::Settings => self.hit_settings(px, py),
             UiMode::Log => self.hit_log(px, py),
+            UiMode::Map => self.hit_map(px, py),
         }
     }
 
@@ -1151,6 +1192,9 @@ impl Layout {
         if self.synth_swap.contains(px, py) {
             return Hit::SynthSwap;
         }
+        if self.synth_save_as.contains(px, py) {
+            return Hit::SynthSaveAs;
+        }
         if self.synth_vib_down.contains(px, py) {
             return Hit::SynthVibDown;
         }
@@ -1178,6 +1222,9 @@ impl Layout {
     pub fn hit_synth_picker(&self, px: i32, py: i32, page: usize, page_len: usize) -> Hit {
         if self.synth_pick_done.contains(px, py) {
             return Hit::SynthPickDone;
+        }
+        if self.synth_pick_save_as.contains(px, py) {
+            return Hit::SynthSaveAs;
         }
         if self.synth_pick_prev.contains(px, py) {
             return Hit::SynthPickPrev;
@@ -1285,6 +1332,19 @@ impl Layout {
             if self.song_row(index).contains(px, py) {
                 return Hit::SongRow(index);
             }
+        }
+        Hit::None
+    }
+
+    fn hit_map(&self, px: i32, py: i32) -> Hit {
+        if self.map_thru_on.contains(px, py) {
+            return Hit::MapThruOn;
+        }
+        if self.map_thru_off.contains(px, py) {
+            return Hit::MapThruOff;
+        }
+        if self.map_refresh.contains(px, py) {
+            return Hit::MapRefresh;
         }
         Hit::None
     }

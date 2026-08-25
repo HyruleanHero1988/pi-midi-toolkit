@@ -1,19 +1,21 @@
 //! Instrument-surface state. Rendering and IPC consume this; they do not own notes.
 //!
-//! Intentional Tk non-parity (see also NATIVE_KIOSK.md): Map/Thru modes,
-//! Kaoss CC→DIN OUT routing, edge-hold full-pad exit, SAVE AS voice bake.
-//! WIFI/UPDATE are UI stubs (status/log only — use `deploy/` scripts).
+//! Remaining Tk gaps (see NATIVE_KIOSK.md): deeper Map remap UI.
+//! Map/WIFI/UPDATE are appliance-oriented host hooks.
 
 use crate::client::Outbox;
+use crate::host;
 use crate::kaoss_ui::{self, KaossPicker, KAOSS_PROGRAMS};
-use crate::layout::{Hit, Layout, Rect, Surface};
+use crate::layout::{Hit, Layout, Rect, Surface, NAV_H, SCREEN_H};
 use crate::mode::UiMode;
 use crate::phrases::{self, PhrasePad};
 use crate::presets::{self, PresetSnapshot};
 use crate::seq::{SeqAction, SeqModel, SEQ_CLIP_SLOT};
 use crate::session::{self, OutMode, SessionState};
 use crate::songs::{self, SONG_CLIP_SLOT};
+use crate::voice_bake;
 use crate::waves;
+use jambox_core::{kaoss_scale, note_at_x, scale_notes, velocity_at_y};
 use jambox_protocol::{MidiNotice, RepeatDivision, RepeatPhase, StatusReply, TouchPhase, WireClipEvent};
 use std::path::PathBuf;
 use std::time::Instant;
@@ -23,6 +25,13 @@ pub const LED_ROWS: usize = 7;
 pub const KICK_NOTE: u8 = 36;
 pub const DRUM_CHANNEL: u8 = 9;
 pub const MAX_FINGERS: usize = 5;
+/// Hold still on the bottom edge this long to leave FULL PAD (Tk uses ~700ms).
+pub const KAOSS_PLAY_EXIT_MS: u64 = 500;
+/// Bottom strip above the nav bar for full-pad exit.
+pub const KAOSS_FULL_EXIT_EDGE_PX: i32 = 24;
+const KAOSS_CC_X: u8 = 12;
+const KAOSS_CC_Y: u8 = 13;
+const KAOSS_CC_TOUCH: u8 = 92;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RepeatDivisionChoice {
@@ -139,6 +148,8 @@ pub struct NativeModel {
     pub kaoss_key: u8,
     pub kaoss_octaves: u8,
     pub kaoss_full: bool,
+    /// Finger parked in the bottom exit strip while full — hold to leave.
+    pub kaoss_full_exit_since: Option<Instant>,
     pub kaoss_hold: bool,
     pub kaoss_program: usize,
     pub kaoss_gate: usize,
@@ -167,6 +178,11 @@ pub struct NativeModel {
     pub pads_out: OutMode,
     pub song_out: OutMode,
     pub kaoss_out: OutMode,
+    /// Last USB Kaoss note (for retune / release).
+    kaoss_usb_note: Option<u8>,
+    kaoss_cc_x_sent: Option<u8>,
+    kaoss_cc_y_sent: Option<u8>,
+    kaoss_cc_touch_sent: Option<u8>,
     pub session_dirty: bool,
     pub last_autosave: Instant,
     /// false = CELLS (default), true = GLOW (larger soft finger blob).
@@ -223,6 +239,7 @@ impl NativeModel {
             kaoss_key: 0,
             kaoss_octaves: 2,
             kaoss_full: false,
+            kaoss_full_exit_since: None,
             kaoss_hold: false,
             kaoss_program: 0,
             kaoss_gate: 0,
@@ -250,7 +267,11 @@ impl NativeModel {
             log_lines: Vec::new(),
             pads_out: OutMode::Both,
             song_out: OutMode::Both,
-            kaoss_out: OutMode::Both,
+            kaoss_out: OutMode::Local,
+            kaoss_usb_note: None,
+            kaoss_cc_x_sent: None,
+            kaoss_cc_y_sent: None,
+            kaoss_cc_touch_sent: None,
             session_dirty: false,
             last_autosave: Instant::now(),
             kaoss_viz_glow: false,
@@ -343,6 +364,7 @@ impl NativeModel {
         self.synth_pick_a = None;
         if mode != UiMode::Kaoss && self.kaoss_full {
             self.kaoss_full = false;
+            self.kaoss_full_exit_since = None;
             self.layout.apply_kaoss_full(false);
         }
     }
@@ -383,6 +405,7 @@ impl NativeModel {
         if self.mode == UiMode::Kaoss {
             self.age_kaoss_viz(dt);
             self.paint_cells();
+            self.tick_kaoss_full_exit();
         }
         self.tick_kaoss_gate(outbox);
     }
@@ -410,6 +433,8 @@ impl NativeModel {
         self.pads_out = s.pads_out;
         self.song_out = s.song_out;
         self.kaoss_out = s.kaoss_out;
+        outbox.emit_mode("clips", self.pads_out.wire());
+        outbox.emit_mode("kaoss", self.kaoss_out.wire());
         outbox.tempo(self.bpm);
         outbox.morph_pair(self.morph_a, self.morph_b);
         outbox.synth("morph", self.synth_params[0]);
@@ -585,6 +610,7 @@ impl NativeModel {
                     py,
                     surface: Surface::Kaoss,
                 };
+                self.watch_kaoss_full_exit(py, true);
                 self.begin_kaoss_touch(gesture, x, y, outbox);
             }
             Hit::Drum { note, .. } => {
@@ -741,6 +767,7 @@ impl NativeModel {
             Hit::PadsOut => {
                 self.tap_ui(slot, id, gesture, px, py);
                 self.pads_out = self.pads_out.cycle();
+                outbox.emit_mode("clips", self.pads_out.wire());
                 self.status_line = self.pads_out.label().into();
                 self.push_log(format!("pads {}", self.pads_out.label()));
                 self.mark_dirty();
@@ -771,6 +798,10 @@ impl NativeModel {
             Hit::SynthSwap => {
                 self.tap_ui(slot, id, gesture, px, py);
                 self.swap_morph_pair(outbox);
+            }
+            Hit::SynthSaveAs => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.save_voice_as(outbox);
             }
             Hit::SynthVibUp => {
                 self.tap_ui(slot, id, gesture, px, py);
@@ -870,14 +901,15 @@ impl NativeModel {
             Hit::KaossFull => {
                 self.tap_ui(slot, id, gesture, px, py);
                 self.kaoss_picker = None;
-                self.kaoss_full = !self.kaoss_full;
-                self.layout.apply_kaoss_full(self.kaoss_full);
-                self.status_line = if self.kaoss_full {
-                    "FULL PAD — tap EXIT to leave".into()
+                if self.kaoss_full {
+                    self.leave_kaoss_full();
                 } else {
-                    "split pad".into()
-                };
-                self.mark_dirty();
+                    self.kaoss_full = true;
+                    self.kaoss_full_exit_since = None;
+                    self.layout.apply_kaoss_full(true);
+                    self.status_line = "hold bottom edge to exit".into();
+                    self.mark_dirty();
+                }
             }
             Hit::KaossShowAll | Hit::KaossSettings => {
                 self.tap_ui(slot, id, gesture, px, py);
@@ -911,6 +943,7 @@ impl NativeModel {
             Hit::KaossOut => {
                 self.tap_ui(slot, id, gesture, px, py);
                 self.kaoss_out = self.kaoss_out.cycle();
+                outbox.emit_mode("kaoss", self.kaoss_out.wire());
                 self.status_line = self.kaoss_out.label().into();
                 self.push_log(format!("kaoss {}", self.kaoss_out.label()));
                 self.mark_dirty();
@@ -1253,6 +1286,7 @@ impl NativeModel {
             Hit::SongOut => {
                 self.tap_ui(slot, id, gesture, px, py);
                 self.song_out = self.song_out.cycle();
+                outbox.emit_mode("clips", self.song_out.wire());
                 self.status_line = self.song_out.label().into();
                 self.push_log(format!("song {}", self.song_out.label()));
                 self.mark_dirty();
@@ -1307,15 +1341,43 @@ impl NativeModel {
             }
             Hit::SettingsWifi => {
                 self.tap_ui(slot, id, gesture, px, py);
-                self.status_line = "WIFI — use appliance deploy scripts".into();
-                self.push_log("WIFI stub: configure on-box via deploy/setup-pi.sh / host SSH — no in-UI network calls");
+                let (status, lines) = host::wifi_action();
+                self.status_line = status;
+                for line in lines {
+                    self.push_log(line);
+                }
             }
             Hit::SettingsUpdate => {
                 self.tap_ui(slot, id, gesture, px, py);
-                self.status_line = "UPDATE — use deploy/ (SET UPDATE)".into();
-                self.push_log(
-                    "UPDATE stub: cross-build with deploy/build-pi-bins.sh, ship via deploy/deploy.sh or SET→UPDATE — no fake GitHub calls",
-                );
+                let (status, lines) = host::update_check();
+                self.status_line = status;
+                for line in lines {
+                    self.push_log(line);
+                }
+            }
+            Hit::MapThruOn => {
+                self.tap_ui(slot, id, gesture, px, py);
+                let (status, lines) = host::map_thru_on();
+                self.status_line = status;
+                for line in lines {
+                    self.push_log(line);
+                }
+            }
+            Hit::MapThruOff => {
+                self.tap_ui(slot, id, gesture, px, py);
+                let (status, lines) = host::map_thru_off();
+                self.status_line = status;
+                for line in lines {
+                    self.push_log(line);
+                }
+            }
+            Hit::MapRefresh => {
+                self.tap_ui(slot, id, gesture, px, py);
+                let (status, lines) = host::map_list_ports();
+                self.status_line = status;
+                for line in lines {
+                    self.push_log(line);
+                }
             }
             Hit::LogClear => {
                 self.tap_ui(slot, id, gesture, px, py);
@@ -1345,6 +1407,7 @@ impl NativeModel {
                 let (x, y) = self.layout.kaoss.pad_xy(px, py);
                 self.fingers[slot].x = x;
                 self.fingers[slot].y = y;
+                self.watch_kaoss_full_exit(py, true);
                 self.move_kaoss_touch(self.fingers[slot].gesture, x, y, outbox);
             }
             Surface::SynthSlider { index } => {
@@ -1364,7 +1427,10 @@ impl NativeModel {
         let finger = self.fingers[slot];
         self.fingers[slot] = Finger::silent();
         match finger.surface {
-            Surface::Kaoss => self.end_kaoss_touch(finger.gesture, finger.x, finger.y, outbox),
+            Surface::Kaoss => {
+                self.watch_kaoss_full_exit(0, false);
+                self.end_kaoss_touch(finger.gesture, finger.x, finger.y, outbox);
+            }
             Surface::Drum { note, repeat } => {
                 if repeat {
                     outbox.repeat(
@@ -1870,16 +1936,10 @@ impl NativeModel {
     }
 
     fn push_kaoss_scale(&mut self, outbox: &mut Outbox) {
-        let root = match self.kaoss_octaves {
-            1 => 48,
-            2 => 48,
-            3 => 36,
-            _ => 24,
-        };
         outbox.kaoss_scale(
             self.kaoss_scale_index,
             self.kaoss_key,
-            root,
+            self.kaoss_root_midi(),
             self.kaoss_octaves,
         );
     }
@@ -1896,11 +1956,12 @@ impl NativeModel {
         self.kaoss_hold = !self.kaoss_hold;
         if !self.kaoss_hold {
             if let Some(gesture) = self.kaoss_hold_gesture.take() {
-                outbox.touch(gesture, TouchPhase::Up, 0.0, 0.0, self.kaoss_channel);
+                self.kaoss_touch_edge(gesture, TouchPhase::Up, 0.0, 0.0, outbox);
             }
             if !self.kaoss_touching {
                 self.release_kaoss_gate(outbox);
             }
+            self.kaoss_usb_silence(outbox, true);
             self.status_line = "HOLD off".into();
         } else {
             self.status_line = "HOLD on — latch last pad".into();
@@ -1910,9 +1971,10 @@ impl NativeModel {
 
     fn begin_kaoss_touch(&mut self, gesture: u32, x: f32, y: f32, outbox: &mut Outbox) {
         if let Some(held) = self.kaoss_hold_gesture.take() {
-            outbox.touch(held, TouchPhase::Up, 0.0, 0.0, self.kaoss_channel);
+            self.kaoss_touch_edge(held, TouchPhase::Up, 0.0, 0.0, outbox);
         }
         self.release_kaoss_gate(outbox);
+        self.kaoss_usb_silence(outbox, true);
         self.kaoss_touching = true;
         self.kaoss_latched_xy = (x, y);
         self.kaoss_gate_t0 = Some(Instant::now());
@@ -1922,10 +1984,12 @@ impl NativeModel {
         let prog = kaoss_ui::program(self.kaoss_program);
         let gated = prog.note && kaoss_ui::gate(self.kaoss_gate).beats > 0.0;
         if prog.note && !gated {
-            outbox.touch(gesture, TouchPhase::Down, x, y, self.kaoss_channel);
+            self.kaoss_touch_edge(gesture, TouchPhase::Down, x, y, outbox);
+            self.kaoss_usb_note_on(x, y, outbox);
         } else if gated {
             self.kaoss_gate_gesture = Some(gesture);
         }
+        self.kaoss_usb_pad_down(x, y, outbox);
         self.apply_kaoss_xy(prog, x, y, outbox);
     }
 
@@ -1935,8 +1999,10 @@ impl NativeModel {
         let prog = kaoss_ui::program(self.kaoss_program);
         let gated = prog.note && kaoss_ui::gate(self.kaoss_gate).beats > 0.0;
         if prog.note && !gated {
-            outbox.touch(gesture, TouchPhase::Move, x, y, self.kaoss_channel);
+            self.kaoss_touch_edge(gesture, TouchPhase::Move, x, y, outbox);
+            self.kaoss_usb_note_follow(x, y, outbox);
         }
+        self.kaoss_usb_xy(x, y, outbox);
         self.apply_kaoss_xy(prog, x, y, outbox);
     }
 
@@ -1956,16 +2022,19 @@ impl NativeModel {
         if gated {
             self.release_kaoss_gate(outbox);
         } else if prog.note {
-            outbox.touch(gesture, TouchPhase::Up, x, y, self.kaoss_channel);
+            self.kaoss_touch_edge(gesture, TouchPhase::Up, x, y, outbox);
+            self.kaoss_usb_note_off(outbox);
         }
+        self.kaoss_usb_pad_up(outbox);
     }
 
     fn release_kaoss_gate(&mut self, outbox: &mut Outbox) {
         if self.kaoss_gate_on {
             let (x, y) = self.kaoss_latched_xy;
             if let Some(g) = self.kaoss_gate_gesture {
-                outbox.touch(g, TouchPhase::Up, x, y, self.kaoss_channel);
+                self.kaoss_touch_edge(g, TouchPhase::Up, x, y, outbox);
             }
+            self.kaoss_usb_note_off(outbox);
             self.kaoss_gate_on = false;
         }
         self.kaoss_gate_gesture = None;
@@ -2009,13 +2078,210 @@ impl NativeModel {
             }
         };
         if want_on && !self.kaoss_gate_on {
-            outbox.touch(gesture, TouchPhase::Down, x, y, self.kaoss_channel);
+            self.kaoss_touch_edge(gesture, TouchPhase::Down, x, y, outbox);
+            self.kaoss_usb_note_on(x, y, outbox);
             self.kaoss_gate_on = true;
         } else if !want_on && self.kaoss_gate_on {
-            outbox.touch(gesture, TouchPhase::Up, x, y, self.kaoss_channel);
+            self.kaoss_touch_edge(gesture, TouchPhase::Up, x, y, outbox);
+            self.kaoss_usb_note_off(outbox);
             self.kaoss_gate_on = false;
         } else if want_on && self.kaoss_gate_on {
-            outbox.touch(gesture, TouchPhase::Move, x, y, self.kaoss_channel);
+            self.kaoss_touch_edge(gesture, TouchPhase::Move, x, y, outbox);
+            self.kaoss_usb_note_follow(x, y, outbox);
+        }
+    }
+
+    fn kaoss_touch_edge(
+        &self,
+        gesture: u32,
+        phase: TouchPhase,
+        x: f32,
+        y: f32,
+        outbox: &mut Outbox,
+    ) {
+        if self.kaoss_out.includes_local() {
+            outbox.touch(gesture, phase, x, y, self.kaoss_channel);
+        }
+    }
+
+    fn kaoss_root_midi(&self) -> u8 {
+        match self.kaoss_octaves {
+            1 | 2 => 48,
+            3 => 36,
+            _ => 24,
+        }
+    }
+
+    fn kaoss_note_at(&self, x: f32) -> u8 {
+        let scale = kaoss_scale(self.kaoss_scale_index as usize);
+        let notes = scale_notes(
+            scale.degrees,
+            self.kaoss_key,
+            self.kaoss_root_midi(),
+            self.kaoss_octaves,
+        );
+        let n = notes
+            .iter()
+            .rposition(|&n| n != 0)
+            .map(|i| i + 1)
+            .unwrap_or(1);
+        note_at_x(x, &notes[..n], n)
+    }
+
+    fn midi_cc01(value: f32) -> u8 {
+        (value.clamp(0.0, 1.0) * 127.0).round() as u8
+    }
+
+    fn kaoss_emit_cc(&mut self, control: u8, value: u8, outbox: &mut Outbox) {
+        if !self.kaoss_out.includes_usb() {
+            return;
+        }
+        let changed = match control {
+            KAOSS_CC_X => {
+                if self.kaoss_cc_x_sent == Some(value) {
+                    false
+                } else {
+                    self.kaoss_cc_x_sent = Some(value);
+                    true
+                }
+            }
+            KAOSS_CC_Y => {
+                if self.kaoss_cc_y_sent == Some(value) {
+                    false
+                } else {
+                    self.kaoss_cc_y_sent = Some(value);
+                    true
+                }
+            }
+            KAOSS_CC_TOUCH => {
+                if self.kaoss_cc_touch_sent == Some(value) {
+                    false
+                } else {
+                    self.kaoss_cc_touch_sent = Some(value);
+                    true
+                }
+            }
+            _ => true,
+        };
+        if changed {
+            outbox.midi_emit(
+                "cc",
+                self.kaoss_channel,
+                None,
+                None,
+                Some(control),
+                Some(value as u16),
+            );
+        }
+    }
+
+    fn kaoss_usb_pad_down(&mut self, x: f32, y: f32, outbox: &mut Outbox) {
+        self.kaoss_emit_cc(KAOSS_CC_TOUCH, 127, outbox);
+        self.kaoss_usb_xy(x, y, outbox);
+    }
+
+    fn kaoss_usb_pad_up(&mut self, outbox: &mut Outbox) {
+        self.kaoss_emit_cc(KAOSS_CC_TOUCH, 0, outbox);
+        self.kaoss_cc_x_sent = None;
+        self.kaoss_cc_y_sent = None;
+    }
+
+    fn kaoss_usb_xy(&mut self, x: f32, y: f32, outbox: &mut Outbox) {
+        self.kaoss_emit_cc(KAOSS_CC_X, Self::midi_cc01(x), outbox);
+        self.kaoss_emit_cc(KAOSS_CC_Y, Self::midi_cc01(y), outbox);
+    }
+
+    fn kaoss_usb_note_on(&mut self, x: f32, y: f32, outbox: &mut Outbox) {
+        if !self.kaoss_out.includes_usb() {
+            return;
+        }
+        let note = self.kaoss_note_at(x);
+        let velocity = velocity_at_y(y);
+        if let Some(old) = self.kaoss_usb_note {
+            if old != note {
+                outbox.midi_emit(
+                    "note_off",
+                    self.kaoss_channel,
+                    Some(old),
+                    Some(0),
+                    None,
+                    None,
+                );
+            } else {
+                return;
+            }
+        }
+        outbox.midi_emit(
+            "note_on",
+            self.kaoss_channel,
+            Some(note),
+            Some(velocity),
+            None,
+            None,
+        );
+        self.kaoss_usb_note = Some(note);
+    }
+
+    fn kaoss_usb_note_follow(&mut self, x: f32, y: f32, outbox: &mut Outbox) {
+        if !self.kaoss_out.includes_usb() {
+            return;
+        }
+        let note = self.kaoss_note_at(x);
+        let velocity = velocity_at_y(y);
+        match self.kaoss_usb_note {
+            Some(old) if old == note => {}
+            Some(old) => {
+                outbox.midi_emit(
+                    "note_off",
+                    self.kaoss_channel,
+                    Some(old),
+                    Some(0),
+                    None,
+                    None,
+                );
+                outbox.midi_emit(
+                    "note_on",
+                    self.kaoss_channel,
+                    Some(note),
+                    Some(velocity),
+                    None,
+                    None,
+                );
+                self.kaoss_usb_note = Some(note);
+            }
+            None => {
+                outbox.midi_emit(
+                    "note_on",
+                    self.kaoss_channel,
+                    Some(note),
+                    Some(velocity),
+                    None,
+                    None,
+                );
+                self.kaoss_usb_note = Some(note);
+            }
+        }
+    }
+
+    fn kaoss_usb_note_off(&mut self, outbox: &mut Outbox) {
+        if let Some(note) = self.kaoss_usb_note.take() {
+            if self.kaoss_out.includes_usb() {
+                outbox.midi_emit(
+                    "note_off",
+                    self.kaoss_channel,
+                    Some(note),
+                    Some(0),
+                    None,
+                    None,
+                );
+            }
+        }
+    }
+
+    fn kaoss_usb_silence(&mut self, outbox: &mut Outbox, clear_touch_cc: bool) {
+        self.kaoss_usb_note_off(outbox);
+        if clear_touch_cc {
+            self.kaoss_usb_pad_up(outbox);
         }
     }
 
@@ -2122,6 +2388,128 @@ impl NativeModel {
         } else {
             "pick wave B".into()
         };
+    }
+
+    fn in_kaoss_full_exit_zone(py: i32) -> bool {
+        py > SCREEN_H - NAV_H - KAOSS_FULL_EXIT_EDGE_PX
+    }
+
+    fn watch_kaoss_full_exit(&mut self, py: i32, touching: bool) {
+        if !self.kaoss_full {
+            self.kaoss_full_exit_since = None;
+            return;
+        }
+        if !touching {
+            self.kaoss_full_exit_since = None;
+            return;
+        }
+        if Self::in_kaoss_full_exit_zone(py) {
+            if self.kaoss_full_exit_since.is_none() {
+                self.kaoss_full_exit_since = Some(Instant::now());
+            }
+        } else {
+            self.kaoss_full_exit_since = None;
+        }
+    }
+
+    fn tick_kaoss_full_exit(&mut self) {
+        if !self.kaoss_full {
+            return;
+        }
+        let Some(t0) = self.kaoss_full_exit_since else {
+            return;
+        };
+        if t0.elapsed().as_millis() as u64 >= KAOSS_PLAY_EXIT_MS {
+            self.leave_kaoss_full();
+        }
+    }
+
+    fn leave_kaoss_full(&mut self) {
+        self.kaoss_full = false;
+        self.kaoss_full_exit_since = None;
+        self.layout.apply_kaoss_full(false);
+        self.status_line = "split pad".into();
+        self.mark_dirty();
+    }
+
+    fn save_voice_as(&mut self, outbox: &mut Outbox) {
+        self.ensure_library_loaded();
+        let name_a = self
+            .wave_names
+            .get(self.morph_a as usize)
+            .cloned()
+            .unwrap_or_else(|| "a".into());
+        let name_b = self
+            .wave_names
+            .get(self.morph_b as usize)
+            .cloned()
+            .unwrap_or_else(|| "b".into());
+        let morph = self.synth_params[0];
+        let drive = self.fx_bus[0];
+        let tone = self.synth_params[1];
+        let delay_mix = self.fx_bus[1];
+        let reverb_mix = self.fx_bus[2];
+        let existing = self.wave_names.clone();
+        let morph_a = self.morph_a as usize;
+        let morph_b = self.morph_b as usize;
+        let Some(bank) = self.wave_bank.as_mut() else {
+            self.status_line = "SAVE AS failed — no wave bank".into();
+            return;
+        };
+        bank.set_morph_pair(morph_a, morph_b);
+        bank.set_morph(morph);
+        match voice_bake::save_as(
+            bank,
+            &existing,
+            &name_a,
+            &name_b,
+            morph,
+            drive,
+            tone,
+            delay_mix,
+            reverb_mix,
+        ) {
+            Ok(baked) => {
+                self.wave_names = waves::list_wave_names(&waves::waves_dirs_from_env());
+                if !self.wave_names.iter().any(|n| n == &baked.name) {
+                    self.wave_names.push(baked.name.clone());
+                }
+                let idx = self
+                    .wave_names
+                    .iter()
+                    .position(|n| n == &baked.name)
+                    .unwrap_or(baked.index);
+                self.morph_a = idx as u16;
+                self.morph_b = idx as u16;
+                self.synth_params[0] = 0.0;
+                outbox.morph_pair(self.morph_a, self.morph_b);
+                outbox.synth("morph", 0.0);
+                self.sync_wave_bank();
+                self.synth_pick_a = None;
+                self.status_line = format!("saved {}", baked.name);
+                self.push_log(format!(
+                    "SAVE AS {} → {} + {} (dly={} rvb={})",
+                    baked.name,
+                    baked
+                        .wav_path
+                        .file_name()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("?"),
+                    baked
+                        .fx_path
+                        .file_name()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("?"),
+                    (delay_mix * 127.0) as i32,
+                    (reverb_mix * 127.0) as i32,
+                ));
+                self.mark_dirty();
+            }
+            Err(e) => {
+                self.status_line = format!("SAVE AS failed: {e}");
+                self.push_log(format!("SAVE AS failed: {e}"));
+            }
+        }
     }
 
     fn swap_morph_pair(&mut self, outbox: &mut Outbox) {
@@ -2282,11 +2670,12 @@ impl NativeModel {
         if self.kaoss_hold {
             self.kaoss_hold = false;
             if let Some(gesture) = self.kaoss_hold_gesture.take() {
-                outbox.touch(gesture, TouchPhase::Up, 0.0, 0.0, self.kaoss_channel);
+                self.kaoss_touch_edge(gesture, TouchPhase::Up, 0.0, 0.0, outbox);
             }
             if !self.kaoss_touching {
                 self.release_kaoss_gate(outbox);
             }
+            self.kaoss_usb_silence(outbox, true);
         }
         self.status_line = "KAOSS FX wiped".into();
         self.push_log("KAOSS FX wiped");

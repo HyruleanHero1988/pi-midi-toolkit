@@ -213,6 +213,32 @@ impl Outbox {
         });
     }
 
+    pub fn midi_emit(
+        &mut self,
+        kind: &str,
+        channel: u8,
+        note: Option<u8>,
+        velocity: Option<u8>,
+        control: Option<u8>,
+        value: Option<u16>,
+    ) {
+        self.reliable.push_back(Request::MidiEmit {
+            kind: kind.to_string(),
+            channel: channel & 0x0f,
+            note,
+            velocity,
+            control,
+            value,
+        });
+    }
+
+    pub fn emit_mode(&mut self, target: &str, mode: &str) {
+        self.reliable.push_back(Request::EmitMode {
+            target: target.to_string(),
+            mode: mode.to_string(),
+        });
+    }
+
     pub fn status(&mut self) {
         self.reliable.push_back(Request::Status);
     }
@@ -409,5 +435,38 @@ mod tests {
         let batch = box_.take();
         assert!(matches!(batch[0], Request::Hello { .. }));
         assert!(matches!(batch[1], Request::NoteOn { note: 60, .. }));
+    }
+
+    #[test]
+    fn midi_emit_encodes_cc_and_notes() {
+        let mut box_ = Outbox::new();
+        box_.midi_emit("cc", 0, None, None, Some(12), Some(64));
+        box_.midi_emit("note_on", 2, Some(60), Some(100), None, None);
+        box_.emit_mode("clips", "usb");
+        let batch = box_.take();
+        assert!(matches!(
+            &batch[0],
+            Request::MidiEmit {
+                kind,
+                control: Some(12),
+                value: Some(64),
+                ..
+            } if kind == "cc"
+        ));
+        assert!(matches!(
+            &batch[1],
+            Request::MidiEmit {
+                kind,
+                channel: 2,
+                note: Some(60),
+                velocity: Some(100),
+                ..
+            } if kind == "note_on"
+        ));
+        assert!(matches!(
+            &batch[2],
+            Request::EmitMode { target, mode }
+                if target == "clips" && mode == "usb"
+        ));
     }
 }

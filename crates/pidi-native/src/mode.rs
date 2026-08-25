@@ -9,12 +9,13 @@ pub enum UiMode {
     Kaoss,
     Songs,
     Presets,
+    Map,
     Log,
     Settings,
 }
 
 impl UiMode {
-    pub const ALL: [UiMode; 9] = [
+    pub const ALL: [UiMode; 10] = [
         UiMode::Home,
         UiMode::Synth,
         UiMode::Seq,
@@ -22,6 +23,7 @@ impl UiMode {
         UiMode::Kaoss,
         UiMode::Songs,
         UiMode::Presets,
+        UiMode::Map,
         UiMode::Log,
         UiMode::Settings,
     ];
@@ -35,6 +37,7 @@ impl UiMode {
             Self::Kaoss => "KAO",
             Self::Songs => "SNG",
             Self::Presets => "PRE",
+            Self::Map => "MAP",
             Self::Log => "LOG",
             Self::Settings => "SET",
         }
@@ -49,6 +52,7 @@ impl UiMode {
             Self::Kaoss => "KAOSS",
             Self::Songs => "SONGS",
             Self::Presets => "PRESETS",
+            Self::Map => "MAP",
             Self::Log => "LOG",
             Self::Settings => "SETTINGS",
         }
@@ -68,8 +72,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn nine_modes_round_trip() {
-        assert_eq!(UiMode::ALL.len(), 9);
+    fn ten_modes_round_trip() {
+        assert_eq!(UiMode::ALL.len(), 10);
         for (i, mode) in UiMode::ALL.iter().enumerate() {
             assert_eq!(UiMode::from_index(i), Some(*mode));
             assert_eq!(mode.index(), i);

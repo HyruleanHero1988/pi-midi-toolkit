@@ -18,7 +18,9 @@ pub fn waves_dirs_from_env() -> Vec<PathBuf> {
     // Lab / appliance defaults (same layout as the Tk kiosk tree).
     for candidate in [
         "apps/pidi/wavetables",
+        "apps/pidi/user-wavetables",
         "wavetables",
+        "user-wavetables",
         "/home/ray/pi-midi-toolkit/apps/pidi/wavetables",
         "/home/ray/pi-midi-toolkit/apps/pidi/user-wavetables",
     ] {

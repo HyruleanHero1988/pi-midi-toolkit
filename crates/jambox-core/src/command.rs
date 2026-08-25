@@ -145,6 +145,45 @@ pub enum Command {
         root_midi: u8,
         octaves: u8,
     },
+    /// Clip (`target=0`) or kaoss (`target=1`) emit mode: Local/Usb/Both.
+    SetEmitMode {
+        target: u8,
+        mode: u8,
+    },
+    /// Push raw MIDI bytes onto the engine USB/DIN out sink (no local voice).
+    MidiEmit {
+        status: u8,
+        d1: u8,
+        d2: u8,
+    },
+}
+
+/// Where clip / kaoss sound and MIDI should go.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[repr(u8)]
+pub enum EmitMode {
+    Local = 0,
+    Usb = 1,
+    #[default]
+    Both = 2,
+}
+
+impl EmitMode {
+    pub fn from_u8(value: u8) -> Self {
+        match value {
+            1 => Self::Usb,
+            2 => Self::Both,
+            _ => Self::Local,
+        }
+    }
+
+    pub fn includes_local(self) -> bool {
+        matches!(self, Self::Local | Self::Both)
+    }
+
+    pub fn includes_usb(self) -> bool {
+        matches!(self, Self::Usb | Self::Both)
+    }
 }
 
 /// A command plus the frame within the block where it takes effect.

@@ -15,26 +15,31 @@ runtime — no Python/Tk on this branch.
 
 | Mode | Status |
 |---|---|
-| KAOSS + drums | Scale/key/oct/gate pickers, HOLD, FULL PAD, CELLS/GLOW, trail/ripples, WIPE FX, CH, OUT cycle |
-| Nav shell / HOME | Mode tiles + bottom nav |
+| KAOSS + drums | Scale/key/oct/gate pickers, HOLD, FULL PAD (hold bottom edge to exit), CELLS/GLOW, trail/ripples, WIPE FX, CH, OUT cycle; Kaoss CC#12/13/92 when OUT is USB/BOTH |
+| Nav shell / HOME | Mode tiles + bottom nav (10 modes) |
 | PADS | Launch/stop from `phrases/pad-XX.json`; PLAY/EDIT; REC/TRIG/MODE/CLEAR; SEQ→PAD; OUT cycle |
-| SYNTH | Morph A/B wave pick, tone/level/atk/rel, vibrato, scope, kit macros, C4–B4 keys |
+| SYNTH | Morph A/B wave pick, tone/level/atk/rel, vibrato, scope, kit macros, C4–B4 keys, **SAVE AS** (bake morph→`user-wavetables/` + `.fx.json`) |
 | SEQ | Backbone REC → engine loop clip; KEEP/DROP/UNDO; len×2/÷2/EXTEND; →PAD; PLAY/STOP/CLEAR/BPM |
 | SONGS | List `songs/*.mid`, SMF→clip PLAY/STOP/LOOP, SAVE SEQ, OUT cycle |
 | PRESETS | 8 slots save/load synth params to `user-presets/` |
-| SETTINGS | Panic, all-notes-off, bus/voice/drum-group FX; WIFI/UPDATE stubs (status/log → `deploy/`) |
+| MAP | Thru status; THRU ON / OFF / REFRESH PORTS → `midi-engine` (Linux appliance; Windows host explains Pi-only) |
+| SETTINGS | Panic, all-notes-off, bus/voice/drum-group FX; **WIFI** (`nmcli` / `.wifi-credentials`); **UPDATE** (`updater.py --check` or git) |
 | LOG | Engine counters + recent action lines |
 | Session | Autosave `settings.json` (synth/kaoss/tempo/OUT prefs) |
 
-## Intentional non-parity (vs Tk)
+## Appliance-oriented hooks
 
-Not ported on purpose: Map/Thru modes, Kaoss CC→DIN OUT routing,
-edge-hold full-pad exit (native uses FULL PAD button), SAVE AS voice bake.
-WIFI/UPDATE are UI stubs only (no on-device GitHub/Wi-Fi stack) — use
-`deploy/build-pi-bins.sh` / `deploy/deploy.sh` (or host SET→UPDATE path).
+Map, WIFI, and UPDATE call host tools when present (`midi-engine`, `nmcli`,
+`python3 apps/pidi/pidi/updater.py`). On a Windows host they report that those
+actions belong on the Pi. Bin deploy remains `deploy/build-pi-bins.sh` /
+`deploy/deploy.sh`.
 
-OUT: LOCAL / USB / BOTH is a stored preference per pads/songs/kaoss; the engine
-may still always play local audio.
+## Remaining non-parity (vs Tk)
+
+Map remap *editing* (learn/map JSON UI) is still thinner than full `midi-engine`
+learn workflows — Map mode starts/stops thru and lists ports. Wavetable
+hot-reload after SAVE AS refreshes the UI bank; the running engine picks up
+new tables on next MorphPair / restart if indices drift.
 
 ## Run (host)
 
@@ -64,7 +69,7 @@ Unit defaults: `--display sdl --touch evdev`. Optional:
 
 - `--evdev /dev/input/event4` if autodetect picks ADS7846
 - `--phrases /path/to/phrases`
-- `PIDI_PRESETS_DIR`, `PIDI_SONGS_DIR`
+- `PIDI_PRESETS_DIR`, `PIDI_SONGS_DIR`, `JAMBOX_USER_WAVETABLES`
 
 ## Touch notes
 

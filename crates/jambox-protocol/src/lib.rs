@@ -163,6 +163,25 @@ pub enum Request {
         #[serde(default = "default_kaoss_octaves")]
         octaves: u8,
     },
+    /// Direct MIDI to the engine's USB/DIN out path (not inject-in).
+    MidiEmit {
+        kind: String, // "note_on" | "note_off" | "cc"
+        channel: u8,
+        #[serde(default)]
+        note: Option<u8>,
+        #[serde(default)]
+        velocity: Option<u8>,
+        #[serde(default)]
+        control: Option<u8>,
+        #[serde(default)]
+        value: Option<u16>,
+    },
+    /// Local / Usb / Both for clip playback MIDI+audio and for documenting kaoss
+    /// (kaoss routing is mostly UI-driven via MidiEmit + Touch).
+    EmitMode {
+        target: String, // "clips" | "kaoss"
+        mode: String,   // "local" | "usb" | "both"
+    },
 }
 
 const fn default_velocity() -> u8 {

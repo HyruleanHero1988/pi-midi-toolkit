@@ -7,6 +7,7 @@ pub mod client;
 pub mod font;
 #[cfg(feature = "sdl")]
 pub mod gles;
+pub mod host;
 pub mod input;
 pub mod kaoss_ui;
 pub mod layout;
@@ -19,6 +20,7 @@ pub mod scene;
 pub mod seq;
 pub mod session;
 pub mod songs;
+pub mod voice_bake;
 pub mod waves;
 #[cfg(feature = "sdl")]
 pub mod sdl_backend;

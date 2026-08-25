@@ -5,7 +5,7 @@
 
 use crate::font::{self, GLYPH_H, GLYPH_STRIDE, GLYPH_W};
 use crate::kaoss_ui;
-use crate::layout::{Rect, HUD_H};
+use crate::layout::{Rect, HUD_H, NAV_H};
 use crate::mode::UiMode;
 use crate::model::{NativeModel, RepeatDivisionChoice, LED_COLS, LED_ROWS};
 use crate::phrases;
@@ -87,6 +87,7 @@ pub fn build(model: &NativeModel) -> Scene {
         UiMode::Seq => draw_seq(&mut scene, model),
         UiMode::Presets => draw_presets(&mut scene, model),
         UiMode::Songs => draw_songs(&mut scene, model),
+        UiMode::Map => draw_map(&mut scene, model),
         UiMode::Settings => draw_settings(&mut scene, model),
         UiMode::Log => draw_log(&mut scene, model),
     }
@@ -293,12 +294,14 @@ fn draw_kaoss(scene: &mut Scene, model: &NativeModel) {
         layout.kaoss_full,
         if model.kaoss_full { 0x689d6a } else { 0x458588 },
     );
-    scene.text(
-        layout.kaoss_full.x + 12,
-        layout.kaoss_full.y + 12,
-        if model.kaoss_full { "EXIT FULL" } else { "FULL PAD" },
-        0xffffff,
-    );
+    if layout.kaoss_full.w > 0 {
+        scene.text(
+            layout.kaoss_full.x + 12,
+            layout.kaoss_full.y + 12,
+            if model.kaoss_full { "EXIT FULL" } else { "FULL PAD" },
+            0xffffff,
+        );
+    }
 }
 
 fn draw_pads(scene: &mut Scene, model: &NativeModel) {
@@ -453,7 +456,7 @@ fn draw_pads(scene: &mut Scene, model: &NativeModel) {
 
 fn draw_home(scene: &mut Scene, model: &NativeModel) {
     // Distinct gruvbox fills per mode tile (Tk parity — not all gray).
-    const COLORS: [u32; 9] = [
+    const COLORS: [u32; 10] = [
         0x3c3836, // Home
         0xb16286, // Synth
         0x458588, // Seq
@@ -461,6 +464,7 @@ fn draw_home(scene: &mut Scene, model: &NativeModel) {
         0xd79921, // Kaoss
         0x83a598, // Songs
         0xd65d0e, // Presets
+        0x8f3f71, // Map
         0x665c54, // Log
         0xcc241d, // Settings
     ];
@@ -518,14 +522,21 @@ fn draw_synth(scene: &mut Scene, model: &NativeModel) {
         );
         scene.fill_rect(layout.synth_pick_next, 0x504945);
         scene.text(
-            layout.synth_pick_next.x + 48,
+            layout.synth_pick_next.x + 40,
             layout.synth_pick_next.y + 16,
             "NEXT",
             0xffffff,
         );
+        scene.fill_rect(layout.synth_pick_save_as, 0x689d6a);
+        scene.text(
+            layout.synth_pick_save_as.x + 28,
+            layout.synth_pick_save_as.y + 16,
+            "SAVE AS",
+            0xffffff,
+        );
         scene.fill_rect(layout.synth_pick_done, 0x458588);
         scene.text(
-            layout.synth_pick_done.x + 160,
+            layout.synth_pick_done.x + 120,
             layout.synth_pick_done.y + 16,
             "DONE",
             0xffffff,
@@ -555,7 +566,14 @@ fn draw_synth(scene: &mut Scene, model: &NativeModel) {
         0xffffff,
     );
     scene.fill_rect(layout.synth_swap, 0x504945);
-    scene.text(layout.synth_swap.x + 24, layout.synth_swap.y + 16, "SWAP", 0xffffff);
+    scene.text(layout.synth_swap.x + 20, layout.synth_swap.y + 16, "SWAP", 0xffffff);
+    scene.fill_rect(layout.synth_save_as, 0x689d6a);
+    scene.text(
+        layout.synth_save_as.x + 20,
+        layout.synth_save_as.y + 16,
+        "SAVE AS",
+        0xffffff,
+    );
     scene.fill_rect(layout.synth_vib_down, 0x3c3836);
     scene.text(
         layout.synth_vib_down.x + 8,
@@ -887,6 +905,54 @@ fn draw_songs(scene: &mut Scene, model: &NativeModel) {
         model.song_out.label(),
         0xffffff,
     );
+}
+
+fn draw_map(scene: &mut Scene, model: &NativeModel) {
+    let layout = model.layout;
+    let c = layout.content;
+    scene.text(c.x + 16, c.y + 16, "MAP / THRU", 0xfbf1c7);
+    scene.text(
+        c.x + 16,
+        c.y + 44,
+        &format!("status: {}", crate::host::map_status_line()),
+        0xa0a0b8,
+    );
+    scene.text(
+        c.x + 16,
+        c.y + 68,
+        "USB MIDI in → remap → out (midi-engine on appliance)",
+        0x83a598,
+    );
+    scene.fill_rect(layout.map_thru_on, 0x689d6a);
+    scene.text(
+        layout.map_thru_on.x + 56,
+        layout.map_thru_on.y + 28,
+        "THRU ON",
+        0xffffff,
+    );
+    scene.fill_rect(layout.map_thru_off, 0x9d0006);
+    scene.text(
+        layout.map_thru_off.x + 48,
+        layout.map_thru_off.y + 28,
+        "THRU OFF",
+        0xffffff,
+    );
+    scene.fill_rect(layout.map_refresh, 0x458588);
+    scene.text(
+        layout.map_refresh.x + 28,
+        layout.map_refresh.y + 28,
+        "REFRESH PORTS",
+        0xffffff,
+    );
+    // Recent log peek for list output
+    let mut y = layout.map_thru_on.y + 96;
+    for line in model.log_lines.iter().rev().take(8) {
+        scene.text(c.x + 16, y, line, 0xc0c0d0);
+        y += 18;
+        if y > crate::layout::SCREEN_H - NAV_H - 20 {
+            break;
+        }
+    }
 }
 
 fn draw_settings(scene: &mut Scene, model: &NativeModel) {

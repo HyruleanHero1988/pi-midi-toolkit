@@ -133,6 +133,24 @@ pub enum Request {
         #[serde(default = "default_kaoss_octaves")]
         octaves: u8,
     },
+    /// Direct MIDI to the engine's USB/DIN out path (not inject-in).
+    MidiEmit {
+        kind: String,
+        channel: u8,
+        #[serde(default)]
+        note: Option<u8>,
+        #[serde(default)]
+        velocity: Option<u8>,
+        #[serde(default)]
+        control: Option<u8>,
+        #[serde(default)]
+        value: Option<u16>,
+    },
+    /// Local / Usb / Both for clip playback and kaoss documentation.
+    EmitMode {
+        target: String,
+        mode: String,
+    },
 }
 
 const fn default_velocity() -> u8 {
@@ -571,6 +589,37 @@ pub fn decode(request: Request) -> Result<Decoded, String> {
             root_midi,
             octaves,
         }),
+        Request::MidiEmit {
+            kind,
+            channel,
+            note,
+            velocity,
+            control,
+            value,
+        } => {
+            let ev = midi_event_from_parts(
+                &kind, channel, note, velocity, control, value,
+            )?;
+            let mut buf = [0u8; 3];
+            let n = ev.encode(&mut buf);
+            Decoded::Command(Command::MidiEmit {
+                status: buf[0],
+                d1: if n > 1 { buf[1] } else { 0 },
+                d2: if n > 2 { buf[2] } else { 0 },
+            })
+        }
+        Request::EmitMode { target, mode } => {
+            let target = match target.to_ascii_lowercase().as_str() {
+                "kaoss" => 1u8,
+                _ => 0u8,
+            };
+            let mode = match mode.to_ascii_lowercase().as_str() {
+                "usb" => 1u8,
+                "both" => 2u8,
+                _ => 0u8,
+            };
+            Decoded::Command(Command::SetEmitMode { target, mode })
+        }
         Request::Hello {
             protocol,
             client,

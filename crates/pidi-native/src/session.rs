@@ -32,6 +32,22 @@ impl OutMode {
         }
     }
 
+    pub fn wire(self) -> &'static str {
+        match self {
+            Self::Local => "local",
+            Self::Usb => "usb",
+            Self::Both => "both",
+        }
+    }
+
+    pub fn includes_local(self) -> bool {
+        matches!(self, Self::Local | Self::Both)
+    }
+
+    pub fn includes_usb(self) -> bool {
+        matches!(self, Self::Usb | Self::Both)
+    }
+
     pub fn color(self) -> u32 {
         match self {
             Self::Local => 0x3c3836,
@@ -71,8 +87,12 @@ pub struct SessionState {
     pub pads_out: OutMode,
     #[serde(default)]
     pub song_out: OutMode,
-    #[serde(default)]
+    #[serde(default = "default_kaoss_out")]
     pub kaoss_out: OutMode,
+}
+
+fn default_kaoss_out() -> OutMode {
+    OutMode::Local
 }
 
 impl Default for SessionState {
@@ -100,7 +120,7 @@ impl Default for SessionState {
             mode: "kaoss".into(),
             pads_out: OutMode::Both,
             song_out: OutMode::Both,
-            kaoss_out: OutMode::Both,
+            kaoss_out: OutMode::Local,
         }
     }
 }
@@ -159,6 +179,6 @@ mod tests {
         let s: SessionState = serde_json::from_str(json).unwrap();
         assert_eq!(s.pads_out, OutMode::Both);
         assert_eq!(s.song_out, OutMode::Both);
-        assert_eq!(s.kaoss_out, OutMode::Both);
+        assert_eq!(s.kaoss_out, OutMode::Local);
     }
 }
