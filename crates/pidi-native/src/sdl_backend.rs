@@ -52,6 +52,11 @@ impl SdlDisplay {
         let renderer = gles::Renderer::new(&gl)?;
         let event_pump = sdl.event_pump()?;
 
+        // Appliance is touch-first; a visible cursor parks in a corner under KMSDRM.
+        if fullscreen {
+            sdl.mouse().show_cursor(false);
+        }
+
         eprintln!(
             "pidi-native: SDL/GL presenter {}x{} fullscreen={fullscreen}",
             window.size().0,
