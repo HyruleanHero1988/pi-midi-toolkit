@@ -1,5 +1,5 @@
 [Unit]
-Description=pi-midi-toolkit jambox audio + sequencer engine
+Description=pi-midi-toolkit jambox audio + sequencer engine (native kiosk)
 After=sound.target multi-user.target
 
 [Service]
@@ -14,7 +14,7 @@ ExecStart=/home/pi/pi-midi-toolkit/bin/jambox-engine run \
   --control /tmp/jambox.sock \
   --waves /home/pi/pi-midi-toolkit/apps/pidi/wavetables \
   --user-waves /home/pi/pi-midi-toolkit/apps/pidi/user-wavetables \
-  --buffer-frames 512 \
+  --buffer-frames 0 \
   --rt
 Restart=on-failure
 RestartSec=2
