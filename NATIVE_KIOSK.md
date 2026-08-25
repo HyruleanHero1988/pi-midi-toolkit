@@ -15,7 +15,7 @@ entirely: `jambox-engine` + `pidi-native` are the appliance.
 
 | Mode | Status |
 |---|---|
-| KAOSS + drums | Working |
+| KAOSS + drums | Working — scale/key cycle, FULL PAD, CELLS |
 | Nav shell / HOME | Working |
 | PADS | Launch/stop from `phrases/pad-XX.json` |
 | SYNTH | Morph/tone/level/atk/rel sliders + C4–B4 keys |

@@ -134,34 +134,57 @@ fn draw_kaoss(scene: &mut Scene, model: &NativeModel) {
         }
     }
 
-    const DRUM_LABELS: [&str; 16] = [
-        "KICK", "SNARE", "CLAP", "CHH", "OHH", "TOM L", "TOM M", "RIM", "KIK2", "RIM2", "SHKR",
-        "PED", "TOM H", "COW", "CLV", "RIDE",
-    ];
-    for index in 0..16 {
-        let cell = layout.drum_cell(index);
-        scene.fill_rect(cell, if index == 0 { 0x3a2030 } else { 0x242436 });
-        scene.text(
-            cell.x + 6,
-            cell.y + cell.h / 2 - 3,
-            DRUM_LABELS[index],
-            0xd0d0e0,
-        );
+    if layout.drums.w > 0 {
+        const DRUM_LABELS: [&str; 16] = [
+            "KICK", "SNARE", "CLAP", "CHH", "OHH", "TOM L", "TOM M", "RIM", "KIK2", "RIM2", "SHKR",
+            "PED", "TOM H", "COW", "CLV", "RIDE",
+        ];
+        for index in 0..16 {
+            let cell = layout.drum_cell(index);
+            scene.fill_rect(cell, if index == 0 { 0x3a2030 } else { 0x242436 });
+            scene.text(
+                cell.x + 6,
+                cell.y + cell.h / 2 - 3,
+                DRUM_LABELS[index],
+                0xd0d0e0,
+            );
+        }
+
+        for index in 0..4 {
+            let cell = layout.division_cell(index);
+            let choice = RepeatDivisionChoice::from_index(index);
+            scene.fill_rect(
+                cell,
+                if choice == model.division {
+                    0x5a3060
+                } else {
+                    0x20202c
+                },
+            );
+            scene.text(cell.x + 8, cell.y + 16, choice.label(), 0xffffff);
+        }
     }
 
-    for index in 0..4 {
-        let cell = layout.division_cell(index);
-        let choice = RepeatDivisionChoice::from_index(index);
-        scene.fill_rect(
-            cell,
-            if choice == model.division {
-                0x5a3060
-            } else {
-                0x20202c
-            },
-        );
-        scene.text(cell.x + 8, cell.y + 16, choice.label(), 0xffffff);
-    }
+    let scale = jambox_core::kaoss_scale(model.kaoss_scale_index as usize);
+    scene.fill_rect(layout.kaoss_scale, 0x3a3048);
+    scene.text(layout.kaoss_scale.x + 6, layout.kaoss_scale.y + 14, scale.label, 0xffffff);
+    scene.fill_rect(layout.kaoss_key, 0x3a3048);
+    scene.text(
+        layout.kaoss_key.x + 16,
+        layout.kaoss_key.y + 14,
+        jambox_core::NOTE_NAMES[model.kaoss_key as usize],
+        0xffffff,
+    );
+    scene.fill_rect(
+        layout.kaoss_full,
+        if model.kaoss_full { 0x5a3060 } else { 0x3a3048 },
+    );
+    scene.text(
+        layout.kaoss_full.x + 10,
+        layout.kaoss_full.y + 14,
+        if model.kaoss_full { "EXIT" } else { "FULL" },
+        0xffffff,
+    );
 }
 
 fn draw_pads(scene: &mut Scene, model: &NativeModel) {

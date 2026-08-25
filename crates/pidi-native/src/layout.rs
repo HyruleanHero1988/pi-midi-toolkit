@@ -18,6 +18,9 @@ pub enum Hit {
     HomeTile(UiMode),
     SynthSlider(usize),
     SynthKey(usize),
+    KaossScale,
+    KaossKey,
+    KaossFull,
     None,
 }
 
@@ -53,6 +56,9 @@ pub struct Layout {
     pub stop_all: Rect,
     pub synth_sliders: Rect,
     pub synth_keys: Rect,
+    pub kaoss_scale: Rect,
+    pub kaoss_key: Rect,
+    pub kaoss_full: Rect,
 }
 
 impl Default for Layout {
@@ -125,6 +131,69 @@ impl Layout {
                 w: 752,
                 h: content_h - 280,
             },
+            kaoss_scale: Rect {
+                x: 540,
+                y: HUD_H + 368,
+                w: 80,
+                h: 40,
+            },
+            kaoss_key: Rect {
+                x: 624,
+                y: HUD_H + 368,
+                w: 80,
+                h: 40,
+            },
+            kaoss_full: Rect {
+                x: 708,
+                y: HUD_H + 368,
+                w: 84,
+                h: 40,
+            },
+        }
+    }
+
+    /// Performance layout when FULL PAD hides the drum chrome.
+    pub fn apply_kaoss_full(&mut self, full: bool) {
+        let content_h = SCREEN_H - HUD_H - NAV_H;
+        if full {
+            self.kaoss = Rect {
+                x: 8,
+                y: HUD_H + 8,
+                w: SCREEN_W - 16,
+                h: content_h - 56,
+            };
+            self.drums = Rect {
+                x: 0,
+                y: 0,
+                w: 0,
+                h: 0,
+            };
+            self.divisions = Rect {
+                x: 0,
+                y: 0,
+                w: 0,
+                h: 0,
+            };
+            self.kaoss_scale = Rect {
+                x: 8,
+                y: HUD_H + content_h - 44,
+                w: 120,
+                h: 40,
+            };
+            self.kaoss_key = Rect {
+                x: 136,
+                y: HUD_H + content_h - 44,
+                w: 120,
+                h: 40,
+            };
+            self.kaoss_full = Rect {
+                x: 264,
+                y: HUD_H + content_h - 44,
+                w: 120,
+                h: 40,
+            };
+        } else {
+            *self = Self::new();
         }
     }
 
@@ -245,11 +314,20 @@ impl Layout {
     }
 
     fn hit_kaoss(&self, px: i32, py: i32) -> Hit {
+        if self.kaoss_scale.contains(px, py) {
+            return Hit::KaossScale;
+        }
+        if self.kaoss_key.contains(px, py) {
+            return Hit::KaossKey;
+        }
+        if self.kaoss_full.contains(px, py) {
+            return Hit::KaossFull;
+        }
         if self.kaoss.contains(px, py) {
             let (x, y) = self.kaoss.pad_xy(px, py);
             return Hit::Kaoss { x, y };
         }
-        if self.drums.contains(px, py) {
+        if self.drums.contains(px, py) && self.drums.w > 0 {
             for index in 0..16 {
                 if self.drum_cell(index).contains(px, py) {
                     return Hit::Drum {
@@ -260,7 +338,7 @@ impl Layout {
             }
             return Hit::None;
         }
-        if self.divisions.contains(px, py) {
+        if self.divisions.contains(px, py) && self.divisions.w > 0 {
             for index in 0..4 {
                 if self.division_cell(index).contains(px, py) {
                     return Hit::Division(index);

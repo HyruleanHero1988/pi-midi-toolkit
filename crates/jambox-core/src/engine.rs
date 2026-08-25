@@ -705,6 +705,15 @@ impl JamboxEngine {
                 let delta = self.kaoss.up(owner);
                 self.apply_touch_delta(delta);
             }
+            Command::SetKaossScale {
+                scale_index,
+                key,
+                root_midi,
+                octaves,
+            } => {
+                self.kaoss
+                    .configure(scale_index, key, root_midi, octaves);
+            }
         }
     }
 

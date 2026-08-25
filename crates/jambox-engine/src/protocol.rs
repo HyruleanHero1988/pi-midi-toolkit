@@ -123,6 +123,16 @@ pub enum Request {
         #[serde(default = "default_repeat_division")]
         division: WireRepeatDivision,
     },
+    KaossScale {
+        #[serde(default)]
+        scale_index: u8,
+        #[serde(default)]
+        key: u8,
+        #[serde(default = "default_kaoss_root")]
+        root_midi: u8,
+        #[serde(default = "default_kaoss_octaves")]
+        octaves: u8,
+    },
 }
 
 const fn default_velocity() -> u8 {
@@ -135,6 +145,14 @@ const fn default_drum_channel() -> u8 {
 
 const fn default_repeat_division() -> WireRepeatDivision {
     WireRepeatDivision::Quarter
+}
+
+const fn default_kaoss_root() -> u8 {
+    48
+}
+
+const fn default_kaoss_octaves() -> u8 {
+    2
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -542,6 +560,17 @@ pub fn decode(request: Request) -> Result<Decoded, String> {
         }),
         Request::StopAllClips => Decoded::Command(Command::StopAllClips),
         Request::Status => Decoded::StatusRequest,
+        Request::KaossScale {
+            scale_index,
+            key,
+            root_midi,
+            octaves,
+        } => Decoded::Command(Command::SetKaossScale {
+            scale_index,
+            key,
+            root_midi,
+            octaves,
+        }),
         Request::Hello {
             protocol,
             client,

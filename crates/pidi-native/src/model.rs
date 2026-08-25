@@ -89,6 +89,9 @@ pub struct NativeModel {
     pub phrase_playing: [bool; 16],
     pub status_line: String,
     pub synth_params: [f32; 5],
+    pub kaoss_scale_index: u8,
+    pub kaoss_key: u8,
+    pub kaoss_full: bool,
     fingers: [Finger; MAX_FINGERS],
     next_gesture: u32,
     cells: [[u32; LED_COLS]; LED_ROWS],
@@ -116,6 +119,9 @@ impl NativeModel {
             phrase_playing: [false; 16],
             status_line: String::new(),
             synth_params: [0.5, 0.5, 0.8, 0.05, 0.3],
+            kaoss_scale_index: 1,
+            kaoss_key: 0,
+            kaoss_full: false,
             fingers: [Finger::silent(); MAX_FINGERS],
             next_gesture: 1,
             cells: [[0; LED_COLS]; LED_ROWS],
@@ -327,6 +333,51 @@ impl NativeModel {
                 };
                 outbox.note_on(0, note, 110);
             }
+            Hit::KaossScale => {
+                self.fingers[slot] = Finger {
+                    active: true,
+                    id,
+                    gesture,
+                    x: 0.0,
+                    y: 0.0,
+                    px,
+                    py,
+                    surface: Surface::UiTap,
+                };
+                self.cycle_kaoss_scale(1, outbox);
+            }
+            Hit::KaossKey => {
+                self.fingers[slot] = Finger {
+                    active: true,
+                    id,
+                    gesture,
+                    x: 0.0,
+                    y: 0.0,
+                    px,
+                    py,
+                    surface: Surface::UiTap,
+                };
+                self.cycle_kaoss_key(1, outbox);
+            }
+            Hit::KaossFull => {
+                self.fingers[slot] = Finger {
+                    active: true,
+                    id,
+                    gesture,
+                    x: 0.0,
+                    y: 0.0,
+                    px,
+                    py,
+                    surface: Surface::UiTap,
+                };
+                self.kaoss_full = !self.kaoss_full;
+                self.layout.apply_kaoss_full(self.kaoss_full);
+                self.status_line = if self.kaoss_full {
+                    "full pad".into()
+                } else {
+                    "split pad".into()
+                };
+            }
             Hit::None => {}
         }
     }
@@ -422,6 +473,21 @@ impl NativeModel {
         self.synth_params[index] = value;
         outbox.synth(Self::SYNTH_PARAM_NAMES[index], value);
         self.status_line = format!("{} {:.2}", Self::SYNTH_PARAM_NAMES[index], value);
+    }
+
+    fn cycle_kaoss_scale(&mut self, step: i32, outbox: &mut Outbox) {
+        let n = jambox_core::KAOSS_SCALES.len() as i32;
+        let next = (self.kaoss_scale_index as i32 + step).rem_euclid(n) as u8;
+        self.kaoss_scale_index = next;
+        outbox.kaoss_scale(next, self.kaoss_key, 48, 2);
+        let scale = jambox_core::kaoss_scale(next as usize);
+        self.status_line = scale.label.to_string();
+    }
+
+    fn cycle_kaoss_key(&mut self, step: i32, outbox: &mut Outbox) {
+        self.kaoss_key = ((self.kaoss_key as i32 + step).rem_euclid(12)) as u8;
+        outbox.kaoss_scale(self.kaoss_scale_index, self.kaoss_key, 48, 2);
+        self.status_line = format!("key {}", jambox_core::NOTE_NAMES[self.kaoss_key as usize]);
     }
 
     fn paint_cells(&mut self) {

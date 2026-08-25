@@ -7,6 +7,91 @@ pub const MAX_TOUCH_VOICES: usize = 5;
 pub const DEFAULT_ROOT_MIDI: u8 = 48;
 pub const DEFAULT_OCTAVES: u8 = 2;
 pub const IONIAN: [u8; 7] = [0, 2, 4, 5, 7, 9, 11];
+// IONIAN remains the named alias for the curated major scale degrees.
+
+/// Curated Kaossilator-style scales (UI + engine share the same table).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KaossScale {
+    pub id: &'static str,
+    pub label: &'static str,
+    pub degrees: &'static [u8],
+}
+
+pub const KAOSS_SCALES: &[KaossScale] = &[
+    KaossScale {
+        id: "chromatic",
+        label: "CHROMATIC",
+        degrees: &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+    },
+    KaossScale {
+        id: "ionian",
+        label: "MAJOR",
+        degrees: &IONIAN,
+    },
+    KaossScale {
+        id: "dorian",
+        label: "DORIAN",
+        degrees: &[0, 2, 3, 5, 7, 9, 10],
+    },
+    KaossScale {
+        id: "mixolydian",
+        label: "MIXOLYDIAN",
+        degrees: &[0, 2, 4, 5, 7, 9, 10],
+    },
+    KaossScale {
+        id: "aeolian",
+        label: "MINOR",
+        degrees: &[0, 2, 3, 5, 7, 8, 10],
+    },
+    KaossScale {
+        id: "harmonic",
+        label: "HARM MINOR",
+        degrees: &[0, 2, 3, 5, 7, 8, 11],
+    },
+    KaossScale {
+        id: "blues",
+        label: "BLUES",
+        degrees: &[0, 3, 5, 6, 7, 10],
+    },
+    KaossScale {
+        id: "major_pent",
+        label: "MAJ PENT",
+        degrees: &[0, 2, 4, 7, 9],
+    },
+    KaossScale {
+        id: "minor_pent",
+        label: "MIN PENT",
+        degrees: &[0, 3, 5, 7, 10],
+    },
+    KaossScale {
+        id: "spanish",
+        label: "SPANISH",
+        degrees: &[0, 1, 3, 4, 5, 7, 8, 10],
+    },
+    KaossScale {
+        id: "ryukyu",
+        label: "RYUKYU",
+        degrees: &[0, 4, 5, 7, 11],
+    },
+    KaossScale {
+        id: "bassline",
+        label: "BASS LINE",
+        degrees: &[0, 7, 10],
+    },
+    KaossScale {
+        id: "whole",
+        label: "WHOLE TONE",
+        degrees: &[0, 2, 4, 6, 8, 10],
+    },
+];
+
+pub const NOTE_NAMES: [&str; 12] = [
+    "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B",
+];
+
+pub fn kaoss_scale(index: usize) -> KaossScale {
+    KAOSS_SCALES[index % KAOSS_SCALES.len()]
+}
 
 /// Latest XY for one contact. Copied across the lock-free mailbox.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -138,6 +223,10 @@ pub struct KaossMapper {
     notes: [u8; 32],
     n_notes: usize,
     voices: [TouchVoice; MAX_TOUCH_VOICES],
+    scale_index: u8,
+    key: u8,
+    root_midi: u8,
+    octaves: u8,
 }
 
 impl Default for KaossMapper {
@@ -148,13 +237,39 @@ impl Default for KaossMapper {
 
 impl KaossMapper {
     pub fn new() -> Self {
-        let notes = scale_notes(&IONIAN, 0, DEFAULT_ROOT_MIDI, DEFAULT_OCTAVES);
-        let n_notes = count_filled(&notes);
-        Self {
-            notes,
-            n_notes,
+        let mut mapper = Self {
+            notes: [0; 32],
+            n_notes: 0,
             voices: [TouchVoice::silent(); MAX_TOUCH_VOICES],
-        }
+            scale_index: 1, // ionian
+            key: 0,
+            root_midi: DEFAULT_ROOT_MIDI,
+            octaves: DEFAULT_OCTAVES,
+        };
+        mapper.rebuild_notes();
+        mapper
+    }
+
+    pub fn scale_index(&self) -> u8 {
+        self.scale_index
+    }
+
+    pub fn key(&self) -> u8 {
+        self.key
+    }
+
+    pub fn configure(&mut self, scale_index: u8, key: u8, root_midi: u8, octaves: u8) {
+        self.scale_index = scale_index % KAOSS_SCALES.len() as u8;
+        self.key = key % 12;
+        self.root_midi = root_midi.min(127);
+        self.octaves = octaves.clamp(1, 4);
+        self.rebuild_notes();
+    }
+
+    fn rebuild_notes(&mut self) {
+        let scale = kaoss_scale(self.scale_index as usize);
+        self.notes = scale_notes(scale.degrees, self.key, self.root_midi, self.octaves);
+        self.n_notes = count_filled(&self.notes);
     }
 
     pub fn note_at(&self, x: f32) -> u8 {

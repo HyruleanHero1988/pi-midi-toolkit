@@ -168,6 +168,15 @@ impl Outbox {
         self.reliable.push_back(Request::StopAllClips);
     }
 
+    pub fn kaoss_scale(&mut self, scale_index: u8, key: u8, root_midi: u8, octaves: u8) {
+        self.reliable.push_back(Request::KaossScale {
+            scale_index,
+            key,
+            root_midi,
+            octaves,
+        });
+    }
+
     pub fn status(&mut self) {
         self.reliable.push_back(Request::Status);
     }

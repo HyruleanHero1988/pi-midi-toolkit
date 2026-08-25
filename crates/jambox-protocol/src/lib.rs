@@ -152,6 +152,17 @@ pub enum Request {
         #[serde(default = "default_repeat_division")]
         division: RepeatDivision,
     },
+    /// Rebuild the engine KAOSS note lattice.
+    KaossScale {
+        #[serde(default)]
+        scale_index: u8,
+        #[serde(default)]
+        key: u8,
+        #[serde(default = "default_kaoss_root")]
+        root_midi: u8,
+        #[serde(default = "default_kaoss_octaves")]
+        octaves: u8,
+    },
 }
 
 const fn default_velocity() -> u8 {
@@ -164,6 +175,14 @@ const fn default_drum_channel() -> u8 {
 
 const fn default_repeat_division() -> RepeatDivision {
     RepeatDivision::Quarter
+}
+
+const fn default_kaoss_root() -> u8 {
+    48
+}
+
+const fn default_kaoss_octaves() -> u8 {
+    2
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

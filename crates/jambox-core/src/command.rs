@@ -137,6 +137,14 @@ pub enum Command {
     TouchCancel {
         owner: u32,
     },
+    /// Rebuild the KAOSS note lattice (scale/key/range). Active contacts keep
+    /// ownership; the next move retunes to the new lattice.
+    SetKaossScale {
+        scale_index: u8,
+        key: u8,
+        root_midi: u8,
+        octaves: u8,
+    },
 }
 
 /// A command plus the frame within the block where it takes effect.
