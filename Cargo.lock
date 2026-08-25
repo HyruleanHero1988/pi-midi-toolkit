@@ -879,6 +879,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "glow",
+ "jambox-core",
  "jambox-protocol",
  "libc",
  "sdl2",
