@@ -87,6 +87,8 @@ struct Finger {
     px: i32,
     py: i32,
     surface: Surface,
+    /// GATE ARP phase for this Kaoss contact (independent of other fingers).
+    gate_on: bool,
 }
 
 impl Finger {
@@ -100,6 +102,7 @@ impl Finger {
             px: 0,
             py: 0,
             surface: Surface::UiTap,
+            gate_on: false,
         }
     }
 }
@@ -584,7 +587,8 @@ impl NativeModel {
                     px,
                     py,
                     surface: Surface::UiTap,
-                };
+                                gate_on: false,
+            };
                 self.set_mode(mode);
             }
             Hit::HomeTile(mode) => {
@@ -597,7 +601,8 @@ impl NativeModel {
                     px,
                     py,
                     surface: Surface::UiTap,
-                };
+                                gate_on: false,
+            };
                 self.set_mode(mode);
             }
             Hit::Power => {
@@ -618,6 +623,7 @@ impl NativeModel {
                     px,
                     py,
                     surface: Surface::Kaoss,
+                    gate_on: false,
                 };
                 self.watch_kaoss_full_exit(py, true);
                 self.begin_kaoss_touch(gesture, x, y, outbox);
@@ -633,6 +639,7 @@ impl NativeModel {
                     px,
                     py,
                     surface: Surface::Drum { note, repeat },
+                    gate_on: false,
                 };
                 if repeat {
                     outbox.repeat(
@@ -660,7 +667,8 @@ impl NativeModel {
                     px,
                     py,
                     surface: Surface::UiTap,
-                };
+                                gate_on: false,
+            };
             }
             Hit::PhrasePad(index) => {
                 self.fingers[slot] = Finger {
@@ -672,6 +680,7 @@ impl NativeModel {
                     px,
                     py,
                     surface: Surface::Phrase { slot: index },
+                    gate_on: false,
                 };
                 if self.seq_to_pad_armed {
                     self.finish_seq_to_pad(index, outbox);
@@ -791,7 +800,8 @@ impl NativeModel {
                     px,
                     py,
                     surface: Surface::UiTap,
-                };
+                                gate_on: false,
+            };
                 outbox.stop_all_clips();
                 self.phrase_playing = [false; 16];
                 self.status_line = "stop all clips".into();
@@ -856,6 +866,7 @@ impl NativeModel {
                     px,
                     py,
                     surface: Surface::SynthSlider { index },
+                    gate_on: false,
                 };
                 self.apply_synth_slider(index, px, py, outbox);
             }
@@ -870,6 +881,7 @@ impl NativeModel {
                     px,
                     py,
                     surface: Surface::SynthKey { note },
+                    gate_on: false,
                 };
                 outbox.note_on(0, note, 110);
                 self.seq.push_note(true, 0, note, 110);
@@ -975,7 +987,8 @@ impl NativeModel {
                     px,
                     py,
                     surface: Surface::UiTap,
-                };
+                                gate_on: false,
+            };
                 let action = self.seq.toggle_record();
                 self.apply_seq_action(action, outbox);
             }
@@ -989,7 +1002,8 @@ impl NativeModel {
                     px,
                     py,
                     surface: Surface::UiTap,
-                };
+                                gate_on: false,
+            };
                 let action = self.seq.toggle_play();
                 self.apply_seq_action(action, outbox);
             }
@@ -1003,7 +1017,8 @@ impl NativeModel {
                     px,
                     py,
                     surface: Surface::UiTap,
-                };
+                                gate_on: false,
+            };
                 let action = self.seq.keep();
                 self.apply_seq_action(action, outbox);
             }
@@ -1017,7 +1032,8 @@ impl NativeModel {
                     px,
                     py,
                     surface: Surface::UiTap,
-                };
+                                gate_on: false,
+            };
                 let action = self.seq.drop();
                 self.apply_seq_action(action, outbox);
             }
@@ -1031,7 +1047,8 @@ impl NativeModel {
                     px,
                     py,
                     surface: Surface::UiTap,
-                };
+                                gate_on: false,
+            };
                 let action = self.seq.undo();
                 self.apply_seq_action(action, outbox);
             }
@@ -1045,7 +1062,8 @@ impl NativeModel {
                     px,
                     py,
                     surface: Surface::UiTap,
-                };
+                                gate_on: false,
+            };
                 let action = self.seq.double_len();
                 self.apply_seq_action(action, outbox);
             }
@@ -1059,7 +1077,8 @@ impl NativeModel {
                     px,
                     py,
                     surface: Surface::UiTap,
-                };
+                                gate_on: false,
+            };
                 let action = self.seq.halve_len();
                 self.apply_seq_action(action, outbox);
             }
@@ -1073,7 +1092,8 @@ impl NativeModel {
                     px,
                     py,
                     surface: Surface::UiTap,
-                };
+                                gate_on: false,
+            };
                 self.seq.toggle_extend();
                 self.status_line = self.seq.status.clone();
             }
@@ -1087,7 +1107,8 @@ impl NativeModel {
                     px,
                     py,
                     surface: Surface::UiTap,
-                };
+                                gate_on: false,
+            };
                 let action = self.seq.stop_all();
                 self.apply_seq_action(action, outbox);
             }
@@ -1101,7 +1122,8 @@ impl NativeModel {
                     px,
                     py,
                     surface: Surface::UiTap,
-                };
+                                gate_on: false,
+            };
                 let action = self.seq.clear();
                 self.apply_seq_action(action, outbox);
             }
@@ -1115,7 +1137,8 @@ impl NativeModel {
                     px,
                     py,
                     surface: Surface::UiTap,
-                };
+                                gate_on: false,
+            };
                 self.seq.nudge_bpm(1.0);
                 outbox.tempo(self.seq.bpm);
                 self.bpm = self.seq.bpm;
@@ -1132,7 +1155,8 @@ impl NativeModel {
                     px,
                     py,
                     surface: Surface::UiTap,
-                };
+                                gate_on: false,
+            };
                 self.seq.nudge_bpm(-1.0);
                 outbox.tempo(self.seq.bpm);
                 self.bpm = self.seq.bpm;
@@ -1160,7 +1184,8 @@ impl NativeModel {
                     px,
                     py,
                     surface: Surface::UiTap,
-                };
+                                gate_on: false,
+            };
                 self.load_preset(index, outbox);
             }
             Hit::PresetSave => {
@@ -1173,7 +1198,8 @@ impl NativeModel {
                     px,
                     py,
                     surface: Surface::UiTap,
-                };
+                                gate_on: false,
+            };
                 self.save_preset(self.preset_selected);
             }
             Hit::PresetLoad => {
@@ -1198,7 +1224,8 @@ impl NativeModel {
                     px,
                     py,
                     surface: Surface::UiTap,
-                };
+                                gate_on: false,
+            };
                 let idx = self.song_scroll + row;
                 if idx < self.song_files.len() {
                     self.song_selected = idx;
@@ -1219,7 +1246,8 @@ impl NativeModel {
                     px,
                     py,
                     surface: Surface::UiTap,
-                };
+                                gate_on: false,
+            };
                 self.play_selected_song(outbox);
             }
             Hit::SongStop => {
@@ -1232,7 +1260,8 @@ impl NativeModel {
                     px,
                     py,
                     surface: Surface::UiTap,
-                };
+                                gate_on: false,
+            };
                 outbox.clip_stop(SONG_CLIP_SLOT, "off");
                 self.song_playing = false;
                 self.status_line = "song stop".into();
@@ -1247,7 +1276,8 @@ impl NativeModel {
                     px,
                     py,
                     surface: Surface::UiTap,
-                };
+                                gate_on: false,
+            };
                 if self.song_scroll > 0 {
                     self.song_scroll -= 1;
                 }
@@ -1262,7 +1292,8 @@ impl NativeModel {
                     px,
                     py,
                     surface: Surface::UiTap,
-                };
+                                gate_on: false,
+            };
                 if self.song_scroll + 5 < self.song_files.len() {
                     self.song_scroll += 1;
                 }
@@ -1310,7 +1341,8 @@ impl NativeModel {
                     px,
                     py,
                     surface: Surface::UiTap,
-                };
+                                gate_on: false,
+            };
                 outbox.panic();
                 self.panic_ui_state(outbox);
                 self.status_line = "PANIC".into();
@@ -1326,7 +1358,8 @@ impl NativeModel {
                     px,
                     py,
                     surface: Surface::UiTap,
-                };
+                                gate_on: false,
+            };
                 outbox.all_notes_off();
                 self.status_line = "all notes off".into();
                 self.push_log("all notes off");
@@ -1345,6 +1378,7 @@ impl NativeModel {
                     px,
                     py,
                     surface: Surface::SettingsFx { index },
+                    gate_on: false,
                 };
                 self.apply_fx_slider(index, py, outbox);
             }
@@ -1438,7 +1472,13 @@ impl NativeModel {
         match finger.surface {
             Surface::Kaoss => {
                 self.watch_kaoss_full_exit(0, false);
-                self.end_kaoss_touch(finger.gesture, finger.x, finger.y, outbox);
+                self.end_kaoss_touch(
+                    finger.gesture,
+                    finger.x,
+                    finger.y,
+                    finger.gate_on,
+                    outbox,
+                );
             }
             Surface::Drum { note, repeat } => {
                 if repeat {
@@ -1880,7 +1920,8 @@ impl NativeModel {
             px,
             py,
             surface: Surface::UiTap,
-        };
+                        gate_on: false,
+            };
     }
 
     fn toggle_kaoss_picker(&mut self, kind: KaossPicker) {
@@ -1978,16 +2019,30 @@ impl NativeModel {
         self.mark_dirty();
     }
 
+    fn kaoss_active_count(&self) -> usize {
+        self.fingers
+            .iter()
+            .filter(|f| f.active && f.surface == Surface::Kaoss)
+            .count()
+    }
+
     fn begin_kaoss_touch(&mut self, gesture: u32, x: f32, y: f32, outbox: &mut Outbox) {
-        if let Some(held) = self.kaoss_hold_gesture.take() {
-            self.kaoss_touch_edge(held, TouchPhase::Up, 0.0, 0.0, outbox);
+        // Count excludes this contact only if it isn't registered yet — callers
+        // always arm the Finger slot before invoking us, so subtract one.
+        let others = self.kaoss_active_count().saturating_sub(1);
+        if others == 0 {
+            if let Some(held) = self.kaoss_hold_gesture.take() {
+                self.kaoss_touch_edge(held, TouchPhase::Up, 0.0, 0.0, outbox);
+            }
+            // Fresh pad press: clear prior gate latch + USB note. Extra fingers
+            // must not steal/kill voices already sounding under GATE.
+            self.release_kaoss_gate(outbox);
+            self.kaoss_usb_silence(outbox, true);
+            self.kaoss_gate_t0 = Some(Instant::now());
+            self.kaoss_gate_on = false;
         }
-        self.release_kaoss_gate(outbox);
-        self.kaoss_usb_silence(outbox, true);
         self.kaoss_touching = true;
         self.kaoss_latched_xy = (x, y);
-        self.kaoss_gate_t0 = Some(Instant::now());
-        self.kaoss_gate_on = false;
         self.push_kaoss_trail(x, y);
         self.push_kaoss_ripple(x, y);
         let prog = kaoss_ui::program(self.kaoss_program);
@@ -1996,9 +2051,22 @@ impl NativeModel {
             self.kaoss_touch_edge(gesture, TouchPhase::Down, x, y, outbox);
             self.kaoss_usb_note_on(x, y, outbox);
         } else if gated {
+            // Shared clock; this gesture joins on the next tick. Mark ownership
+            // so HOLD can latch the last contact.
             self.kaoss_gate_gesture = Some(gesture);
+            if let Some(slot) = self
+                .fingers
+                .iter()
+                .position(|f| f.active && f.gesture == gesture)
+            {
+                self.fingers[slot].gate_on = false;
+            }
         }
-        self.kaoss_usb_pad_down(x, y, outbox);
+        if others == 0 {
+            self.kaoss_usb_pad_down(x, y, outbox);
+        } else {
+            self.kaoss_usb_xy(x, y, outbox);
+        }
         self.apply_kaoss_xy(prog, x, y, outbox);
     }
 
@@ -2010,43 +2078,113 @@ impl NativeModel {
         if prog.note && !gated {
             self.kaoss_touch_edge(gesture, TouchPhase::Move, x, y, outbox);
             self.kaoss_usb_note_follow(x, y, outbox);
+        } else if gated {
+            // While the shared gate is in the on phase, slide this voice.
+            if let Some(slot) = self
+                .fingers
+                .iter()
+                .position(|f| f.active && f.gesture == gesture)
+            {
+                if self.fingers[slot].gate_on {
+                    self.kaoss_touch_edge(gesture, TouchPhase::Move, x, y, outbox);
+                    self.kaoss_usb_note_follow(x, y, outbox);
+                }
+            } else if self.kaoss_hold && self.kaoss_gate_on && self.kaoss_gate_gesture == Some(gesture)
+            {
+                self.kaoss_touch_edge(gesture, TouchPhase::Move, x, y, outbox);
+                self.kaoss_usb_note_follow(x, y, outbox);
+            }
         }
         self.kaoss_usb_xy(x, y, outbox);
         self.apply_kaoss_xy(prog, x, y, outbox);
     }
 
-    fn end_kaoss_touch(&mut self, gesture: u32, x: f32, y: f32, outbox: &mut Outbox) {
-        self.kaoss_touching = false;
+    fn end_kaoss_touch(
+        &mut self,
+        gesture: u32,
+        x: f32,
+        y: f32,
+        was_gate_on: bool,
+        outbox: &mut Outbox,
+    ) {
+        // Finger slot already cleared by caller — remaining Kaoss contacts only.
+        let remaining = self.kaoss_active_count();
         let prog = kaoss_ui::program(self.kaoss_program);
         let gated = prog.note && kaoss_ui::gate(self.kaoss_gate).beats > 0.0;
-        if self.kaoss_hold && prog.note {
+        if self.kaoss_hold && prog.note && remaining == 0 {
             if !gated {
                 self.kaoss_hold_gesture = Some(gesture);
             } else {
+                // Preserve on-phase across the latch so HOLD doesn't click off.
                 self.kaoss_gate_gesture = Some(gesture);
+                self.kaoss_latched_xy = (x, y);
+                self.kaoss_gate_on = was_gate_on;
             }
+            self.kaoss_touching = false;
             self.status_line = "HOLD latched".into();
             return;
         }
         if gated {
-            self.release_kaoss_gate(outbox);
+            if was_gate_on {
+                self.kaoss_touch_edge(gesture, TouchPhase::Up, x, y, outbox);
+            }
+            if remaining == 0 {
+                self.kaoss_usb_note_off(outbox);
+                self.kaoss_gate_on = false;
+                if !self.kaoss_hold {
+                    self.kaoss_gate_gesture = None;
+                }
+            } else if self.kaoss_gate_gesture == Some(gesture) {
+                // Point ownership at another live contact for HOLD/status.
+                self.kaoss_gate_gesture = self
+                    .fingers
+                    .iter()
+                    .find(|f| f.active && f.surface == Surface::Kaoss)
+                    .map(|f| f.gesture);
+            }
         } else if prog.note {
             self.kaoss_touch_edge(gesture, TouchPhase::Up, x, y, outbox);
-            self.kaoss_usb_note_off(outbox);
+            if remaining == 0 {
+                self.kaoss_usb_note_off(outbox);
+            }
         }
-        self.kaoss_usb_pad_up(outbox);
+        self.kaoss_touching = remaining > 0;
+        if remaining == 0 {
+            self.kaoss_usb_pad_up(outbox);
+        }
     }
 
     fn release_kaoss_gate(&mut self, outbox: &mut Outbox) {
+        let (x, y) = self.kaoss_latched_xy;
+        for slot in 0..MAX_FINGERS {
+            if self.fingers[slot].active
+                && self.fingers[slot].surface == Surface::Kaoss
+                && self.fingers[slot].gate_on
+            {
+                let g = self.fingers[slot].gesture;
+                let fx = self.fingers[slot].x;
+                let fy = self.fingers[slot].y;
+                self.kaoss_touch_edge(g, TouchPhase::Up, fx, fy, outbox);
+                self.fingers[slot].gate_on = false;
+            }
+        }
         if self.kaoss_gate_on {
-            let (x, y) = self.kaoss_latched_xy;
             if let Some(g) = self.kaoss_gate_gesture {
-                self.kaoss_touch_edge(g, TouchPhase::Up, x, y, outbox);
+                // Avoid double-Up if that gesture was already cleared above.
+                let already = self
+                    .fingers
+                    .iter()
+                    .any(|f| f.active && f.gesture == g && f.surface == Surface::Kaoss);
+                if !already {
+                    self.kaoss_touch_edge(g, TouchPhase::Up, x, y, outbox);
+                }
             }
             self.kaoss_usb_note_off(outbox);
             self.kaoss_gate_on = false;
         }
-        self.kaoss_gate_gesture = None;
+        if self.kaoss_active_count() == 0 {
+            self.kaoss_gate_gesture = None;
+        }
     }
 
     fn tick_kaoss_gate(&mut self, outbox: &mut Outbox) {
@@ -2055,9 +2193,16 @@ impl NativeModel {
         if !prog.note || gate.beats <= 0.0 {
             return;
         }
-        let active = self.kaoss_touching || self.kaoss_hold;
-        if !active {
-            if self.kaoss_gate_on {
+        let live: Vec<(u32, f32, f32, usize)> = self
+            .fingers
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| f.active && f.surface == Surface::Kaoss)
+            .map(|(i, f)| (f.gesture, f.x, f.y, i))
+            .collect();
+        let hold_only = live.is_empty() && self.kaoss_hold;
+        if live.is_empty() && !hold_only {
+            if self.kaoss_gate_on || self.fingers.iter().any(|f| f.gate_on) {
                 self.release_kaoss_gate(outbox);
             }
             return;
@@ -2076,27 +2221,62 @@ impl NativeModel {
         let elapsed = t0.elapsed().as_secs_f64();
         let phase = (elapsed % period) / period;
         let want_on = phase < gate.duty;
-        let (x, y) = self.kaoss_latched_xy;
-        let gesture = match self.kaoss_gate_gesture {
-            Some(g) => g,
-            None => {
-                let g = self.next_gesture;
-                self.next_gesture = self.next_gesture.wrapping_add(1).max(1);
-                self.kaoss_gate_gesture = Some(g);
-                g
+
+        if hold_only {
+            let (x, y) = self.kaoss_latched_xy;
+            let gesture = match self.kaoss_gate_gesture {
+                Some(g) => g,
+                None => {
+                    let g = self.next_gesture;
+                    self.next_gesture = self.next_gesture.wrapping_add(1).max(1);
+                    self.kaoss_gate_gesture = Some(g);
+                    g
+                }
+            };
+            if want_on && !self.kaoss_gate_on {
+                self.kaoss_touch_edge(gesture, TouchPhase::Down, x, y, outbox);
+                self.kaoss_usb_note_on(x, y, outbox);
+                self.kaoss_gate_on = true;
+            } else if !want_on && self.kaoss_gate_on {
+                self.kaoss_touch_edge(gesture, TouchPhase::Up, x, y, outbox);
+                self.kaoss_usb_note_off(outbox);
+                self.kaoss_gate_on = false;
+            } else if want_on && self.kaoss_gate_on {
+                self.kaoss_touch_edge(gesture, TouchPhase::Move, x, y, outbox);
+                self.kaoss_usb_note_follow(x, y, outbox);
             }
-        };
-        if want_on && !self.kaoss_gate_on {
-            self.kaoss_touch_edge(gesture, TouchPhase::Down, x, y, outbox);
-            self.kaoss_usb_note_on(x, y, outbox);
+            return;
+        }
+
+        // Polyphonic: every live Kaoss contact shares the gate clock.
+        let mut any_on = false;
+        let mut usb_xy = self.kaoss_latched_xy;
+        for (gesture, x, y, slot) in live {
+            let was = self.fingers[slot].gate_on;
+            if want_on && !was {
+                self.kaoss_touch_edge(gesture, TouchPhase::Down, x, y, outbox);
+                self.fingers[slot].gate_on = true;
+                usb_xy = (x, y);
+            } else if !want_on && was {
+                self.kaoss_touch_edge(gesture, TouchPhase::Up, x, y, outbox);
+                self.fingers[slot].gate_on = false;
+            } else if want_on && was {
+                self.kaoss_touch_edge(gesture, TouchPhase::Move, x, y, outbox);
+                usb_xy = (x, y);
+            }
+            any_on |= self.fingers[slot].gate_on;
+        }
+        // USB MIDI out stays monophonic (last/primary XY) so CC/note don't thrash.
+        if want_on && any_on {
+            if !self.kaoss_gate_on {
+                self.kaoss_usb_note_on(usb_xy.0, usb_xy.1, outbox);
+            } else {
+                self.kaoss_usb_note_follow(usb_xy.0, usb_xy.1, outbox);
+            }
             self.kaoss_gate_on = true;
-        } else if !want_on && self.kaoss_gate_on {
-            self.kaoss_touch_edge(gesture, TouchPhase::Up, x, y, outbox);
+        } else if self.kaoss_gate_on {
             self.kaoss_usb_note_off(outbox);
             self.kaoss_gate_on = false;
-        } else if want_on && self.kaoss_gate_on {
-            self.kaoss_touch_edge(gesture, TouchPhase::Move, x, y, outbox);
-            self.kaoss_usb_note_follow(x, y, outbox);
         }
     }
 
@@ -2911,6 +3091,38 @@ mod tests {
         model.finger_up(1, &mut out);
         let batch = out.take();
         assert!(batch.iter().any(|r| matches!(r, Request::Touch { .. })));
+    }
+
+    #[test]
+    fn gate_multi_touch_survives_first_finger_up() {
+        let mut model = NativeModel::new();
+        model.kaoss_gate = 1; // GATE 1/8
+        assert!(kaoss_ui::program(model.kaoss_program).note);
+        assert!(kaoss_ui::gate(model.kaoss_gate).beats > 0.0);
+        let mut out = Outbox::new();
+        let a = model.layout.kaoss_cell(2, 3);
+        let b = model.layout.kaoss_cell(9, 3);
+        model.finger_down(1, a.x + 4, a.y + 4, &mut out);
+        model.finger_down(2, b.x + 4, b.y + 4, &mut out);
+        assert_eq!(model.active_fingers(), 2);
+        assert!(model.kaoss_touching);
+        out.take();
+        model.finger_up(1, &mut out);
+        assert_eq!(model.active_fingers(), 1);
+        assert!(
+            model.kaoss_touching,
+            "lifting first gated finger must not kill the second"
+        );
+        // Force gate clock into the on phase and tick.
+        model.kaoss_gate_t0 = Some(Instant::now());
+        for _ in 0..45 {
+            model.tick(1.0 / 60.0, &mut out);
+        }
+        let batch = out.take();
+        assert!(
+            batch.iter().any(|r| matches!(r, Request::Touch { .. })),
+            "remaining finger should still receive gated touches: {batch:?}"
+        );
     }
 
     #[test]
