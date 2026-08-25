@@ -15,8 +15,8 @@ runtime — no Python/Tk on this branch.
 
 | Mode | Status |
 |---|---|
-| KAOSS + drums | Scale/key/oct/gate pickers, HOLD, FULL PAD (hold bottom edge to exit), CELLS/GLOW, trail/ripples, WIPE FX, CH, OUT cycle; Kaoss CC#12/13/92 when OUT is USB/BOTH |
-| Nav shell / HOME | Mode tiles + bottom nav (10 modes) |
+| KAOSS + drums | Full-width pad (Tk layout); axes/cursor; scale/key/oct/gate pickers, HOLD, FULL PAD, CELLS/GLOW, trail/ripples, WIPE FX, CH, OUT; Kaoss CC#12/13/92 when OUT is USB/BOTH. On-screen drums live on SEQ. |
+| Nav shell / HOME | Top chrome (PiDI / HOME / POWER / jam tabs); Home 4×2 `HOME_TILES` |
 | PADS | Launch/stop from `phrases/pad-XX.json`; PLAY/EDIT; REC/TRIG/MODE/CLEAR; SEQ→PAD; OUT cycle |
 | SYNTH | Morph A/B wave pick, tone/level/atk/rel, vibrato, scope, kit macros, C4–B4 keys, **SAVE AS** (bake morph→`user-wavetables/` + `.fx.json`) |
 | SEQ | Backbone REC → engine loop clip; KEEP/DROP/UNDO; len×2/÷2/EXTEND; →PAD; PLAY/STOP/CLEAR/BPM |

@@ -4,8 +4,25 @@ use crate::mode::UiMode;
 
 pub const SCREEN_W: i32 = 800;
 pub const SCREEN_H: i32 = 480;
-pub const NAV_H: i32 = 48;
-pub const HUD_H: i32 = 36;
+/// Bottom strip removed — Tk chrome lives in the top bar (`HUD_H`).
+pub const NAV_H: i32 = 0;
+/// Top chrome: PiDI brand + HOME/POWER + jam tabs (matches Tk nav height).
+pub const HUD_H: i32 = 52;
+
+/// Jam-mode tabs on the right of the top chrome (Tk order).
+pub const JAM_MODES: [UiMode; 4] = [UiMode::Synth, UiMode::Seq, UiMode::Pads, UiMode::Kaoss];
+
+/// Home grid entries — Tk `HOME_TILES` (4×2), Map lives under Settings.
+pub const HOME_TILES: [(UiMode, &'static str, u32); 8] = [
+    (UiMode::Synth, "SYNTHESIZER", 0x458588),
+    (UiMode::Seq, "SEQUENCER", 0xb16286),
+    (UiMode::Pads, "PADS", 0xd79921),
+    (UiMode::Kaoss, "KAOSS", 0xfe8019),
+    (UiMode::Songs, "SONGS", 0x689d6a),
+    (UiMode::Presets, "PRESETS", 0x83a598),
+    (UiMode::Log, "LOG", 0x504945),
+    (UiMode::Settings, "SETTINGS", 0x665c54),
+];
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Hit {
@@ -28,6 +45,7 @@ pub enum Hit {
     PadsSynth,
     PadsOut,
     HomeTile(UiMode),
+    Power,
     SynthSlider(usize),
     SynthKey(usize),
     SynthWaveA,
@@ -239,29 +257,31 @@ impl Layout {
                 w: SCREEN_W,
                 h: content_h,
             },
+            // Top chrome (Tk): brand / home / power / jam tabs.
             nav: Rect {
                 x: 0,
-                y: SCREEN_H - NAV_H,
+                y: 0,
                 w: SCREEN_W,
-                h: NAV_H,
+                h: HUD_H,
             },
+            // Full-width Kaoss pad like Tk (drums live on SEQ / kit, not here).
             kaoss: Rect {
                 x: 8,
                 y: HUD_H + 8,
-                w: 520,
+                w: SCREEN_W - 16,
                 h: content_h - 112,
             },
             drums: Rect {
-                x: 540,
-                y: HUD_H + 8,
-                w: 252,
-                h: content_h - 172,
+                x: 0,
+                y: 0,
+                w: 0,
+                h: 0,
             },
             divisions: Rect {
-                x: 540,
-                y: HUD_H + content_h - 156,
-                w: 252,
-                h: 44,
+                x: 0,
+                y: 0,
+                w: 0,
+                h: 0,
             },
             // Two-row footer chrome (Tk parity), full width under pad+drums.
             kaoss_prog: Rect {
@@ -893,27 +913,51 @@ impl Layout {
     }
 
     pub fn nav_cell(&self, index: usize) -> Rect {
-        let n = UiMode::ALL.len() as i32;
-        let w = self.nav.w / n;
+        // Jam tabs on the right of the top chrome.
+        self.nav_jam(index)
+    }
+
+    pub fn nav_home(&self) -> Rect {
         Rect {
-            x: self.nav.x + (index as i32) * w + 1,
-            y: self.nav.y + 4,
-            w: w - 2,
-            h: self.nav.h - 8,
+            x: 88,
+            y: 6,
+            w: 72,
+            h: self.nav.h - 12,
+        }
+    }
+
+    pub fn nav_power(&self) -> Rect {
+        Rect {
+            x: 168,
+            y: 6,
+            w: 72,
+            h: self.nav.h - 12,
+        }
+    }
+
+    pub fn nav_jam(&self, index: usize) -> Rect {
+        let n = JAM_MODES.len() as i32;
+        let w = 92;
+        let total = n * w;
+        let x0 = self.nav.w - total - 8;
+        Rect {
+            x: x0 + (index as i32) * w + 2,
+            y: self.nav.y + 6,
+            w: w - 4,
+            h: self.nav.h - 12,
         }
     }
 
     pub fn home_tile(&self, index: usize) -> Rect {
-        let n = UiMode::ALL.len() as i32;
-        let cols = 5i32;
-        let rows = (n + cols - 1) / cols;
+        let cols = 4i32;
+        let rows = 2i32;
         let gw = (self.content.w - 24) / cols;
-        let gh = (self.content.h - 24) / rows.max(1);
+        let gh = (self.content.h - 40) / rows;
         let col = (index as i32) % cols;
         let row = (index as i32) / cols;
         Rect {
             x: self.content.x + 12 + col * gw + 4,
-            y: self.content.y + 12 + row * gh + 4,
+            y: self.content.y + 36 + row * gh + 4,
             w: gw - 8,
             h: gh - 8,
         }
@@ -1018,8 +1062,14 @@ impl Layout {
 
     pub fn hit(&self, mode: UiMode, px: i32, py: i32) -> Hit {
         if self.nav.contains(px, py) {
-            for (i, m) in UiMode::ALL.iter().enumerate() {
-                if self.nav_cell(i).contains(px, py) {
+            if self.nav_home().contains(px, py) {
+                return Hit::Nav(UiMode::Home);
+            }
+            if self.nav_power().contains(px, py) {
+                return Hit::Power;
+            }
+            for (i, m) in JAM_MODES.iter().enumerate() {
+                if self.nav_jam(i).contains(px, py) {
                     return Hit::Nav(*m);
                 }
             }
@@ -1174,7 +1224,7 @@ impl Layout {
     }
 
     fn hit_home(&self, px: i32, py: i32) -> Hit {
-        for (i, mode) in UiMode::ALL.iter().enumerate() {
+        for (i, (mode, _, _)) in HOME_TILES.iter().enumerate() {
             if self.home_tile(i).contains(px, py) {
                 return Hit::HomeTile(*mode);
             }
@@ -1468,8 +1518,8 @@ mod tests {
     #[test]
     fn kick_is_bottom_left() {
         let layout = Layout::new();
-        let cell = layout.drum_cell(0);
-        match layout.hit(UiMode::Kaoss, cell.x + 4, cell.y + 4) {
+        let cell = layout.seq_drum_cell(0);
+        match layout.hit(UiMode::Seq, cell.x + 4, cell.y + 4) {
             Hit::Drum { note: 36, .. } => {}
             other => panic!("{other:?}"),
         }
@@ -1490,10 +1540,15 @@ mod tests {
     #[test]
     fn nav_switches_modes() {
         let layout = Layout::new();
-        let cell = layout.nav_cell(UiMode::Pads.index());
+        let cell = layout.nav_jam(2); // Pads
         assert_eq!(
             layout.hit(UiMode::Kaoss, cell.x + 4, cell.y + 4),
             Hit::Nav(UiMode::Pads)
+        );
+        let home = layout.nav_home();
+        assert_eq!(
+            layout.hit(UiMode::Kaoss, home.x + 4, home.y + 4),
+            Hit::Nav(UiMode::Home)
         );
     }
 

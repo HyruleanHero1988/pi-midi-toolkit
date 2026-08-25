@@ -559,7 +559,8 @@ impl NativeModel {
                 | Hit::KaossOut
                 | Hit::Drum { .. }
                 | Hit::Division(_)
-                | Hit::Nav(_) => base,
+                | Hit::Nav(_)
+                | Hit::Power => base,
                 _ => self
                     .layout
                     .hit_kaoss_picker(kind, px, py, self.kaoss_show_all),
@@ -599,6 +600,14 @@ impl NativeModel {
                 };
                 self.set_mode(mode);
             }
+            Hit::Power => {
+                self.tap_ui(slot, id, gesture, px, py);
+                let (status, lines) = host::power_action();
+                self.status_line = status;
+                for line in lines {
+                    self.push_log(line);
+                }
+            }
             Hit::Kaoss { x, y } => {
                 self.fingers[slot] = Finger {
                     active: true,
@@ -614,7 +623,7 @@ impl NativeModel {
                 self.begin_kaoss_touch(gesture, x, y, outbox);
             }
             Hit::Drum { note, .. } => {
-                let repeat = note == KICK_NOTE && self.mode == UiMode::Kaoss;
+                let repeat = note == KICK_NOTE && matches!(self.mode, UiMode::Kaoss | UiMode::Seq);
                 self.fingers[slot] = Finger {
                     active: true,
                     id,
@@ -2907,9 +2916,10 @@ mod tests {
     #[test]
     fn a_snare_can_fire_while_kick_repeats() {
         let mut model = NativeModel::new();
+        model.set_mode(UiMode::Seq);
         let mut out = Outbox::new();
-        let kick = model.layout.drum_cell(0);
-        let snare = model.layout.drum_cell(1);
+        let kick = model.layout.seq_drum_cell(0);
+        let snare = model.layout.seq_drum_cell(1);
         model.finger_down(1, kick.x + 4, kick.y + 4, &mut out);
         model.finger_down(2, snare.x + 4, snare.y + 4, &mut out);
         assert_eq!(model.active_fingers(), 2);
@@ -2937,7 +2947,7 @@ mod tests {
         let mut model = NativeModel::new();
         let mut out = Outbox::new();
         assert_eq!(model.mode, UiMode::Kaoss);
-        let cell = model.layout.nav_cell(UiMode::Pads.index());
+        let cell = model.layout.nav_jam(2); // Pads
         model.finger_down(1, cell.x + 4, cell.y + 4, &mut out);
         assert_eq!(model.mode, UiMode::Pads);
     }

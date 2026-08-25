@@ -419,3 +419,46 @@ pub fn update_check() -> (String, Vec<String>) {
     };
     (status, lines)
 }
+
+/// Soft poweroff via midi-tone `pi-power.sh` when present (Tk POWER button).
+pub fn power_action() -> (String, Vec<String>) {
+    #[cfg(not(target_os = "linux"))]
+    {
+        return (
+            "POWER — appliance only".into(),
+            vec!["POWER runs pi-power.sh on the Pi.".into()],
+        );
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let candidates = [
+            PathBuf::from("/home/ray/midi-tone/scripts/session/pi-power.sh"),
+            find_repo_root().join("apps/pidi/scripts/session/pi-power.sh"),
+            PathBuf::from("apps/pidi/scripts/session/pi-power.sh"),
+        ];
+        let Some(script) = candidates.into_iter().find(|p| p.is_file()) else {
+            return (
+                "POWER: pi-power.sh missing".into(),
+                vec!["expected apps/pidi/scripts/session/pi-power.sh".into()],
+            );
+        };
+        let (code, stdout, stderr) = run_capture(
+            Command::new("sudo")
+                .args(["-n", script.to_str().unwrap_or("pi-power.sh"), "poweroff"]),
+            8,
+        );
+        let mut lines = vec![format!("pi-power.sh poweroff exit {code}")];
+        if !stdout.is_empty() {
+            lines.push(truncate_lines(&stdout, 4, 240));
+        }
+        if !stderr.is_empty() {
+            lines.push(truncate_lines(&stderr, 4, 240));
+        }
+        let status = if code == 0 {
+            "POWER: shutting down…".into()
+        } else {
+            "POWER: failed (see LOG)".into()
+        };
+        (status, lines)
+    }
+}

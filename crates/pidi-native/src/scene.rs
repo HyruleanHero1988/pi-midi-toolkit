@@ -7,7 +7,7 @@ use crate::font::{self, GLYPH_H, GLYPH_STRIDE, GLYPH_W};
 use crate::kaoss_ui;
 use crate::layout::{Rect, HUD_H, NAV_H};
 use crate::mode::UiMode;
-use crate::model::{NativeModel, RepeatDivisionChoice, LED_COLS, LED_ROWS};
+use crate::model::{NativeModel, LED_COLS, LED_ROWS};
 use crate::phrases;
 use crate::render::{SCREEN_H, SCREEN_W};
 use crate::waves;
@@ -59,6 +59,21 @@ impl Scene {
         self.fill(rect.x as f32, rect.y as f32, rect.w as f32, rect.h as f32, color);
     }
 
+    /// Tk-style touch button: light border around a solid fill.
+    pub fn button(&mut self, rect: Rect, fill: u32) {
+        const BORDER: u32 = 0xa89984;
+        self.fill_rect(rect, BORDER);
+        if rect.w > 2 && rect.h > 2 {
+            self.fill(
+                (rect.x + 1) as f32,
+                (rect.y + 1) as f32,
+                (rect.w - 2) as f32,
+                (rect.h - 2) as f32,
+                fill,
+            );
+        }
+    }
+
     pub fn fill(&mut self, x: f32, y: f32, w: f32, h: f32, color: u32) {
         if w <= 0.0 || h <= 0.0 {
             return;
@@ -66,28 +81,46 @@ impl Scene {
         self.color.push(ColorQuad { x, y, w, h, color });
     }
 
-    pub fn text(&mut self, mut x: i32, y: i32, s: &str, color: u32) {
+    /// Default UI text at 2× bitmap scale (readable on 800×480).
+    pub fn text(&mut self, x: i32, y: i32, s: &str, color: u32) {
+        self.text_scaled(x, y, s, color, 2);
+    }
+
+    pub fn text_scaled(&mut self, mut x: i32, y: i32, s: &str, color: u32, scale: i32) {
+        let scale = scale.max(1);
+        let gw = GLYPH_W * scale;
+        let gh = GLYPH_H * scale;
+        let stride = GLYPH_STRIDE * scale;
         for ch in s.chars() {
             let (u0, v0, u1, v1) = font::glyph_uv(ch);
             self.glyphs.push(GlyphQuad {
                 x: x as f32,
                 y: y as f32,
-                w: GLYPH_W as f32,
-                h: GLYPH_H as f32,
+                w: gw as f32,
+                h: gh as f32,
                 u0,
                 v0,
                 u1,
                 v1,
                 color,
             });
-            x += GLYPH_STRIDE;
+            x += stride;
         }
+    }
+
+    pub fn text_centered(&mut self, rect: Rect, s: &str, color: u32, scale: i32) {
+        let scale = scale.max(1);
+        let w = (s.chars().count() as i32) * GLYPH_STRIDE * scale;
+        let h = GLYPH_H * scale;
+        let x = rect.x + (rect.w - w).max(0) / 2;
+        let y = rect.y + (rect.h - h).max(0) / 2;
+        self.text_scaled(x, y, s, color, scale);
     }
 }
 
 pub fn build(model: &NativeModel) -> Scene {
     let mut scene = Scene {
-        clear: 0x101018,
+        clear: 0x111111,
         color: Vec::with_capacity(200),
         glyphs: Vec::with_capacity(240),
     };
@@ -109,33 +142,26 @@ pub fn build(model: &NativeModel) -> Scene {
 }
 
 fn draw_chrome(scene: &mut Scene, model: &NativeModel) {
-    let layout = model.layout;
-    scene.fill_rect(layout.hud, 0x1c1c28);
-    let hud = format!(
-        "{}  fps {:>4.0}  cb {}/{}us  xrun {}  {}",
-        model.mode.title(),
-        model.fps,
-        model.status.callback_frames,
-        model.status.callback_micros,
-        model.status.xruns,
-        if model.connected { "ENG" } else { "NO ENGINE" },
-    );
-    scene.text(8, 12, &hud, 0xf2f2f2);
-    if !model.status_line.is_empty() {
-        scene.text(420, 12, &model.status_line, 0xa0a0b8);
-    }
+    use crate::layout::JAM_MODES;
 
-    scene.fill_rect(layout.nav, 0x14141c);
-    for (i, mode) in UiMode::ALL.iter().enumerate() {
-        let cell = layout.nav_cell(i);
+    let layout = model.layout;
+    // Tk top bar: warm charcoal, cyan brand, HOME / POWER, jam tabs.
+    scene.fill_rect(layout.nav, 0x1d2021);
+    scene.text_scaled(10, 16, "PiDI", 0x00d4ff, 3);
+
+    let home = layout.nav_home();
+    scene.button(home, if model.mode == UiMode::Home { 0x458588 } else { 0x3c3836 });
+    scene.text_centered(home, "HOME", 0xfbf1c7, 2);
+
+    let power = layout.nav_power();
+    scene.button(power, 0x9d0006);
+    scene.text_centered(power, "POWER", 0xfbf1c7, 2);
+
+    for (i, mode) in JAM_MODES.iter().enumerate() {
+        let cell = layout.nav_jam(i);
         let active = *mode == model.mode;
-        scene.fill_rect(cell, if active { 0x5a3060 } else { 0x242430 });
-        scene.text(
-            cell.x + 6,
-            cell.y + cell.h / 2 - 3,
-            mode.label(),
-            if active { 0xffffff } else { 0xb0b0c0 },
-        );
+        scene.button(cell, if active { 0x458588 } else { 0x3c3836 });
+        scene.text_centered(cell, mode.title(), 0xfbf1c7, 2);
     }
 }
 
@@ -143,7 +169,7 @@ fn draw_kaoss(scene: &mut Scene, model: &NativeModel) {
     let layout = model.layout;
 
     if let Some(kind) = model.kaoss_picker {
-        scene.fill_rect(layout.kaoss, 0x101018);
+        scene.fill_rect(layout.kaoss, 0x08040a);
         let n = kaoss_ui::picker_count(kind, model.kaoss_show_all);
         let selected = match kind {
             kaoss_ui::KaossPicker::Program => {
@@ -166,53 +192,30 @@ fn draw_kaoss(scene: &mut Scene, model: &NativeModel) {
         for index in 0..n {
             let cell = kaoss_ui::picker_cell(layout.kaoss, kind, index, model.kaoss_show_all);
             let on = index == selected;
-            scene.fill_rect(cell, if on { 0x458588 } else { 0x2a2a38 });
+            scene.button(cell, if on { 0x458588 } else { 0x2a2a38 });
             let label = kaoss_ui::picker_label(kind, index, model.kaoss_show_all);
-            scene.text(cell.x + 8, cell.y + cell.h / 2 - 3, &label, 0xffffff);
+            scene.text_centered(cell, &label, 0xffffff, 2);
         }
     } else {
+        scene.fill_rect(layout.kaoss, 0x08040a);
         for row in 0..LED_ROWS {
             for col in 0..LED_COLS {
                 let cell = layout.kaoss_cell(col, row);
-                scene.fill(
-                    cell.x as f32,
-                    cell.y as f32,
-                    (cell.w - 1) as f32,
-                    (cell.h - 1) as f32,
-                    model.cell(col, row),
-                );
+                let color = model.cell(col, row);
+                if color != 0 {
+                    scene.fill(
+                        cell.x as f32,
+                        cell.y as f32,
+                        (cell.w - 1) as f32,
+                        (cell.h - 1) as f32,
+                        color,
+                    );
+                }
             }
         }
-    }
-
-    if layout.drums.w > 0 && model.kaoss_picker.is_none() {
-        const DRUM_LABELS: [&str; 16] = [
-            "KICK", "SNARE", "CLAP", "CHH", "OHH", "TOM L", "TOM M", "RIM", "KIK2", "RIM2", "SHKR",
-            "PED", "TOM H", "COW", "CLV", "RIDE",
-        ];
-        for index in 0..16 {
-            let cell = layout.drum_cell(index);
-            scene.fill_rect(cell, if index == 0 { 0x3a2030 } else { 0x242436 });
-            scene.text(
-                cell.x + 6,
-                cell.y + cell.h / 2 - 3,
-                DRUM_LABELS[index],
-                0xd0d0e0,
-            );
-        }
-
-        for index in 0..4 {
-            let cell = layout.division_cell(index);
-            let choice = RepeatDivisionChoice::from_index(index);
-            scene.fill_rect(
-                cell,
-                if choice == model.division {
-                    0x5a3060
-                } else {
-                    0x20202c
-                },
-            );
-            scene.text(cell.x + 8, cell.y + 16, choice.label(), 0xffffff);
+        draw_kaoss_axes(scene, layout.kaoss);
+        if let Some((fx, fy)) = model.kaoss_finger() {
+            draw_kaoss_cursor(scene, layout.kaoss, fx, fy, model);
         }
     }
 
@@ -223,98 +226,113 @@ fn draw_kaoss(scene: &mut Scene, model: &NativeModel) {
     let gate = kaoss_ui::gate(model.kaoss_gate).label;
 
     if layout.kaoss_prog.w > 0 {
-        scene.fill_rect(layout.kaoss_prog, 0xb16286);
-        scene.text(layout.kaoss_prog.x + 36, layout.kaoss_prog.y + 14, prog.label, 0xffffff);
-        scene.fill_rect(layout.kaoss_scale, 0x458588);
-        scene.text(layout.kaoss_scale.x + 12, layout.kaoss_scale.y + 14, scale.label, 0xffffff);
-        scene.fill_rect(layout.kaoss_key, 0x3c3836);
-        scene.text(
-            layout.kaoss_key.x + 40,
-            layout.kaoss_key.y + 14,
-            &format!("KEY {key}"),
-            0xffffff,
-        );
-        scene.fill_rect(layout.kaoss_oct, 0x3c3836);
-        scene.text(layout.kaoss_oct.x + 36, layout.kaoss_oct.y + 14, &oct, 0xffffff);
-        scene.fill_rect(
+        scene.button(layout.kaoss_prog, 0xb16286);
+        scene.text_centered(layout.kaoss_prog, prog.label, 0xffffff, 2);
+        scene.button(layout.kaoss_scale, 0x458588);
+        scene.text_centered(layout.kaoss_scale, scale.label, 0xffffff, 2);
+        scene.button(layout.kaoss_key, 0x3c3836);
+        scene.text_centered(layout.kaoss_key, &format!("KEY {key}"), 0xffffff, 2);
+        scene.button(layout.kaoss_oct, 0x3c3836);
+        scene.text_centered(layout.kaoss_oct, &oct, 0xffffff, 2);
+        scene.button(
             layout.kaoss_hold,
             if model.kaoss_hold { 0xd79921 } else { 0x3c3836 },
         );
-        scene.text(layout.kaoss_hold.x + 44, layout.kaoss_hold.y + 14, "HOLD", 0xffffff);
+        scene.text_centered(layout.kaoss_hold, "HOLD", 0xffffff, 2);
     }
 
     if layout.kaoss_gate.w > 0 {
-        scene.fill_rect(layout.kaoss_gate, 0x3c3836);
-        scene.text(layout.kaoss_gate.x + 24, layout.kaoss_gate.y + 12, gate, 0xffffff);
-        scene.fill_rect(layout.kaoss_bpm_down, 0x3c3836);
-        scene.text(
-            layout.kaoss_bpm_down.x + 28,
-            layout.kaoss_bpm_down.y + 12,
-            "BPM -",
-            0xffffff,
-        );
-        scene.fill_rect(layout.kaoss_bpm_up, 0x3c3836);
-        scene.text(
-            layout.kaoss_bpm_up.x + 24,
-            layout.kaoss_bpm_up.y + 12,
-            "BPM +",
-            0xffffff,
-        );
-        scene.fill_rect(
+        scene.button(layout.kaoss_gate, 0x3c3836);
+        scene.text_centered(layout.kaoss_gate, gate, 0xffffff, 2);
+        scene.button(layout.kaoss_bpm_down, 0x3c3836);
+        scene.text_centered(layout.kaoss_bpm_down, "BPM -", 0xffffff, 2);
+        scene.button(layout.kaoss_bpm_up, 0x3c3836);
+        scene.text_centered(layout.kaoss_bpm_up, "BPM +", 0xffffff, 2);
+        scene.button(
             layout.kaoss_show_all,
             if model.kaoss_show_all { 0xd79921 } else { 0x3c3836 },
         );
-        scene.text(
-            layout.kaoss_show_all.x + 6,
-            layout.kaoss_show_all.y + 12,
-            if model.kaoss_show_all { "ALL ON" } else { "SHOW ALL" },
+        scene.text_centered(
+            layout.kaoss_show_all,
+            if model.kaoss_show_all { "ALL" } else { "SHOW" },
             0xffffff,
+            2,
         );
-        scene.fill_rect(
+        scene.button(
             layout.kaoss_viz,
             if model.kaoss_viz_glow { 0xb16286 } else { 0x3c3836 },
         );
-        scene.text(
-            layout.kaoss_viz.x + 10,
-            layout.kaoss_viz.y + 12,
+        scene.text_centered(
+            layout.kaoss_viz,
             if model.kaoss_viz_glow { "GLOW" } else { "CELLS" },
             0xffffff,
+            2,
         );
-        scene.fill_rect(layout.kaoss_wipe_fx, 0x9d0006);
-        scene.text(
-            layout.kaoss_wipe_fx.x + 8,
-            layout.kaoss_wipe_fx.y + 12,
-            "WIPE FX",
-            0xffffff,
-        );
-        scene.fill_rect(layout.kaoss_channel, 0x504945);
-        scene.text(
-            layout.kaoss_channel.x + 6,
-            layout.kaoss_channel.y + 12,
+        scene.button(layout.kaoss_wipe_fx, 0x9d0006);
+        scene.text_centered(layout.kaoss_wipe_fx, "WIPE", 0xffffff, 2);
+        scene.button(layout.kaoss_channel, 0x504945);
+        scene.text_centered(
+            layout.kaoss_channel,
             &format!("CH{}", model.kaoss_channel + 1),
             0xffffff,
+            2,
         );
-        scene.fill_rect(layout.kaoss_out, model.kaoss_out.color());
-        scene.text(
-            layout.kaoss_out.x + 8,
-            layout.kaoss_out.y + 12,
-            model.kaoss_out.label(),
+        scene.button(layout.kaoss_out, model.kaoss_out.color());
+        scene.text_centered(layout.kaoss_out, model.kaoss_out.label(), 0xffffff, 2);
+    }
+
+    if layout.kaoss_full.w > 0 {
+        scene.button(
+            layout.kaoss_full,
+            if model.kaoss_full { 0x689d6a } else { 0x458588 },
+        );
+        scene.text_centered(
+            layout.kaoss_full,
+            if model.kaoss_full { "EXIT" } else { "FULL" },
             0xffffff,
+            2,
         );
     }
 
-    scene.fill_rect(
-        layout.kaoss_full,
-        if model.kaoss_full { 0x689d6a } else { 0x458588 },
-    );
-    if layout.kaoss_full.w > 0 {
-        scene.text(
-            layout.kaoss_full.x + 12,
-            layout.kaoss_full.y + 12,
-            if model.kaoss_full { "EXIT FULL" } else { "FULL PAD" },
-            0xffffff,
-        );
+    // Amber status in the top chrome gap (between POWER and jam tabs).
+    let status = if model.status_line.is_empty() {
+        format!(
+            "{:.0} BPM  {}  {}",
+            model.bpm,
+            gate,
+            model.kaoss_out.label(),
+        )
+    } else {
+        model.status_line.clone()
+    };
+    scene.text_scaled(250, 18, &status, 0xfe8019, 2);
+}
+
+fn draw_kaoss_axes(scene: &mut Scene, pad: crate::layout::Rect) {
+    let cx = pad.x as f32 + pad.w as f32 * 0.5;
+    let cy = pad.y as f32 + pad.h as f32 * 0.5;
+    scene.fill(cx - 1.0, pad.y as f32, 2.0, pad.h as f32, 0x9d2449);
+    scene.fill(pad.x as f32, cy - 1.0, pad.w as f32, 2.0, 0x9d2449);
+    scene.text_scaled(pad.x + 6, pad.y + pad.h / 2 - 20, "Y TONE", 0xd3869b, 2);
+    scene.text_scaled(pad.x + pad.w / 2 - 40, pad.y + pad.h - 22, "X PITCH", 0xd3869b, 2);
+}
+
+fn draw_kaoss_cursor(
+    scene: &mut Scene,
+    pad: crate::layout::Rect,
+    fx: f32,
+    fy: f32,
+    model: &NativeModel,
+) {
+    let cx = pad.x as f32 + fx.clamp(0.0, 1.0) * pad.w as f32;
+    let cy = pad.y as f32 + (1.0 - fy.clamp(0.0, 1.0)) * pad.h as f32;
+    for (r, color) in [(18.0_f32, 0x689d6au32), (11.0, 0xb8bb26), (5.0, 0xffffff)] {
+        scene.fill(cx - r, cy - 1.5, r * 2.0, 3.0, color);
+        scene.fill(cx - 1.5, cy - r, 3.0, r * 2.0, color);
     }
+    scene.fill(cx - 3.0, cy - 3.0, 6.0, 6.0, 0xffffff);
+    let note = jambox_core::NOTE_NAMES[model.kaoss_key as usize];
+    scene.text_scaled((cx as i32) - 8, (cy as i32) - 28, note, 0xffffff, 2);
 }
 
 fn draw_pads(scene: &mut Scene, model: &NativeModel) {
@@ -468,28 +486,21 @@ fn draw_pads(scene: &mut Scene, model: &NativeModel) {
 }
 
 fn draw_home(scene: &mut Scene, model: &NativeModel) {
-    // Distinct gruvbox fills per mode tile (Tk parity — not all gray).
-    const COLORS: [u32; 10] = [
-        0x3c3836, // Home
-        0xb16286, // Synth
-        0x458588, // Seq
-        0x689d6a, // Pads
-        0xd79921, // Kaoss
-        0x83a598, // Songs
-        0xd65d0e, // Presets
-        0x8f3f71, // Map
-        0x665c54, // Log
-        0xcc241d, // Settings
-    ];
-    for (i, mode) in UiMode::ALL.iter().enumerate() {
-        let cell = model.layout.home_tile(i);
-        scene.fill_rect(cell, COLORS[i % COLORS.len()]);
-        scene.text(
-            cell.x + 16,
-            cell.y + cell.h / 2 - 4,
-            mode.title(),
-            0xfbf1c7,
-        );
+    use crate::layout::HOME_TILES;
+
+    let layout = model.layout;
+    scene.text_scaled(layout.content.x + 12, layout.content.y + 10, "Home", 0xfbf1c7, 3);
+    scene.text_scaled(
+        layout.content.x + layout.content.w - 160,
+        layout.content.y + 14,
+        "tap a mode",
+        0x928374,
+        2,
+    );
+    for (i, (_mode, title, color)) in HOME_TILES.iter().enumerate() {
+        let cell = layout.home_tile(i);
+        scene.button(cell, *color);
+        scene.text_centered(cell, title, 0xfbf1c7, 2);
     }
 }
 
@@ -1097,6 +1108,8 @@ mod tests {
                     && q.y >= model.layout.kaoss.y as f32
                     && q.x < (model.layout.kaoss.x + model.layout.kaoss.w) as f32
                     && q.y < (model.layout.kaoss.y + model.layout.kaoss.h) as f32
+                    && q.w >= 20.0
+                    && q.h >= 20.0
                     && q.w < 80.0
                     && q.h < 80.0
             })
