@@ -41,6 +41,19 @@ pub struct Scene {
     pub glyphs: Vec<GlyphQuad>,
 }
 
+/// Unpack 0xRRGGBB (or 0xAARRGGBB) into RGBA floats for GLES.
+pub fn unpack_rgb(color: u32) -> [f32; 4] {
+    let r = ((color >> 16) & 0xff) as f32 / 255.0;
+    let g = ((color >> 8) & 0xff) as f32 / 255.0;
+    let b = (color & 0xff) as f32 / 255.0;
+    let a = if color > 0x00ff_ffff {
+        ((color >> 24) & 0xff) as f32 / 255.0
+    } else {
+        1.0
+    };
+    [r, g, b, a]
+}
+
 impl Scene {
     pub fn fill_rect(&mut self, rect: Rect, color: u32) {
         self.fill(rect.x as f32, rect.y as f32, rect.w as f32, rect.h as f32, color);
