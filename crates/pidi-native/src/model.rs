@@ -2484,7 +2484,14 @@ impl NativeModel {
         // Engine always maps Y→tone on note touches; for other Y params (and FX
         // programs) drive the synth/bus from the UI so MORPH/FILTER feel right.
         if prog.note {
-            if prog.y_param == "vibrato_always" {
+            if prog.y_param == "tone" {
+                // Match Python _emit_xy: Y drives brightness on every move for this
+                // finger. Engine tone is global; sync_touches must not let a second
+                // finger's static Y overwrite the finger being dragged.
+                outbox.synth("tone", y);
+                self.synth_params[1] = y;
+                self.mark_dirty();
+            } else if prog.y_param == "vibrato_always" {
                 self.vibrato_always = y;
                 outbox.synth("vibrato_always", y);
                 self.mark_dirty();
@@ -3091,6 +3098,25 @@ mod tests {
         model.finger_up(1, &mut out);
         let batch = out.take();
         assert!(batch.iter().any(|r| matches!(r, Request::Touch { .. })));
+    }
+
+    #[test]
+    fn kaoss_y_move_emits_tone_for_lead() {
+        let mut model = NativeModel::new();
+        assert_eq!(kaoss_ui::program(model.kaoss_program).y_param, "tone");
+        let mut out = Outbox::new();
+        let cell = model.layout.kaoss_cell(6, 3);
+        model.finger_down(1, cell.x + 4, cell.y + 4, &mut out);
+        out.take();
+        model.finger_move(1, cell.x + 4, cell.y + cell.h / 2, &mut out);
+        let batch = out.take();
+        assert!(
+            batch.iter().any(|r| matches!(
+                r,
+                Request::Synth { param, .. } if param == "tone"
+            )),
+            "Y drag on LEAD should drive synth tone like Tk _emit_xy"
+        );
     }
 
     #[test]

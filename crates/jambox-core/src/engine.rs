@@ -796,10 +796,22 @@ impl JamboxEngine {
 
     /// Apply coalesced XY updates. Only active gestures move; a lift already
     /// processed in this block wins because `KaossMapper::follow` is idle then.
+    ///
+    /// Tone (Y brightness) is a single shared lowpass on the key bus. With one
+    /// finger, derive it here every frame; with several, the UI sends `synth
+    /// tone` per moving finger so a second contact does not pin brightness.
     pub fn sync_touches(&mut self, touches: &[LatestTouch]) {
+        if touches.len() == 1 {
+            let touch = touches[0].clamp();
+            self.set_synth(SynthParam::Tone, tone_at_y(touch.y));
+            let delta = self
+                .kaoss
+                .follow(touch.owner, touch.x, touch.y, touch.velocity);
+            self.apply_touch_delta(delta);
+            return;
+        }
         for touch in touches {
             let touch = touch.clamp();
-            self.set_synth(SynthParam::Tone, tone_at_y(touch.y));
             let delta = self
                 .kaoss
                 .follow(touch.owner, touch.x, touch.y, touch.velocity);
