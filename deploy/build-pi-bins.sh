@@ -39,54 +39,8 @@ log() { echo "build-pi-bins: $*"; }
 ensure_ubuntu_armhf_ports() {
   # Ubuntu keeps armhf packages on ports.ubuntu.com. Adding armhf without
   # pinning archive.ubuntu.com to amd64 makes apt 404 on noble/jammy.
-  if [[ ! -r /etc/os-release ]]; then
-    return 0
-  fi
-  # shellcheck disable=SC1091
-  . /etc/os-release
-  if [[ "${ID:-}" != "ubuntu" ]]; then
-    return 0
-  fi
-  local archive_src="/etc/apt/sources.list.d/ubuntu.sources"
-  local ports_src="/etc/apt/sources.list.d/ubuntu-ports-armhf.sources"
-  local codename="${VERSION_CODENAME:-noble}"
-  if [[ -f "$archive_src" ]] && ! grep -q '^Architectures:' "$archive_src"; then
-    log "pinning Ubuntu archive to amd64 so armhf can use ports.ubuntu.com"
-    sudo python3 - "$archive_src" <<'PY'
-from pathlib import Path
-import sys
-path = Path(sys.argv[1])
-lines = path.read_text(encoding="utf-8").splitlines(True)
-out = []
-i = 0
-while i < len(lines):
-    line = lines[i]
-    out.append(line)
-    if line.startswith("Types:") and "deb" in line:
-        j = i + 1
-        has_arch = False
-        while j < len(lines) and lines[j].strip() and not lines[j].startswith("#") and not lines[j].startswith("Types:"):
-            if lines[j].startswith("Architectures:"):
-                has_arch = True
-                break
-            j += 1
-        if not has_arch:
-            out.append("Architectures: amd64\n")
-    i += 1
-path.write_text("".join(out), encoding="utf-8")
-PY
-  fi
-  if [[ ! -f "$ports_src" ]]; then
-    log "adding ports.ubuntu.com for armhf ($codename)"
-    sudo tee "$ports_src" >/dev/null <<EOF
-Types: deb
-URIs: http://ports.ubuntu.com/ubuntu-ports
-Suites: ${codename} ${codename}-updates ${codename}-security
-Components: main universe restricted multiverse
-Architectures: armhf
-Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
-EOF
-  fi
+  log "pinning Ubuntu archive to amd64 and adding ports.ubuntu.com for armhf"
+  bash "$ROOT/deploy/ubuntu-armhf-ports.sh"
 }
 
 ensure_apt_toolchain() {
