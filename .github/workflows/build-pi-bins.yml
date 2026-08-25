@@ -1,0 +1,48 @@
+name: Build Pi armv7 bins
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - cursor/native-jambox-vertical-slice-010c
+    paths:
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "deploy/build-pi-bins.sh"
+      - ".github/workflows/build-pi-bins.yml"
+
+jobs:
+  build:
+    # Ubuntu 22.04 ships glibc 2.35 — older than Pi Bookworm 2.36, so binaries run.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install armhf cross toolchain + SDL/ALSA
+        run: |
+          set -euo pipefail
+          sudo dpkg --add-architecture armhf
+          sudo apt-get update -qq
+          sudo apt-get install -y \
+            gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf pkg-config \
+            libasound2-dev:armhf libsdl2-dev:armhf libgles2-mesa-dev:armhf \
+            libegl1-mesa-dev:armhf libgbm-dev:armhf libdrm-dev:armhf
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: armv7-unknown-linux-gnueabihf
+
+      - name: Cross-build and stage dist/armv7
+        env:
+          SKIP_APT: "1"
+          PACKAGES: midi-engine,jambox-engine,pidi-native
+        run: ./deploy/build-pi-bins.sh
+
+      - name: Upload staged binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: armv7-bins
+          path: dist/armv7/
+          if-no-files-found: error
