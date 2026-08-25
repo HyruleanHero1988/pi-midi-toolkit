@@ -1,6 +1,7 @@
 //! Instrument-surface state. Rendering and IPC consume this; they do not own notes.
 
 use crate::client::Outbox;
+use crate::kaoss_ui::{self, KaossPicker, KAOSS_PROGRAMS};
 use crate::layout::{Hit, Layout, Surface};
 use crate::mode::UiMode;
 use crate::phrases::{self, PhrasePad};
@@ -95,7 +96,13 @@ pub struct NativeModel {
     pub synth_params: [f32; 5],
     pub kaoss_scale_index: u8,
     pub kaoss_key: u8,
+    pub kaoss_octaves: u8,
     pub kaoss_full: bool,
+    pub kaoss_hold: bool,
+    pub kaoss_program: usize,
+    pub kaoss_gate: usize,
+    pub kaoss_picker: Option<KaossPicker>,
+    kaoss_hold_gesture: Option<u32>,
     pub seq: SeqModel,
     pub preset_occupied: [bool; 8],
     pub preset_selected: usize,
@@ -134,7 +141,13 @@ impl NativeModel {
             synth_params: [0.5, 0.5, 0.8, 0.05, 0.3],
             kaoss_scale_index: 1,
             kaoss_key: 0,
+            kaoss_octaves: 2,
             kaoss_full: false,
+            kaoss_hold: false,
+            kaoss_program: 0,
+            kaoss_gate: 0,
+            kaoss_picker: None,
+            kaoss_hold_gesture: None,
             seq: SeqModel::new(),
             preset_occupied: [false; 8],
             preset_selected: 0,
@@ -185,6 +198,11 @@ impl NativeModel {
     pub fn set_mode(&mut self, mode: UiMode) {
         self.mode = mode;
         self.status_line.clear();
+        self.kaoss_picker = None;
+        if mode != UiMode::Kaoss && self.kaoss_full {
+            self.kaoss_full = false;
+            self.layout.apply_kaoss_full(false);
+        }
     }
 
     pub fn push_log(&mut self, line: impl Into<String>) {
@@ -237,7 +255,28 @@ impl NativeModel {
         let gesture = self.next_gesture;
         self.next_gesture = self.next_gesture.wrapping_add(1).max(1);
 
-        match self.layout.hit(self.mode, px, py) {
+        let hit = if let Some(kind) = self.kaoss_picker {
+            let base = self.layout.hit(self.mode, px, py);
+            match base {
+                Hit::KaossProg
+                | Hit::KaossScale
+                | Hit::KaossKey
+                | Hit::KaossOct
+                | Hit::KaossHold
+                | Hit::KaossGate
+                | Hit::KaossBpmUp
+                | Hit::KaossBpmDown
+                | Hit::KaossFull
+                | Hit::Drum { .. }
+                | Hit::Division(_)
+                | Hit::Nav(_) => base,
+                _ => self.layout.hit_kaoss_picker(kind, px, py),
+            }
+        } else {
+            self.layout.hit(self.mode, px, py)
+        };
+
+        match hit {
             Hit::Nav(mode) => {
                 self.fingers[slot] = Finger {
                     active: true,
@@ -275,7 +314,7 @@ impl NativeModel {
                     py,
                     surface: Surface::Kaoss,
                 };
-                outbox.touch(gesture, TouchPhase::Down, x, y);
+                self.begin_kaoss_touch(gesture, x, y, outbox);
             }
             Hit::Drum { note, .. } => {
                 let repeat = note == KICK_NOTE && self.mode == UiMode::Kaoss;
@@ -372,50 +411,56 @@ impl NativeModel {
                 outbox.note_on(0, note, 110);
                 self.seq.push_note(true, 0, note, 110);
             }
+            Hit::KaossProg => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.toggle_kaoss_picker(KaossPicker::Program);
+            }
             Hit::KaossScale => {
-                self.fingers[slot] = Finger {
-                    active: true,
-                    id,
-                    gesture,
-                    x: 0.0,
-                    y: 0.0,
-                    px,
-                    py,
-                    surface: Surface::UiTap,
-                };
-                self.cycle_kaoss_scale(1, outbox);
+                self.tap_ui(slot, id, gesture, px, py);
+                self.toggle_kaoss_picker(KaossPicker::Scale);
             }
             Hit::KaossKey => {
-                self.fingers[slot] = Finger {
-                    active: true,
-                    id,
-                    gesture,
-                    x: 0.0,
-                    y: 0.0,
-                    px,
-                    py,
-                    surface: Surface::UiTap,
-                };
-                self.cycle_kaoss_key(1, outbox);
+                self.tap_ui(slot, id, gesture, px, py);
+                self.toggle_kaoss_picker(KaossPicker::Key);
+            }
+            Hit::KaossOct => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.toggle_kaoss_picker(KaossPicker::Octave);
+            }
+            Hit::KaossHold => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.toggle_kaoss_hold(outbox);
+            }
+            Hit::KaossGate => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.toggle_kaoss_picker(KaossPicker::Gate);
+            }
+            Hit::KaossBpmUp => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.nudge_kaoss_bpm(5.0, outbox);
+            }
+            Hit::KaossBpmDown => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.nudge_kaoss_bpm(-5.0, outbox);
             }
             Hit::KaossFull => {
-                self.fingers[slot] = Finger {
-                    active: true,
-                    id,
-                    gesture,
-                    x: 0.0,
-                    y: 0.0,
-                    px,
-                    py,
-                    surface: Surface::UiTap,
-                };
+                self.tap_ui(slot, id, gesture, px, py);
+                self.kaoss_picker = None;
                 self.kaoss_full = !self.kaoss_full;
                 self.layout.apply_kaoss_full(self.kaoss_full);
                 self.status_line = if self.kaoss_full {
-                    "full pad".into()
+                    "FULL PAD — tap EXIT to leave".into()
                 } else {
                     "split pad".into()
                 };
+            }
+            Hit::KaossPicker(index) => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.apply_kaoss_picker(index, outbox);
+            }
+            Hit::KaossPickerClose => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.kaoss_picker = None;
             }
             Hit::SeqRec => {
                 self.fingers[slot] = Finger {
@@ -752,7 +797,7 @@ impl NativeModel {
                 let (x, y) = self.layout.kaoss.pad_xy(px, py);
                 self.fingers[slot].x = x;
                 self.fingers[slot].y = y;
-                outbox.touch(self.fingers[slot].gesture, TouchPhase::Move, x, y);
+                self.move_kaoss_touch(self.fingers[slot].gesture, x, y, outbox);
             }
             Surface::SynthSlider { index } => {
                 self.apply_synth_slider(index, px, py, outbox);
@@ -771,7 +816,7 @@ impl NativeModel {
         let finger = self.fingers[slot];
         self.fingers[slot] = Finger::silent();
         match finger.surface {
-            Surface::Kaoss => outbox.touch(finger.gesture, TouchPhase::Up, finger.x, finger.y),
+            Surface::Kaoss => self.end_kaoss_touch(finger.gesture, finger.x, finger.y, outbox),
             Surface::Drum { note, repeat } => {
                 if repeat {
                     outbox.repeat(
@@ -858,19 +903,186 @@ impl NativeModel {
         self.status_line = format!("bus {} {:.2}", Self::FX_PARAM_NAMES[index], value);
     }
 
-    fn cycle_kaoss_scale(&mut self, step: i32, outbox: &mut Outbox) {
-        let n = jambox_core::KAOSS_SCALES.len() as i32;
-        let next = (self.kaoss_scale_index as i32 + step).rem_euclid(n) as u8;
-        self.kaoss_scale_index = next;
-        outbox.kaoss_scale(next, self.kaoss_key, 48, 2);
-        let scale = jambox_core::kaoss_scale(next as usize);
-        self.status_line = scale.label.to_string();
+    fn tap_ui(&mut self, slot: usize, id: i32, gesture: u32, px: i32, py: i32) {
+        self.fingers[slot] = Finger {
+            active: true,
+            id,
+            gesture,
+            x: 0.0,
+            y: 0.0,
+            px,
+            py,
+            surface: Surface::UiTap,
+        };
     }
 
-    fn cycle_kaoss_key(&mut self, step: i32, outbox: &mut Outbox) {
-        self.kaoss_key = ((self.kaoss_key as i32 + step).rem_euclid(12)) as u8;
-        outbox.kaoss_scale(self.kaoss_scale_index, self.kaoss_key, 48, 2);
-        self.status_line = format!("key {}", jambox_core::NOTE_NAMES[self.kaoss_key as usize]);
+    fn toggle_kaoss_picker(&mut self, kind: KaossPicker) {
+        self.kaoss_picker = match self.kaoss_picker {
+            Some(open) if open == kind => None,
+            _ => Some(kind),
+        };
+        if self.kaoss_picker.is_some() {
+            self.status_line = match kind {
+                KaossPicker::Program => "pick program".into(),
+                KaossPicker::Scale => "pick scale".into(),
+                KaossPicker::Key => "pick key".into(),
+                KaossPicker::Octave => "pick range".into(),
+                KaossPicker::Gate => "pick gate".into(),
+            };
+        }
+    }
+
+    fn apply_kaoss_picker(&mut self, index: usize, outbox: &mut Outbox) {
+        let Some(kind) = self.kaoss_picker.take() else {
+            return;
+        };
+        match kind {
+            KaossPicker::Program => {
+                self.kaoss_program = index % KAOSS_PROGRAMS.len();
+                let p = kaoss_ui::program(self.kaoss_program);
+                self.status_line = format!("program {}", p.label);
+            }
+            KaossPicker::Scale => {
+                self.kaoss_scale_index = (index % jambox_core::KAOSS_SCALES.len()) as u8;
+                self.push_kaoss_scale(outbox);
+                self.status_line = jambox_core::kaoss_scale(self.kaoss_scale_index as usize)
+                    .label
+                    .to_string();
+            }
+            KaossPicker::Key => {
+                self.kaoss_key = (index % 12) as u8;
+                self.push_kaoss_scale(outbox);
+                self.status_line =
+                    format!("key {}", jambox_core::NOTE_NAMES[self.kaoss_key as usize]);
+            }
+            KaossPicker::Octave => {
+                self.kaoss_octaves = ((index % 4) + 1) as u8;
+                self.push_kaoss_scale(outbox);
+                self.status_line = format!("{} oct", self.kaoss_octaves);
+            }
+            KaossPicker::Gate => {
+                self.kaoss_gate = index % kaoss_ui::GATE_LABELS.len();
+                self.status_line = kaoss_ui::GATE_LABELS[self.kaoss_gate].to_string();
+            }
+        }
+    }
+
+    fn push_kaoss_scale(&mut self, outbox: &mut Outbox) {
+        let root = match self.kaoss_octaves {
+            1 => 48,
+            2 => 48,
+            3 => 36,
+            _ => 24,
+        };
+        outbox.kaoss_scale(
+            self.kaoss_scale_index,
+            self.kaoss_key,
+            root,
+            self.kaoss_octaves,
+        );
+    }
+
+    fn nudge_kaoss_bpm(&mut self, delta: f32, outbox: &mut Outbox) {
+        self.bpm = (self.bpm + delta).clamp(40.0, 240.0);
+        self.seq.bpm = self.bpm;
+        outbox.tempo(self.bpm);
+        self.status_line = format!("tempo {:.0}", self.bpm);
+    }
+
+    fn toggle_kaoss_hold(&mut self, outbox: &mut Outbox) {
+        self.kaoss_hold = !self.kaoss_hold;
+        if !self.kaoss_hold {
+            if let Some(gesture) = self.kaoss_hold_gesture.take() {
+                outbox.touch(gesture, TouchPhase::Up, 0.0, 0.0);
+            }
+            self.status_line = "HOLD off".into();
+        } else {
+            self.status_line = "HOLD on — latch last pad".into();
+        }
+    }
+
+    fn begin_kaoss_touch(&mut self, gesture: u32, x: f32, y: f32, outbox: &mut Outbox) {
+        if let Some(held) = self.kaoss_hold_gesture.take() {
+            outbox.touch(held, TouchPhase::Up, 0.0, 0.0);
+        }
+        let prog = kaoss_ui::program(self.kaoss_program);
+        if prog.note {
+            outbox.touch(gesture, TouchPhase::Down, x, y);
+        }
+        self.apply_kaoss_xy(prog, x, y, outbox);
+    }
+
+    fn move_kaoss_touch(&mut self, gesture: u32, x: f32, y: f32, outbox: &mut Outbox) {
+        let prog = kaoss_ui::program(self.kaoss_program);
+        if prog.note {
+            outbox.touch(gesture, TouchPhase::Move, x, y);
+        }
+        self.apply_kaoss_xy(prog, x, y, outbox);
+    }
+
+    fn end_kaoss_touch(&mut self, gesture: u32, x: f32, y: f32, outbox: &mut Outbox) {
+        let prog = kaoss_ui::program(self.kaoss_program);
+        if self.kaoss_hold && prog.note {
+            self.kaoss_hold_gesture = Some(gesture);
+            self.status_line = "HOLD latched".into();
+            return;
+        }
+        if prog.note {
+            outbox.touch(gesture, TouchPhase::Up, x, y);
+        }
+    }
+
+    fn apply_kaoss_xy(
+        &mut self,
+        prog: kaoss_ui::KaossProgram,
+        x: f32,
+        y: f32,
+        outbox: &mut Outbox,
+    ) {
+        // Engine always maps Y→tone on note touches; for other Y params (and FX
+        // programs) drive the synth/bus from the UI so MORPH/FILTER feel right.
+        if prog.note {
+            if prog.y_param != "tone" {
+                outbox.synth(prog.y_param, y);
+                if let Some(i) = Self::synth_param_index(prog.y_param) {
+                    self.synth_params[i] = y;
+                }
+            }
+        } else {
+            if let Some(xp) = prog.x_param {
+                if Self::is_bus_param(xp) {
+                    outbox.fx_bus(xp, x);
+                } else {
+                    outbox.synth(xp, x);
+                    if let Some(i) = Self::synth_param_index(xp) {
+                        self.synth_params[i] = x;
+                    }
+                }
+            }
+            if Self::is_bus_param(prog.y_param) {
+                outbox.fx_bus(prog.y_param, y);
+            } else {
+                outbox.synth(prog.y_param, y);
+                if let Some(i) = Self::synth_param_index(prog.y_param) {
+                    self.synth_params[i] = y;
+                }
+            }
+        }
+    }
+
+    fn synth_param_index(name: &str) -> Option<usize> {
+        match name {
+            "morph" => Some(0),
+            "tone" => Some(1),
+            "level" => Some(2),
+            "attack" => Some(3),
+            "release" => Some(4),
+            _ => None,
+        }
+    }
+
+    fn is_bus_param(name: &str) -> bool {
+        matches!(name, "drive" | "delay_mix" | "reverb_mix" | "delay_time")
     }
 
     fn apply_seq_action(&mut self, action: SeqAction, outbox: &mut Outbox) {

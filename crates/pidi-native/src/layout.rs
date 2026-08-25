@@ -18,9 +18,17 @@ pub enum Hit {
     HomeTile(UiMode),
     SynthSlider(usize),
     SynthKey(usize),
+    KaossProg,
     KaossScale,
     KaossKey,
+    KaossOct,
+    KaossHold,
+    KaossGate,
     KaossFull,
+    KaossBpmUp,
+    KaossBpmDown,
+    KaossPicker(usize),
+    KaossPickerClose,
     SeqRec,
     SeqPlay,
     SeqKeep,
@@ -78,9 +86,15 @@ pub struct Layout {
     pub stop_all: Rect,
     pub synth_sliders: Rect,
     pub synth_keys: Rect,
+    pub kaoss_prog: Rect,
     pub kaoss_scale: Rect,
     pub kaoss_key: Rect,
+    pub kaoss_oct: Rect,
+    pub kaoss_hold: Rect,
+    pub kaoss_gate: Rect,
     pub kaoss_full: Rect,
+    pub kaoss_bpm_up: Rect,
+    pub kaoss_bpm_down: Rect,
     pub seq_rec: Rect,
     pub seq_play: Rect,
     pub seq_keep: Rect,
@@ -138,19 +152,74 @@ impl Layout {
                 x: 8,
                 y: HUD_H + 8,
                 w: 520,
-                h: content_h - 16,
+                h: content_h - 112,
             },
             drums: Rect {
                 x: 540,
                 y: HUD_H + 8,
                 w: 252,
-                h: 252,
+                h: content_h - 172,
             },
             divisions: Rect {
                 x: 540,
-                y: HUD_H + 268,
+                y: HUD_H + content_h - 156,
                 w: 252,
-                h: 52,
+                h: 44,
+            },
+            // Two-row footer chrome (Tk parity), full width under pad+drums.
+            kaoss_prog: Rect {
+                x: 8,
+                y: HUD_H + content_h - 100,
+                w: 152,
+                h: 44,
+            },
+            kaoss_scale: Rect {
+                x: 168,
+                y: HUD_H + content_h - 100,
+                w: 152,
+                h: 44,
+            },
+            kaoss_key: Rect {
+                x: 328,
+                y: HUD_H + content_h - 100,
+                w: 152,
+                h: 44,
+            },
+            kaoss_oct: Rect {
+                x: 488,
+                y: HUD_H + content_h - 100,
+                w: 148,
+                h: 44,
+            },
+            kaoss_hold: Rect {
+                x: 644,
+                y: HUD_H + content_h - 100,
+                w: 148,
+                h: 44,
+            },
+            kaoss_gate: Rect {
+                x: 8,
+                y: HUD_H + content_h - 48,
+                w: 180,
+                h: 40,
+            },
+            kaoss_bpm_down: Rect {
+                x: 196,
+                y: HUD_H + content_h - 48,
+                w: 120,
+                h: 40,
+            },
+            kaoss_bpm_up: Rect {
+                x: 324,
+                y: HUD_H + content_h - 48,
+                w: 120,
+                h: 40,
+            },
+            kaoss_full: Rect {
+                x: 452,
+                y: HUD_H + content_h - 48,
+                w: 340,
+                h: 40,
             },
             phrase_grid: Rect {
                 x: 16,
@@ -175,24 +244,6 @@ impl Layout {
                 y: HUD_H + 260,
                 w: 752,
                 h: content_h - 280,
-            },
-            kaoss_scale: Rect {
-                x: 540,
-                y: HUD_H + 368,
-                w: 80,
-                h: 40,
-            },
-            kaoss_key: Rect {
-                x: 624,
-                y: HUD_H + 368,
-                w: 80,
-                h: 40,
-            },
-            kaoss_full: Rect {
-                x: 708,
-                y: HUD_H + 368,
-                w: 84,
-                h: 40,
             },
             // Tk-like transport chrome, plus a compact drum strip for live capture
             // (improvement vs Tk — no need to leave SEQ to hit drums).
@@ -360,22 +411,59 @@ impl Layout {
                 w: 0,
                 h: 0,
             };
+            // Thin exit strip — tap FULL again to leave (clearer than Tk edge-hold).
+            self.kaoss_prog = Rect {
+                x: 0,
+                y: 0,
+                w: 0,
+                h: 0,
+            };
             self.kaoss_scale = Rect {
-                x: 8,
-                y: HUD_H + content_h - 44,
-                w: 120,
-                h: 40,
+                x: 0,
+                y: 0,
+                w: 0,
+                h: 0,
             };
             self.kaoss_key = Rect {
-                x: 136,
-                y: HUD_H + content_h - 44,
-                w: 120,
-                h: 40,
+                x: 0,
+                y: 0,
+                w: 0,
+                h: 0,
+            };
+            self.kaoss_oct = Rect {
+                x: 0,
+                y: 0,
+                w: 0,
+                h: 0,
+            };
+            self.kaoss_hold = Rect {
+                x: 0,
+                y: 0,
+                w: 0,
+                h: 0,
+            };
+            self.kaoss_gate = Rect {
+                x: 0,
+                y: 0,
+                w: 0,
+                h: 0,
+            };
+            self.kaoss_bpm_down = Rect {
+                x: 0,
+                y: 0,
+                w: 0,
+                h: 0,
+            };
+            self.kaoss_bpm_up = Rect {
+                x: 0,
+                y: 0,
+                w: 0,
+                h: 0,
             };
             self.kaoss_full = Rect {
-                x: 264,
-                y: HUD_H + content_h - 44,
-                w: 120,
+                x: 280,
+                y: HUD_H + content_h - 48,
+                w: 240,
                 h: 40,
             };
         } else {
@@ -519,11 +607,29 @@ impl Layout {
     }
 
     fn hit_kaoss(&self, px: i32, py: i32) -> Hit {
+        if self.kaoss_prog.contains(px, py) {
+            return Hit::KaossProg;
+        }
         if self.kaoss_scale.contains(px, py) {
             return Hit::KaossScale;
         }
         if self.kaoss_key.contains(px, py) {
             return Hit::KaossKey;
+        }
+        if self.kaoss_oct.contains(px, py) {
+            return Hit::KaossOct;
+        }
+        if self.kaoss_hold.contains(px, py) {
+            return Hit::KaossHold;
+        }
+        if self.kaoss_gate.contains(px, py) {
+            return Hit::KaossGate;
+        }
+        if self.kaoss_bpm_up.contains(px, py) {
+            return Hit::KaossBpmUp;
+        }
+        if self.kaoss_bpm_down.contains(px, py) {
+            return Hit::KaossBpmDown;
         }
         if self.kaoss_full.contains(px, py) {
             return Hit::KaossFull;
@@ -551,6 +657,23 @@ impl Layout {
             }
         }
         Hit::None
+    }
+
+    /// When a picker overlay is open, hit-test its cells first.
+    pub fn hit_kaoss_picker(
+        &self,
+        kind: crate::kaoss_ui::KaossPicker,
+        px: i32,
+        py: i32,
+    ) -> Hit {
+        let n = crate::kaoss_ui::picker_count(kind);
+        for index in 0..n {
+            if crate::kaoss_ui::picker_cell(self.kaoss, kind, index).contains(px, py) {
+                return Hit::KaossPicker(index);
+            }
+        }
+        // Tap outside the pad closes the picker.
+        Hit::KaossPickerClose
     }
 
     fn hit_pads(&self, px: i32, py: i32) -> Hit {

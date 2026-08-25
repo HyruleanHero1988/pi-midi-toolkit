@@ -8,6 +8,7 @@ pub mod font;
 #[cfg(feature = "sdl")]
 pub mod gles;
 pub mod input;
+pub mod kaoss_ui;
 pub mod layout;
 pub mod mode;
 pub mod model;

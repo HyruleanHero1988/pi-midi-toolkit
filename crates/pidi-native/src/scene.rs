@@ -4,6 +4,7 @@
 //! rasterizer uses the same list so dummy/PPM output matches the GPU path.
 
 use crate::font::{self, GLYPH_H, GLYPH_STRIDE, GLYPH_W};
+use crate::kaoss_ui;
 use crate::layout::{Rect, HUD_H};
 use crate::mode::UiMode;
 use crate::model::{NativeModel, RepeatDivisionChoice, LED_COLS, LED_ROWS};
@@ -126,20 +127,40 @@ fn draw_chrome(scene: &mut Scene, model: &NativeModel) {
 
 fn draw_kaoss(scene: &mut Scene, model: &NativeModel) {
     let layout = model.layout;
-    for row in 0..LED_ROWS {
-        for col in 0..LED_COLS {
-            let cell = layout.kaoss_cell(col, row);
-            scene.fill(
-                cell.x as f32,
-                cell.y as f32,
-                (cell.w - 1) as f32,
-                (cell.h - 1) as f32,
-                model.cell(col, row),
-            );
+
+    if let Some(kind) = model.kaoss_picker {
+        scene.fill_rect(layout.kaoss, 0x101018);
+        let n = kaoss_ui::picker_count(kind);
+        let selected = match kind {
+            kaoss_ui::KaossPicker::Program => model.kaoss_program,
+            kaoss_ui::KaossPicker::Scale => model.kaoss_scale_index as usize,
+            kaoss_ui::KaossPicker::Key => model.kaoss_key as usize,
+            kaoss_ui::KaossPicker::Octave => (model.kaoss_octaves as usize).saturating_sub(1),
+            kaoss_ui::KaossPicker::Gate => model.kaoss_gate,
+        };
+        for index in 0..n {
+            let cell = kaoss_ui::picker_cell(layout.kaoss, kind, index);
+            let on = index == selected;
+            scene.fill_rect(cell, if on { 0x458588 } else { 0x2a2a38 });
+            let label = kaoss_ui::picker_label(kind, index);
+            scene.text(cell.x + 8, cell.y + cell.h / 2 - 3, &label, 0xffffff);
+        }
+    } else {
+        for row in 0..LED_ROWS {
+            for col in 0..LED_COLS {
+                let cell = layout.kaoss_cell(col, row);
+                scene.fill(
+                    cell.x as f32,
+                    cell.y as f32,
+                    (cell.w - 1) as f32,
+                    (cell.h - 1) as f32,
+                    model.cell(col, row),
+                );
+            }
         }
     }
 
-    if layout.drums.w > 0 {
+    if layout.drums.w > 0 && model.kaoss_picker.is_none() {
         const DRUM_LABELS: [&str; 16] = [
             "KICK", "SNARE", "CLAP", "CHH", "OHH", "TOM L", "TOM M", "RIM", "KIK2", "RIM2", "SHKR",
             "PED", "TOM H", "COW", "CLV", "RIDE",
@@ -170,24 +191,60 @@ fn draw_kaoss(scene: &mut Scene, model: &NativeModel) {
         }
     }
 
+    let prog = kaoss_ui::program(model.kaoss_program);
     let scale = jambox_core::kaoss_scale(model.kaoss_scale_index as usize);
-    scene.fill_rect(layout.kaoss_scale, 0x3a3048);
-    scene.text(layout.kaoss_scale.x + 6, layout.kaoss_scale.y + 14, scale.label, 0xffffff);
-    scene.fill_rect(layout.kaoss_key, 0x3a3048);
-    scene.text(
-        layout.kaoss_key.x + 16,
-        layout.kaoss_key.y + 14,
-        jambox_core::NOTE_NAMES[model.kaoss_key as usize],
-        0xffffff,
-    );
+    let key = jambox_core::NOTE_NAMES[model.kaoss_key as usize];
+    let oct = format!("{} OCT", model.kaoss_octaves);
+    let gate = kaoss_ui::GATE_LABELS[model.kaoss_gate % kaoss_ui::GATE_LABELS.len()];
+
+    if layout.kaoss_prog.w > 0 {
+        scene.fill_rect(layout.kaoss_prog, 0xb16286);
+        scene.text(layout.kaoss_prog.x + 36, layout.kaoss_prog.y + 14, prog.label, 0xffffff);
+        scene.fill_rect(layout.kaoss_scale, 0x458588);
+        scene.text(layout.kaoss_scale.x + 12, layout.kaoss_scale.y + 14, scale.label, 0xffffff);
+        scene.fill_rect(layout.kaoss_key, 0x3c3836);
+        scene.text(
+            layout.kaoss_key.x + 40,
+            layout.kaoss_key.y + 14,
+            &format!("KEY {key}"),
+            0xffffff,
+        );
+        scene.fill_rect(layout.kaoss_oct, 0x3c3836);
+        scene.text(layout.kaoss_oct.x + 36, layout.kaoss_oct.y + 14, &oct, 0xffffff);
+        scene.fill_rect(
+            layout.kaoss_hold,
+            if model.kaoss_hold { 0xd79921 } else { 0x3c3836 },
+        );
+        scene.text(layout.kaoss_hold.x + 44, layout.kaoss_hold.y + 14, "HOLD", 0xffffff);
+    }
+
+    if layout.kaoss_gate.w > 0 {
+        scene.fill_rect(layout.kaoss_gate, 0x3c3836);
+        scene.text(layout.kaoss_gate.x + 24, layout.kaoss_gate.y + 12, gate, 0xffffff);
+        scene.fill_rect(layout.kaoss_bpm_down, 0x3c3836);
+        scene.text(
+            layout.kaoss_bpm_down.x + 28,
+            layout.kaoss_bpm_down.y + 12,
+            "BPM -",
+            0xffffff,
+        );
+        scene.fill_rect(layout.kaoss_bpm_up, 0x3c3836);
+        scene.text(
+            layout.kaoss_bpm_up.x + 28,
+            layout.kaoss_bpm_up.y + 12,
+            "BPM +",
+            0xffffff,
+        );
+    }
+
     scene.fill_rect(
         layout.kaoss_full,
-        if model.kaoss_full { 0x5a3060 } else { 0x3a3048 },
+        if model.kaoss_full { 0x689d6a } else { 0x458588 },
     );
     scene.text(
-        layout.kaoss_full.x + 10,
-        layout.kaoss_full.y + 14,
-        if model.kaoss_full { "EXIT" } else { "FULL" },
+        layout.kaoss_full.x + 90,
+        layout.kaoss_full.y + 12,
+        if model.kaoss_full { "EXIT FULL" } else { "FULL PAD" },
         0xffffff,
     );
 }
