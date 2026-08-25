@@ -18,6 +18,7 @@ pub mod render;
 pub mod scene;
 pub mod seq;
 pub mod songs;
+pub mod waves;
 #[cfg(feature = "sdl")]
 pub mod sdl_backend;
 

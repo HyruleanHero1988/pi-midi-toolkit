@@ -8,6 +8,7 @@ use crate::phrases::{self, PhrasePad};
 use crate::presets::{self, PresetSnapshot};
 use crate::seq::{SeqAction, SeqModel, SEQ_CLIP_SLOT};
 use crate::songs::{self, SONG_CLIP_SLOT};
+use crate::waves;
 use jambox_protocol::{RepeatDivision, RepeatPhase, StatusReply, TouchPhase};
 use std::path::PathBuf;
 
@@ -94,6 +95,12 @@ pub struct NativeModel {
     pub phrase_playing: [bool; 16],
     pub status_line: String,
     pub synth_params: [f32; 5],
+    pub wave_names: Vec<String>,
+    pub morph_a: u16,
+    pub morph_b: u16,
+    /// `Some(true)` = picking A, `Some(false)` = picking B.
+    pub synth_pick_a: Option<bool>,
+    pub synth_pick_page: usize,
     pub kaoss_scale_index: u8,
     pub kaoss_key: u8,
     pub kaoss_octaves: u8,
@@ -139,6 +146,11 @@ impl NativeModel {
             phrase_playing: [false; 16],
             status_line: String::new(),
             synth_params: [0.5, 0.5, 0.8, 0.05, 0.3],
+            wave_names: waves::list_wave_names(&waves::waves_dirs_from_env()),
+            morph_a: 0,
+            morph_b: 1,
+            synth_pick_a: None,
+            synth_pick_page: 0,
             kaoss_scale_index: 1,
             kaoss_key: 0,
             kaoss_octaves: 2,
@@ -169,6 +181,16 @@ impl NativeModel {
         self.preset_occupied = presets::list_occupied(&presets_dir);
         let songs_dir = songs::songs_dir_from_env();
         self.song_files = songs::list_songs(&songs_dir);
+        if self.wave_names.len() <= 4 {
+            self.wave_names = waves::list_wave_names(&waves::waves_dirs_from_env());
+        }
+    }
+
+    pub fn wave_label(&self, index: u16) -> &str {
+        self.wave_names
+            .get(index as usize)
+            .map(|s| s.as_str())
+            .unwrap_or("—")
     }
 
     pub fn ensure_phrases_loaded(&mut self, outbox: &mut Outbox) {
@@ -199,6 +221,7 @@ impl NativeModel {
         self.mode = mode;
         self.status_line.clear();
         self.kaoss_picker = None;
+        self.synth_pick_a = None;
         if mode != UiMode::Kaoss && self.kaoss_full {
             self.kaoss_full = false;
             self.layout.apply_kaoss_full(false);
@@ -272,6 +295,10 @@ impl NativeModel {
                 | Hit::Nav(_) => base,
                 _ => self.layout.hit_kaoss_picker(kind, px, py),
             }
+        } else if self.mode == UiMode::Synth && self.synth_pick_a.is_some() {
+            let page_len = self.wave_names.len().saturating_sub(self.synth_pick_page * 12);
+            self.layout
+                .hit_synth_picker(px, py, self.synth_pick_page, page_len)
         } else {
             self.layout.hit(self.mode, px, py)
         };
@@ -382,6 +409,40 @@ impl NativeModel {
                 outbox.stop_all_clips();
                 self.phrase_playing = [false; 16];
                 self.status_line = "stop all clips".into();
+            }
+            Hit::SynthWaveA => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.open_synth_pick(true);
+            }
+            Hit::SynthWaveB => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.open_synth_pick(false);
+            }
+            Hit::SynthSwap => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.swap_morph_pair(outbox);
+            }
+            Hit::SynthPickDone => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.synth_pick_a = None;
+                self.status_line.clear();
+            }
+            Hit::SynthPickPrev => {
+                self.tap_ui(slot, id, gesture, px, py);
+                if self.synth_pick_page > 0 {
+                    self.synth_pick_page -= 1;
+                }
+            }
+            Hit::SynthPickNext => {
+                self.tap_ui(slot, id, gesture, px, py);
+                let max_page = self.wave_names.len().saturating_sub(1) / 12;
+                if self.synth_pick_page < max_page {
+                    self.synth_pick_page += 1;
+                }
+            }
+            Hit::SynthPickWave(index) => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.assign_morph_endpoint(index, outbox);
             }
             Hit::SynthSlider(index) => {
                 self.fingers[slot] = Finger {
@@ -1111,6 +1172,46 @@ impl NativeModel {
         self.status_line = self.seq.status.clone();
     }
 
+    fn open_synth_pick(&mut self, pick_a: bool) {
+        self.synth_pick_a = Some(pick_a);
+        self.synth_pick_page = 0;
+        self.status_line = if pick_a {
+            "pick wave A".into()
+        } else {
+            "pick wave B".into()
+        };
+    }
+
+    fn swap_morph_pair(&mut self, outbox: &mut Outbox) {
+        std::mem::swap(&mut self.morph_a, &mut self.morph_b);
+        self.synth_params[0] = 1.0 - self.synth_params[0];
+        outbox.morph_pair(self.morph_a, self.morph_b);
+        outbox.synth("morph", self.synth_params[0]);
+        self.status_line = format!(
+            "swap {} ↔ {}",
+            self.wave_label(self.morph_a),
+            self.wave_label(self.morph_b)
+        );
+    }
+
+    fn assign_morph_endpoint(&mut self, index: usize, outbox: &mut Outbox) {
+        if index >= self.wave_names.len() {
+            return;
+        }
+        let pick_a = self.synth_pick_a.unwrap_or(true);
+        if pick_a {
+            self.morph_a = index as u16;
+        } else {
+            self.morph_b = index as u16;
+        }
+        outbox.morph_pair(self.morph_a, self.morph_b);
+        self.status_line = format!(
+            "{} = {}",
+            if pick_a { "A" } else { "B" },
+            self.wave_label(index as u16)
+        );
+    }
+
     fn load_preset(&mut self, index: usize, outbox: &mut Outbox) {
         self.preset_selected = index.min(7);
         let dir = presets::presets_dir_from_env();
@@ -1119,6 +1220,8 @@ impl NativeModel {
             return;
         };
         self.synth_params = [p.morph, p.tone, p.level, p.attack, p.release];
+        self.morph_a = p.morph_a;
+        self.morph_b = p.morph_b;
         outbox.morph_pair(p.morph_a, p.morph_b);
         outbox.synth("morph", p.morph);
         outbox.synth("tone", p.tone);
@@ -1138,8 +1241,8 @@ impl NativeModel {
             level: self.synth_params[2],
             attack: self.synth_params[3],
             release: self.synth_params[4],
-            morph_a: 0,
-            morph_b: 1,
+            morph_a: self.morph_a,
+            morph_b: self.morph_b,
         };
         if presets::save_slot(&dir, index.min(7), &preset) {
             self.preset_occupied[index.min(7)] = true;

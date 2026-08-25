@@ -10,6 +10,7 @@ use crate::mode::UiMode;
 use crate::model::{NativeModel, RepeatDivisionChoice, LED_COLS, LED_ROWS};
 use crate::phrases;
 use crate::render::{SCREEN_H, SCREEN_W};
+use crate::waves;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ColorQuad {
@@ -295,12 +296,88 @@ fn draw_home(scene: &mut Scene, model: &NativeModel) {
 }
 
 fn draw_synth(scene: &mut Scene, model: &NativeModel) {
+    let layout = model.layout;
+
+    if model.synth_pick_a.is_some() {
+        let pick_a = model.synth_pick_a.unwrap_or(true);
+        scene.text(
+            24,
+            HUD_H + 4,
+            if pick_a {
+                "MORPH PAIR · tap a wave for A"
+            } else {
+                "MORPH PAIR · tap a wave for B"
+            },
+            0xfbf1c7,
+        );
+        let start = model.synth_pick_page * 12;
+        for local in 0..12 {
+            let index = start + local;
+            if index >= model.wave_names.len() {
+                break;
+            }
+            let cell = layout.synth_pick_cell(local);
+            let color = if index == model.morph_a as usize {
+                0xb16286
+            } else if index == model.morph_b as usize {
+                0x458588
+            } else {
+                0x3c3836
+            };
+            scene.fill_rect(cell, color);
+            let label = waves::short_label(&model.wave_names[index]);
+            scene.text(cell.x + 10, cell.y + cell.h / 2 - 3, &label, 0xffffff);
+        }
+        scene.fill_rect(layout.synth_pick_prev, 0x504945);
+        scene.text(
+            layout.synth_pick_prev.x + 48,
+            layout.synth_pick_prev.y + 16,
+            "PREV",
+            0xffffff,
+        );
+        scene.fill_rect(layout.synth_pick_next, 0x504945);
+        scene.text(
+            layout.synth_pick_next.x + 48,
+            layout.synth_pick_next.y + 16,
+            "NEXT",
+            0xffffff,
+        );
+        scene.fill_rect(layout.synth_pick_done, 0x458588);
+        scene.text(
+            layout.synth_pick_done.x + 160,
+            layout.synth_pick_done.y + 16,
+            "DONE",
+            0xffffff,
+        );
+        return;
+    }
+
     const LABELS: [&str; 5] = ["MORPH", "TONE", "LEVEL", "ATK", "REL"];
     const KEYS: [&str; 12] = [
         "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B",
     ];
+
+    let a = waves::short_label(model.wave_label(model.morph_a));
+    let b = waves::short_label(model.wave_label(model.morph_b));
+    scene.fill_rect(layout.synth_wave_a, 0xb16286);
+    scene.text(
+        layout.synth_wave_a.x + 12,
+        layout.synth_wave_a.y + 16,
+        &format!("A · {a}"),
+        0xffffff,
+    );
+    scene.fill_rect(layout.synth_wave_b, 0x458588);
+    scene.text(
+        layout.synth_wave_b.x + 12,
+        layout.synth_wave_b.y + 16,
+        &format!("B · {b}"),
+        0xffffff,
+    );
+    scene.fill_rect(layout.synth_swap, 0x504945);
+    scene.text(layout.synth_swap.x + 52, layout.synth_swap.y + 16, "SWAP", 0xffffff);
+
     for index in 0..5 {
-        let track = model.layout.synth_slider(index);
+        let track = layout.synth_slider(index);
         scene.fill_rect(track, 0x20202c);
         scene.text(track.x + 8, track.y - 18, LABELS[index], 0xc0c0d0);
         let fill_h = (track.h as f32 * model.synth_params[index]) as i32;
@@ -308,12 +385,12 @@ fn draw_synth(scene: &mut Scene, model: &NativeModel) {
             x: track.x + 4,
             y: track.y + track.h - fill_h,
             w: track.w - 8,
-            h: fill_h,
+            h: fill_h.max(2),
         };
-        scene.fill_rect(fill, 0x5a3060);
+        scene.fill_rect(fill, if index == 0 { 0xb16286 } else { 0x689d6a });
     }
     for index in 0..12 {
-        let key = model.layout.synth_key(index);
+        let key = layout.synth_key(index);
         let black = KEYS[index].contains('#');
         scene.fill_rect(key, if black { 0x1a1a22 } else { 0x3a3a48 });
         scene.text(key.x + 10, key.y + key.h / 2 - 3, KEYS[index], 0xf2f2f2);

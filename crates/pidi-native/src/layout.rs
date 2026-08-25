@@ -18,6 +18,13 @@ pub enum Hit {
     HomeTile(UiMode),
     SynthSlider(usize),
     SynthKey(usize),
+    SynthWaveA,
+    SynthWaveB,
+    SynthSwap,
+    SynthPickDone,
+    SynthPickPrev,
+    SynthPickNext,
+    SynthPickWave(usize),
     KaossProg,
     KaossScale,
     KaossKey,
@@ -86,6 +93,13 @@ pub struct Layout {
     pub stop_all: Rect,
     pub synth_sliders: Rect,
     pub synth_keys: Rect,
+    pub synth_wave_a: Rect,
+    pub synth_wave_b: Rect,
+    pub synth_swap: Rect,
+    pub synth_pick_done: Rect,
+    pub synth_pick_prev: Rect,
+    pub synth_pick_next: Rect,
+    pub synth_pick_grid: Rect,
     pub kaoss_prog: Rect,
     pub kaoss_scale: Rect,
     pub kaoss_key: Rect,
@@ -235,15 +249,57 @@ impl Layout {
             },
             synth_sliders: Rect {
                 x: 24,
-                y: HUD_H + 24,
+                y: HUD_H + 72,
                 w: 752,
-                h: 220,
+                h: 180,
             },
             synth_keys: Rect {
                 x: 24,
-                y: HUD_H + 260,
+                y: HUD_H + 268,
                 w: 752,
-                h: content_h - 280,
+                h: content_h - 284,
+            },
+            synth_wave_a: Rect {
+                x: 24,
+                y: HUD_H + 12,
+                w: 280,
+                h: 48,
+            },
+            synth_wave_b: Rect {
+                x: 312,
+                y: HUD_H + 12,
+                w: 280,
+                h: 48,
+            },
+            synth_swap: Rect {
+                x: 600,
+                y: HUD_H + 12,
+                w: 176,
+                h: 48,
+            },
+            synth_pick_grid: Rect {
+                x: 16,
+                y: HUD_H + 16,
+                w: 768,
+                h: content_h - 80,
+            },
+            synth_pick_prev: Rect {
+                x: 16,
+                y: HUD_H + content_h - 56,
+                w: 160,
+                h: 48,
+            },
+            synth_pick_next: Rect {
+                x: 184,
+                y: HUD_H + content_h - 56,
+                w: 160,
+                h: 48,
+            },
+            synth_pick_done: Rect {
+                x: 360,
+                y: HUD_H + content_h - 56,
+                w: 424,
+                h: 48,
             },
             // Tk-like transport chrome, plus a compact drum strip for live capture
             // (improvement vs Tk — no need to leave SEQ to hit drums).
@@ -698,6 +754,15 @@ impl Layout {
     }
 
     fn hit_synth(&self, px: i32, py: i32) -> Hit {
+        if self.synth_wave_a.contains(px, py) {
+            return Hit::SynthWaveA;
+        }
+        if self.synth_wave_b.contains(px, py) {
+            return Hit::SynthWaveB;
+        }
+        if self.synth_swap.contains(px, py) {
+            return Hit::SynthSwap;
+        }
         for index in 0..5 {
             if self.synth_slider(index).contains(px, py) {
                 return Hit::SynthSlider(index);
@@ -709,6 +774,37 @@ impl Layout {
             }
         }
         Hit::None
+    }
+
+    pub fn hit_synth_picker(&self, px: i32, py: i32, page: usize, page_len: usize) -> Hit {
+        if self.synth_pick_done.contains(px, py) {
+            return Hit::SynthPickDone;
+        }
+        if self.synth_pick_prev.contains(px, py) {
+            return Hit::SynthPickPrev;
+        }
+        if self.synth_pick_next.contains(px, py) {
+            return Hit::SynthPickNext;
+        }
+        for local in 0..page_len.min(12) {
+            if self.synth_pick_cell(local).contains(px, py) {
+                return Hit::SynthPickWave(page * 12 + local);
+            }
+        }
+        Hit::None
+    }
+
+    pub fn synth_pick_cell(&self, index: usize) -> Rect {
+        let col = (index % 4) as i32;
+        let row = (index / 4) as i32;
+        let gw = self.synth_pick_grid.w / 4;
+        let gh = self.synth_pick_grid.h / 3;
+        Rect {
+            x: self.synth_pick_grid.x + col * gw + 4,
+            y: self.synth_pick_grid.y + row * gh + 4,
+            w: gw - 8,
+            h: gh - 8,
+        }
     }
 
     pub fn preset_cell(&self, index: usize) -> Rect {
