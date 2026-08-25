@@ -14,6 +14,7 @@ pub mod model;
 pub mod phrases;
 pub mod render;
 pub mod scene;
+pub mod seq;
 #[cfg(feature = "sdl")]
 pub mod sdl_backend;
 

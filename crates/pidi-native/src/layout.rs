@@ -21,6 +21,12 @@ pub enum Hit {
     KaossScale,
     KaossKey,
     KaossFull,
+    SeqRec,
+    SeqPlay,
+    SeqStop,
+    SeqClear,
+    SeqBpmUp,
+    SeqBpmDown,
     None,
 }
 
@@ -59,6 +65,13 @@ pub struct Layout {
     pub kaoss_scale: Rect,
     pub kaoss_key: Rect,
     pub kaoss_full: Rect,
+    pub seq_rec: Rect,
+    pub seq_play: Rect,
+    pub seq_stop: Rect,
+    pub seq_clear: Rect,
+    pub seq_bpm_up: Rect,
+    pub seq_bpm_down: Rect,
+    pub seq_drums: Rect,
 }
 
 impl Default for Layout {
@@ -148,6 +161,48 @@ impl Layout {
                 y: HUD_H + 368,
                 w: 84,
                 h: 40,
+            },
+            seq_rec: Rect {
+                x: 24,
+                y: HUD_H + 24,
+                w: 240,
+                h: 100,
+            },
+            seq_play: Rect {
+                x: 280,
+                y: HUD_H + 24,
+                w: 240,
+                h: 100,
+            },
+            seq_stop: Rect {
+                x: 536,
+                y: HUD_H + 24,
+                w: 120,
+                h: 100,
+            },
+            seq_clear: Rect {
+                x: 668,
+                y: HUD_H + 24,
+                w: 108,
+                h: 100,
+            },
+            seq_bpm_down: Rect {
+                x: 24,
+                y: HUD_H + 140,
+                w: 120,
+                h: 56,
+            },
+            seq_bpm_up: Rect {
+                x: 156,
+                y: HUD_H + 140,
+                w: 120,
+                h: 56,
+            },
+            seq_drums: Rect {
+                x: 24,
+                y: HUD_H + 220,
+                w: 752,
+                h: content_h - 240,
             },
         }
     }
@@ -295,6 +350,19 @@ impl Layout {
         }
     }
 
+    pub fn seq_drum_cell(&self, index: usize) -> Rect {
+        let col = (index % 4) as i32;
+        let row = (index / 4) as i32;
+        let gw = self.seq_drums.w / 4;
+        let gh = self.seq_drums.h / 4;
+        Rect {
+            x: self.seq_drums.x + col * gw + 3,
+            y: self.seq_drums.y + row * gh + 3,
+            w: gw - 6,
+            h: gh - 6,
+        }
+    }
+
     pub fn hit(&self, mode: UiMode, px: i32, py: i32) -> Hit {
         if self.nav.contains(px, py) {
             for (i, m) in UiMode::ALL.iter().enumerate() {
@@ -309,6 +377,7 @@ impl Layout {
             UiMode::Pads => self.hit_pads(px, py),
             UiMode::Home => self.hit_home(px, py),
             UiMode::Synth => self.hit_synth(px, py),
+            UiMode::Seq => self.hit_seq(px, py),
             _ => Hit::None,
         }
     }
@@ -378,6 +447,36 @@ impl Layout {
         for index in 0..12 {
             if self.synth_key(index).contains(px, py) {
                 return Hit::SynthKey(index);
+            }
+        }
+        Hit::None
+    }
+
+    fn hit_seq(&self, px: i32, py: i32) -> Hit {
+        if self.seq_rec.contains(px, py) {
+            return Hit::SeqRec;
+        }
+        if self.seq_play.contains(px, py) {
+            return Hit::SeqPlay;
+        }
+        if self.seq_stop.contains(px, py) {
+            return Hit::SeqStop;
+        }
+        if self.seq_clear.contains(px, py) {
+            return Hit::SeqClear;
+        }
+        if self.seq_bpm_up.contains(px, py) {
+            return Hit::SeqBpmUp;
+        }
+        if self.seq_bpm_down.contains(px, py) {
+            return Hit::SeqBpmDown;
+        }
+        for index in 0..16 {
+            if self.seq_drum_cell(index).contains(px, py) {
+                return Hit::Drum {
+                    index,
+                    note: 36 + index as u8,
+                };
             }
         }
         Hit::None

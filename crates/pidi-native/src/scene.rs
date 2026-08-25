@@ -82,6 +82,7 @@ pub fn build(model: &NativeModel) -> Scene {
         UiMode::Pads => draw_pads(&mut scene, model),
         UiMode::Home => draw_home(&mut scene, model),
         UiMode::Synth => draw_synth(&mut scene, model),
+        UiMode::Seq => draw_seq(&mut scene, model),
         other => draw_placeholder(&mut scene, model, other),
     }
     let _ = (SCREEN_W, SCREEN_H);
@@ -255,6 +256,49 @@ fn draw_synth(scene: &mut Scene, model: &NativeModel) {
         let black = KEYS[index].contains('#');
         scene.fill_rect(key, if black { 0x1a1a22 } else { 0x3a3a48 });
         scene.text(key.x + 10, key.y + key.h / 2 - 3, KEYS[index], 0xf2f2f2);
+    }
+}
+
+fn draw_seq(scene: &mut Scene, model: &NativeModel) {
+    use crate::seq::SeqPhase;
+    let layout = model.layout;
+    let rec_bg = if model.seq.phase == SeqPhase::Recording {
+        0x9d0006
+    } else {
+        0x5a2020
+    };
+    let play_bg = if model.seq.phase == SeqPhase::Playing {
+        0x689d6a
+    } else {
+        0x3a5040
+    };
+    scene.fill_rect(layout.seq_rec, rec_bg);
+    scene.text(layout.seq_rec.x + 40, layout.seq_rec.y + 42, "REC", 0xffffff);
+    scene.fill_rect(layout.seq_play, play_bg);
+    scene.text(layout.seq_play.x + 36, layout.seq_play.y + 42, "PLAY", 0xffffff);
+    scene.fill_rect(layout.seq_stop, 0x3c3836);
+    scene.text(layout.seq_stop.x + 24, layout.seq_stop.y + 42, "STOP", 0xffffff);
+    scene.fill_rect(layout.seq_clear, 0x3c3836);
+    scene.text(layout.seq_clear.x + 16, layout.seq_clear.y + 42, "CLEAR", 0xffffff);
+    scene.fill_rect(layout.seq_bpm_down, 0x282838);
+    scene.text(layout.seq_bpm_down.x + 36, layout.seq_bpm_down.y + 22, "-BPM", 0xffffff);
+    scene.fill_rect(layout.seq_bpm_up, 0x282838);
+    scene.text(layout.seq_bpm_up.x + 36, layout.seq_bpm_up.y + 22, "+BPM", 0xffffff);
+    scene.text(
+        300,
+        layout.seq_bpm_up.y + 22,
+        &format!("{:.0} BPM  {}", model.seq.bpm, model.seq.status),
+        0xd5c4a1,
+    );
+
+    const DRUM_LABELS: [&str; 16] = [
+        "KICK", "SNARE", "CLAP", "CHH", "OHH", "TOM L", "TOM M", "RIM", "KIK2", "RIM2", "SHKR",
+        "PED", "TOM H", "COW", "CLV", "RIDE",
+    ];
+    for index in 0..16 {
+        let cell = layout.seq_drum_cell(index);
+        scene.fill_rect(cell, 0x242436);
+        scene.text(cell.x + 8, cell.y + cell.h / 2 - 3, DRUM_LABELS[index], 0xd0d0e0);
     }
 }
 

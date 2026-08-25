@@ -4,6 +4,7 @@ use crate::client::Outbox;
 use crate::layout::{Hit, Layout, Surface};
 use crate::mode::UiMode;
 use crate::phrases::{self, PhrasePad};
+use crate::seq::{SeqModel, SeqPhase, SeqPlayAction, SeqRecAction, SEQ_CLIP_SLOT};
 use jambox_protocol::{RepeatDivision, RepeatPhase, StatusReply, TouchPhase};
 
 pub const LED_COLS: usize = 12;
@@ -92,6 +93,7 @@ pub struct NativeModel {
     pub kaoss_scale_index: u8,
     pub kaoss_key: u8,
     pub kaoss_full: bool,
+    pub seq: SeqModel,
     fingers: [Finger; MAX_FINGERS],
     next_gesture: u32,
     cells: [[u32; LED_COLS]; LED_ROWS],
@@ -122,6 +124,7 @@ impl NativeModel {
             kaoss_scale_index: 1,
             kaoss_key: 0,
             kaoss_full: false,
+            seq: SeqModel::new(),
             fingers: [Finger::silent(); MAX_FINGERS],
             next_gesture: 1,
             cells: [[0; LED_COLS]; LED_ROWS],
@@ -241,7 +244,7 @@ impl NativeModel {
                 outbox.touch(gesture, TouchPhase::Down, x, y);
             }
             Hit::Drum { note, .. } => {
-                let repeat = note == KICK_NOTE;
+                let repeat = note == KICK_NOTE && self.mode == UiMode::Kaoss;
                 self.fingers[slot] = Finger {
                     active: true,
                     id,
@@ -263,6 +266,7 @@ impl NativeModel {
                     );
                 } else {
                     outbox.note_on(DRUM_CHANNEL, note, 110);
+                    self.seq.push_note(true, DRUM_CHANNEL, note, 110);
                 }
             }
             Hit::Division(index) => {
@@ -332,6 +336,7 @@ impl NativeModel {
                     surface: Surface::SynthKey { note },
                 };
                 outbox.note_on(0, note, 110);
+                self.seq.push_note(true, 0, note, 110);
             }
             Hit::KaossScale => {
                 self.fingers[slot] = Finger {
@@ -378,6 +383,97 @@ impl NativeModel {
                     "split pad".into()
                 };
             }
+            Hit::SeqRec => {
+                self.fingers[slot] = Finger {
+                    active: true,
+                    id,
+                    gesture,
+                    x: 0.0,
+                    y: 0.0,
+                    px,
+                    py,
+                    surface: Surface::UiTap,
+                };
+                self.handle_seq_rec(outbox);
+            }
+            Hit::SeqPlay => {
+                self.fingers[slot] = Finger {
+                    active: true,
+                    id,
+                    gesture,
+                    x: 0.0,
+                    y: 0.0,
+                    px,
+                    py,
+                    surface: Surface::UiTap,
+                };
+                self.handle_seq_play(outbox);
+            }
+            Hit::SeqStop => {
+                self.fingers[slot] = Finger {
+                    active: true,
+                    id,
+                    gesture,
+                    x: 0.0,
+                    y: 0.0,
+                    px,
+                    py,
+                    surface: Surface::UiTap,
+                };
+                outbox.clip_stop(SEQ_CLIP_SLOT, "off");
+                self.seq.phase = SeqPhase::Idle;
+                self.seq.status = "stopped".into();
+                self.status_line = self.seq.status.clone();
+            }
+            Hit::SeqClear => {
+                self.fingers[slot] = Finger {
+                    active: true,
+                    id,
+                    gesture,
+                    x: 0.0,
+                    y: 0.0,
+                    px,
+                    py,
+                    surface: Surface::UiTap,
+                };
+                if self.seq.clear() {
+                    outbox.clip_clear(SEQ_CLIP_SLOT);
+                    outbox.clip_stop(SEQ_CLIP_SLOT, "off");
+                }
+                self.status_line = self.seq.status.clone();
+            }
+            Hit::SeqBpmUp => {
+                self.fingers[slot] = Finger {
+                    active: true,
+                    id,
+                    gesture,
+                    x: 0.0,
+                    y: 0.0,
+                    px,
+                    py,
+                    surface: Surface::UiTap,
+                };
+                self.seq.nudge_bpm(1.0);
+                outbox.tempo(self.seq.bpm);
+                self.bpm = self.seq.bpm;
+                self.status_line = self.seq.status.clone();
+            }
+            Hit::SeqBpmDown => {
+                self.fingers[slot] = Finger {
+                    active: true,
+                    id,
+                    gesture,
+                    x: 0.0,
+                    y: 0.0,
+                    px,
+                    py,
+                    surface: Surface::UiTap,
+                };
+                self.seq.nudge_bpm(-1.0);
+                outbox.tempo(self.seq.bpm);
+                self.bpm = self.seq.bpm;
+                self.status_line = self.seq.status.clone();
+            }
             Hit::None => {}
         }
     }
@@ -420,10 +516,13 @@ impl NativeModel {
                         110,
                         self.division.as_wire(),
                     );
+                } else {
+                    self.seq.push_note(false, DRUM_CHANNEL, note, 0);
                 }
             }
             Surface::SynthKey { note } => {
                 outbox.note_off(0, note);
+                self.seq.push_note(false, 0, note, 0);
             }
             Surface::Phrase { .. } | Surface::SynthSlider { .. } | Surface::UiTap => {}
         }
@@ -488,6 +587,36 @@ impl NativeModel {
         self.kaoss_key = ((self.kaoss_key as i32 + step).rem_euclid(12)) as u8;
         outbox.kaoss_scale(self.kaoss_scale_index, self.kaoss_key, 48, 2);
         self.status_line = format!("key {}", jambox_core::NOTE_NAMES[self.kaoss_key as usize]);
+    }
+
+    fn handle_seq_rec(&mut self, outbox: &mut Outbox) {
+        match self.seq.toggle_record() {
+            SeqRecAction::Started => {
+                outbox.clip_stop(SEQ_CLIP_SLOT, "off");
+            }
+            SeqRecAction::Empty => {}
+            SeqRecAction::Finished {
+                events,
+                length_ticks,
+            } => {
+                outbox.clip_load(SEQ_CLIP_SLOT, length_ticks, "loop", events);
+            }
+        }
+        self.status_line = self.seq.status.clone();
+    }
+
+    fn handle_seq_play(&mut self, outbox: &mut Outbox) {
+        match self.seq.toggle_play() {
+            SeqPlayAction::Start => {
+                outbox.tempo(self.seq.bpm);
+                outbox.clip_launch(SEQ_CLIP_SLOT, "bar");
+            }
+            SeqPlayAction::Stop => {
+                outbox.clip_stop(SEQ_CLIP_SLOT, "off");
+            }
+            SeqPlayAction::None => {}
+        }
+        self.status_line = self.seq.status.clone();
     }
 
     fn paint_cells(&mut self) {
