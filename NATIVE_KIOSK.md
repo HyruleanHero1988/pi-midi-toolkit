@@ -20,7 +20,9 @@ entirely: `jambox-engine` + `pidi-native` are the appliance.
 | PADS | Launch/stop from `phrases/pad-XX.json` |
 | SYNTH | Morph/tone/level/atk/rel sliders + C4–B4 keys |
 | SEQ | Backbone REC → engine loop clip; PLAY/STOP/CLEAR/BPM |
-| SONGS / PRESETS / LOG / SET | Placeholders |
+| SONGS | List `songs/*.mid`, SMF→clip PLAY/STOP |
+| PRESETS | 8 slots save/load synth params to `user-presets/` |
+| LOG / SET | Placeholders |
 
 ## Run (host)
 

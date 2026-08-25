@@ -27,6 +27,13 @@ pub enum Hit {
     SeqClear,
     SeqBpmUp,
     SeqBpmDown,
+    PresetSlot(usize),
+    PresetSave,
+    SongRow(usize),
+    SongPlay,
+    SongStop,
+    SongPrev,
+    SongNext,
     None,
 }
 
@@ -72,6 +79,13 @@ pub struct Layout {
     pub seq_bpm_up: Rect,
     pub seq_bpm_down: Rect,
     pub seq_drums: Rect,
+    pub preset_grid: Rect,
+    pub preset_save: Rect,
+    pub song_list: Rect,
+    pub song_play: Rect,
+    pub song_stop: Rect,
+    pub song_prev: Rect,
+    pub song_next: Rect,
 }
 
 impl Default for Layout {
@@ -203,6 +217,48 @@ impl Layout {
                 y: HUD_H + 220,
                 w: 752,
                 h: content_h - 240,
+            },
+            preset_grid: Rect {
+                x: 24,
+                y: HUD_H + 24,
+                w: 752,
+                h: 280,
+            },
+            preset_save: Rect {
+                x: 24,
+                y: HUD_H + 320,
+                w: 200,
+                h: 64,
+            },
+            song_list: Rect {
+                x: 24,
+                y: HUD_H + 24,
+                w: 520,
+                h: content_h - 100,
+            },
+            song_play: Rect {
+                x: 560,
+                y: HUD_H + 24,
+                w: 216,
+                h: 80,
+            },
+            song_stop: Rect {
+                x: 560,
+                y: HUD_H + 116,
+                w: 216,
+                h: 80,
+            },
+            song_prev: Rect {
+                x: 560,
+                y: HUD_H + 208,
+                w: 100,
+                h: 64,
+            },
+            song_next: Rect {
+                x: 676,
+                y: HUD_H + 208,
+                w: 100,
+                h: 64,
             },
         }
     }
@@ -378,6 +434,8 @@ impl Layout {
             UiMode::Home => self.hit_home(px, py),
             UiMode::Synth => self.hit_synth(px, py),
             UiMode::Seq => self.hit_seq(px, py),
+            UiMode::Presets => self.hit_presets(px, py),
+            UiMode::Songs => self.hit_songs(px, py),
             _ => Hit::None,
         }
     }
@@ -447,6 +505,62 @@ impl Layout {
         for index in 0..12 {
             if self.synth_key(index).contains(px, py) {
                 return Hit::SynthKey(index);
+            }
+        }
+        Hit::None
+    }
+
+    pub fn preset_cell(&self, index: usize) -> Rect {
+        let col = (index % 4) as i32;
+        let row = (index / 4) as i32;
+        let gw = self.preset_grid.w / 4;
+        let gh = self.preset_grid.h / 2;
+        Rect {
+            x: self.preset_grid.x + col * gw + 4,
+            y: self.preset_grid.y + row * gh + 4,
+            w: gw - 8,
+            h: gh - 8,
+        }
+    }
+
+    pub fn song_row(&self, index: usize) -> Rect {
+        let h = 56;
+        Rect {
+            x: self.song_list.x + 4,
+            y: self.song_list.y + 4 + (index as i32) * h,
+            w: self.song_list.w - 8,
+            h: h - 4,
+        }
+    }
+
+    fn hit_presets(&self, px: i32, py: i32) -> Hit {
+        if self.preset_save.contains(px, py) {
+            return Hit::PresetSave;
+        }
+        for index in 0..8 {
+            if self.preset_cell(index).contains(px, py) {
+                return Hit::PresetSlot(index);
+            }
+        }
+        Hit::None
+    }
+
+    fn hit_songs(&self, px: i32, py: i32) -> Hit {
+        if self.song_play.contains(px, py) {
+            return Hit::SongPlay;
+        }
+        if self.song_stop.contains(px, py) {
+            return Hit::SongStop;
+        }
+        if self.song_prev.contains(px, py) {
+            return Hit::SongPrev;
+        }
+        if self.song_next.contains(px, py) {
+            return Hit::SongNext;
+        }
+        for index in 0..5 {
+            if self.song_row(index).contains(px, py) {
+                return Hit::SongRow(index);
             }
         }
         Hit::None

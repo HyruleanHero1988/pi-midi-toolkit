@@ -12,9 +12,11 @@ pub mod layout;
 pub mod mode;
 pub mod model;
 pub mod phrases;
+pub mod presets;
 pub mod render;
 pub mod scene;
 pub mod seq;
+pub mod songs;
 #[cfg(feature = "sdl")]
 pub mod sdl_backend;
 

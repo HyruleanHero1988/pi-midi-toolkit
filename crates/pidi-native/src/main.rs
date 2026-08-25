@@ -89,6 +89,7 @@ fn main() {
     );
 
     model.ensure_phrases_loaded(&mut client.outbox);
+    model.ensure_library_loaded();
     client.flush();
 
     let frame_time = Duration::from_secs_f64(1.0 / cli.hz.max(1) as f64);

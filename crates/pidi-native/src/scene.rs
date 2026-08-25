@@ -83,6 +83,8 @@ pub fn build(model: &NativeModel) -> Scene {
         UiMode::Home => draw_home(&mut scene, model),
         UiMode::Synth => draw_synth(&mut scene, model),
         UiMode::Seq => draw_seq(&mut scene, model),
+        UiMode::Presets => draw_presets(&mut scene, model),
+        UiMode::Songs => draw_songs(&mut scene, model),
         other => draw_placeholder(&mut scene, model, other),
     }
     let _ = (SCREEN_W, SCREEN_H);
@@ -300,6 +302,66 @@ fn draw_seq(scene: &mut Scene, model: &NativeModel) {
         scene.fill_rect(cell, 0x242436);
         scene.text(cell.x + 8, cell.y + cell.h / 2 - 3, DRUM_LABELS[index], 0xd0d0e0);
     }
+}
+
+fn draw_presets(scene: &mut Scene, model: &NativeModel) {
+    for index in 0..8 {
+        let cell = model.layout.preset_cell(index);
+        let selected = index == model.preset_selected;
+        let color = if selected {
+            0x5a3060
+        } else if model.preset_occupied[index] {
+            0x458588
+        } else {
+            0x3c3836
+        };
+        scene.fill_rect(cell, color);
+        scene.text(
+            cell.x + 16,
+            cell.y + cell.h / 2 - 4,
+            &format!("SLOT {}", index + 1),
+            0xfbf1c7,
+        );
+    }
+    scene.fill_rect(model.layout.preset_save, 0x689d6a);
+    scene.text(
+        model.layout.preset_save.x + 40,
+        model.layout.preset_save.y + 24,
+        "SAVE",
+        0xffffff,
+    );
+}
+
+fn draw_songs(scene: &mut Scene, model: &NativeModel) {
+    let layout = model.layout;
+    scene.fill_rect(layout.song_list, 0x1c1c28);
+    for row in 0..5 {
+        let idx = model.song_scroll + row;
+        let cell = layout.song_row(row);
+        if idx >= model.song_files.len() {
+            scene.fill_rect(cell, 0x14141c);
+            continue;
+        }
+        let selected = idx == model.song_selected;
+        scene.fill_rect(cell, if selected { 0x458588 } else { 0x282838 });
+        let name = model.song_files[idx]
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("?");
+        let label: String = name.chars().take(28).collect();
+        scene.text(cell.x + 12, cell.y + 20, &label, 0xfbf1c7);
+    }
+    scene.fill_rect(
+        layout.song_play,
+        if model.song_playing { 0x689d6a } else { 0x3a5040 },
+    );
+    scene.text(layout.song_play.x + 60, layout.song_play.y + 32, "PLAY", 0xffffff);
+    scene.fill_rect(layout.song_stop, 0x3c3836);
+    scene.text(layout.song_stop.x + 60, layout.song_stop.y + 32, "STOP", 0xffffff);
+    scene.fill_rect(layout.song_prev, 0x282838);
+    scene.text(layout.song_prev.x + 28, layout.song_prev.y + 24, "UP", 0xffffff);
+    scene.fill_rect(layout.song_next, 0x282838);
+    scene.text(layout.song_next.x + 16, layout.song_next.y + 24, "DOWN", 0xffffff);
 }
 
 fn draw_placeholder(scene: &mut Scene, model: &NativeModel, mode: UiMode) {

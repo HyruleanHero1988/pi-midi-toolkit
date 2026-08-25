@@ -4,8 +4,11 @@ use crate::client::Outbox;
 use crate::layout::{Hit, Layout, Surface};
 use crate::mode::UiMode;
 use crate::phrases::{self, PhrasePad};
+use crate::presets::{self, PresetSnapshot};
 use crate::seq::{SeqModel, SeqPhase, SeqPlayAction, SeqRecAction, SEQ_CLIP_SLOT};
+use crate::songs::{self, SONG_CLIP_SLOT};
 use jambox_protocol::{RepeatDivision, RepeatPhase, StatusReply, TouchPhase};
+use std::path::PathBuf;
 
 pub const LED_COLS: usize = 12;
 pub const LED_ROWS: usize = 7;
@@ -94,6 +97,12 @@ pub struct NativeModel {
     pub kaoss_key: u8,
     pub kaoss_full: bool,
     pub seq: SeqModel,
+    pub preset_occupied: [bool; 8],
+    pub preset_selected: usize,
+    pub song_files: Vec<PathBuf>,
+    pub song_selected: usize,
+    pub song_scroll: usize,
+    pub song_playing: bool,
     fingers: [Finger; MAX_FINGERS],
     next_gesture: u32,
     cells: [[u32; LED_COLS]; LED_ROWS],
@@ -125,11 +134,24 @@ impl NativeModel {
             kaoss_key: 0,
             kaoss_full: false,
             seq: SeqModel::new(),
+            preset_occupied: [false; 8],
+            preset_selected: 0,
+            song_files: Vec::new(),
+            song_selected: 0,
+            song_scroll: 0,
+            song_playing: false,
             fingers: [Finger::silent(); MAX_FINGERS],
             next_gesture: 1,
             cells: [[0; LED_COLS]; LED_ROWS],
             phrases_loaded: false,
         }
+    }
+
+    pub fn ensure_library_loaded(&mut self) {
+        let presets_dir = presets::presets_dir_from_env();
+        self.preset_occupied = presets::list_occupied(&presets_dir);
+        let songs_dir = songs::songs_dir_from_env();
+        self.song_files = songs::list_songs(&songs_dir);
     }
 
     pub fn ensure_phrases_loaded(&mut self, outbox: &mut Outbox) {
@@ -474,6 +496,111 @@ impl NativeModel {
                 self.bpm = self.seq.bpm;
                 self.status_line = self.seq.status.clone();
             }
+            Hit::PresetSlot(index) => {
+                self.fingers[slot] = Finger {
+                    active: true,
+                    id,
+                    gesture,
+                    x: 0.0,
+                    y: 0.0,
+                    px,
+                    py,
+                    surface: Surface::UiTap,
+                };
+                self.load_preset(index, outbox);
+            }
+            Hit::PresetSave => {
+                self.fingers[slot] = Finger {
+                    active: true,
+                    id,
+                    gesture,
+                    x: 0.0,
+                    y: 0.0,
+                    px,
+                    py,
+                    surface: Surface::UiTap,
+                };
+                self.save_preset(self.preset_selected);
+            }
+            Hit::SongRow(row) => {
+                self.fingers[slot] = Finger {
+                    active: true,
+                    id,
+                    gesture,
+                    x: 0.0,
+                    y: 0.0,
+                    px,
+                    py,
+                    surface: Surface::UiTap,
+                };
+                let idx = self.song_scroll + row;
+                if idx < self.song_files.len() {
+                    self.song_selected = idx;
+                    self.status_line = self.song_files[idx]
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("song")
+                        .to_string();
+                }
+            }
+            Hit::SongPlay => {
+                self.fingers[slot] = Finger {
+                    active: true,
+                    id,
+                    gesture,
+                    x: 0.0,
+                    y: 0.0,
+                    px,
+                    py,
+                    surface: Surface::UiTap,
+                };
+                self.play_selected_song(outbox);
+            }
+            Hit::SongStop => {
+                self.fingers[slot] = Finger {
+                    active: true,
+                    id,
+                    gesture,
+                    x: 0.0,
+                    y: 0.0,
+                    px,
+                    py,
+                    surface: Surface::UiTap,
+                };
+                outbox.clip_stop(SONG_CLIP_SLOT, "off");
+                self.song_playing = false;
+                self.status_line = "song stop".into();
+            }
+            Hit::SongPrev => {
+                self.fingers[slot] = Finger {
+                    active: true,
+                    id,
+                    gesture,
+                    x: 0.0,
+                    y: 0.0,
+                    px,
+                    py,
+                    surface: Surface::UiTap,
+                };
+                if self.song_scroll > 0 {
+                    self.song_scroll -= 1;
+                }
+            }
+            Hit::SongNext => {
+                self.fingers[slot] = Finger {
+                    active: true,
+                    id,
+                    gesture,
+                    x: 0.0,
+                    y: 0.0,
+                    px,
+                    py,
+                    surface: Surface::UiTap,
+                };
+                if self.song_scroll + 5 < self.song_files.len() {
+                    self.song_scroll += 1;
+                }
+            }
             Hit::None => {}
         }
     }
@@ -617,6 +744,65 @@ impl NativeModel {
             SeqPlayAction::None => {}
         }
         self.status_line = self.seq.status.clone();
+    }
+
+    fn load_preset(&mut self, index: usize, outbox: &mut Outbox) {
+        self.preset_selected = index.min(7);
+        let dir = presets::presets_dir_from_env();
+        let Some(p) = presets::load_slot(&dir, self.preset_selected) else {
+            self.status_line = format!("slot {} empty — SAVE first", self.preset_selected + 1);
+            return;
+        };
+        self.synth_params = [p.morph, p.tone, p.level, p.attack, p.release];
+        outbox.morph_pair(p.morph_a, p.morph_b);
+        outbox.synth("morph", p.morph);
+        outbox.synth("tone", p.tone);
+        outbox.synth("level", p.level);
+        outbox.synth("attack", p.attack);
+        outbox.synth("release", p.release);
+        self.status_line = format!("loaded {}", p.name);
+    }
+
+    fn save_preset(&mut self, index: usize) {
+        let dir = presets::presets_dir_from_env();
+        let preset = PresetSnapshot {
+            version: 1,
+            name: format!("SLOT {}", index + 1),
+            morph: self.synth_params[0],
+            tone: self.synth_params[1],
+            level: self.synth_params[2],
+            attack: self.synth_params[3],
+            release: self.synth_params[4],
+            morph_a: 0,
+            morph_b: 1,
+        };
+        if presets::save_slot(&dir, index.min(7), &preset) {
+            self.preset_occupied[index.min(7)] = true;
+            self.preset_selected = index.min(7);
+            self.status_line = format!("saved {}", preset.name);
+        } else {
+            self.status_line = "preset save failed".into();
+        }
+    }
+
+    fn play_selected_song(&mut self, outbox: &mut Outbox) {
+        let Some(path) = self.song_files.get(self.song_selected).cloned() else {
+            self.status_line = "no songs in songs/".into();
+            return;
+        };
+        let Some((events, length_ticks, bpm)) = songs::load_smf_as_clip(&path) else {
+            self.status_line = "could not parse SMF".into();
+            return;
+        };
+        outbox.tempo(bpm);
+        outbox.clip_load(SONG_CLIP_SLOT, length_ticks, "oneshot", events);
+        outbox.clip_launch(SONG_CLIP_SLOT, "bar");
+        self.song_playing = true;
+        self.bpm = bpm;
+        self.status_line = format!(
+            "play {}",
+            path.file_name().and_then(|n| n.to_str()).unwrap_or("song")
+        );
     }
 
     fn paint_cells(&mut self) {
