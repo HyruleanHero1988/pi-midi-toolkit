@@ -69,6 +69,15 @@ pub fn save_slot(dir: &Path, slot: usize, preset: &PresetSnapshot) -> bool {
     }
 }
 
+pub fn delete_slot(dir: &Path, slot: usize) -> bool {
+    let path = slot_path(dir, slot);
+    if path.is_file() {
+        fs::remove_file(path).is_ok()
+    } else {
+        true
+    }
+}
+
 pub fn list_occupied(dir: &Path) -> [bool; 8] {
     let mut out = [false; 8];
     for i in 0..8 {

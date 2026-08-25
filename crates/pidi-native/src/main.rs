@@ -89,7 +89,7 @@ fn main() {
     );
 
     model.ensure_phrases_loaded(&mut client.outbox);
-    model.ensure_library_loaded();
+    model.ensure_library_loaded_with(Some(&mut client.outbox));
     client.flush();
 
     let frame_time = Duration::from_secs_f64(1.0 / cli.hz.max(1) as f64);
@@ -120,9 +120,13 @@ fn main() {
             status_tick = Instant::now();
         }
         client.flush();
+        for notice in client.midi_inbox.drain(..) {
+            model.on_midi_notice(&notice);
+        }
         model.connected = client.connected;
         model.status = client.last_status;
-        model.tick(dt);
+        model.tick(dt, &mut client.outbox);
+        model.maybe_autosave();
         let scene = scene::build(&model);
         presenter.present(&scene, &mut frame);
 

@@ -19,16 +19,27 @@ pub enum Hit {
     PadsEditView,
     PadsClearArm,
     PadsTrig,
+    PadsModeArm,
+    PadsRec,
+    PadsVolUp,
+    PadsVolDown,
+    PadsVoice,
+    PadsChannel,
+    PadsSynth,
+    PadsOut,
     HomeTile(UiMode),
     SynthSlider(usize),
     SynthKey(usize),
     SynthWaveA,
     SynthWaveB,
     SynthSwap,
+    SynthVibUp,
+    SynthVibDown,
     SynthPickDone,
     SynthPickPrev,
     SynthPickNext,
     SynthPickWave(usize),
+    DrumMacro(usize),
     KaossProg,
     KaossScale,
     KaossKey,
@@ -38,6 +49,12 @@ pub enum Hit {
     KaossFull,
     KaossBpmUp,
     KaossBpmDown,
+    KaossShowAll,
+    KaossChannel,
+    KaossSettings,
+    KaossWipeFx,
+    KaossViz,
+    KaossOut,
     KaossPicker(usize),
     KaossPickerClose,
     SeqRec,
@@ -52,16 +69,32 @@ pub enum Hit {
     SeqClear,
     SeqBpmUp,
     SeqBpmDown,
+    SeqToPad,
+    SeqAllOff,
     PresetSlot(usize),
+    PresetLoad,
     PresetSave,
+    PresetDelete,
+    PresetFactory,
     SongRow(usize),
     SongPlay,
     SongStop,
     SongPrev,
     SongNext,
+    SongLoop,
+    SongDelete,
+    SongBpmUp,
+    SongBpmDown,
+    SongSaveSeq,
+    SongOut,
     SettingsPanic,
     SettingsAllOff,
+    SettingsFxTarget,
     SettingsFx(usize),
+    SettingsWifi,
+    SettingsUpdate,
+    LogClear,
+    LogAllOff,
     None,
 }
 
@@ -95,15 +128,27 @@ pub struct Layout {
     pub divisions: Rect,
     pub phrase_grid: Rect,
     pub stop_all: Rect,
+    pub pads_out: Rect,
     pub pads_play: Rect,
     pub pads_edit: Rect,
     pub pads_clear: Rect,
     pub pads_trig: Rect,
+    pub pads_mode: Rect,
+    pub pads_rec: Rect,
+    pub pads_vol_down: Rect,
+    pub pads_vol_up: Rect,
+    pub pads_voice: Rect,
+    pub pads_channel: Rect,
+    pub pads_synth: Rect,
     pub synth_sliders: Rect,
     pub synth_keys: Rect,
+    pub synth_scope: Rect,
+    pub synth_macros: Rect,
     pub synth_wave_a: Rect,
     pub synth_wave_b: Rect,
     pub synth_swap: Rect,
+    pub synth_vib_down: Rect,
+    pub synth_vib_up: Rect,
     pub synth_pick_done: Rect,
     pub synth_pick_prev: Rect,
     pub synth_pick_next: Rect,
@@ -117,6 +162,11 @@ pub struct Layout {
     pub kaoss_full: Rect,
     pub kaoss_bpm_up: Rect,
     pub kaoss_bpm_down: Rect,
+    pub kaoss_show_all: Rect,
+    pub kaoss_channel: Rect,
+    pub kaoss_wipe_fx: Rect,
+    pub kaoss_viz: Rect,
+    pub kaoss_out: Rect,
     pub seq_rec: Rect,
     pub seq_play: Rect,
     pub seq_keep: Rect,
@@ -127,19 +177,35 @@ pub struct Layout {
     pub seq_extend: Rect,
     pub seq_stop: Rect,
     pub seq_clear: Rect,
+    pub seq_to_pad: Rect,
+    pub seq_all_off: Rect,
     pub seq_bpm_up: Rect,
     pub seq_bpm_down: Rect,
     pub seq_drums: Rect,
     pub preset_grid: Rect,
+    pub preset_load: Rect,
     pub preset_save: Rect,
+    pub preset_delete: Rect,
+    pub preset_factory: Rect,
     pub song_list: Rect,
     pub song_play: Rect,
     pub song_stop: Rect,
     pub song_prev: Rect,
     pub song_next: Rect,
+    pub song_loop: Rect,
+    pub song_delete: Rect,
+    pub song_bpm_up: Rect,
+    pub song_bpm_down: Rect,
+    pub song_save_seq: Rect,
+    pub song_out: Rect,
     pub settings_panic: Rect,
     pub settings_all_off: Rect,
+    pub settings_fx_target: Rect,
     pub settings_fx: Rect,
+    pub settings_wifi: Rect,
+    pub settings_update: Rect,
+    pub log_clear: Rect,
+    pub log_all_off: Rect,
 }
 
 impl Default for Layout {
@@ -222,25 +288,55 @@ impl Layout {
             kaoss_gate: Rect {
                 x: 8,
                 y: HUD_H + content_h - 48,
-                w: 180,
+                w: 120,
                 h: 40,
             },
             kaoss_bpm_down: Rect {
-                x: 196,
+                x: 136,
                 y: HUD_H + content_h - 48,
-                w: 120,
+                w: 72,
                 h: 40,
             },
             kaoss_bpm_up: Rect {
-                x: 324,
+                x: 216,
                 y: HUD_H + content_h - 48,
-                w: 120,
+                w: 72,
+                h: 40,
+            },
+            kaoss_show_all: Rect {
+                x: 296,
+                y: HUD_H + content_h - 48,
+                w: 72,
+                h: 40,
+            },
+            kaoss_viz: Rect {
+                x: 376,
+                y: HUD_H + content_h - 48,
+                w: 64,
+                h: 40,
+            },
+            kaoss_wipe_fx: Rect {
+                x: 448,
+                y: HUD_H + content_h - 48,
+                w: 72,
+                h: 40,
+            },
+            kaoss_channel: Rect {
+                x: 528,
+                y: HUD_H + content_h - 48,
+                w: 48,
+                h: 40,
+            },
+            kaoss_out: Rect {
+                x: 584,
+                y: HUD_H + content_h - 48,
+                w: 100,
                 h: 40,
             },
             kaoss_full: Rect {
-                x: 452,
+                x: 692,
                 y: HUD_H + content_h - 48,
-                w: 340,
+                w: 100,
                 h: 40,
             },
             phrase_grid: Rect {
@@ -253,6 +349,12 @@ impl Layout {
                 x: 668,
                 y: HUD_H + content_h - 56,
                 w: 116,
+                h: 48,
+            },
+            pads_out: Rect {
+                x: 540,
+                y: HUD_H + content_h - 56,
+                w: 120,
                 h: 48,
             },
             pads_play: Rect {
@@ -274,7 +376,49 @@ impl Layout {
                 h: 48,
             },
             pads_trig: Rect {
-                x: 224,
+                x: 112,
+                y: HUD_H + content_h - 56,
+                w: 0,
+                h: 48,
+            },
+            pads_mode: Rect {
+                x: 232,
+                y: HUD_H + content_h - 56,
+                w: 0,
+                h: 48,
+            },
+            pads_rec: Rect {
+                x: 340,
+                y: HUD_H + content_h - 56,
+                w: 0,
+                h: 48,
+            },
+            pads_vol_down: Rect {
+                x: 448,
+                y: HUD_H + content_h - 56,
+                w: 0,
+                h: 48,
+            },
+            pads_vol_up: Rect {
+                x: 536,
+                y: HUD_H + content_h - 56,
+                w: 0,
+                h: 48,
+            },
+            pads_voice: Rect {
+                x: 0,
+                y: HUD_H + content_h - 56,
+                w: 0,
+                h: 48,
+            },
+            pads_channel: Rect {
+                x: 0,
+                y: HUD_H + content_h - 56,
+                w: 0,
+                h: 48,
+            },
+            pads_synth: Rect {
+                x: 0,
                 y: HUD_H + content_h - 56,
                 w: 0,
                 h: 48,
@@ -282,31 +426,55 @@ impl Layout {
             synth_sliders: Rect {
                 x: 24,
                 y: HUD_H + 72,
+                w: 480,
+                h: 160,
+            },
+            synth_scope: Rect {
+                x: 520,
+                y: HUD_H + 72,
+                w: 256,
+                h: 160,
+            },
+            synth_macros: Rect {
+                x: 24,
+                y: HUD_H + 240,
                 w: 752,
-                h: 180,
+                h: 40,
             },
             synth_keys: Rect {
                 x: 24,
-                y: HUD_H + 268,
+                y: HUD_H + 288,
                 w: 752,
-                h: content_h - 284,
+                h: content_h - 296,
             },
             synth_wave_a: Rect {
                 x: 24,
                 y: HUD_H + 12,
-                w: 280,
+                w: 240,
                 h: 48,
             },
             synth_wave_b: Rect {
-                x: 312,
+                x: 272,
                 y: HUD_H + 12,
-                w: 280,
+                w: 240,
                 h: 48,
             },
             synth_swap: Rect {
-                x: 600,
+                x: 520,
                 y: HUD_H + 12,
-                w: 176,
+                w: 100,
+                h: 48,
+            },
+            synth_vib_down: Rect {
+                x: 628,
+                y: HUD_H + 12,
+                w: 76,
+                h: 48,
+            },
+            synth_vib_up: Rect {
+                x: 712,
+                y: HUD_H + 12,
+                w: 76,
                 h: 48,
             },
             synth_pick_grid: Rect {
@@ -387,32 +555,44 @@ impl Layout {
             seq_stop: Rect {
                 x: 12,
                 y: HUD_H + 254,
-                w: 200,
+                w: 120,
                 h: 44,
             },
             seq_clear: Rect {
-                x: 220,
+                x: 140,
                 y: HUD_H + 254,
-                w: 200,
+                w: 100,
+                h: 44,
+            },
+            seq_to_pad: Rect {
+                x: 248,
+                y: HUD_H + 254,
+                w: 120,
+                h: 44,
+            },
+            seq_all_off: Rect {
+                x: 376,
+                y: HUD_H + 254,
+                w: 120,
                 h: 44,
             },
             seq_bpm_down: Rect {
-                x: 428,
+                x: 504,
                 y: HUD_H + 254,
-                w: 176,
+                w: 136,
                 h: 44,
             },
             seq_bpm_up: Rect {
-                x: 612,
+                x: 648,
                 y: HUD_H + 254,
-                w: 176,
+                w: 140,
                 h: 44,
             },
             seq_drums: Rect {
                 x: 12,
                 y: HUD_H + 306,
                 w: 776,
-                h: content_h - 314,
+                h: content_h - 334,
             },
             preset_grid: Rect {
                 x: 24,
@@ -423,56 +603,140 @@ impl Layout {
             preset_save: Rect {
                 x: 24,
                 y: HUD_H + 320,
-                w: 200,
+                w: 160,
+                h: 64,
+            },
+            preset_load: Rect {
+                x: 196,
+                y: HUD_H + 320,
+                w: 160,
+                h: 64,
+            },
+            preset_delete: Rect {
+                x: 368,
+                y: HUD_H + 320,
+                w: 160,
+                h: 64,
+            },
+            preset_factory: Rect {
+                x: 540,
+                y: HUD_H + 320,
+                w: 236,
                 h: 64,
             },
             song_list: Rect {
                 x: 24,
                 y: HUD_H + 24,
                 w: 520,
-                h: content_h - 100,
+                h: content_h - 148,
             },
             song_play: Rect {
                 x: 560,
                 y: HUD_H + 24,
                 w: 216,
-                h: 80,
+                h: 56,
             },
             song_stop: Rect {
                 x: 560,
-                y: HUD_H + 116,
+                y: HUD_H + 88,
                 w: 216,
-                h: 80,
+                h: 56,
             },
-            song_prev: Rect {
+            song_loop: Rect {
+                x: 560,
+                y: HUD_H + 152,
+                w: 100,
+                h: 48,
+            },
+            song_delete: Rect {
+                x: 668,
+                y: HUD_H + 152,
+                w: 108,
+                h: 48,
+            },
+            song_bpm_down: Rect {
                 x: 560,
                 y: HUD_H + 208,
                 w: 100,
-                h: 64,
+                h: 48,
+            },
+            song_bpm_up: Rect {
+                x: 668,
+                y: HUD_H + 208,
+                w: 108,
+                h: 48,
+            },
+            song_prev: Rect {
+                x: 560,
+                y: HUD_H + 268,
+                w: 100,
+                h: 56,
             },
             song_next: Rect {
-                x: 676,
-                y: HUD_H + 208,
-                w: 100,
-                h: 64,
+                x: 668,
+                y: HUD_H + 268,
+                w: 108,
+                h: 56,
+            },
+            song_save_seq: Rect {
+                x: 560,
+                y: HUD_H + 332,
+                w: 216,
+                h: 44,
+            },
+            song_out: Rect {
+                x: 560,
+                y: HUD_H + 384,
+                w: 216,
+                h: 44,
             },
             settings_panic: Rect {
                 x: 24,
                 y: HUD_H + 24,
-                w: 240,
-                h: 80,
+                w: 200,
+                h: 72,
             },
             settings_all_off: Rect {
-                x: 280,
+                x: 236,
                 y: HUD_H + 24,
-                w: 240,
-                h: 80,
+                w: 200,
+                h: 72,
+            },
+            settings_fx_target: Rect {
+                x: 448,
+                y: HUD_H + 24,
+                w: 328,
+                h: 72,
             },
             settings_fx: Rect {
                 x: 24,
-                y: HUD_H + 120,
+                y: HUD_H + 112,
                 w: 752,
-                h: 220,
+                h: 200,
+            },
+            settings_wifi: Rect {
+                x: 24,
+                y: HUD_H + 336,
+                w: 368,
+                h: 56,
+            },
+            settings_update: Rect {
+                x: 408,
+                y: HUD_H + 336,
+                w: 368,
+                h: 56,
+            },
+            log_clear: Rect {
+                x: 24,
+                y: HUD_H + content_h - 56,
+                w: 200,
+                h: 48,
+            },
+            log_all_off: Rect {
+                x: 240,
+                y: HUD_H + content_h - 56,
+                w: 200,
+                h: 48,
             },
         }
     }
@@ -543,6 +807,36 @@ impl Layout {
                 h: 0,
             };
             self.kaoss_bpm_up = Rect {
+                x: 0,
+                y: 0,
+                w: 0,
+                h: 0,
+            };
+            self.kaoss_show_all = Rect {
+                x: 0,
+                y: 0,
+                w: 0,
+                h: 0,
+            };
+            self.kaoss_viz = Rect {
+                x: 0,
+                y: 0,
+                w: 0,
+                h: 0,
+            };
+            self.kaoss_wipe_fx = Rect {
+                x: 0,
+                y: 0,
+                w: 0,
+                h: 0,
+            };
+            self.kaoss_channel = Rect {
+                x: 0,
+                y: 0,
+                w: 0,
+                h: 0,
+            };
+            self.kaoss_out = Rect {
                 x: 0,
                 y: 0,
                 w: 0,
@@ -646,6 +940,17 @@ impl Layout {
         }
     }
 
+    pub fn synth_macro_cell(&self, index: usize) -> Rect {
+        let n = 4i32;
+        let w = self.synth_macros.w / n;
+        Rect {
+            x: self.synth_macros.x + (index as i32) * w + 4,
+            y: self.synth_macros.y + 2,
+            w: w - 8,
+            h: self.synth_macros.h - 4,
+        }
+    }
+
     pub fn synth_key(&self, index: usize) -> Rect {
         let n = 12i32;
         let w = self.synth_keys.w / n;
@@ -689,8 +994,7 @@ impl Layout {
             UiMode::Presets => self.hit_presets(px, py),
             UiMode::Songs => self.hit_songs(px, py),
             UiMode::Settings => self.hit_settings(px, py),
-            UiMode::Log => Hit::None, // read-only
-            _ => Hit::None,
+            UiMode::Log => self.hit_log(px, py),
         }
     }
 
@@ -718,6 +1022,21 @@ impl Layout {
         }
         if self.kaoss_bpm_down.contains(px, py) {
             return Hit::KaossBpmDown;
+        }
+        if self.kaoss_show_all.w > 0 && self.kaoss_show_all.contains(px, py) {
+            return Hit::KaossShowAll;
+        }
+        if self.kaoss_viz.w > 0 && self.kaoss_viz.contains(px, py) {
+            return Hit::KaossViz;
+        }
+        if self.kaoss_wipe_fx.w > 0 && self.kaoss_wipe_fx.contains(px, py) {
+            return Hit::KaossWipeFx;
+        }
+        if self.kaoss_channel.w > 0 && self.kaoss_channel.contains(px, py) {
+            return Hit::KaossChannel;
+        }
+        if self.kaoss_out.w > 0 && self.kaoss_out.contains(px, py) {
+            return Hit::KaossOut;
         }
         if self.kaoss_full.contains(px, py) {
             return Hit::KaossFull;
@@ -753,10 +1072,11 @@ impl Layout {
         kind: crate::kaoss_ui::KaossPicker,
         px: i32,
         py: i32,
+        show_all: bool,
     ) -> Hit {
-        let n = crate::kaoss_ui::picker_count(kind);
+        let n = crate::kaoss_ui::picker_count(kind, show_all);
         for index in 0..n {
-            if crate::kaoss_ui::picker_cell(self.kaoss, kind, index).contains(px, py) {
+            if crate::kaoss_ui::picker_cell(self.kaoss, kind, index, show_all).contains(px, py) {
                 return Hit::KaossPicker(index);
             }
         }
@@ -776,6 +1096,30 @@ impl Layout {
         }
         if self.pads_trig.w > 0 && self.pads_trig.contains(px, py) {
             return Hit::PadsTrig;
+        }
+        if self.pads_mode.w > 0 && self.pads_mode.contains(px, py) {
+            return Hit::PadsModeArm;
+        }
+        if self.pads_rec.w > 0 && self.pads_rec.contains(px, py) {
+            return Hit::PadsRec;
+        }
+        if self.pads_vol_down.w > 0 && self.pads_vol_down.contains(px, py) {
+            return Hit::PadsVolDown;
+        }
+        if self.pads_vol_up.w > 0 && self.pads_vol_up.contains(px, py) {
+            return Hit::PadsVolUp;
+        }
+        if self.pads_voice.w > 0 && self.pads_voice.contains(px, py) {
+            return Hit::PadsVoice;
+        }
+        if self.pads_channel.w > 0 && self.pads_channel.contains(px, py) {
+            return Hit::PadsChannel;
+        }
+        if self.pads_synth.w > 0 && self.pads_synth.contains(px, py) {
+            return Hit::PadsSynth;
+        }
+        if self.pads_out.w > 0 && self.pads_out.contains(px, py) {
+            return Hit::PadsOut;
         }
         if self.stop_all.contains(px, py) {
             return Hit::StopAllClips;
@@ -806,6 +1150,17 @@ impl Layout {
         }
         if self.synth_swap.contains(px, py) {
             return Hit::SynthSwap;
+        }
+        if self.synth_vib_down.contains(px, py) {
+            return Hit::SynthVibDown;
+        }
+        if self.synth_vib_up.contains(px, py) {
+            return Hit::SynthVibUp;
+        }
+        for index in 0..4 {
+            if self.synth_macro_cell(index).contains(px, py) {
+                return Hit::DrumMacro(index);
+            }
         }
         for index in 0..5 {
             if self.synth_slider(index).contains(px, py) {
@@ -878,6 +1233,15 @@ impl Layout {
         if self.preset_save.contains(px, py) {
             return Hit::PresetSave;
         }
+        if self.preset_load.contains(px, py) {
+            return Hit::PresetLoad;
+        }
+        if self.preset_delete.contains(px, py) {
+            return Hit::PresetDelete;
+        }
+        if self.preset_factory.contains(px, py) {
+            return Hit::PresetFactory;
+        }
         for index in 0..8 {
             if self.preset_cell(index).contains(px, py) {
                 return Hit::PresetSlot(index);
@@ -893,11 +1257,29 @@ impl Layout {
         if self.song_stop.contains(px, py) {
             return Hit::SongStop;
         }
+        if self.song_loop.contains(px, py) {
+            return Hit::SongLoop;
+        }
+        if self.song_delete.contains(px, py) {
+            return Hit::SongDelete;
+        }
+        if self.song_bpm_up.contains(px, py) {
+            return Hit::SongBpmUp;
+        }
+        if self.song_bpm_down.contains(px, py) {
+            return Hit::SongBpmDown;
+        }
         if self.song_prev.contains(px, py) {
             return Hit::SongPrev;
         }
         if self.song_next.contains(px, py) {
             return Hit::SongNext;
+        }
+        if self.song_save_seq.contains(px, py) {
+            return Hit::SongSaveSeq;
+        }
+        if self.song_out.contains(px, py) {
+            return Hit::SongOut;
         }
         for index in 0..5 {
             if self.song_row(index).contains(px, py) {
@@ -924,6 +1306,15 @@ impl Layout {
         }
         if self.settings_all_off.contains(px, py) {
             return Hit::SettingsAllOff;
+        }
+        if self.settings_fx_target.contains(px, py) {
+            return Hit::SettingsFxTarget;
+        }
+        if self.settings_wifi.contains(px, py) {
+            return Hit::SettingsWifi;
+        }
+        if self.settings_update.contains(px, py) {
+            return Hit::SettingsUpdate;
         }
         for index in 0..3 {
             if self.settings_fx_slider(index).contains(px, py) {
@@ -964,6 +1355,12 @@ impl Layout {
         if self.seq_clear.contains(px, py) {
             return Hit::SeqClear;
         }
+        if self.seq_to_pad.contains(px, py) {
+            return Hit::SeqToPad;
+        }
+        if self.seq_all_off.contains(px, py) {
+            return Hit::SeqAllOff;
+        }
         if self.seq_bpm_up.contains(px, py) {
             return Hit::SeqBpmUp;
         }
@@ -977,6 +1374,16 @@ impl Layout {
                     note: 36 + index as u8,
                 };
             }
+        }
+        Hit::None
+    }
+
+    fn hit_log(&self, px: i32, py: i32) -> Hit {
+        if self.log_clear.contains(px, py) {
+            return Hit::LogClear;
+        }
+        if self.log_all_off.contains(px, py) {
+            return Hit::LogAllOff;
         }
         Hit::None
     }

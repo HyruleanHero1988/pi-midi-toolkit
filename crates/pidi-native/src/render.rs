@@ -137,7 +137,8 @@ mod tests {
         let mut out = Outbox::new();
         let k = model.layout.kaoss;
         model.finger_down(1, k.x + 40, k.y + 40, &mut out);
-        model.tick(1.0 / 60.0);
+        let mut out = crate::client::Outbox::new();
+        model.tick(1.0 / 60.0, &mut out);
         let mut frame = Frame::new();
         draw(&mut frame, &model);
         assert_eq!(frame.pixels.len(), SCREEN_W * SCREEN_H);

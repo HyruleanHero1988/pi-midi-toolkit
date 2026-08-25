@@ -41,6 +41,14 @@ pub fn list_songs(dir: &Path) -> Vec<PathBuf> {
     files
 }
 
+pub fn delete_song(path: &Path) -> bool {
+    if path.is_file() {
+        fs::remove_file(path).is_ok()
+    } else {
+        true
+    }
+}
+
 /// Minimal SMF reader: collects note on/off into ticks at `PPQ`.
 pub fn load_smf_as_clip(path: &Path) -> Option<(Vec<WireClipEvent>, u32, f32)> {
     let data = fs::read(path).ok()?;
@@ -168,6 +176,148 @@ fn read_vlq(data: &[u8]) -> Option<(u32, usize)> {
     None
 }
 
+fn write_vlq(mut value: u32, out: &mut Vec<u8>) {
+    let mut stack = [0u8; 5];
+    let mut n = 0;
+    stack[n] = (value & 0x7f) as u8;
+    n += 1;
+    value >>= 7;
+    while value > 0 {
+        stack[n] = (value & 0x7f) as u8 | 0x80;
+        n += 1;
+        value >>= 7;
+    }
+    for i in (0..n).rev() {
+        out.push(stack[i]);
+    }
+}
+
+/// Write a Type-0 SMF from clip events (ticks at `PPQ`).
+pub fn write_smf_type0(
+    path: &Path,
+    events: &[WireClipEvent],
+    length_ticks: u32,
+    bpm: f32,
+) -> bool {
+    let bpm = bpm.clamp(20.0, 400.0);
+    let us_per_beat = (60_000_000.0 / bpm).round() as u32;
+    let mut track = Vec::new();
+    // set_tempo
+    track.push(0x00);
+    track.extend_from_slice(&[0xff, 0x51, 0x03]);
+    track.push(((us_per_beat >> 16) & 0xff) as u8);
+    track.push(((us_per_beat >> 8) & 0xff) as u8);
+    track.push((us_per_beat & 0xff) as u8);
+
+    let mut ordered: Vec<&WireClipEvent> = events.iter().collect();
+    ordered.sort_by(|a, b| {
+        a.tick
+            .cmp(&b.tick)
+            .then_with(|| (!a.on).cmp(&(!b.on)) /* offs before ons */)
+    });
+
+    let mut last_tick = 0u32;
+    for ev in ordered {
+        let delta = ev.tick.saturating_sub(last_tick);
+        last_tick = ev.tick;
+        write_vlq(delta, &mut track);
+        let status = if ev.on {
+            0x90 | (ev.channel & 0x0f)
+        } else {
+            0x80 | (ev.channel & 0x0f)
+        };
+        track.push(status);
+        track.push(ev.note & 0x7f);
+        track.push(if ev.on {
+            ev.velocity.max(1).min(127)
+        } else {
+            0
+        });
+    }
+    let pad = length_ticks.saturating_sub(last_tick);
+    write_vlq(pad, &mut track);
+    track.extend_from_slice(&[0xff, 0x2f, 0x00]);
+
+    let mut data = Vec::new();
+    data.extend_from_slice(b"MThd");
+    data.extend_from_slice(&6u32.to_be_bytes());
+    data.extend_from_slice(&0u16.to_be_bytes()); // type 0
+    data.extend_from_slice(&1u16.to_be_bytes()); // one track
+    data.extend_from_slice(&(PPQ as u16).to_be_bytes());
+    data.extend_from_slice(b"MTrk");
+    data.extend_from_slice(&(track.len() as u32).to_be_bytes());
+    data.extend_from_slice(&track);
+
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let tmp = path.with_extension("mid.tmp");
+    if fs::write(&tmp, &data).is_err() {
+        return false;
+    }
+    let _ = fs::remove_file(path);
+    if fs::rename(&tmp, path).is_ok() {
+        return true;
+    }
+    // Fallback if rename across volumes fails.
+    let ok = fs::write(path, &data).is_ok();
+    let _ = fs::remove_file(&tmp);
+    ok
+}
+
+/// Next `seq-YYYYMMDD-HHMMSS.mid` (or `seq-export-N.mid` fallback).
+pub fn next_seq_export_path(dir: &Path) -> PathBuf {
+    let _ = fs::create_dir_all(dir);
+    let stamp = chrono_like_stamp();
+    if !stamp.is_empty() {
+        let candidate = dir.join(format!("seq-{stamp}.mid"));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    for n in 1..10_000 {
+        let candidate = dir.join(format!("seq-export-{n}.mid"));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    dir.join("seq-export.mid")
+}
+
+fn chrono_like_stamp() -> String {
+    // Local wall clock without pulling chrono crate: use system time via formatting
+    // that works on Windows/Linux for export filenames.
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let Ok(dur) = SystemTime::now().duration_since(UNIX_EPOCH) else {
+        return String::new();
+    };
+    let secs = dur.as_secs() as i64;
+    // Approximate UTC → local is fine for a unique filename; use a fixed offset-free
+    // civil date via a compact algorithm (Howard Hinnant).
+    let days = secs.div_euclid(86_400);
+    let tod = secs.rem_euclid(86_400) as u32;
+    let hh = tod / 3600;
+    let mm = (tod % 3600) / 60;
+    let ss = tod % 60;
+    let (y, m, d) = civil_from_days(days);
+    format!("{y:04}{m:02}{d:02}-{hh:02}{mm:02}{ss:02}")
+}
+
+/// Days since Unix epoch → (year, month, day) UTC.
+fn civil_from_days(days: i64) -> (i32, u32, u32) {
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u32;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = (yoe as i64) + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    (y as i32, m, d)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -193,5 +343,42 @@ mod tests {
         assert!(events[0].on);
         assert_eq!(events[0].note, 60);
         assert!(len >= 1);
+    }
+
+    #[test]
+    fn round_trips_type0_write() {
+        let dir = std::env::temp_dir().join(format!(
+            "pidi-smf-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = fs::create_dir_all(&dir);
+        let path = dir.join("out.mid");
+        let events = vec![
+            WireClipEvent {
+                tick: 0,
+                on: true,
+                channel: 0,
+                note: 60,
+                velocity: 100,
+            },
+            WireClipEvent {
+                tick: 480,
+                on: false,
+                channel: 0,
+                note: 60,
+                velocity: 0,
+            },
+        ];
+        assert!(write_smf_type0(&path, &events, 960, 120.0));
+        let (loaded, len, bpm) = load_smf_as_clip(&path).expect("reload");
+        assert_eq!(loaded.len(), 2);
+        assert!(loaded[0].on);
+        assert_eq!(loaded[0].note, 60);
+        assert!(len >= 480);
+        assert!((bpm - 120.0).abs() < 0.5);
+        let _ = fs::remove_dir_all(&dir);
     }
 }

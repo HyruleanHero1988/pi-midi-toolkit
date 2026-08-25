@@ -293,6 +293,18 @@ impl SeqModel {
         self.sequence.layers.len()
     }
 
+    /// Flattened clip for SEQ → PAD / song export. Pending layers included.
+    pub fn snapshot(&self) -> Option<(Vec<WireClipEvent>, u32, f64)> {
+        if self.sequence.is_empty() {
+            return None;
+        }
+        let (events, length_ticks) = self.sequence.to_wire(self.bpm, true);
+        if events.is_empty() || length_ticks == 0 {
+            return None;
+        }
+        Some((events, length_ticks, self.sequence.total_len()))
+    }
+
     pub fn rec_label(&self) -> (&'static str, u32) {
         match self.state {
             SeqState::RecBackbone => ("STOP REC", 0xcc241d),

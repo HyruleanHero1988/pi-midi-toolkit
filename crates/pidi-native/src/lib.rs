@@ -17,6 +17,7 @@ pub mod presets;
 pub mod render;
 pub mod scene;
 pub mod seq;
+pub mod session;
 pub mod songs;
 pub mod waves;
 #[cfg(feature = "sdl")]
@@ -27,4 +28,5 @@ pub use input::TouchEvent;
 pub use layout::{Hit, Layout, Surface};
 pub use mode::UiMode;
 pub use model::{NativeModel, RepeatDivisionChoice};
+pub use session::OutMode;
 pub use render::{Frame, SCREEN_H, SCREEN_W};

@@ -6,8 +6,8 @@ use std::net::TcpStream;
 use std::time::Duration;
 
 use jambox_protocol::{
-    RepeatDivision, RepeatPhase, Request, Response, StatusReply, TouchPhase, WireClipEvent,
-    PROTOCOL_VERSION,
+    MidiNotice, RepeatDivision, RepeatPhase, Request, Response, StatusReply, TouchPhase,
+    WireClipEvent, PROTOCOL_VERSION,
 };
 use tracing::{info, warn};
 
@@ -70,13 +70,13 @@ impl Outbox {
         Self::default()
     }
 
-    pub fn touch(&mut self, gesture: u32, phase: TouchPhase, x: f32, y: f32) {
+    pub fn touch(&mut self, gesture: u32, phase: TouchPhase, x: f32, y: f32, channel: u8) {
         let request = Request::Touch {
             gesture,
             phase,
             x,
             y,
-            channel: 0,
+            channel: channel & 0x0f,
             velocity: 110,
         };
         match phase {
@@ -188,6 +188,22 @@ impl Outbox {
         });
     }
 
+    pub fn fx_voice(&mut self, index: u16, param: &str, value: f32) {
+        self.reliable.push_back(Request::Fx {
+            target: jambox_protocol::FxTargetSpec::Voice { index },
+            param: param.to_string(),
+            value,
+        });
+    }
+
+    pub fn fx_drum_group(&mut self, param: &str, value: f32) {
+        self.reliable.push_back(Request::Fx {
+            target: jambox_protocol::FxTargetSpec::DrumGroup,
+            param: param.to_string(),
+            value,
+        });
+    }
+
     pub fn kaoss_scale(&mut self, scale_index: u8, key: u8, root_midi: u8, octaves: u8) {
         self.reliable.push_back(Request::KaossScale {
             scale_index,
@@ -239,6 +255,7 @@ pub struct NativeClient {
     reader: Option<BufReader<Stream>>,
     pub outbox: Outbox,
     pub last_status: StatusReply,
+    pub midi_inbox: Vec<MidiNotice>,
     pub connected: bool,
     address: String,
     tcp: bool,
@@ -251,6 +268,7 @@ impl NativeClient {
             reader: None,
             outbox: Outbox::new(),
             last_status: StatusReply::default(),
+            midi_inbox: Vec::new(),
             connected: false,
             address,
             tcp,
@@ -342,8 +360,10 @@ impl NativeClient {
                 }
                 Ok(_) => {
                     if let Ok(response) = serde_json::from_str::<Response>(line.trim()) {
-                        if let Response::Status(status) = response {
-                            self.last_status = status;
+                        match response {
+                            Response::Status(status) => self.last_status = status,
+                            Response::Midi(notice) => self.midi_inbox.push(notice),
+                            _ => {}
                         }
                     }
                 }
@@ -371,10 +391,10 @@ mod tests {
     #[test]
     fn moves_overwrite_and_edges_stay_in_order() {
         let mut box_ = Outbox::new();
-        box_.touch(1, TouchPhase::Down, 0.1, 0.2);
-        box_.touch(1, TouchPhase::Move, 0.2, 0.2);
-        box_.touch(1, TouchPhase::Move, 0.9, 0.8);
-        box_.touch(1, TouchPhase::Up, 0.9, 0.8);
+        box_.touch(1, TouchPhase::Down, 0.1, 0.2, 0);
+        box_.touch(1, TouchPhase::Move, 0.2, 0.2, 0);
+        box_.touch(1, TouchPhase::Move, 0.9, 0.8, 0);
+        box_.touch(1, TouchPhase::Up, 0.9, 0.8, 0);
         let batch = box_.take();
         assert_eq!(batch.len(), 2);
         assert!(matches!(batch[0], Request::Touch { phase: TouchPhase::Down, .. }));
