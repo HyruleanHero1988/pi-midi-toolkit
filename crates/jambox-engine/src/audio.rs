@@ -82,16 +82,9 @@ pub fn start(
     let channels = supported.channels();
     let format = supported.sample_format();
 
-    let mut candidates = Vec::new();
-    if preferred_frames > 0 {
-        candidates.push(preferred_frames);
-    }
-    for size in [PREFERRED_BLOCK, 1024, 256] {
-        if !candidates.contains(&size) {
-            candidates.push(size);
-        }
-    }
-
+    // cpal Fixed sizes often probe OK on bcm2835 Headphones then immediately
+    // XRUN/POLLERR at runtime. Only try Fixed when the operator asks
+    // (--buffer-frames N with N>0); otherwise keep ALSA default periods.
     let mut chosen = "alsa-default".to_string();
     let mut config = StreamConfig {
         channels,
@@ -99,18 +92,26 @@ pub fn start(
         buffer_size: BufferSize::Default,
     };
 
-    for frames in candidates {
-        let trial = StreamConfig {
-            channels,
-            sample_rate: cpal::SampleRate(sample_rate),
-            buffer_size: BufferSize::Fixed(frames),
-        };
-        if probe_config(device, &trial, format) {
-            config = trial;
-            chosen = format!("fixed-{frames}");
-            break;
+    if preferred_frames > 0 {
+        let mut candidates = vec![preferred_frames];
+        for size in [PREFERRED_BLOCK, 1024, 256] {
+            if !candidates.contains(&size) {
+                candidates.push(size);
+            }
         }
-        warn!(frames, "audio: fixed period rejected");
+        for frames in candidates {
+            let trial = StreamConfig {
+                channels,
+                sample_rate: cpal::SampleRate(sample_rate),
+                buffer_size: BufferSize::Fixed(frames),
+            };
+            if probe_config(device, &trial, format) {
+                config = trial;
+                chosen = format!("fixed-{frames}");
+                break;
+            }
+            warn!(frames, "audio: fixed period rejected");
+        }
     }
 
     info!(

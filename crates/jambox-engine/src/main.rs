@@ -60,8 +60,9 @@ enum Cmd {
         /// Extra wavetable dir (kiosk `user-wavetables/`). Later dirs add/replace names.
         #[arg(long, default_value = "")]
         user_waves: String,
-        /// Preferred ALSA/cpal callback frames. 0 probes 512, then 1024, then 256.
-        #[arg(long, default_value_t = 512)]
+        /// Preferred ALSA/cpal callback frames. 0 keeps ALSA default periods
+        /// (reliable on bcm2835 Headphones). N>0 tries Fixed(N), then 512/1024/256.
+        #[arg(long, default_value_t = 0)]
         buffer_frames: u32,
     },
     /// Offline render benchmark — the PLAN's CPU headroom check, no device needed.
