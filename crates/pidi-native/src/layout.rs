@@ -1,17 +1,27 @@
 //! 800×480 hit-testing. Coordinates are pixels unless noted as 0..1 pad space.
 
+use crate::mode::UiMode;
+
 pub const SCREEN_W: i32 = 800;
 pub const SCREEN_H: i32 = 480;
+pub const NAV_H: i32 = 48;
+pub const HUD_H: i32 = 36;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Hit {
+    Nav(UiMode),
     Kaoss { x: f32, y: f32 },
     Drum { index: usize, note: u8 },
     Division(usize),
+    PhrasePad(usize),
+    StopAllClips,
+    HomeTile(UiMode),
+    SynthSlider(usize),
+    SynthKey(usize),
     None,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Rect {
     pub x: i32,
     pub y: i32,
@@ -34,10 +44,15 @@ impl Rect {
 #[derive(Debug, Clone, Copy)]
 pub struct Layout {
     pub hud: Rect,
+    pub content: Rect,
+    pub nav: Rect,
     pub kaoss: Rect,
     pub drums: Rect,
     pub divisions: Rect,
-    pub footer: Rect,
+    pub phrase_grid: Rect,
+    pub stop_all: Rect,
+    pub synth_sliders: Rect,
+    pub synth_keys: Rect,
 }
 
 impl Default for Layout {
@@ -48,37 +63,94 @@ impl Default for Layout {
 
 impl Layout {
     pub fn new() -> Self {
+        let content_h = SCREEN_H - HUD_H - NAV_H;
         Self {
             hud: Rect {
                 x: 0,
                 y: 0,
                 w: SCREEN_W,
-                h: 40,
+                h: HUD_H,
+            },
+            content: Rect {
+                x: 0,
+                y: HUD_H,
+                w: SCREEN_W,
+                h: content_h,
+            },
+            nav: Rect {
+                x: 0,
+                y: SCREEN_H - NAV_H,
+                w: SCREEN_W,
+                h: NAV_H,
             },
             kaoss: Rect {
                 x: 8,
-                y: 48,
+                y: HUD_H + 8,
                 w: 520,
-                h: 368,
+                h: content_h - 16,
             },
             drums: Rect {
                 x: 540,
-                y: 48,
+                y: HUD_H + 8,
                 w: 252,
                 h: 252,
             },
             divisions: Rect {
                 x: 540,
-                y: 308,
+                y: HUD_H + 268,
                 w: 252,
                 h: 52,
             },
-            footer: Rect {
-                x: 0,
-                y: 432,
-                w: SCREEN_W,
-                h: 48,
+            phrase_grid: Rect {
+                x: 16,
+                y: HUD_H + 16,
+                w: 640,
+                h: content_h - 80,
             },
+            stop_all: Rect {
+                x: 668,
+                y: HUD_H + 16,
+                w: 116,
+                h: 64,
+            },
+            synth_sliders: Rect {
+                x: 24,
+                y: HUD_H + 24,
+                w: 752,
+                h: 220,
+            },
+            synth_keys: Rect {
+                x: 24,
+                y: HUD_H + 260,
+                w: 752,
+                h: content_h - 280,
+            },
+        }
+    }
+
+    pub fn nav_cell(&self, index: usize) -> Rect {
+        let n = UiMode::ALL.len() as i32;
+        let w = self.nav.w / n;
+        Rect {
+            x: self.nav.x + (index as i32) * w + 1,
+            y: self.nav.y + 4,
+            w: w - 2,
+            h: self.nav.h - 8,
+        }
+    }
+
+    pub fn home_tile(&self, index: usize) -> Rect {
+        let cols = 3i32;
+        let rows = 3i32;
+        let gw = (self.content.w - 24) / cols;
+        let gh = (self.content.h - 24) / rows;
+        let col = (index as i32) % cols;
+        let row = (index as i32) / cols;
+        Rect {
+            x: self.content.x + 12 + col * gw + 4,
+            y: self.content.y + 12 + row * gh + 4,
+            w: gw - 8,
+            h: gh - 8,
         }
     }
 
@@ -119,7 +191,60 @@ impl Layout {
         }
     }
 
-    pub fn hit(&self, px: i32, py: i32) -> Hit {
+    pub fn phrase_cell(&self, index: usize) -> Rect {
+        let col = (index % 4) as i32;
+        let row = (index / 4) as i32;
+        let gw = self.phrase_grid.w / 4;
+        let gh = self.phrase_grid.h / 4;
+        Rect {
+            x: self.phrase_grid.x + col * gw + 3,
+            y: self.phrase_grid.y + row * gh + 3,
+            w: gw - 6,
+            h: gh - 6,
+        }
+    }
+
+    pub fn synth_slider(&self, index: usize) -> Rect {
+        let n = 5i32;
+        let w = self.synth_sliders.w / n;
+        Rect {
+            x: self.synth_sliders.x + (index as i32) * w + 6,
+            y: self.synth_sliders.y + 28,
+            w: w - 12,
+            h: self.synth_sliders.h - 36,
+        }
+    }
+
+    pub fn synth_key(&self, index: usize) -> Rect {
+        let n = 12i32;
+        let w = self.synth_keys.w / n;
+        Rect {
+            x: self.synth_keys.x + (index as i32) * w + 2,
+            y: self.synth_keys.y + 4,
+            w: w - 4,
+            h: self.synth_keys.h - 8,
+        }
+    }
+
+    pub fn hit(&self, mode: UiMode, px: i32, py: i32) -> Hit {
+        if self.nav.contains(px, py) {
+            for (i, m) in UiMode::ALL.iter().enumerate() {
+                if self.nav_cell(i).contains(px, py) {
+                    return Hit::Nav(*m);
+                }
+            }
+            return Hit::None;
+        }
+        match mode {
+            UiMode::Kaoss => self.hit_kaoss(px, py),
+            UiMode::Pads => self.hit_pads(px, py),
+            UiMode::Home => self.hit_home(px, py),
+            UiMode::Synth => self.hit_synth(px, py),
+            _ => Hit::None,
+        }
+    }
+
+    fn hit_kaoss(&self, px: i32, py: i32) -> Hit {
         if self.kaoss.contains(px, py) {
             let (x, y) = self.kaoss.pad_xy(px, py);
             return Hit::Kaoss { x, y };
@@ -144,6 +269,41 @@ impl Layout {
         }
         Hit::None
     }
+
+    fn hit_pads(&self, px: i32, py: i32) -> Hit {
+        if self.stop_all.contains(px, py) {
+            return Hit::StopAllClips;
+        }
+        for index in 0..16 {
+            if self.phrase_cell(index).contains(px, py) {
+                return Hit::PhrasePad(index);
+            }
+        }
+        Hit::None
+    }
+
+    fn hit_home(&self, px: i32, py: i32) -> Hit {
+        for (i, mode) in UiMode::ALL.iter().enumerate() {
+            if self.home_tile(i).contains(px, py) {
+                return Hit::HomeTile(*mode);
+            }
+        }
+        Hit::None
+    }
+
+    fn hit_synth(&self, px: i32, py: i32) -> Hit {
+        for index in 0..5 {
+            if self.synth_slider(index).contains(px, py) {
+                return Hit::SynthSlider(index);
+            }
+        }
+        for index in 0..12 {
+            if self.synth_key(index).contains(px, py) {
+                return Hit::SynthKey(index);
+            }
+        }
+        Hit::None
+    }
 }
 
 /// Which performance surface a captured finger owns until lift.
@@ -151,6 +311,10 @@ impl Layout {
 pub enum Surface {
     Kaoss,
     Drum { note: u8, repeat: bool },
+    Phrase { slot: usize },
+    SynthKey { note: u8 },
+    SynthSlider { index: usize },
+    UiTap,
 }
 
 #[cfg(test)]
@@ -161,7 +325,7 @@ mod tests {
     fn kick_is_bottom_left() {
         let layout = Layout::new();
         let cell = layout.drum_cell(0);
-        match layout.hit(cell.x + 4, cell.y + 4) {
+        match layout.hit(UiMode::Kaoss, cell.x + 4, cell.y + 4) {
             Hit::Drum { note: 36, .. } => {}
             other => panic!("{other:?}"),
         }
@@ -170,7 +334,8 @@ mod tests {
     #[test]
     fn kaoss_bottom_is_y_zero() {
         let layout = Layout::new();
-        let Hit::Kaoss { x, y } = layout.hit(layout.kaoss.x + 10, layout.kaoss.y + layout.kaoss.h - 2)
+        let Hit::Kaoss { x, y } =
+            layout.hit(UiMode::Kaoss, layout.kaoss.x + 10, layout.kaoss.y + layout.kaoss.h - 2)
         else {
             panic!("expected kaoss");
         };
@@ -179,23 +344,22 @@ mod tests {
     }
 
     #[test]
-    fn five_independent_hits_are_possible() {
+    fn nav_switches_modes() {
         let layout = Layout::new();
-        let points = [
-            (layout.kaoss.x + 20, layout.kaoss.y + 20),
-            (layout.kaoss.x + 200, layout.kaoss.y + 100),
-            (layout.drum_cell(0).x + 4, layout.drum_cell(0).y + 4),
-            (layout.drum_cell(1).x + 4, layout.drum_cell(1).y + 4),
-            (layout.drum_cell(4).x + 4, layout.drum_cell(4).y + 4),
-        ];
-        let mut kinds = Vec::new();
-        for (x, y) in points {
-            kinds.push(layout.hit(x, y));
-        }
-        assert!(matches!(kinds[0], Hit::Kaoss { .. }));
-        assert!(matches!(kinds[1], Hit::Kaoss { .. }));
-        assert!(matches!(kinds[2], Hit::Drum { note: 36, .. }));
-        assert!(matches!(kinds[3], Hit::Drum { note: 37, .. }));
-        assert!(matches!(kinds[4], Hit::Drum { note: 40, .. }));
+        let cell = layout.nav_cell(UiMode::Pads.index());
+        assert_eq!(
+            layout.hit(UiMode::Kaoss, cell.x + 4, cell.y + 4),
+            Hit::Nav(UiMode::Pads)
+        );
+    }
+
+    #[test]
+    fn phrase_pad_a1_is_top_left() {
+        let layout = Layout::new();
+        let cell = layout.phrase_cell(0);
+        assert_eq!(
+            layout.hit(UiMode::Pads, cell.x + 4, cell.y + 4),
+            Hit::PhrasePad(0)
+        );
     }
 }

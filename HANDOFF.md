@@ -50,9 +50,11 @@ Modes today in `tools/midi-tone`:
 
 ## What’s active now
 
-`tools/midi-tone` — Tk kiosk UI, wavetables, morph, drums, sequencer, pads, songs, presets/session JSON, scopes, `kiosk.sh` / `install-kiosk.sh`.
+**Native kiosk port (this branch):** `pidi-native` + `jambox-engine` only — no Tk fallback. See [NATIVE_KIOSK.md](NATIVE_KIOSK.md). Slice notes remain in [NATIVE_SLICE.md](NATIVE_SLICE.md).
 
-See `tools/midi-tone/README.md`. Session: `settings.json`; slots: `user-presets/`; phrases: `phrases/`.
+`tools/midi-tone` / `apps/pidi` — historical Tk kiosk (not used on this branch).
+
+See `apps/pidi/README.md`. Session: `settings.json`; slots: `user-presets/`; phrases: `phrases/`.
 
 Branch stack (recent): drum voices → phrase pads → pad enhance → wave viz → plan north-star → jambox FX → Rust jambox engine → overdub sequencer.
 
@@ -72,7 +74,7 @@ Still needs hardware / machine:
 
 Rust toolchain on PATH for engine work. midi-tone is Python venv on the Pi.
 
-When crates change, compile Pi binaries **before commit** (PC Linux/WSL or cloud-agent VM): `./deploy/build-pi-bins.sh` then `git add dist/armv7`. SET→UPDATE copies those files onto `bin/` on the box. Do not use Git LFS for them (archive downloads would get pointer files).
+When crates change, compile Pi binaries **before commit** (PC Linux/WSL or cloud-agent VM): `./deploy/build-pi-bins.sh` then `git add dist/armv7`. SET→UPDATE copies those files onto `bin/` on the box. Do not use Git LFS for them (archive downloads would get pointer files). On Windows, use **WSL2 Ubuntu 22.04** for that script (see [NATIVE_SLICE.md](NATIVE_SLICE.md) “Fast host loop”); Ubuntu 24.04 bins need a newer glibc than Pi Bookworm.
 
 ## Not related to play-my-synth
 

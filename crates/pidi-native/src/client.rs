@@ -6,7 +6,8 @@ use std::net::TcpStream;
 use std::time::Duration;
 
 use jambox_protocol::{
-    RepeatDivision, RepeatPhase, Request, Response, StatusReply, TouchPhase, PROTOCOL_VERSION,
+    RepeatDivision, RepeatPhase, Request, Response, StatusReply, TouchPhase, WireClipEvent,
+    PROTOCOL_VERSION,
 };
 use tracing::{info, warn};
 
@@ -113,6 +114,58 @@ impl Outbox {
             note,
             velocity,
         });
+    }
+
+    pub fn note_off(&mut self, channel: u8, note: u8) {
+        self.reliable.push_back(Request::NoteOff { channel, note });
+    }
+
+    pub fn synth(&mut self, param: &str, value: f32) {
+        self.reliable.push_back(Request::Synth {
+            param: param.to_string(),
+            value,
+        });
+    }
+
+    pub fn morph_pair(&mut self, a: u16, b: u16) {
+        self.reliable.push_back(Request::MorphPair { a, b });
+    }
+
+    pub fn clip_load(
+        &mut self,
+        slot: u8,
+        length_ticks: u32,
+        mode: &str,
+        events: Vec<WireClipEvent>,
+    ) {
+        self.reliable.push_back(Request::ClipLoad {
+            slot,
+            length_ticks,
+            mode: Some(mode.to_string()),
+            events,
+        });
+    }
+
+    pub fn clip_clear(&mut self, slot: u8) {
+        self.reliable.push_back(Request::ClipClear { slot });
+    }
+
+    pub fn clip_launch(&mut self, slot: u8, quantize: &str) {
+        self.reliable.push_back(Request::ClipLaunch {
+            slot,
+            quantize: Some(quantize.to_string()),
+        });
+    }
+
+    pub fn clip_stop(&mut self, slot: u8, quantize: &str) {
+        self.reliable.push_back(Request::ClipStop {
+            slot,
+            quantize: Some(quantize.to_string()),
+        });
+    }
+
+    pub fn stop_all_clips(&mut self) {
+        self.reliable.push_back(Request::StopAllClips);
     }
 
     pub fn status(&mut self) {

@@ -56,6 +56,21 @@ sudo systemctl restart pidi-native
 
 The unit sets `SDL_VIDEODRIVER=kmsdrm` and `SDL_AUDIODRIVER=dummy`.
 
+### Restore the Tk kiosk later
+
+The native slice and LightDM cannot share the panel. To go back to the
+Python PiDI / midi-tone kiosk (lab user `ray`):
+
+```bash
+sudo systemctl stop pidi-native
+sudo systemctl disable pidi-native   # optional: don't autostart the slice
+sudo systemctl unmask lightdm
+sudo systemctl enable --now lightdm
+```
+
+Leave `jambox-engine` running — the Tk kiosk talks to the same control socket.
+If LightDM was only stopped (not masked), `enable --now` is enough; skip `unmask`.
+
 ## Binaries
 
 - `jambox-engine` — audio, MIDI, protocol v1 (`hello` / `touch` / `repeat` / `status`)
@@ -76,6 +91,30 @@ cargo run -p pidi-native -- --tcp --control 127.0.0.1:17890 --display sdl --wind
 ```
 
 ## Deploy to the Pi
+
+### Fast host loop (WSL — recommended)
+
+Windows cannot cross-link these crates cleanly. Install **WSL2 + Ubuntu 22.04**
+(jammy): its glibc is ≤ Pi Bookworm’s 2.36. Avoid Ubuntu 24.04 for staging
+bins — they need GLIBC 2.38+ and fail on the Pi.
+
+```powershell
+# Admin PowerShell once; reboot if prompted
+wsl --install -d Ubuntu-22.04
+```
+
+Then in the Ubuntu shell (repo path via `/mnt/c/...`):
+
+```bash
+cd /mnt/c/Users/Raymond/Documents/Development/pi-midi-toolkit
+# first time: rustup + passwordless sudo helps apt in the script
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+PACKAGES=jambox-engine,pidi-native ./deploy/build-pi-bins.sh
+# copy dist/armv7/* to the Pi and restart units (or deploy-native-slice.sh)
+```
+
+CI (`.github/workflows/build-pi-bins.yml` on ubuntu-22.04) remains the backup
+when you are not on WSL.
 
 Cross-build needs `gcc-arm-linux-gnueabihf`, rustc **1.83+**, and the armhf SDL
 + GLES development packages (`libsdl2-dev:armhf`, `libgles2-mesa-dev:armhf`,
@@ -113,7 +152,7 @@ Install:
 9. CELLS — no blank flash; previous frame remains until the next complete swap.
 10. Status HUD — callback frames, µs, xruns, drops.
 11. Confirm `pidi-native` log says `SDL/GL presenter` / display `sdl-gles`, not fbdev.
-12. If SDL finger IDs or coordinates are wrong, keep `--display sdl` and switch `--touch evdev`.
+12. If SDL finger IDs or coordinates are wrong, keep `--display sdl` and switch `--touch evdev` (lab: `--evdev /dev/input/event4` for FT5x06; avoid ADS7846).
 
 Capture Tk baseline with the same gestures before deciding to migrate the rest
 of PiDI.

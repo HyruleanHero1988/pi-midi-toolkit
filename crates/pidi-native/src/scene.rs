@@ -5,7 +5,9 @@
 
 use crate::font::{self, GLYPH_H, GLYPH_STRIDE, GLYPH_W};
 use crate::layout::Rect;
+use crate::mode::UiMode;
 use crate::model::{NativeModel, RepeatDivisionChoice, LED_COLS, LED_ROWS};
+use crate::phrases;
 use crate::render::{SCREEN_H, SCREEN_W};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -71,29 +73,54 @@ impl Scene {
 pub fn build(model: &NativeModel) -> Scene {
     let mut scene = Scene {
         clear: 0x101018,
-        color: Vec::with_capacity(84 + 32),
-        glyphs: Vec::with_capacity(160),
+        color: Vec::with_capacity(200),
+        glyphs: Vec::with_capacity(240),
     };
+    draw_chrome(&mut scene, model);
+    match model.mode {
+        UiMode::Kaoss => draw_kaoss(&mut scene, model),
+        UiMode::Pads => draw_pads(&mut scene, model),
+        UiMode::Home => draw_home(&mut scene, model),
+        UiMode::Synth => draw_synth(&mut scene, model),
+        other => draw_placeholder(&mut scene, model, other),
+    }
+    let _ = (SCREEN_W, SCREEN_H);
+    scene
+}
+
+fn draw_chrome(scene: &mut Scene, model: &NativeModel) {
     let layout = model.layout;
     scene.fill_rect(layout.hud, 0x1c1c28);
-    scene.text(
-        8,
-        14,
-        &format!(
-            "PIDI NATIVE  GLES  fps {:>4.0}  cb {}/{}us  xrun {}  drop {}  rel {}  xy {}  rpt {}  {}",
-            model.fps,
-            model.status.callback_frames,
-            model.status.callback_micros,
-            model.status.xruns,
-            model.status.command_drops,
-            model.status.emergency_releases,
-            model.status.touch_overwrites,
-            model.status.active_repeats,
-            if model.connected { "ENG" } else { "NO ENGINE" },
-        ),
-        0xf2f2f2,
+    let hud = format!(
+        "{}  fps {:>4.0}  cb {}/{}us  xrun {}  {}",
+        model.mode.title(),
+        model.fps,
+        model.status.callback_frames,
+        model.status.callback_micros,
+        model.status.xruns,
+        if model.connected { "ENG" } else { "NO ENGINE" },
     );
+    scene.text(8, 12, &hud, 0xf2f2f2);
+    if !model.status_line.is_empty() {
+        scene.text(420, 12, &model.status_line, 0xa0a0b8);
+    }
 
+    scene.fill_rect(layout.nav, 0x14141c);
+    for (i, mode) in UiMode::ALL.iter().enumerate() {
+        let cell = layout.nav_cell(i);
+        let active = *mode == model.mode;
+        scene.fill_rect(cell, if active { 0x5a3060 } else { 0x242430 });
+        scene.text(
+            cell.x + 6,
+            cell.y + cell.h / 2 - 3,
+            mode.label(),
+            if active { 0xffffff } else { 0xb0b0c0 },
+        );
+    }
+}
+
+fn draw_kaoss(scene: &mut Scene, model: &NativeModel) {
+    let layout = model.layout;
     for row in 0..LED_ROWS {
         for col in 0..LED_COLS {
             let cell = layout.kaoss_cell(col, row);
@@ -125,28 +152,103 @@ pub fn build(model: &NativeModel) -> Scene {
     for index in 0..4 {
         let cell = layout.division_cell(index);
         let choice = RepeatDivisionChoice::from_index(index);
-        scene.fill_rect(cell, if choice == model.division { 0x5a3060 } else { 0x20202c });
+        scene.fill_rect(
+            cell,
+            if choice == model.division {
+                0x5a3060
+            } else {
+                0x20202c
+            },
+        );
         scene.text(cell.x + 8, cell.y + 16, choice.label(), 0xffffff);
     }
-
-    scene.fill_rect(layout.footer, 0x1c1c28);
-    scene.text(
-        8,
-        448,
-        "KAOSS LEFT  DRUMS RIGHT  HOLD KICK TO REPEAT  ENGINE OWNS TIME",
-        0xa0a0b8,
-    );
-    let _ = (SCREEN_W, SCREEN_H);
-    scene
 }
 
-pub fn unpack_rgb(color: u32) -> [f32; 4] {
-    [
-        ((color >> 16) & 0xff) as f32 / 255.0,
-        ((color >> 8) & 0xff) as f32 / 255.0,
-        (color & 0xff) as f32 / 255.0,
-        1.0,
-    ]
+fn draw_pads(scene: &mut Scene, model: &NativeModel) {
+    let layout = model.layout;
+    scene.fill_rect(layout.stop_all, 0x3c3836);
+    scene.text(layout.stop_all.x + 10, layout.stop_all.y + 24, "STOP", 0xffffff);
+    scene.text(layout.stop_all.x + 10, layout.stop_all.y + 40, "ALL", 0xffffff);
+
+    for index in 0..16 {
+        let cell = layout.phrase_cell(index);
+        let pad = &model.phrases[index];
+        let color = if model.phrase_playing[index] {
+            0x689d6a
+        } else if pad.empty {
+            0x3c3836
+        } else if pad.loop_mode {
+            0x458588
+        } else {
+            0x076678
+        };
+        scene.fill_rect(cell, color);
+        let label = phrases::pad_label(index);
+        scene.text(cell.x + 10, cell.y + 16, &label, 0xfbf1c7);
+        if !pad.empty {
+            scene.text(
+                cell.x + 10,
+                cell.y + 36,
+                if pad.loop_mode { "LOOP" } else { "1SHOT" },
+                0xd5c4a1,
+            );
+        }
+    }
+}
+
+fn draw_home(scene: &mut Scene, model: &NativeModel) {
+    for (i, mode) in UiMode::ALL.iter().enumerate() {
+        let cell = model.layout.home_tile(i);
+        scene.fill_rect(cell, 0x282838);
+        scene.text(
+            cell.x + 16,
+            cell.y + cell.h / 2 - 4,
+            mode.title(),
+            0xf2f2f2,
+        );
+    }
+}
+
+fn draw_synth(scene: &mut Scene, model: &NativeModel) {
+    const LABELS: [&str; 5] = ["MORPH", "TONE", "LEVEL", "ATK", "REL"];
+    const KEYS: [&str; 12] = [
+        "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B",
+    ];
+    for index in 0..5 {
+        let track = model.layout.synth_slider(index);
+        scene.fill_rect(track, 0x20202c);
+        scene.text(track.x + 8, track.y - 18, LABELS[index], 0xc0c0d0);
+        let fill_h = (track.h as f32 * model.synth_params[index]) as i32;
+        let fill = Rect {
+            x: track.x + 4,
+            y: track.y + track.h - fill_h,
+            w: track.w - 8,
+            h: fill_h,
+        };
+        scene.fill_rect(fill, 0x5a3060);
+    }
+    for index in 0..12 {
+        let key = model.layout.synth_key(index);
+        let black = KEYS[index].contains('#');
+        scene.fill_rect(key, if black { 0x1a1a22 } else { 0x3a3a48 });
+        scene.text(key.x + 10, key.y + key.h / 2 - 3, KEYS[index], 0xf2f2f2);
+    }
+}
+
+fn draw_placeholder(scene: &mut Scene, model: &NativeModel, mode: UiMode) {
+    let c = model.layout.content;
+    scene.text(
+        c.x + 24,
+        c.y + 48,
+        &format!("{} — coming on this branch", mode.title()),
+        0xc0c0d0,
+    );
+    scene.text(
+        c.x + 24,
+        c.y + 72,
+        "Native kiosk port; engine owns musical time.",
+        0x808098,
+    );
 }
 
 #[cfg(test)]
@@ -177,5 +279,23 @@ mod tests {
             .count();
         assert_eq!(cells, LED_COLS * LED_ROWS);
         assert!(!scene.glyphs.is_empty());
+    }
+
+    #[test]
+    fn pads_mode_draws_sixteen_tiles() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Pads);
+        let scene = build(&model);
+        let tiles = scene
+            .color
+            .iter()
+            .filter(|q| {
+                q.w > 100.0
+                    && q.h > 50.0
+                    && q.x >= model.layout.phrase_grid.x as f32
+                    && q.y >= model.layout.phrase_grid.y as f32
+            })
+            .count();
+        assert!(tiles >= 16);
     }
 }

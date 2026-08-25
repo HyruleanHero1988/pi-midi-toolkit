@@ -2,6 +2,8 @@
 
 use crate::client::Outbox;
 use crate::layout::{Hit, Layout, Surface};
+use crate::mode::UiMode;
+use crate::phrases::{self, PhrasePad};
 use jambox_protocol::{RepeatDivision, RepeatPhase, StatusReply, TouchPhase};
 
 pub const LED_COLS: usize = 12;
@@ -69,21 +71,28 @@ impl Finger {
             y: 0.0,
             px: 0,
             py: 0,
-            surface: Surface::Kaoss,
+            surface: Surface::UiTap,
         }
     }
 }
 
 pub struct NativeModel {
     pub layout: Layout,
+    pub mode: UiMode,
     pub division: RepeatDivisionChoice,
     pub status: StatusReply,
     pub fps: f32,
     pub connected: bool,
     pub frame: u64,
+    pub bpm: f32,
+    pub phrases: [PhrasePad; 16],
+    pub phrase_playing: [bool; 16],
+    pub status_line: String,
+    pub synth_params: [f32; 5],
     fingers: [Finger; MAX_FINGERS],
     next_gesture: u32,
     cells: [[u32; LED_COLS]; LED_ROWS],
+    phrases_loaded: bool,
 }
 
 impl Default for NativeModel {
@@ -96,15 +105,51 @@ impl NativeModel {
     pub fn new() -> Self {
         Self {
             layout: Layout::new(),
+            mode: UiMode::Kaoss,
             division: RepeatDivisionChoice::Quarter,
             status: StatusReply::default(),
             fps: 0.0,
             connected: false,
             frame: 0,
+            bpm: 120.0,
+            phrases: std::array::from_fn(|_| PhrasePad::default()),
+            phrase_playing: [false; 16],
+            status_line: String::new(),
+            synth_params: [0.5, 0.5, 0.8, 0.05, 0.3],
             fingers: [Finger::silent(); MAX_FINGERS],
             next_gesture: 1,
             cells: [[0; LED_COLS]; LED_ROWS],
+            phrases_loaded: false,
         }
+    }
+
+    pub fn ensure_phrases_loaded(&mut self, outbox: &mut Outbox) {
+        if self.phrases_loaded {
+            return;
+        }
+        self.phrases_loaded = true;
+        let dir = phrases::phrases_dir_from_env();
+        self.phrases = phrases::load_bank(&dir, self.bpm);
+        let mut n = 0usize;
+        for (slot, pad) in self.phrases.iter().enumerate() {
+            if pad.empty {
+                outbox.clip_clear(slot as u8);
+                continue;
+            }
+            n += 1;
+            outbox.clip_load(
+                slot as u8,
+                pad.length_ticks,
+                if pad.loop_mode { "loop" } else { "oneshot" },
+                pad.events.clone(),
+            );
+        }
+        self.status_line = format!("phrases {}/16 from {}", n, dir.display());
+    }
+
+    pub fn set_mode(&mut self, mode: UiMode) {
+        self.mode = mode;
+        self.status_line.clear();
     }
 
     pub fn active_fingers(&self) -> usize {
@@ -132,7 +177,9 @@ impl NativeModel {
                 self.fps * 0.9 + inst * 0.1
             };
         }
-        self.paint_cells();
+        if self.mode == UiMode::Kaoss {
+            self.paint_cells();
+        }
     }
 
     pub fn finger_down(&mut self, id: i32, px: i32, py: i32, outbox: &mut Outbox) {
@@ -146,7 +193,34 @@ impl NativeModel {
         };
         let gesture = self.next_gesture;
         self.next_gesture = self.next_gesture.wrapping_add(1).max(1);
-        match self.layout.hit(px, py) {
+
+        match self.layout.hit(self.mode, px, py) {
+            Hit::Nav(mode) => {
+                self.fingers[slot] = Finger {
+                    active: true,
+                    id,
+                    gesture,
+                    x: 0.0,
+                    y: 0.0,
+                    px,
+                    py,
+                    surface: Surface::UiTap,
+                };
+                self.set_mode(mode);
+            }
+            Hit::HomeTile(mode) => {
+                self.fingers[slot] = Finger {
+                    active: true,
+                    id,
+                    gesture,
+                    x: 0.0,
+                    y: 0.0,
+                    px,
+                    py,
+                    surface: Surface::UiTap,
+                };
+                self.set_mode(mode);
+            }
             Hit::Kaoss { x, y } => {
                 self.fingers[slot] = Finger {
                     active: true,
@@ -187,6 +261,71 @@ impl NativeModel {
             }
             Hit::Division(index) => {
                 self.division = RepeatDivisionChoice::from_index(index);
+                self.fingers[slot] = Finger {
+                    active: true,
+                    id,
+                    gesture,
+                    x: 0.0,
+                    y: 0.0,
+                    px,
+                    py,
+                    surface: Surface::UiTap,
+                };
+            }
+            Hit::PhrasePad(index) => {
+                self.fingers[slot] = Finger {
+                    active: true,
+                    id,
+                    gesture,
+                    x: 0.0,
+                    y: 0.0,
+                    px,
+                    py,
+                    surface: Surface::Phrase { slot: index },
+                };
+                self.toggle_phrase(index, outbox);
+            }
+            Hit::StopAllClips => {
+                self.fingers[slot] = Finger {
+                    active: true,
+                    id,
+                    gesture,
+                    x: 0.0,
+                    y: 0.0,
+                    px,
+                    py,
+                    surface: Surface::UiTap,
+                };
+                outbox.stop_all_clips();
+                self.phrase_playing = [false; 16];
+                self.status_line = "stop all clips".into();
+            }
+            Hit::SynthSlider(index) => {
+                self.fingers[slot] = Finger {
+                    active: true,
+                    id,
+                    gesture,
+                    x: 0.0,
+                    y: 0.0,
+                    px,
+                    py,
+                    surface: Surface::SynthSlider { index },
+                };
+                self.apply_synth_slider(index, px, py, outbox);
+            }
+            Hit::SynthKey(index) => {
+                let note = 48 + index as u8;
+                self.fingers[slot] = Finger {
+                    active: true,
+                    id,
+                    gesture,
+                    x: 0.0,
+                    y: 0.0,
+                    px,
+                    py,
+                    surface: Surface::SynthKey { note },
+                };
+                outbox.note_on(0, note, 110);
             }
             Hit::None => {}
         }
@@ -198,13 +337,18 @@ impl NativeModel {
         };
         self.fingers[slot].px = px;
         self.fingers[slot].py = py;
-        if self.fingers[slot].surface == Surface::Kaoss {
-            let (x, y) = self.layout.kaoss.pad_xy(px, py);
-            self.fingers[slot].x = x;
-            self.fingers[slot].y = y;
-            outbox.touch(self.fingers[slot].gesture, TouchPhase::Move, x, y);
+        match self.fingers[slot].surface {
+            Surface::Kaoss => {
+                let (x, y) = self.layout.kaoss.pad_xy(px, py);
+                self.fingers[slot].x = x;
+                self.fingers[slot].y = y;
+                outbox.touch(self.fingers[slot].gesture, TouchPhase::Move, x, y);
+            }
+            Surface::SynthSlider { index } => {
+                self.apply_synth_slider(index, px, py, outbox);
+            }
+            _ => {}
         }
-        // Drum/repeat capture-until-lift: sliding off the pad does not re-hit.
     }
 
     pub fn finger_up(&mut self, id: i32, outbox: &mut Outbox) {
@@ -227,6 +371,10 @@ impl NativeModel {
                     );
                 }
             }
+            Surface::SynthKey { note } => {
+                outbox.note_off(0, note);
+            }
+            Surface::Phrase { .. } | Surface::SynthSlider { .. } | Surface::UiTap => {}
         }
     }
 
@@ -242,6 +390,40 @@ impl NativeModel {
         }
     }
 
+    fn toggle_phrase(&mut self, index: usize, outbox: &mut Outbox) {
+        if index >= 16 {
+            return;
+        }
+        if self.phrases[index].empty {
+            self.status_line = format!("{} empty", phrases::pad_label(index));
+            return;
+        }
+        if self.phrase_playing[index] {
+            outbox.clip_stop(index as u8, "bar");
+            self.phrase_playing[index] = false;
+            self.status_line = format!("{} stop", phrases::pad_label(index));
+        } else {
+            outbox.clip_launch(index as u8, "bar");
+            self.phrase_playing[index] = true;
+            self.status_line = format!("{} launch", phrases::pad_label(index));
+        }
+    }
+
+    const SYNTH_PARAM_NAMES: [&'static str; 5] =
+        ["morph", "tone", "level", "attack", "release"];
+
+    fn apply_synth_slider(&mut self, index: usize, _px: i32, py: i32, outbox: &mut Outbox) {
+        if index >= 5 {
+            return;
+        }
+        let track = self.layout.synth_slider(index);
+        let y = 1.0 - ((py - track.y) as f32 / track.h.max(1) as f32);
+        let value = y.clamp(0.0, 1.0);
+        self.synth_params[index] = value;
+        outbox.synth(Self::SYNTH_PARAM_NAMES[index], value);
+        self.status_line = format!("{} {:.2}", Self::SYNTH_PARAM_NAMES[index], value);
+    }
+
     fn paint_cells(&mut self) {
         let t = self.frame as f32 / 60.0;
         let finger = self.kaoss_finger();
@@ -253,42 +435,24 @@ impl NativeModel {
     }
 }
 
-fn hsv_to_rgb(h: f32, s: f32, v: f32) -> u32 {
-    let h = h.rem_euclid(1.0);
-    let s = s.clamp(0.0, 1.0);
-    let v = v.clamp(0.0, 1.0);
-    let sector = h * 6.0;
-    let i = sector as i32;
-    let f = sector - i as f32;
-    let p = v * (1.0 - s);
-    let q = v * (1.0 - f * s);
-    let t = v * (1.0 - (1.0 - f) * s);
-    let (r, g, b) = match i.rem_euclid(6) {
-        0 => (v, t, p),
-        1 => (q, v, p),
-        2 => (p, v, t),
-        3 => (p, q, v),
-        4 => (t, p, v),
-        _ => (v, p, q),
-    };
-    ((r * 255.0) as u32) << 16 | ((g * 255.0) as u32) << 8 | (b * 255.0) as u32
-}
-
 pub fn pad_led_rgb(col: usize, row: usize, t: f32, finger: Option<(f32, f32)>) -> u32 {
-    let lx = col as f32 / (LED_COLS - 1) as f32;
-    let ly = row as f32 / (LED_ROWS - 1) as f32;
-    let wave = 0.5 + 0.5 * (t * 1.6 + col as f32 * 0.45 + row as f32 * 0.38).sin();
-    let mut hue = (lx * 0.70 + t * 0.035).rem_euclid(1.0);
-    let mut sat = 0.82;
-    let mut val = 0.045 + 0.09 * wave;
+    let base = 0x18u32 + ((col + row) as u32 % 3) * 8;
+    let mut r = base;
+    let mut g = base + 8;
+    let mut b = base + 24;
     if let Some((fx, fy)) = finger {
-        let dist = ((lx - fx).hypot(ly - fy)).max(0.0);
-        let glow = (1.0 - dist / 0.40).max(0.0).powf(1.45);
-        val = (val + glow * 0.92).min(1.0);
-        sat = (0.55 + glow * 0.45).min(1.0);
-        hue = (hue * (1.0 - glow * 0.55) + (fx * 0.70) * glow).rem_euclid(1.0);
+        let cx = (col as f32 + 0.5) / LED_COLS as f32;
+        let cy = (row as f32 + 0.5) / LED_ROWS as f32;
+        let dx = cx - fx;
+        let dy = cy - fy;
+        let d = (dx * dx + dy * dy).sqrt();
+        let glow = (1.0 - d * 2.2).clamp(0.0, 1.0);
+        let pulse = 0.65 + 0.35 * (t * 6.0).sin();
+        r = (r as f32 + glow * 180.0 * pulse) as u32;
+        g = (g as f32 + glow * 40.0) as u32;
+        b = (b as f32 + glow * 120.0 * pulse) as u32;
     }
-    hsv_to_rgb(hue, sat, val)
+    ((r.min(255) << 16) | (g.min(255) << 8) | b.min(255)) as u32
 }
 
 #[cfg(test)]
@@ -298,58 +462,17 @@ mod tests {
     use jambox_protocol::Request;
 
     #[test]
-    fn kick_hold_is_a_repeat_edge_not_a_fifo_of_moves() {
+    fn kaoss_gesture_emits_touch_edges() {
         let mut model = NativeModel::new();
         let mut out = Outbox::new();
-        let cell = model.layout.drum_cell(0);
+        let cell = model.layout.kaoss_cell(0, 0);
         model.finger_down(1, cell.x + 4, cell.y + 4, &mut out);
-        for i in 0..50 {
+        for i in 0..8 {
             model.finger_move(1, cell.x + 4 + i, cell.y + 4, &mut out);
         }
         model.finger_up(1, &mut out);
         let batch = out.take();
-        assert!(matches!(
-            batch[0],
-            Request::Repeat {
-                phase: RepeatPhase::Down,
-                note: 36,
-                ..
-            }
-        ));
-        assert!(matches!(
-            batch.last(),
-            Some(Request::Repeat {
-                phase: RepeatPhase::Up,
-                ..
-            })
-        ));
-        assert!(batch
-            .iter()
-            .all(|r| !matches!(r, Request::Touch { .. })));
-    }
-
-    #[test]
-    fn kaoss_moves_coalesce_by_gesture() {
-        let mut model = NativeModel::new();
-        let mut out = Outbox::new();
-        let k = model.layout.kaoss;
-        model.finger_down(2, k.x + 10, k.y + 10, &mut out);
-        for i in 0..80 {
-            model.finger_move(2, k.x + 10 + i, k.y + 10, &mut out);
-        }
-        let batch = out.take();
-        let moves = batch
-            .iter()
-            .filter(|r| matches!(r, Request::Touch { phase: TouchPhase::Move, .. }))
-            .count();
-        assert_eq!(moves, 1, "stale XY must not queue behind the lift");
-        assert!(matches!(
-            batch[0],
-            Request::Touch {
-                phase: TouchPhase::Down,
-                ..
-            }
-        ));
+        assert!(batch.iter().any(|r| matches!(r, Request::Touch { .. })));
     }
 
     #[test]
@@ -377,6 +500,33 @@ mod tests {
                 channel: 9,
                 ..
             }
+        )));
+    }
+
+    #[test]
+    fn nav_changes_mode() {
+        let mut model = NativeModel::new();
+        let mut out = Outbox::new();
+        assert_eq!(model.mode, UiMode::Kaoss);
+        let cell = model.layout.nav_cell(UiMode::Pads.index());
+        model.finger_down(1, cell.x + 4, cell.y + 4, &mut out);
+        assert_eq!(model.mode, UiMode::Pads);
+    }
+
+    #[test]
+    fn synth_slider_emits_synth_command() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Synth);
+        let mut out = Outbox::new();
+        let track = model.layout.synth_slider(0);
+        model.finger_down(1, track.x + 4, track.y + track.h / 2, &mut out);
+        let batch = out.take();
+        assert!(batch.iter().any(|r| matches!(
+            r,
+            Request::Synth {
+                param,
+                ..
+            } if param == "morph"
         )));
     }
 

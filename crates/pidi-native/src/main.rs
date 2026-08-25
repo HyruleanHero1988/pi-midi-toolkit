@@ -1,4 +1,4 @@
-//! Native KAOSS/drum vertical slice. Deploy beside jambox-engine on the Pi.
+//! Native jambox kiosk. Deploy beside jambox-engine on the Pi.
 //!
 //! Default presenter is SDL + OpenGL ES 2 (KMSDRM on the Pi). fbdev is an
 //! explicit fallback; dummy is for host tests and `--frames` dumps.
@@ -18,7 +18,7 @@ use pidi_native::scene;
 #[derive(Parser)]
 #[command(
     name = "pidi-native",
-    about = "Native 800x480 KAOSS + drum slice for jambox-engine (SDL/GLES)"
+    about = "Native 800x480 jambox kiosk for jambox-engine (SDL/GLES)"
 )]
 struct Cli {
     /// Control socket path or host:port.
@@ -37,9 +37,12 @@ struct Cli {
     /// Linux framebuffer device (only for --display fb).
     #[arg(long, default_value = "/dev/fb0")]
     fb: String,
-    /// Linux evdev node (empty = autodetect Goodix/touch).
+    /// Linux evdev node (empty = autodetect capacitive panel).
     #[arg(long, default_value = "")]
     evdev: String,
+    /// Directory of pad-01.json … pad-16.json (overrides PIDI_PHRASES_DIR).
+    #[arg(long, default_value = "")]
+    phrases: String,
     /// Run N frames then exit (0 = forever).
     #[arg(long, default_value_t = 0)]
     frames: u64,
@@ -62,6 +65,9 @@ fn main() {
         .init();
 
     let cli = Cli::parse();
+    if !cli.phrases.is_empty() {
+        std::env::set_var("PIDI_PHRASES_DIR", &cli.phrases);
+    }
     let mut model = NativeModel::new();
     let mut frame = Frame::new();
     let mut client = NativeClient::new(cli.control.clone(), cli.tcp);
@@ -81,6 +87,9 @@ fn main() {
         input = if sdl_touch { "sdl" } else { input.name() },
         "pidi-native: starting"
     );
+
+    model.ensure_phrases_loaded(&mut client.outbox);
+    client.flush();
 
     let frame_time = Duration::from_secs_f64(1.0 / cli.hz.max(1) as f64);
     let mut last = Instant::now();
@@ -503,8 +512,6 @@ mod linux_evdev {
 
     const EV_SYN: u16 = 0;
     const EV_ABS: u16 = 3;
-    const ABS_X: u16 = 0;
-    const ABS_Y: u16 = 1;
     const ABS_MT_SLOT: u16 = 0x2f;
     const ABS_MT_POSITION_X: u16 = 0x35;
     const ABS_MT_POSITION_Y: u16 = 0x36;
@@ -540,6 +547,7 @@ mod linux_evdev {
         min_y: i32,
         max_y: i32,
         buf: Vec<u8>,
+        pending: Vec<u8>,
     }
 
     impl Device {
@@ -567,6 +575,7 @@ mod linux_evdev {
                 min_y: 0,
                 max_y: 480,
                 buf: vec![0; 16 * 64],
+                pending: Vec::new(),
             })
         }
 
@@ -576,8 +585,8 @@ mod linux_evdev {
                 match self.file.read(&mut self.buf) {
                     Ok(0) => break,
                     Ok(n) => {
-                        let copy = self.buf[..n].to_vec();
-                        self.ingest(&copy, &mut out);
+                        self.pending.extend_from_slice(&self.buf[..n]);
+                        self.ingest_pending(&mut out);
                     }
                     Err(err)
                         if err.kind() == std::io::ErrorKind::WouldBlock
@@ -591,22 +600,27 @@ mod linux_evdev {
             out
         }
 
-        fn ingest(&mut self, bytes: &[u8], out: &mut Vec<TouchEvent>) {
+        fn ingest_pending(&mut self, out: &mut Vec<TouchEvent>) {
             let size = std::mem::size_of::<libc::input_event>();
-            for chunk in bytes.chunks_exact(size) {
-                let ev = unsafe { ptr_read(chunk) };
+            while self.pending.len() >= size {
+                let chunk: Vec<u8> = self.pending.drain(..size).collect();
+                let ev = unsafe { ptr_read(&chunk) };
                 match ev.type_ {
                     EV_ABS => match ev.code {
-                        ABS_MT_SLOT => self.current = (ev.value as usize).min(self.slots.len() - 1),
+                        ABS_MT_SLOT => {
+                            self.current = (ev.value as usize).min(self.slots.len() - 1)
+                        }
                         ABS_MT_TRACKING_ID => {
                             self.slots[self.current].tracking = ev.value;
                             self.slots[self.current].dirty = true;
                         }
-                        ABS_MT_POSITION_X | ABS_X => {
+                        // Type-B only: ignore legacy ABS_X/ABS_Y (they mirror a
+                        // single "primary" contact and corrupt other slots).
+                        ABS_MT_POSITION_X => {
                             self.slots[self.current].x = ev.value;
                             self.slots[self.current].dirty = true;
                         }
-                        ABS_MT_POSITION_Y | ABS_Y => {
+                        ABS_MT_POSITION_Y => {
                             self.slots[self.current].y = ev.value;
                             self.slots[self.current].dirty = true;
                         }
@@ -655,6 +669,9 @@ mod linux_evdev {
     }
 
     fn find_touch_device() -> Option<PathBuf> {
+        // Prefer capacitive panels (Goodix/FT5x06) over resistive leftovers
+        // like ADS7846, which also match a naive "touch" substring.
+        let mut best: Option<(i32, PathBuf)> = None;
         let dir = std::fs::read_dir("/dev/input").ok()?;
         for entry in dir.flatten() {
             let path = entry.path();
@@ -662,25 +679,33 @@ mod linux_evdev {
             if !name.starts_with("event") {
                 continue;
             }
-            if let Ok(file) = File::open(&path) {
-                let mut buf = [0u8; 256];
-                let rc = unsafe {
-                    libc::ioctl(file.as_raw_fd(), 0x81004506, buf.as_mut_ptr())
-                };
-                if rc >= 0 {
-                    let label = String::from_utf8_lossy(&buf);
-                    let lower = label.to_ascii_lowercase();
-                    if lower.contains("goodix")
-                        || lower.contains("gt911")
-                        || lower.contains("touch")
-                        || lower.contains("fts")
-                    {
-                        return Some(path);
-                    }
-                }
+            let Ok(file) = File::open(&path) else {
+                continue;
+            };
+            let mut buf = [0u8; 256];
+            let rc = unsafe { libc::ioctl(file.as_raw_fd(), 0x81004506, buf.as_mut_ptr()) };
+            if rc < 0 {
+                continue;
+            }
+            let lower = String::from_utf8_lossy(&buf).to_ascii_lowercase();
+            let score = if lower.contains("goodix")
+                || lower.contains("gt911")
+                || lower.contains("ft5")
+                || lower.contains("fts")
+            {
+                100
+            } else if lower.contains("ads7846") {
+                10
+            } else if lower.contains("touch") {
+                50
+            } else {
+                continue;
+            };
+            if best.as_ref().map(|(s, _)| *s).unwrap_or(0) < score {
+                best = Some((score, path));
             }
         }
-        None
+        best.map(|(_, path)| path)
     }
 
     unsafe fn ptr_read(bytes: &[u8]) -> libc::input_event {
