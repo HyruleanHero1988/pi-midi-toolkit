@@ -120,9 +120,12 @@ fn main() {
         if cli.frames > 0 && n >= cli.frames {
             break;
         }
-        let spent = last.elapsed();
-        if spent < frame_time {
-            std::thread::sleep(frame_time - spent);
+        // SDL already waits on VSync; an extra sleep makes Pi 2 hitches worse.
+        if !presenter.paces_with_vsync() {
+            let spent = last.elapsed();
+            if spent < frame_time {
+                std::thread::sleep(frame_time - spent);
+            }
         }
     }
 
@@ -221,6 +224,11 @@ impl Presenter {
         {
             false
         }
+    }
+
+    /// SDL present blocks on the display refresh; don't also sleep for `--hz`.
+    fn paces_with_vsync(&self) -> bool {
+        self.is_sdl()
     }
 
     fn name(&self) -> &'static str {
