@@ -172,6 +172,22 @@ impl Outbox {
         self.reliable.push_back(Request::Tempo { bpm });
     }
 
+    pub fn panic(&mut self) {
+        self.reliable.push_back(Request::Panic);
+    }
+
+    pub fn all_notes_off(&mut self) {
+        self.reliable.push_back(Request::AllNotesOff);
+    }
+
+    pub fn fx_bus(&mut self, param: &str, value: f32) {
+        self.reliable.push_back(Request::Fx {
+            target: jambox_protocol::FxTargetSpec::Bus,
+            param: param.to_string(),
+            value,
+        });
+    }
+
     pub fn kaoss_scale(&mut self, scale_index: u8, key: u8, root_midi: u8, octaves: u8) {
         self.reliable.push_back(Request::KaossScale {
             scale_index,

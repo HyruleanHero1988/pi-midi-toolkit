@@ -34,6 +34,9 @@ pub enum Hit {
     SongStop,
     SongPrev,
     SongNext,
+    SettingsPanic,
+    SettingsAllOff,
+    SettingsFx(usize),
     None,
 }
 
@@ -86,6 +89,9 @@ pub struct Layout {
     pub song_stop: Rect,
     pub song_prev: Rect,
     pub song_next: Rect,
+    pub settings_panic: Rect,
+    pub settings_all_off: Rect,
+    pub settings_fx: Rect,
 }
 
 impl Default for Layout {
@@ -259,6 +265,24 @@ impl Layout {
                 y: HUD_H + 208,
                 w: 100,
                 h: 64,
+            },
+            settings_panic: Rect {
+                x: 24,
+                y: HUD_H + 24,
+                w: 240,
+                h: 80,
+            },
+            settings_all_off: Rect {
+                x: 280,
+                y: HUD_H + 24,
+                w: 240,
+                h: 80,
+            },
+            settings_fx: Rect {
+                x: 24,
+                y: HUD_H + 120,
+                w: 752,
+                h: 220,
             },
         }
     }
@@ -436,6 +460,8 @@ impl Layout {
             UiMode::Seq => self.hit_seq(px, py),
             UiMode::Presets => self.hit_presets(px, py),
             UiMode::Songs => self.hit_songs(px, py),
+            UiMode::Settings => self.hit_settings(px, py),
+            UiMode::Log => Hit::None, // read-only
             _ => Hit::None,
         }
     }
@@ -566,6 +592,32 @@ impl Layout {
         Hit::None
     }
 
+    pub fn settings_fx_slider(&self, index: usize) -> Rect {
+        let n = 3i32;
+        let w = self.settings_fx.w / n;
+        Rect {
+            x: self.settings_fx.x + (index as i32) * w + 8,
+            y: self.settings_fx.y + 28,
+            w: w - 16,
+            h: self.settings_fx.h - 36,
+        }
+    }
+
+    fn hit_settings(&self, px: i32, py: i32) -> Hit {
+        if self.settings_panic.contains(px, py) {
+            return Hit::SettingsPanic;
+        }
+        if self.settings_all_off.contains(px, py) {
+            return Hit::SettingsAllOff;
+        }
+        for index in 0..3 {
+            if self.settings_fx_slider(index).contains(px, py) {
+                return Hit::SettingsFx(index);
+            }
+        }
+        Hit::None
+    }
+
     fn hit_seq(&self, px: i32, py: i32) -> Hit {
         if self.seq_rec.contains(px, py) {
             return Hit::SeqRec;
@@ -605,6 +657,7 @@ pub enum Surface {
     Phrase { slot: usize },
     SynthKey { note: u8 },
     SynthSlider { index: usize },
+    SettingsFx { index: usize },
     UiTap,
 }
 

@@ -103,6 +103,8 @@ pub struct NativeModel {
     pub song_selected: usize,
     pub song_scroll: usize,
     pub song_playing: bool,
+    pub fx_bus: [f32; 3],
+    pub log_lines: Vec<String>,
     fingers: [Finger; MAX_FINGERS],
     next_gesture: u32,
     cells: [[u32; LED_COLS]; LED_ROWS],
@@ -140,6 +142,8 @@ impl NativeModel {
             song_selected: 0,
             song_scroll: 0,
             song_playing: false,
+            fx_bus: [0.0, 0.0, 0.0],
+            log_lines: Vec::new(),
             fingers: [Finger::silent(); MAX_FINGERS],
             next_gesture: 1,
             cells: [[0; LED_COLS]; LED_ROWS],
@@ -181,6 +185,14 @@ impl NativeModel {
     pub fn set_mode(&mut self, mode: UiMode) {
         self.mode = mode;
         self.status_line.clear();
+    }
+
+    pub fn push_log(&mut self, line: impl Into<String>) {
+        self.log_lines.push(line.into());
+        if self.log_lines.len() > 14 {
+            let drop = self.log_lines.len() - 14;
+            self.log_lines.drain(0..drop);
+        }
     }
 
     pub fn active_fingers(&self) -> usize {
@@ -601,6 +613,49 @@ impl NativeModel {
                     self.song_scroll += 1;
                 }
             }
+            Hit::SettingsPanic => {
+                self.fingers[slot] = Finger {
+                    active: true,
+                    id,
+                    gesture,
+                    x: 0.0,
+                    y: 0.0,
+                    px,
+                    py,
+                    surface: Surface::UiTap,
+                };
+                outbox.panic();
+                self.status_line = "PANIC".into();
+                self.push_log("panic");
+            }
+            Hit::SettingsAllOff => {
+                self.fingers[slot] = Finger {
+                    active: true,
+                    id,
+                    gesture,
+                    x: 0.0,
+                    y: 0.0,
+                    px,
+                    py,
+                    surface: Surface::UiTap,
+                };
+                outbox.all_notes_off();
+                self.status_line = "all notes off".into();
+                self.push_log("all notes off");
+            }
+            Hit::SettingsFx(index) => {
+                self.fingers[slot] = Finger {
+                    active: true,
+                    id,
+                    gesture,
+                    x: 0.0,
+                    y: 0.0,
+                    px,
+                    py,
+                    surface: Surface::SettingsFx { index },
+                };
+                self.apply_fx_slider(index, py, outbox);
+            }
             Hit::None => {}
         }
     }
@@ -620,6 +675,9 @@ impl NativeModel {
             }
             Surface::SynthSlider { index } => {
                 self.apply_synth_slider(index, px, py, outbox);
+            }
+            Surface::SettingsFx { index } => {
+                self.apply_fx_slider(index, py, outbox);
             }
             _ => {}
         }
@@ -651,7 +709,10 @@ impl NativeModel {
                 outbox.note_off(0, note);
                 self.seq.push_note(false, 0, note, 0);
             }
-            Surface::Phrase { .. } | Surface::SynthSlider { .. } | Surface::UiTap => {}
+            Surface::Phrase { .. }
+            | Surface::SynthSlider { .. }
+            | Surface::SettingsFx { .. }
+            | Surface::UiTap => {}
         }
     }
 
@@ -699,6 +760,20 @@ impl NativeModel {
         self.synth_params[index] = value;
         outbox.synth(Self::SYNTH_PARAM_NAMES[index], value);
         self.status_line = format!("{} {:.2}", Self::SYNTH_PARAM_NAMES[index], value);
+    }
+
+    const FX_PARAM_NAMES: [&'static str; 3] = ["drive", "delay_mix", "reverb_mix"];
+
+    fn apply_fx_slider(&mut self, index: usize, py: i32, outbox: &mut Outbox) {
+        if index >= 3 {
+            return;
+        }
+        let track = self.layout.settings_fx_slider(index);
+        let y = 1.0 - ((py - track.y) as f32 / track.h.max(1) as f32);
+        let value = y.clamp(0.0, 1.0);
+        self.fx_bus[index] = value;
+        outbox.fx_bus(Self::FX_PARAM_NAMES[index], value);
+        self.status_line = format!("bus {} {:.2}", Self::FX_PARAM_NAMES[index], value);
     }
 
     fn cycle_kaoss_scale(&mut self, step: i32, outbox: &mut Outbox) {

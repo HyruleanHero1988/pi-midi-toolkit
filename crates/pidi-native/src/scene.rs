@@ -85,6 +85,8 @@ pub fn build(model: &NativeModel) -> Scene {
         UiMode::Seq => draw_seq(&mut scene, model),
         UiMode::Presets => draw_presets(&mut scene, model),
         UiMode::Songs => draw_songs(&mut scene, model),
+        UiMode::Settings => draw_settings(&mut scene, model),
+        UiMode::Log => draw_log(&mut scene, model),
         other => draw_placeholder(&mut scene, model, other),
     }
     let _ = (SCREEN_W, SCREEN_H);
@@ -362,6 +364,55 @@ fn draw_songs(scene: &mut Scene, model: &NativeModel) {
     scene.text(layout.song_prev.x + 28, layout.song_prev.y + 24, "UP", 0xffffff);
     scene.fill_rect(layout.song_next, 0x282838);
     scene.text(layout.song_next.x + 16, layout.song_next.y + 24, "DOWN", 0xffffff);
+}
+
+fn draw_settings(scene: &mut Scene, model: &NativeModel) {
+    let layout = model.layout;
+    scene.fill_rect(layout.settings_panic, 0x9d0006);
+    scene.text(layout.settings_panic.x + 60, layout.settings_panic.y + 32, "PANIC", 0xffffff);
+    scene.fill_rect(layout.settings_all_off, 0x504945);
+    scene.text(
+        layout.settings_all_off.x + 40,
+        layout.settings_all_off.y + 32,
+        "NOTES OFF",
+        0xffffff,
+    );
+    const LABELS: [&str; 3] = ["DRIVE", "DELAY", "REVERB"];
+    for index in 0..3 {
+        let track = layout.settings_fx_slider(index);
+        scene.fill_rect(track, 0x20202c);
+        scene.text(track.x + 8, track.y - 18, LABELS[index], 0xc0c0d0);
+        let fill_h = (track.h as f32 * model.fx_bus[index]) as i32;
+        let fill = Rect {
+            x: track.x + 4,
+            y: track.y + track.h - fill_h,
+            w: track.w - 8,
+            h: fill_h,
+        };
+        scene.fill_rect(fill, 0x458588);
+    }
+}
+
+fn draw_log(scene: &mut Scene, model: &NativeModel) {
+    let c = model.layout.content;
+    scene.text(c.x + 16, c.y + 16, "ENGINE LOG", 0xfbf1c7);
+    scene.text(
+        c.x + 16,
+        c.y + 40,
+        &format!(
+            "cb {}/{}us  xrun {}  drop {}  rel {}  rpt {}",
+            model.status.callback_frames,
+            model.status.callback_micros,
+            model.status.xruns,
+            model.status.command_drops,
+            model.status.emergency_releases,
+            model.status.active_repeats,
+        ),
+        0xa0a0b8,
+    );
+    for (i, line) in model.log_lines.iter().rev().take(12).enumerate() {
+        scene.text(c.x + 16, c.y + 70 + (i as i32) * 18, line, 0xd5c4a1);
+    }
 }
 
 fn draw_placeholder(scene: &mut Scene, model: &NativeModel, mode: UiMode) {

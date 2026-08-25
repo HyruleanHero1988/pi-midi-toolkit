@@ -1,28 +1,30 @@
 # Native jambox kiosk
 
-Status: **in progress on `cursor/native-kiosk-port`**
+Status: **greenfield on `cursor/native-kiosk-port`**
 
-Greenfield Rust UI for the Pi TFT70. This branch ignores the Python/Tk kiosk
-entirely: `jambox-engine` + `pidi-native` are the appliance.
+Rust-only appliance UI for the Pi TFT70. `jambox-engine` + `pidi-native` are the
+runtime — no Python/Tk on this branch.
 
 ## Architecture
 
 - `pidi-native` — SDL/KMSDRM + GLES2, mode shell, touch (prefer `--touch evdev`)
 - `jambox-engine` — audio, MIDI, transport, clips, KAOSS, repeats
-- On-disk phrases/presets/wavetables stay readable; adapters live in Rust
+- On-disk phrases/presets/songs stay readable; adapters live in Rust
 
 ## Modes
 
 | Mode | Status |
 |---|---|
-| KAOSS + drums | Working — scale/key cycle, FULL PAD, CELLS |
-| Nav shell / HOME | Working |
+| KAOSS + drums | Scale/key cycle, FULL PAD, CELLS |
+| Nav shell / HOME | Mode tiles + bottom nav |
 | PADS | Launch/stop from `phrases/pad-XX.json` |
-| SYNTH | Morph/tone/level/atk/rel sliders + C4–B4 keys |
+| SYNTH | Morph/tone/level/atk/rel + C4–B4 keys |
 | SEQ | Backbone REC → engine loop clip; PLAY/STOP/CLEAR/BPM |
 | SONGS | List `songs/*.mid`, SMF→clip PLAY/STOP |
 | PRESETS | 8 slots save/load synth params to `user-presets/` |
-| LOG / SET | Placeholders |
+| SETTINGS | Panic, all-notes-off, bus drive/delay/reverb |
+| LOG | Engine counters + recent action lines |
+| HOME | Mode tiles |
 
 ## Run (host)
 
@@ -32,19 +34,29 @@ cargo run -p jambox-engine -- run --null-audio --tcp --control 127.0.0.1:17890
 cargo run -p pidi-native -- --tcp --control 127.0.0.1:17890 --display dummy --frames 30
 ```
 
-## Run (Pi)
+## Pi appliance
+
+Cross-build (WSL Ubuntu 22.04 / Debian, or CI):
 
 ```bash
-# LightDM must not own the panel
-sudo systemctl stop lightdm   # or keep it masked
-# unit uses --display sdl --touch evdev
-sudo systemctl restart jambox-engine pidi-native
+PACKAGES=jambox-engine,pidi-native ./deploy/build-pi-bins.sh
 ```
 
-Phrase bank: `PIDI_PHRASES_DIR` or `--phrases /path` (defaults to `./phrases`).
+Deploy bins to `~/pi-midi-toolkit/bin/`, then:
+
+```bash
+sudo systemctl stop lightdm
+sudo systemctl mask lightdm   # keep KMSDRM free
+sudo systemctl enable --now jambox-engine pidi-native
+```
+
+Unit defaults: `--display sdl --touch evdev`. Optional:
+
+- `--evdev /dev/input/event4` if autodetect picks ADS7846
+- `--phrases /path/to/phrases`
+- `PIDI_PRESETS_DIR`, `PIDI_SONGS_DIR`
 
 ## Touch notes
 
-Use type-B `ABS_MT_*` only. Legacy `ABS_X`/`ABS_Y` are ignored so a second
-contact cannot corrupt slot 0. Prefer FT5x06/Goodix over ADS7846 when
-autodetecting.
+Type-B `ABS_MT_*` only. Legacy `ABS_X`/`ABS_Y` ignored. Prefer FT5x06/Goodix
+over ADS7846 when autodetecting.
