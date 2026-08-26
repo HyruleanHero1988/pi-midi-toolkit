@@ -49,7 +49,7 @@ pub const KAOSS_PROGRAMS: &[KaossProgram] = &[
         id: "vib",
         label: "VIB",
         note: true,
-        y_param: "vibrato_always",
+        y_param: "vib",
         x_param: None,
         curated: true,
     },
@@ -165,43 +165,87 @@ pub const KAOSS_PROGRAMS: &[KaossProgram] = &[
         x_param: Some("tone"),
         curated: false,
     },
+    // X = scale pitch; Y = pitch bend about the pad midline (center = 0).
+    KaossProgram {
+        id: "bend",
+        label: "BEND",
+        note: true,
+        y_param: "pitch_bend",
+        x_param: None,
+        curated: true,
+    },
 ];
+
+/// Full-pad Y travel maps to ± this many semitones (center Y = 0).
+pub const PITCH_BEND_RANGE_SEMIS: f32 = 12.0;
+
+/// Pad Y (0 = bottom, 1 = top) → pitch-bend semitones. Midline is unison.
+pub fn y_to_pitch_bend_semis(y: f32) -> f32 {
+    let centered = (y.clamp(0.0, 1.0) - 0.5) * 2.0; // -1 .. +1
+    centered * PITCH_BEND_RANGE_SEMIS
+}
+
+/// MIDI 14-bit pitch wheel (8192 = center) for a pad-Y bend.
+pub fn y_to_pitch_bend_midi(y: f32) -> u16 {
+    let t = (y_to_pitch_bend_semis(y) / PITCH_BEND_RANGE_SEMIS).clamp(-1.0, 1.0);
+    (8192.0 + t * 8192.0).round().clamp(0.0, 16383.0) as u16
+}
 
 /// Gate set: off / 1/4 / 1/8 / 1/16 / trip (1/4 fills the gap vs drum divisions).
 pub const GATE_PATTERNS: &[GatePattern] = &[
     GatePattern {
         id: "off",
-        label: "OFF",
+        label: "GATE OFF",
         beats: 0.0,
         duty: 0.0,
     },
     GatePattern {
         id: "4th",
-        label: "1/4",
+        label: "GATE 1/4",
         beats: 1.0,
         duty: 0.55,
     },
     GatePattern {
         id: "8th",
-        label: "1/8",
+        label: "GATE 1/8",
         beats: 0.5,
         duty: 0.55,
     },
     GatePattern {
         id: "16th",
-        label: "1/16",
+        label: "GATE 1/16",
         beats: 0.25,
         duty: 0.50,
     },
     GatePattern {
         id: "trip",
-        label: "TRIP",
+        label: "GATE TRIP",
         beats: 1.0 / 3.0,
         duty: 0.50,
     },
 ];
 
 pub const OCTAVE_LABELS: [&str; 4] = ["1 OCT", "2 OCT", "3 OCT", "4 OCT"];
+/// Left-edge C of the pad (Kaossilator-style). C1 .. C5.
+pub const ROOT_OCTAVE_MIDI: [u8; 5] = [24, 36, 48, 60, 72];
+
+pub fn midi_note_label(midi: u8) -> String {
+    let name = jambox_core::NOTE_NAMES[(midi % 12) as usize];
+    let octave = (midi as i32 / 12) - 1;
+    format!("{name}{octave}")
+}
+
+pub fn root_octave_index(root_midi: u8) -> usize {
+    let c = (root_midi / 12) * 12;
+    ROOT_OCTAVE_MIDI
+        .iter()
+        .position(|&m| m == c)
+        .unwrap_or(2) // C3
+}
+
+pub fn clamp_root_midi(note: u8) -> u8 {
+    note.clamp(ROOT_OCTAVE_MIDI[0], ROOT_OCTAVE_MIDI[ROOT_OCTAVE_MIDI.len() - 1])
+}
 
 pub fn program(index: usize) -> KaossProgram {
     KAOSS_PROGRAMS[index % KAOSS_PROGRAMS.len()]
@@ -281,7 +325,8 @@ pub fn picker_count(kind: KaossPicker, show_all: bool) -> usize {
         KaossPicker::Program => program_count(show_all),
         KaossPicker::Scale => scale_count(show_all),
         KaossPicker::Key => 12,
-        KaossPicker::Octave => 4,
+        // Start C1..C5, then width 1..4 OCT (Tk "OCTAVE — start + width").
+        KaossPicker::Octave => ROOT_OCTAVE_MIDI.len() + OCTAVE_LABELS.len(),
         KaossPicker::Gate => GATE_PATTERNS.len(),
     }
 }
@@ -291,7 +336,13 @@ pub fn picker_label(kind: KaossPicker, index: usize, show_all: bool) -> String {
         KaossPicker::Program => program_at(show_all, index).label.to_string(),
         KaossPicker::Scale => scale_at(show_all, index).label.to_string(),
         KaossPicker::Key => jambox_core::NOTE_NAMES[index % 12].to_string(),
-        KaossPicker::Octave => OCTAVE_LABELS[index % 4].to_string(),
+        KaossPicker::Octave => {
+            if index < ROOT_OCTAVE_MIDI.len() {
+                midi_note_label(ROOT_OCTAVE_MIDI[index])
+            } else {
+                OCTAVE_LABELS[(index - ROOT_OCTAVE_MIDI.len()) % OCTAVE_LABELS.len()].to_string()
+            }
+        }
         KaossPicker::Gate => gate(index).label.to_string(),
     }
 }
@@ -356,9 +407,29 @@ mod tests {
     fn gate_set_includes_quarter() {
         assert_eq!(GATE_PATTERNS.len(), 5);
         assert_eq!(gate(1).id, "4th");
-        assert_eq!(gate(1).label, "1/4");
+        assert_eq!(gate(1).label, "GATE 1/4");
         assert_eq!(gate(1).beats, 1.0);
         assert_eq!(migrate_legacy_gate_index(1), 2); // old 1/8
         assert_eq!(migrate_legacy_gate_index(3), 4); // old trip
+    }
+
+    #[test]
+    fn octave_picker_lists_starts_and_widths() {
+        assert_eq!(picker_count(KaossPicker::Octave, false), 9);
+        assert_eq!(picker_label(KaossPicker::Octave, 0, false), "C1");
+        assert_eq!(picker_label(KaossPicker::Octave, 2, false), "C3");
+        assert_eq!(picker_label(KaossPicker::Octave, 5, false), "1 OCT");
+        assert_eq!(picker_label(KaossPicker::Octave, 8, false), "4 OCT");
+        assert_eq!(root_octave_index(48), 2);
+        assert_eq!(midi_note_label(60), "C4");
+    }
+
+    #[test]
+    fn bend_y_is_zero_at_midline() {
+        assert!((y_to_pitch_bend_semis(0.5)).abs() < 1e-4);
+        assert!((y_to_pitch_bend_semis(1.0) - PITCH_BEND_RANGE_SEMIS).abs() < 1e-4);
+        assert!((y_to_pitch_bend_semis(0.0) + PITCH_BEND_RANGE_SEMIS).abs() < 1e-4);
+        assert_eq!(y_to_pitch_bend_midi(0.5), 8192);
+        assert!(KAOSS_PROGRAMS.iter().any(|p| p.id == "bend" && p.curated));
     }
 }

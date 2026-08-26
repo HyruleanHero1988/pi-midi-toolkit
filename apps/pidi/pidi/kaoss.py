@@ -113,6 +113,7 @@ PROGRAMS: Tuple[KaossProgram, ...] = (
     KaossProgram("lead", "LEAD", "note", y_param="tone", x_axis="PITCH", y_axis="TONE", curated=True),
     KaossProgram("morph", "MORPH", "note", y_param="morph", x_axis="PITCH", y_axis="MORPH", curated=True),
     KaossProgram("vib", "VIB", "note", y_param="vib", x_axis="PITCH", y_axis="VIB", curated=True),
+    KaossProgram("bend", "BEND", "note", y_param="pitch_bend", x_axis="PITCH", y_axis="BEND", curated=True),
     KaossProgram("level", "LEVEL", "note", y_param="level", x_axis="PITCH", y_axis="LEVEL"),
     KaossProgram("decay", "DECAY", "note", y_param="release", x_axis="PITCH", y_axis="DECAY"),
     KaossProgram("attack", "ATTACK", "note", y_param="attack", x_axis="PITCH", y_axis="ATTACK"),

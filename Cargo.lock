@@ -928,6 +928,7 @@ dependencies = [
  "clap",
  "fontdue",
  "glow",
+ "hound",
  "jambox-core",
  "jambox-protocol",
  "libc",

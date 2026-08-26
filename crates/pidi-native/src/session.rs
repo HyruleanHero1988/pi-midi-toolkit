@@ -79,8 +79,14 @@ pub struct SessionState {
     pub release: f32,
     pub morph_a: u16,
     pub morph_b: u16,
+    /// On-screen synth keyboard octave relative to C4 (−3..+3).
+    #[serde(default)]
+    pub synth_octave: i8,
     pub kaoss_scale_index: u8,
     pub kaoss_key: u8,
+    /// Left-edge MIDI note of the Kaoss pad (C1..C5).
+    #[serde(default = "default_kaoss_root_midi")]
+    pub kaoss_root_midi: u8,
     pub kaoss_octaves: u8,
     pub kaoss_program: usize,
     pub kaoss_gate: usize,
@@ -108,12 +114,17 @@ pub struct SessionState {
     pub font_style: FontStyle,
     #[serde(default = "default_screensaver_sec")]
     pub screensaver_sec: f32,
-    /// Pad visualizer: "rainbow" | "mono" | "glow" (also accepts legacy "cells").
+    /// Pad visualizer: "cells" | "glow" (also accepts legacy "rainbow" | "mono").
     #[serde(default = "default_kaoss_viz_style")]
     pub kaoss_viz_style: String,
-    /// Index into the mono LED color palette.
+    /// Index into pad color palette (0 = RAINBOW, then solids). Legacy mono
+    /// sessions used 0 = PINK — migrated on load when style was `"mono"`.
     #[serde(default)]
     pub kaoss_mono_color: usize,
+}
+
+fn default_kaoss_root_midi() -> u8 {
+    jambox_core::DEFAULT_ROOT_MIDI
 }
 
 fn default_screensaver_sec() -> f32 {
@@ -125,7 +136,7 @@ fn default_kaoss_out() -> OutMode {
 }
 
 fn default_kaoss_viz_style() -> String {
-    "rainbow".into()
+    "cells".into()
 }
 
 fn default_vibrato_depth() -> f32 {
@@ -148,8 +159,10 @@ impl Default for SessionState {
             release: 0.3,
             morph_a: 0,
             morph_b: 1,
+            synth_octave: 0,
             kaoss_scale_index: jambox_core::DEFAULT_KAOSS_SCALE_INDEX,
             kaoss_key: 0,
+            kaoss_root_midi: default_kaoss_root_midi(),
             kaoss_octaves: 2,
             kaoss_program: 0,
             kaoss_gate: 0,

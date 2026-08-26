@@ -154,6 +154,8 @@ pub struct NativeModel {
     /// Vibrato depth / rate / always-on overlay (replaces redundant VOICES grid).
     pub synth_vib_open: bool,
     pub synth_pick_scroll: i32,
+    /// On-screen keyboard octave relative to C4 (−3 = C1 … +3 = C7).
+    pub synth_octave: i8,
     pub kaoss_picker_scroll: i32,
     pub log_scroll: usize,
     /// Kit macros: tone, noise/snap, pitch, decay.
@@ -163,6 +165,8 @@ pub struct NativeModel {
     pub kit_all_drums: bool,
     pub kaoss_scale_index: u8,
     pub kaoss_key: u8,
+    /// Left-edge MIDI of the pad window (C1..C5 typically).
+    pub kaoss_root_midi: u8,
     pub kaoss_octaves: u8,
     pub kaoss_full: bool,
     /// Finger parked in the bottom exit strip while full — hold to leave.
@@ -174,6 +178,8 @@ pub struct NativeModel {
     pub kaoss_channel: u8,
     pub kaoss_settings_open: bool,
     pub kaoss_settings_scroll: i32,
+    /// Drill-down pad color picker (opened from KAOSS settings COLOR).
+    pub kaoss_color_picker_open: bool,
     pub kaoss_show_axis_labels: bool,
     pub kaoss_show_grid_lines: bool,
     pub kaoss_grid_width: i8,
@@ -217,9 +223,9 @@ pub struct NativeModel {
     kaoss_cc_touch_sent: Option<u8>,
     pub session_dirty: bool,
     pub last_autosave: Instant,
-    /// Pad visualizer: rainbow cells / mono cells / free-form glow.
+    /// Pad visualizer: LED cells vs soft radial glow.
     pub kaoss_viz_style: crate::kaoss_viz::KaossVizStyle,
-    /// Index into [`crate::kaoss_viz::MONO_PALETTE`].
+    /// Index into [`crate::kaoss_viz::PAD_COLORS`] (0 = RAINBOW).
     pub kaoss_mono_color: usize,
     /// GLOW envelope 0..1 (Tk `_glow_amp`).
     pub kaoss_glow_amp: f32,
@@ -279,6 +285,7 @@ impl NativeModel {
             synth_pick_a: None,
             synth_vib_open: false,
             synth_pick_scroll: 0,
+            synth_octave: 0,
             kaoss_picker_scroll: 0,
             log_scroll: 0,
             drum_macros: [0.60, 0.45, 0.50, 0.55],
@@ -286,6 +293,7 @@ impl NativeModel {
             kit_all_drums: false,
             kaoss_scale_index: jambox_core::DEFAULT_KAOSS_SCALE_INDEX,
             kaoss_key: 0,
+            kaoss_root_midi: jambox_core::DEFAULT_ROOT_MIDI,
             kaoss_octaves: 2,
             kaoss_full: false,
             kaoss_full_exit_since: None,
@@ -296,6 +304,7 @@ impl NativeModel {
             kaoss_channel: 0,
             kaoss_settings_open: false,
             kaoss_settings_scroll: 0,
+            kaoss_color_picker_open: false,
             kaoss_show_axis_labels: true,
             kaoss_show_grid_lines: true,
             kaoss_grid_width: 2,
@@ -338,7 +347,7 @@ impl NativeModel {
             kaoss_cc_touch_sent: None,
             session_dirty: false,
             last_autosave: Instant::now(),
-            kaoss_viz_style: crate::kaoss_viz::KaossVizStyle::Rainbow,
+            kaoss_viz_style: crate::kaoss_viz::KaossVizStyle::Cells,
             kaoss_mono_color: 0,
             kaoss_glow_amp: 0.0,
             kaoss_glow_xy: (0.5, 0.5),
@@ -368,9 +377,20 @@ impl NativeModel {
             self.wave_names = waves::list_wave_names(&waves::waves_dirs_from_env());
         }
         if self.wave_bank.is_none() {
-            // Builtins-only scope bank — matches morph A/B indices within bank.len().
-            self.wave_bank = Some(jambox_core::WaveBank::with_builtins());
-            self.sync_wave_bank();
+            // Full catalog bank (builtins + wav dirs) so scope A/B indices match the picker.
+            let mut bank = waves::load_wave_bank(&waves::waves_dirs_from_env());
+            // Prefer bank order (skips files that failed to decode).
+            if bank.len() > self.wave_names.len() || self.wave_names.len() <= 4 {
+                self.wave_names = bank.names().to_vec();
+            }
+            let max = bank.len().saturating_sub(1);
+            bank.set_morph_pair(
+                (self.morph_a as usize).min(max),
+                (self.morph_b as usize).min(max),
+            );
+            bank.set_morph(self.synth_params[0]);
+            bank.rebuild_morph();
+            self.wave_bank = Some(bank);
         }
         if !self.session_loaded {
             if let Some(outbox) = outbox {
@@ -435,6 +455,7 @@ impl NativeModel {
         self.kaoss_picker_scroll = 0;
         self.kaoss_settings_open = false;
         self.kaoss_settings_scroll = 0;
+        self.kaoss_color_picker_open = false;
         self.synth_pick_a = None;
         self.synth_vib_open = false;
         self.synth_pick_scroll = 0;
@@ -485,6 +506,9 @@ impl NativeModel {
         if self.power_menu_open {
             return Some("power");
         }
+        if self.kaoss_color_picker_open {
+            return Some("kaoss_color");
+        }
         if self.kaoss_settings_open {
             return Some("kaoss_settings");
         }
@@ -502,6 +526,7 @@ impl NativeModel {
 
     fn leave_kaoss_mode(&mut self, outbox: &mut Outbox) {
         self.kaoss_settings_open = false;
+        self.kaoss_color_picker_open = false;
         self.kaoss_picker = None;
         if self.kaoss_full {
             self.leave_kaoss_full();
@@ -524,6 +549,7 @@ impl NativeModel {
     fn close_kaoss_settings(&mut self) {
         self.kaoss_settings_open = false;
         self.kaoss_settings_scroll = 0;
+        self.kaoss_color_picker_open = false;
         self.status_line.clear();
     }
 
@@ -535,10 +561,22 @@ impl NativeModel {
             self.leave_kaoss_full();
         }
         self.kaoss_picker = None;
+        self.kaoss_color_picker_open = false;
         self.kaoss_settings_open = true;
         self.kaoss_settings_scroll = 0;
         self.status_line = "KAOSS settings".into();
         self.mark_dirty();
+    }
+
+    fn open_kaoss_color_picker(&mut self) {
+        self.kaoss_color_picker_open = true;
+        self.status_line = "PAD COLOR".into();
+        self.mark_dirty();
+    }
+
+    fn close_kaoss_color_picker(&mut self) {
+        self.kaoss_color_picker_open = false;
+        self.status_line = "KAOSS settings".into();
     }
 
     fn nav_back(&mut self, outbox: &mut Outbox) {
@@ -547,6 +585,7 @@ impl NativeModel {
         }
         match self.overlay_nav_target() {
             Some("power") => self.close_power_menu(true),
+            Some("kaoss_color") => self.close_kaoss_color_picker(),
             Some("kaoss_settings") => self.close_kaoss_settings(),
             Some("kaoss_picker") => self.kaoss_picker = None,
             Some("morph") => {
@@ -710,6 +749,7 @@ impl NativeModel {
         self.mode_before_power = self.mode;
         self.kaoss_picker = None;
         self.kaoss_settings_open = false;
+        self.kaoss_color_picker_open = false;
         self.synth_vib_open = false;
         self.synth_pick_a = None;
         self.power_menu_open = true;
@@ -770,12 +810,17 @@ impl NativeModel {
         self.vibrato_rate = s.vibrato_rate.clamp(1.0, 9.0);
         self.morph_a = s.morph_a;
         self.morph_b = s.morph_b;
+        self.synth_octave = s.synth_octave.clamp(
+            crate::layout::Layout::SYNTH_OCTAVE_MIN,
+            crate::layout::Layout::SYNTH_OCTAVE_MAX,
+        );
         self.kaoss_scale_index = if s.version < 2 {
             jambox_core::migrate_legacy_scale_index(s.kaoss_scale_index)
         } else {
             s.kaoss_scale_index.min(jambox_core::KAOSS_SCALES.len() as u8 - 1)
         };
         self.kaoss_key = s.kaoss_key.min(11);
+        self.kaoss_root_midi = kaoss_ui::clamp_root_midi(s.kaoss_root_midi);
         self.kaoss_octaves = s.kaoss_octaves.clamp(1, 4);
         self.kaoss_program = s.kaoss_program % KAOSS_PROGRAMS.len();
         self.kaoss_gate = if s.version < 3 {
@@ -791,9 +836,10 @@ impl NativeModel {
         self.song_out = s.song_out;
         self.kaoss_out = s.kaoss_out;
         self.font_style = s.font_style;
-        self.kaoss_viz_style = crate::kaoss_viz::KaossVizStyle::from_name(&s.kaoss_viz_style);
-        self.kaoss_mono_color =
-            s.kaoss_mono_color % crate::kaoss_viz::MONO_PALETTE.len();
+        let (style, color) =
+            crate::kaoss_viz::load_viz_from_session(&s.kaoss_viz_style, s.kaoss_mono_color);
+        self.kaoss_viz_style = style;
+        self.kaoss_mono_color = color;
         if s.screensaver_sec >= 0.0
             && std::env::var("MIDI_TONE_SCREENSAVER_SEC").is_err()
         {
@@ -837,8 +883,10 @@ impl NativeModel {
             release: self.synth_params[4],
             morph_a: self.morph_a,
             morph_b: self.morph_b,
+            synth_octave: self.synth_octave,
             kaoss_scale_index: self.kaoss_scale_index,
             kaoss_key: self.kaoss_key,
+            kaoss_root_midi: self.kaoss_root_midi,
             kaoss_octaves: self.kaoss_octaves,
             kaoss_program: self.kaoss_program,
             kaoss_gate: self.kaoss_gate,
@@ -924,7 +972,19 @@ impl NativeModel {
         let gesture = self.next_gesture;
         self.next_gesture = self.next_gesture.wrapping_add(1).max(1);
 
-        let hit = if self.kaoss_settings_open {
+        let hit = if self.kaoss_color_picker_open {
+            let base = self.layout.hit(self.mode, px, py);
+            if matches!(
+                base,
+                Hit::Nav(_) | Hit::NavBack | Hit::Power | Hit::HomeTile(_)
+            ) {
+                base
+            } else if self.layout.content.contains(px, py) {
+                self.layout.hit_kaoss_color_picker(px, py)
+            } else {
+                base
+            }
+        } else if self.kaoss_settings_open {
             let base = self.layout.hit(self.mode, px, py);
             if matches!(
                 base,
@@ -944,10 +1004,14 @@ impl NativeModel {
                 | Hit::KaossScale
                 | Hit::KaossKey
                 | Hit::KaossOct
+                | Hit::KaossOctUp
+                | Hit::KaossOctDown
                 | Hit::KaossHold
                 | Hit::KaossGate
                 | Hit::KaossBpmUp
                 | Hit::KaossBpmDown
+                | Hit::KaossBpmUp5
+                | Hit::KaossBpmDown5
                 | Hit::KaossFull
                 | Hit::KaossShowAll
                 | Hit::KaossChannel
@@ -1290,6 +1354,14 @@ impl NativeModel {
                 self.tap_ui(slot, id, gesture, px, py);
                 self.open_vib_menu();
             }
+            Hit::SynthOctDown => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.nudge_synth_octave(-1);
+            }
+            Hit::SynthOctUp => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.nudge_synth_octave(1);
+            }
             Hit::SynthVibAlways => {
                 self.tap_ui(slot, id, gesture, px, py);
                 self.toggle_vibrato_always(outbox);
@@ -1360,6 +1432,7 @@ impl NativeModel {
                 self.apply_synth_slider(index, px, py, outbox);
             }
             Hit::SynthKey { note } => {
+                let note = self.transpose_synth_key(note);
                 self.fingers[slot] = Finger {
                     active: true,
                     id,
@@ -1391,6 +1464,14 @@ impl NativeModel {
                 self.tap_ui(slot, id, gesture, px, py);
                 self.toggle_kaoss_picker(KaossPicker::Octave);
             }
+            Hit::KaossOctDown => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.nudge_kaoss_root_octave(-1, outbox);
+            }
+            Hit::KaossOctUp => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.nudge_kaoss_root_octave(1, outbox);
+            }
             Hit::KaossHold => {
                 self.tap_ui(slot, id, gesture, px, py);
                 self.toggle_kaoss_hold(outbox);
@@ -1401,9 +1482,17 @@ impl NativeModel {
             }
             Hit::KaossBpmUp => {
                 self.tap_ui(slot, id, gesture, px, py);
-                self.nudge_kaoss_bpm(5.0, outbox);
+                self.nudge_kaoss_bpm(1.0, outbox);
             }
             Hit::KaossBpmDown => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.nudge_kaoss_bpm(-1.0, outbox);
+            }
+            Hit::KaossBpmUp5 => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.nudge_kaoss_bpm(5.0, outbox);
+            }
+            Hit::KaossBpmDown5 => {
                 self.tap_ui(slot, id, gesture, px, py);
                 self.nudge_kaoss_bpm(-5.0, outbox);
             }
@@ -1436,37 +1525,38 @@ impl NativeModel {
             }
             Hit::KaossViz | Hit::KaossVizCells => {
                 self.tap_ui(slot, id, gesture, px, py);
-                self.kaoss_viz_style = crate::kaoss_viz::KaossVizStyle::Rainbow;
-                self.status_line = "PAD VIZ: RAINBOW".into();
-                self.mark_dirty();
-            }
-            Hit::KaossVizMono => {
-                self.tap_ui(slot, id, gesture, px, py);
-                self.kaoss_viz_style = crate::kaoss_viz::KaossVizStyle::Mono;
+                self.kaoss_viz_style = crate::kaoss_viz::KaossVizStyle::Cells;
                 self.status_line = format!(
-                    "PAD VIZ: MONO {}",
-                    crate::kaoss_viz::mono_color_label(self.kaoss_mono_color)
+                    "PAD VIZ: CELLS · {}",
+                    crate::kaoss_viz::pad_color_label(self.kaoss_mono_color)
                 );
                 self.mark_dirty();
             }
             Hit::KaossVizGlow => {
                 self.tap_ui(slot, id, gesture, px, py);
                 self.kaoss_viz_style = crate::kaoss_viz::KaossVizStyle::Glow;
-                self.status_line = "PAD VIZ: GLOW".into();
-                self.mark_dirty();
-            }
-            Hit::KaossMonoColor => {
-                self.tap_ui(slot, id, gesture, px, py);
-                self.kaoss_mono_color =
-                    crate::kaoss_viz::cycle_mono_color(self.kaoss_mono_color);
-                if self.kaoss_viz_style != crate::kaoss_viz::KaossVizStyle::Mono {
-                    self.kaoss_viz_style = crate::kaoss_viz::KaossVizStyle::Mono;
-                }
                 self.status_line = format!(
-                    "MONO COLOR → {}",
-                    crate::kaoss_viz::mono_color_label(self.kaoss_mono_color)
+                    "PAD VIZ: GLOW · {}",
+                    crate::kaoss_viz::pad_color_label(self.kaoss_mono_color)
                 );
                 self.mark_dirty();
+            }
+            Hit::KaossColor => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.open_kaoss_color_picker();
+            }
+            Hit::KaossColorPick(index) => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.kaoss_mono_color = index % crate::kaoss_viz::pad_color_count();
+                self.status_line = format!(
+                    "PAD COLOR → {}",
+                    crate::kaoss_viz::pad_color_label(self.kaoss_mono_color)
+                );
+                self.mark_dirty();
+            }
+            Hit::KaossColorDone => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.close_kaoss_color_picker();
             }
             Hit::KaossAxes => {
                 self.tap_ui(slot, id, gesture, px, py);
@@ -2044,7 +2134,8 @@ impl NativeModel {
                 self.apply_fx_slider(index, py, outbox);
             }
             Surface::SynthKey { note } => {
-                if let Some(new_note) = self.layout.synth_keyboard_note_at(px, py) {
+                if let Some(raw) = self.layout.synth_keyboard_note_at(px, py) {
+                    let new_note = self.transpose_synth_key(raw);
                     if new_note != note {
                         outbox.note_off(0, note);
                         self.seq.push_note(false, 0, note, 0);
@@ -2610,11 +2701,15 @@ impl NativeModel {
         };
         match kind {
             KaossPicker::Program => {
+                let prev = kaoss_ui::program(self.kaoss_program);
                 let p = kaoss_ui::program_at(self.kaoss_show_all, index);
                 self.kaoss_program = KAOSS_PROGRAMS
                     .iter()
                     .position(|q| q.id == p.id)
                     .unwrap_or(0);
+                if prev.y_param == "pitch_bend" && p.y_param != "pitch_bend" {
+                    self.reset_kaoss_pitch_bend(outbox);
+                }
                 self.status_line = format!("program {}", p.label);
                 self.mark_dirty();
             }
@@ -2633,9 +2728,21 @@ impl NativeModel {
                 self.mark_dirty();
             }
             KaossPicker::Octave => {
-                self.kaoss_octaves = ((index % 4) + 1) as u8;
-                self.push_kaoss_scale(outbox);
-                self.status_line = format!("{} oct", self.kaoss_octaves);
+                if index < kaoss_ui::ROOT_OCTAVE_MIDI.len() {
+                    self.kaoss_root_midi = kaoss_ui::ROOT_OCTAVE_MIDI[index];
+                    self.push_kaoss_scale(outbox);
+                    self.status_line = format!(
+                        "start {}",
+                        kaoss_ui::midi_note_label(self.kaoss_root_midi)
+                    );
+                } else {
+                    self.kaoss_octaves =
+                        ((index - kaoss_ui::ROOT_OCTAVE_MIDI.len()) % 4) as u8 + 1;
+                    self.push_kaoss_scale(outbox);
+                    self.status_line = format!("{} oct wide", self.kaoss_octaves);
+                }
+                // Keep picker open so you can set start and width together.
+                self.kaoss_picker = Some(KaossPicker::Octave);
                 self.mark_dirty();
             }
             KaossPicker::Gate => {
@@ -2658,7 +2765,8 @@ impl NativeModel {
     }
 
     fn nudge_kaoss_bpm(&mut self, delta: f32, outbox: &mut Outbox) {
-        self.bpm = (self.bpm + delta).clamp(40.0, 240.0);
+        // Whole-BPM steps so ±1 can land on 120 after coarse song tempos, etc.
+        self.bpm = (self.bpm.round() + delta).clamp(40.0, 240.0);
         self.seq.bpm = self.bpm;
         outbox.tempo(self.bpm);
         self.status_line = format!("tempo {:.0}", self.bpm);
@@ -2675,6 +2783,11 @@ impl NativeModel {
                 self.release_kaoss_gate(outbox);
             }
             self.kaoss_usb_silence(outbox, true);
+            if !self.kaoss_touching
+                && kaoss_ui::program(self.kaoss_program).y_param == "pitch_bend"
+            {
+                self.reset_kaoss_pitch_bend(outbox);
+            }
             self.status_line = "HOLD off".into();
         } else {
             self.status_line = "HOLD on — latch last pad".into();
@@ -2813,6 +2926,10 @@ impl NativeModel {
         self.kaoss_touching = remaining > 0;
         if remaining == 0 {
             self.kaoss_usb_pad_up(outbox);
+            // Leave bend at center when the pad is idle (HOLD keeps the latched Y).
+            if !self.kaoss_hold && prog.y_param == "pitch_bend" {
+                self.reset_kaoss_pitch_bend(outbox);
+            }
         }
     }
 
@@ -2951,19 +3068,40 @@ impl NativeModel {
         outbox: &mut Outbox,
     ) {
         if self.kaoss_out.includes_local() {
-            outbox.touch(gesture, phase, x, y, self.kaoss_channel);
+            // BEND owns Y for pitch bend — send midline Y so engine velocity stays full.
+            let touch_y = if kaoss_ui::program(self.kaoss_program).y_param == "pitch_bend" {
+                0.5
+            } else {
+                y
+            };
+            outbox.touch(gesture, phase, x, touch_y, self.kaoss_channel);
         }
     }
 
     fn kaoss_root_midi(&self) -> u8 {
-        match self.kaoss_octaves {
-            1 | 2 => 48,
-            3 => 36,
-            _ => 24,
-        }
+        kaoss_ui::clamp_root_midi(self.kaoss_root_midi)
     }
 
-    fn kaoss_note_at(&self, x: f32) -> u8 {
+    fn nudge_kaoss_root_octave(&mut self, step: i8, outbox: &mut Outbox) {
+        let next = (self.kaoss_root_midi() as i16 + step as i16 * 12).clamp(
+            kaoss_ui::ROOT_OCTAVE_MIDI[0] as i16,
+            kaoss_ui::ROOT_OCTAVE_MIDI[kaoss_ui::ROOT_OCTAVE_MIDI.len() - 1] as i16,
+        ) as u8;
+        if next == self.kaoss_root_midi() {
+            return;
+        }
+        self.kaoss_root_midi = next;
+        self.push_kaoss_scale(outbox);
+        self.status_line = format!(
+            "kaoss {} · {} oct",
+            kaoss_ui::midi_note_label(self.kaoss_root_midi),
+            self.kaoss_octaves
+        );
+        self.mark_dirty();
+    }
+
+    /// MIDI note under pad X (scale + key + octave span).
+    pub fn kaoss_note_at(&self, x: f32) -> u8 {
         let scale = kaoss_scale(self.kaoss_scale_index as usize);
         let notes = scale_notes(
             scale.degrees,
@@ -3047,7 +3185,11 @@ impl NativeModel {
             return;
         }
         let note = self.kaoss_note_at(x);
-        let velocity = velocity_at_y(y);
+        let velocity = if kaoss_ui::program(self.kaoss_program).y_param == "pitch_bend" {
+            100
+        } else {
+            velocity_at_y(y)
+        };
         if let Some(old) = self.kaoss_usb_note {
             if old != note {
                 outbox.midi_emit(
@@ -3078,7 +3220,11 @@ impl NativeModel {
             return;
         }
         let note = self.kaoss_note_at(x);
-        let velocity = velocity_at_y(y);
+        let velocity = if kaoss_ui::program(self.kaoss_program).y_param == "pitch_bend" {
+            100
+        } else {
+            velocity_at_y(y)
+        };
         match self.kaoss_usb_note {
             Some(old) if old == note => {}
             Some(old) => {
@@ -3143,28 +3289,35 @@ impl NativeModel {
         y: f32,
         outbox: &mut Outbox,
     ) {
-        // Engine always maps Y→tone on note touches; for other Y params (and FX
-        // programs) drive the synth/bus from the UI so MORPH/FILTER feel right.
+        // Engine touch path only handles pitch; Y (and FX X) are driven here so
+        // LEAD/MORPH/VIB/BEND each own their axis without fighting a hardwired tone map.
         if prog.note {
             if prog.y_param == "tone" {
-                // Match Python _emit_xy: Y drives brightness on every move for this
-                // finger. Engine tone is global; sync_touches must not let a second
-                // finger's static Y overwrite the finger being dragged.
                 outbox.synth("tone", y);
                 self.synth_params[1] = y;
                 self.mark_dirty();
-            } else if prog.y_param == "vibrato_always" {
-                self.vibrato_always = y;
-                outbox.synth("vibrato_always", y);
+            } else if prog.y_param == "vib" {
+                // Tk parity: Y raises depth and gates always-on vibrato.
+                self.vibrato_depth = (y * 2.0).clamp(0.0, 2.0);
+                self.vibrato_always = if y > 0.02 { 1.0 } else { 0.0 };
+                outbox.synth("vibrato_depth", y.clamp(0.0, 1.0));
+                outbox.synth("vibrato_always", self.vibrato_always);
                 self.mark_dirty();
-            } else if prog.y_param != "tone" {
-                outbox.synth(prog.y_param, y);
-                if let Some(i) = Self::synth_param_index(prog.y_param) {
-                    self.synth_params[i] = y;
-                    if i == 0 {
-                        self.sync_wave_bank();
+            } else if prog.y_param == "pitch_bend" {
+                self.apply_kaoss_pitch_bend(y, outbox);
+            } else {
+                if Self::is_bus_param(prog.y_param) {
+                    outbox.fx_bus(prog.y_param, y);
+                } else {
+                    outbox.synth(prog.y_param, y);
+                    if let Some(i) = Self::synth_param_index(prog.y_param) {
+                        self.synth_params[i] = y;
+                        if i == 0 {
+                            self.sync_wave_bank();
+                        }
                     }
                 }
+                self.mark_dirty();
             }
         } else {
             if let Some(xp) = prog.x_param {
@@ -3182,9 +3335,11 @@ impl NativeModel {
             }
             if Self::is_bus_param(prog.y_param) {
                 outbox.fx_bus(prog.y_param, y);
-            } else if prog.y_param == "vibrato_always" {
-                self.vibrato_always = y;
-                outbox.synth("vibrato_always", y);
+            } else if prog.y_param == "vib" {
+                self.vibrato_depth = (y * 2.0).clamp(0.0, 2.0);
+                self.vibrato_always = if y > 0.02 { 1.0 } else { 0.0 };
+                outbox.synth("vibrato_depth", y.clamp(0.0, 1.0));
+                outbox.synth("vibrato_always", self.vibrato_always);
             } else {
                 outbox.synth(prog.y_param, y);
                 if let Some(i) = Self::synth_param_index(prog.y_param) {
@@ -3194,6 +3349,38 @@ impl NativeModel {
                     }
                 }
             }
+            self.mark_dirty();
+        }
+    }
+
+    fn apply_kaoss_pitch_bend(&mut self, y: f32, outbox: &mut Outbox) {
+        let semis = kaoss_ui::y_to_pitch_bend_semis(y);
+        outbox.synth("pitch_bend", semis);
+        if self.kaoss_out.includes_usb() {
+            let wheel = kaoss_ui::y_to_pitch_bend_midi(y);
+            outbox.midi_emit(
+                "pitch_bend",
+                self.kaoss_channel,
+                None,
+                None,
+                None,
+                Some(wheel),
+            );
+        }
+        self.mark_dirty();
+    }
+
+    fn reset_kaoss_pitch_bend(&mut self, outbox: &mut Outbox) {
+        outbox.synth("pitch_bend", 0.0);
+        if self.kaoss_out.includes_usb() {
+            outbox.midi_emit(
+                "pitch_bend",
+                self.kaoss_channel,
+                None,
+                None,
+                None,
+                Some(8192),
+            );
         }
     }
 
@@ -3236,6 +3423,34 @@ impl NativeModel {
             }
         }
         self.status_line = self.seq.status.clone();
+    }
+
+    fn synth_key_base(&self) -> u8 {
+        (60i16 + self.synth_octave as i16 * 12).clamp(24, 108) as u8
+    }
+
+    /// Map a C4-relative keyboard note (60..71) onto the selected octave.
+    fn transpose_synth_key(&self, c4_note: u8) -> u8 {
+        let deg = c4_note.saturating_sub(Layout::SYNTH_KEY_BASE);
+        self.synth_key_base().saturating_add(deg).min(127)
+    }
+
+    fn nudge_synth_octave(&mut self, delta: i8) {
+        let next = (self.synth_octave + delta).clamp(
+            Layout::SYNTH_OCTAVE_MIN,
+            Layout::SYNTH_OCTAVE_MAX,
+        );
+        if next == self.synth_octave {
+            return;
+        }
+        self.synth_octave = next;
+        self.status_line = format!("keyboard {}", Self::c_note_label(self.synth_key_base()));
+        self.mark_dirty();
+    }
+
+    fn c_note_label(midi: u8) -> String {
+        let octave = (midi as i32 / 12) - 1;
+        format!("C{octave}")
     }
 
     fn open_synth_pick(&mut self, pick_a: bool) {
@@ -3797,24 +4012,11 @@ impl NativeModel {
         let hold = self.kaoss_hold && self.kaoss_touching;
         let gate_flash = self.kaoss_gate_flash();
         let hue_shift = crate::kaoss_viz::program_hue(kaoss_ui::program(self.kaoss_program).id);
-        let (mono_h, mono_s) = crate::kaoss_viz::mono_color_hs(self.kaoss_mono_color);
-        let mono = self.kaoss_viz_style == crate::kaoss_viz::KaossVizStyle::Mono;
+        let rainbow = crate::kaoss_viz::pad_color_is_rainbow(self.kaoss_mono_color);
+        let solid = crate::kaoss_viz::pad_color_hs(self.kaoss_mono_color);
         for row in 0..LED_ROWS {
             for col in 0..LED_COLS {
-                self.cells[row][col] = if mono {
-                    crate::kaoss_viz::pad_led_mono(
-                        col,
-                        row,
-                        t,
-                        finger,
-                        &trail,
-                        &ripples,
-                        hold,
-                        gate_flash,
-                        mono_h,
-                        mono_s,
-                    )
-                } else {
+                self.cells[row][col] = if rainbow {
                     crate::kaoss_viz::pad_led_rgb(
                         col,
                         row,
@@ -3825,6 +4027,20 @@ impl NativeModel {
                         hold,
                         gate_flash,
                         hue_shift,
+                    )
+                } else {
+                    let (h, s) = solid.unwrap_or((0.93, 0.88));
+                    crate::kaoss_viz::pad_led_mono(
+                        col,
+                        row,
+                        t,
+                        finger,
+                        &trail,
+                        &ripples,
+                        hold,
+                        gate_flash,
+                        h,
+                        s,
                     )
                 };
             }
@@ -3907,6 +4123,18 @@ mod tests {
     use jambox_protocol::Request;
 
     #[test]
+    fn kaoss_note_at_tracks_pad_x() {
+        let model = NativeModel::new();
+        let left = model.kaoss_note_at(0.05);
+        let right = model.kaoss_note_at(0.95);
+        assert_ne!(left, right, "left and right edges should map to different notes");
+        assert_eq!(
+            kaoss_ui::midi_note_label(left),
+            format!("{}{}", jambox_core::NOTE_NAMES[(left % 12) as usize], (left as i32 / 12) - 1)
+        );
+    }
+
+    #[test]
     fn kaoss_gesture_emits_touch_edges() {
         let mut model = NativeModel::new();
         let mut out = Outbox::new();
@@ -3918,6 +4146,39 @@ mod tests {
         model.finger_up(1, &mut out);
         let batch = out.take();
         assert!(batch.iter().any(|r| matches!(r, Request::Touch { .. })));
+    }
+
+    #[test]
+    fn kaoss_bend_program_emits_pitch_bend_semis() {
+        let mut model = NativeModel::new();
+        model.kaoss_program = kaoss_ui::KAOSS_PROGRAMS
+            .iter()
+            .position(|p| p.id == "bend")
+            .expect("bend program");
+        let mut out = Outbox::new();
+        let k = model.layout.kaoss;
+        // Touch top of pad → +12 semis.
+        model.finger_down(1, k.x + k.w / 2, k.y + 4, &mut out);
+        let batch = out.take();
+        assert!(
+            batch.iter().any(|r| matches!(
+                r,
+                Request::Synth { param, value, .. }
+                    if param == "pitch_bend" && (*value - 12.0).abs() < 0.5
+            )),
+            "top of pad should bend +12 semis: {batch:?}"
+        );
+        // Midline → near 0.
+        model.finger_move(1, k.x + k.w / 2, k.y + k.h / 2, &mut out);
+        let batch = out.take();
+        assert!(
+            batch.iter().any(|r| matches!(
+                r,
+                Request::Synth { param, value, .. }
+                    if param == "pitch_bend" && value.abs() < 0.5
+            )),
+            "midline should be near unison: {batch:?}"
+        );
     }
 
     #[test]
@@ -3937,6 +4198,37 @@ mod tests {
             )),
             "Y drag on LEAD should drive synth tone like Tk _emit_xy"
         );
+    }
+
+    #[test]
+    fn kaoss_vib_y_drives_vibrato_not_tone() {
+        let mut model = NativeModel::new();
+        model.kaoss_program = kaoss_ui::KAOSS_PROGRAMS
+            .iter()
+            .position(|p| p.id == "vib")
+            .expect("vib program");
+        assert_eq!(kaoss_ui::program(model.kaoss_program).y_param, "vib");
+        let tone_before = model.synth_params[1];
+        let mut out = Outbox::new();
+        let cell = model.layout.kaoss_cell(6, 1); // high Y → strong vib
+        model.finger_down(1, cell.x + 4, cell.y + 4, &mut out);
+        let batch = out.take();
+        assert!(
+            batch.iter().any(|r| matches!(
+                r,
+                Request::Synth { param, .. } if param == "vibrato_depth" || param == "vibrato_always"
+            )),
+            "VIB should emit vibrato params: {batch:?}"
+        );
+        assert!(
+            !batch.iter().any(|r| matches!(
+                r,
+                Request::Synth { param, .. } if param == "tone"
+            )),
+            "VIB must not scrub tone: {batch:?}"
+        );
+        assert!((model.synth_params[1] - tone_before).abs() < 1e-6);
+        assert!(model.vibrato_always > 0.5);
     }
 
     #[test]
@@ -4108,6 +4400,39 @@ mod tests {
         assert!(batch.iter().any(|r| matches!(
             r,
             Request::Synth { param, .. } if param == "drum_tone"
+        )));
+    }
+
+    #[test]
+    fn synth_octave_shifts_keyboard_notes() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Synth);
+        let mut out = Outbox::new();
+        let key = model.layout.synth_keyboard_white_rect(0); // C relative to C4
+        model.finger_down(1, key.x + 4, key.y + key.h - 8, &mut out);
+        let batch = out.take();
+        assert!(batch.iter().any(|r| matches!(
+            r,
+            Request::NoteOn {
+                channel: 0,
+                note: 60,
+                velocity: 110
+            }
+        )));
+        model.finger_up(1, &mut out);
+        out.take();
+
+        model.nudge_synth_octave(1);
+        assert_eq!(model.synth_octave, 1);
+        model.finger_down(2, key.x + 4, key.y + key.h - 8, &mut out);
+        let batch = out.take();
+        assert!(batch.iter().any(|r| matches!(
+            r,
+            Request::NoteOn {
+                channel: 0,
+                note: 72,
+                velocity: 110
+            }
         )));
     }
 }

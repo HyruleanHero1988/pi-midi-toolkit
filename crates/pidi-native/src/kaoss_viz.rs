@@ -6,14 +6,12 @@ fn clamp01(v: f32) -> f32 {
     v.clamp(0.0, 1.0)
 }
 
-/// Pad visualizer modes.
+/// Pad visualizer shape: LED grid vs soft radial bloom.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum KaossVizStyle {
-    /// Colorful HSV LED field (current CELLS).
+    /// 12×7 LED field.
     #[default]
-    Rainbow,
-    /// Single-hue LED field (legacy monochrome feel).
-    Mono,
+    Cells,
     /// Free-form soft radial bloom.
     Glow,
 }
@@ -21,14 +19,13 @@ pub enum KaossVizStyle {
 impl KaossVizStyle {
     pub fn label(self) -> &'static str {
         match self {
-            Self::Rainbow => "RAINBOW",
-            Self::Mono => "MONO",
+            Self::Cells => "CELLS",
             Self::Glow => "GLOW",
         }
     }
 
     pub fn is_cells(self) -> bool {
-        matches!(self, Self::Rainbow | Self::Mono)
+        matches!(self, Self::Cells)
     }
 
     pub fn is_glow(self) -> bool {
@@ -37,22 +34,36 @@ impl KaossVizStyle {
 
     pub fn from_name(name: &str) -> Self {
         match name.to_ascii_lowercase().as_str() {
-            "mono" | "static" => Self::Mono,
             "glow" => Self::Glow,
-            "cells" | "rainbow" | _ => Self::Rainbow,
+            // Legacy "rainbow" / "mono" / "cells" all map to the LED grid;
+            // solid vs rainbow is owned by [`pad_color_index`].
+            "mono" | "static" | "cells" | "rainbow" | _ => Self::Cells,
         }
     }
 
     pub fn wire(self) -> &'static str {
         match self {
-            Self::Rainbow => "rainbow",
-            Self::Mono => "mono",
+            Self::Cells => "cells",
             Self::Glow => "glow",
         }
     }
 }
 
-/// Named mono LED colors (hue, sat). WHITE uses sat=0.
+/// Pad color choices shared by CELLS and GLOW.
+/// Index 0 = RAINBOW; the rest are solid hues (legacy mono palette).
+pub const PAD_COLORS: &[(&str, Option<(f32, f32)>)] = &[
+    ("RAINBOW", None),
+    ("PINK", Some((0.93, 0.88))),
+    ("PURPLE", Some((0.78, 0.85))),
+    ("CYAN", Some((0.52, 0.82))),
+    ("GREEN", Some((0.33, 0.78))),
+    ("AMBER", Some((0.10, 0.90))),
+    ("RED", Some((0.00, 0.90))),
+    ("WHITE", Some((0.00, 0.00))),
+];
+
+/// Legacy mono palette (solids only) — kept for older session indices that
+/// stored 0=PINK before RAINBOW was prepended. Prefer [`PAD_COLORS`].
 pub const MONO_PALETTE: &[(&str, f32, f32)] = &[
     ("PINK", 0.93, 0.88),
     ("PURPLE", 0.78, 0.85),
@@ -63,17 +74,44 @@ pub const MONO_PALETTE: &[(&str, f32, f32)] = &[
     ("WHITE", 0.00, 0.00),
 ];
 
+pub fn pad_color_count() -> usize {
+    PAD_COLORS.len()
+}
+
+pub fn pad_color_label(index: usize) -> &'static str {
+    PAD_COLORS[index % PAD_COLORS.len()].0
+}
+
+pub fn pad_color_is_rainbow(index: usize) -> bool {
+    PAD_COLORS[index % PAD_COLORS.len()].1.is_none()
+}
+
+/// Solid hue/sat, or `None` for rainbow.
+pub fn pad_color_hs(index: usize) -> Option<(f32, f32)> {
+    PAD_COLORS[index % PAD_COLORS.len()].1
+}
+
+/// Migrate a pre-rainbow mono index (0=PINK…) into [`PAD_COLORS`] (0=RAINBOW).
+pub fn migrate_legacy_mono_color(index: usize, style_was_mono: bool) -> usize {
+    if style_was_mono {
+        // Old mono index 0..6 → PAD_COLORS 1..7
+        (index % MONO_PALETTE.len()) + 1
+    } else {
+        // Old rainbow / cells / glow with unused mono index → RAINBOW
+        0
+    }
+}
+
 pub fn mono_color_label(index: usize) -> &'static str {
-    MONO_PALETTE[index % MONO_PALETTE.len()].0
+    pad_color_label(index)
 }
 
 pub fn mono_color_hs(index: usize) -> (f32, f32) {
-    let (_, h, s) = MONO_PALETTE[index % MONO_PALETTE.len()];
-    (h, s)
+    pad_color_hs(index).unwrap_or((0.93, 0.88))
 }
 
 pub fn cycle_mono_color(index: usize) -> usize {
-    (index + 1) % MONO_PALETTE.len()
+    (index + 1) % PAD_COLORS.len()
 }
 
 pub fn hsv_to_rgb(h: f32, s: f32, v: f32) -> (u8, u8, u8) {
@@ -133,6 +171,7 @@ pub fn program_hue(program_id: &str) -> f32 {
         "wash" => 0.70,
         "crush" => 0.98,
         "sweep" => 0.50,
+        "bend" => 0.42,
         _ => 0.93,
     }
 }
@@ -166,6 +205,40 @@ pub fn glow_sample(hue: f32, amp: f32, fall: f32, pulse: f32) -> u32 {
     let sat = (0.92 - 0.78 * soft.powf(1.1)).clamp(0.12, 0.95);
     let val = ((0.08 + 0.90 * soft) * (0.35 + 0.65 * amp) + pulse * 0.06 * soft).min(1.0);
     hsv_color(hue, sat, val)
+}
+
+/// Hue for one glow ring. Rainbow mode spreads the spectrum across concentric shells.
+pub fn glow_ring_hue(pad_color: usize, fall: f32, t: f32) -> f32 {
+    if pad_color_is_rainbow(pad_color) {
+        // Outer rings (fall≈0) → red; toward core → cyan/blue, slow drift.
+        ((1.0 - clamp01(fall)) * 0.85 + t * 0.025).rem_euclid(1.0)
+    } else {
+        pad_color_hs(pad_color).map(|(h, _)| h).unwrap_or(0.93)
+    }
+}
+
+/// Saturation for glow wash / solid rings (rainbow keeps full chroma).
+pub fn glow_ring_sat(pad_color: usize) -> f32 {
+    if pad_color_is_rainbow(pad_color) {
+        0.92
+    } else {
+        pad_color_hs(pad_color)
+            .map(|(_, s)| s.max(0.35))
+            .unwrap_or(0.88)
+    }
+}
+
+/// Resolve session style wire + stored color index into (style, pad color).
+pub fn load_viz_from_session(style_name: &str, mono_color: usize) -> (KaossVizStyle, usize) {
+    let style = KaossVizStyle::from_name(style_name);
+    let lower = style_name.to_ascii_lowercase();
+    let color = match lower.as_str() {
+        "mono" | "static" => migrate_legacy_mono_color(mono_color, true),
+        "cells" | "glow" => mono_color % PAD_COLORS.len(),
+        // Legacy rainbow (and unknown): rainbow color, cells unless glow.
+        _ => migrate_legacy_mono_color(mono_color, false),
+    };
+    (style, color)
 }
 
 /// Lag shells for GLOW: index 0 = outermost (slowest), last = core (fastest).
@@ -221,12 +294,12 @@ pub fn pad_led_rgb(
     gate_flash: f32,
     hue_shift: f32,
 ) -> u32 {
-    let (_h, _s, mut val) =
+    let (_h, _s, val) =
         pad_led_base(col, row, t, finger, trail, ripples, hold, gate_flash);
     let cols = LED_COLS.max(2);
     let lx = col as f32 / (cols - 1) as f32;
     let mut hue = (lx * 0.70 + hue_shift + t * 0.035).rem_euclid(1.0);
-    let mut sat;
+    let sat;
     if let Some((fx, fy)) = finger {
         let dist = ((lx - fx).hypot((row as f32 / (LED_ROWS.max(2) - 1) as f32) - fy)).abs();
         let glow = (1.0 - dist / 0.40).max(0.0).powf(1.45);
@@ -388,5 +461,31 @@ mod tests {
         let r_b = (b >> 16) & 0xff;
         assert!(r_a >= g_a, "mono pink idle should be reddish");
         assert!(r_b > 20, "touched mono cell should light up");
+    }
+
+    #[test]
+    fn legacy_mono_migrates_past_rainbow_slot() {
+        assert_eq!(migrate_legacy_mono_color(0, true), 1); // PINK
+        assert_eq!(migrate_legacy_mono_color(0, false), 0); // RAINBOW
+        let (style, color) = load_viz_from_session("mono", 0);
+        assert_eq!(style, KaossVizStyle::Cells);
+        assert_eq!(color, 1);
+        let (style, color) = load_viz_from_session("rainbow", 0);
+        assert_eq!(style, KaossVizStyle::Cells);
+        assert_eq!(color, 0);
+        let (style, color) = load_viz_from_session("glow", 3);
+        assert_eq!(style, KaossVizStyle::Glow);
+        assert_eq!(color, 3);
+    }
+
+    #[test]
+    fn rainbow_glow_rings_differ_in_hue() {
+        let outer = glow_ring_hue(0, 0.0, 0.0);
+        let mid = glow_ring_hue(0, 0.5, 0.0);
+        let core = glow_ring_hue(0, 1.0, 0.0);
+        assert!((outer - mid).abs() > 0.1);
+        assert!((mid - core).abs() > 0.1);
+        // Solid color: same hue regardless of fall.
+        assert!((glow_ring_hue(1, 0.0, 0.0) - glow_ring_hue(1, 1.0, 0.0)).abs() < 1e-4);
     }
 }

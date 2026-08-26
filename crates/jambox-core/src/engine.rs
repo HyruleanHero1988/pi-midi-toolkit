@@ -14,7 +14,7 @@ use crate::drums::{
     drum_model_for_note, DrumKit, DrumMacros, DrumModel, DRUM_MODEL_COUNT, MAX_DRUM_HITS,
 };
 use crate::fx::{FxParams, FxUnit};
-use crate::kaoss::{unpack_xy, KaossMapper, LatestTouch, TouchDelta, tone_at_y};
+use crate::kaoss::{unpack_xy, KaossMapper, LatestTouch, TouchDelta};
 use crate::repeat::{
     RepeatEvent, RepeatRack, MAX_REPEAT_EVENTS_PER_BLOCK,
 };
@@ -709,7 +709,8 @@ impl JamboxEngine {
                 velocity,
             } => {
                 let (xf, yf) = unpack_xy(x, y);
-                self.set_synth(SynthParam::Tone, tone_at_y(yf));
+                // Tone / morph / vib are owned by the UI (Kaoss program Y). Do not
+                // force Y→tone here — that made VIB/MORPH scrub brightness too.
                 match self.kaoss.down(owner, xf, yf, channel, velocity) {
                     TouchDelta::Start {
                         channel,
@@ -797,19 +798,9 @@ impl JamboxEngine {
     /// Apply coalesced XY updates. Only active gestures move; a lift already
     /// processed in this block wins because `KaossMapper::follow` is idle then.
     ///
-    /// Tone (Y brightness) is a single shared lowpass on the key bus. With one
-    /// finger, derive it here every frame; with several, the UI sends `synth
-    /// tone` per moving finger so a second contact does not pin brightness.
+    /// Brightness / morph / vibrato come from UI `synth` commands for the active
+    /// Kaoss program — this path only retunes pitch from X.
     pub fn sync_touches(&mut self, touches: &[LatestTouch]) {
-        if touches.len() == 1 {
-            let touch = touches[0].clamp();
-            self.set_synth(SynthParam::Tone, tone_at_y(touch.y));
-            let delta = self
-                .kaoss
-                .follow(touch.owner, touch.x, touch.y, touch.velocity);
-            self.apply_touch_delta(delta);
-            return;
-        }
         for touch in touches {
             let touch = touch.clamp();
             let delta = self

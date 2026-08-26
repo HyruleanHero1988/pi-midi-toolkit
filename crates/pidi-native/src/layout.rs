@@ -64,6 +64,8 @@ pub enum Hit {
     SynthVibRateDown,
     SynthPickDone,
     SynthSaveAs,
+    SynthOctUp,
+    SynthOctDown,
     ScrollArea(crate::scroll::ScrollKind),
     DrumMacro(usize),
     KitAllDrums,
@@ -74,11 +76,15 @@ pub enum Hit {
     KaossScale,
     KaossKey,
     KaossOct,
+    KaossOctUp,
+    KaossOctDown,
     KaossHold,
     KaossGate,
     KaossFull,
     KaossBpmUp,
     KaossBpmDown,
+    KaossBpmUp5,
+    KaossBpmDown5,
     KaossShowAll,
     KaossChannel,
     KaossSettings,
@@ -88,9 +94,10 @@ pub enum Hit {
     KaossAxes,
     KaossGridLines,
     KaossVizCells,
-    KaossVizMono,
     KaossVizGlow,
-    KaossMonoColor,
+    KaossColor,
+    KaossColorPick(usize),
+    KaossColorDone,
     KaossOutPick(usize),
     KaossChannelPick(u8),
     KaossGridWidthUp,
@@ -200,6 +207,8 @@ pub struct Layout {
     pub synth_pick_next: Rect,
     pub synth_pick_grid: Rect,
     pub synth_save_as: Rect,
+    pub synth_oct_down: Rect,
+    pub synth_oct_up: Rect,
     pub synth_pick_save_as: Rect,
     pub map_thru_on: Rect,
     pub map_thru_off: Rect,
@@ -208,11 +217,15 @@ pub struct Layout {
     pub kaoss_scale: Rect,
     pub kaoss_key: Rect,
     pub kaoss_oct: Rect,
+    pub kaoss_oct_down: Rect,
+    pub kaoss_oct_up: Rect,
     pub kaoss_hold: Rect,
     pub kaoss_gate: Rect,
     pub kaoss_full: Rect,
     pub kaoss_bpm_up: Rect,
     pub kaoss_bpm_down: Rect,
+    pub kaoss_bpm_up5: Rect,
+    pub kaoss_bpm_down5: Rect,
     pub kaoss_show_all: Rect,
     pub kaoss_channel: Rect,
     pub kaoss_wipe_fx: Rect,
@@ -370,34 +383,58 @@ impl Layout {
                 w: 152,
                 h: 44,
             },
-            kaoss_oct: Rect {
+            kaoss_oct_down: Rect {
                 x: 488,
                 y: HUD_H + content_h - 100,
-                w: 148,
+                w: 40,
+                h: 44,
+            },
+            kaoss_oct: Rect {
+                x: 532,
+                y: HUD_H + content_h - 100,
+                w: 68,
+                h: 44,
+            },
+            kaoss_oct_up: Rect {
+                x: 604,
+                y: HUD_H + content_h - 100,
+                w: 40,
                 h: 44,
             },
             kaoss_hold: Rect {
-                x: 644,
+                x: 648,
                 y: HUD_H + content_h - 100,
-                w: 148,
+                w: 144,
                 h: 44,
             },
             kaoss_gate: Rect {
                 x: 8,
                 y: HUD_H + content_h - 48,
-                w: 140,
+                w: 144,
+                h: 40,
+            },
+            kaoss_bpm_down5: Rect {
+                x: 160,
+                y: HUD_H + content_h - 48,
+                w: 70,
                 h: 40,
             },
             kaoss_bpm_down: Rect {
-                x: 156,
+                x: 234,
                 y: HUD_H + content_h - 48,
-                w: 140,
+                w: 70,
                 h: 40,
             },
             kaoss_bpm_up: Rect {
-                x: 304,
+                x: 308,
                 y: HUD_H + content_h - 48,
-                w: 140,
+                w: 70,
+                h: 40,
+            },
+            kaoss_bpm_up5: Rect {
+                x: 382,
+                y: HUD_H + content_h - 48,
+                w: 70,
                 h: 40,
             },
             kaoss_show_all: Rect {
@@ -431,15 +468,15 @@ impl Layout {
                 h: 0,
             },
             kaoss_full: Rect {
-                x: 452,
+                x: 460,
                 y: HUD_H + content_h - 48,
-                w: 160,
+                w: 148,
                 h: 40,
             },
             kaoss_settings_btn: Rect {
-                x: 620,
+                x: 616,
                 y: HUD_H + content_h - 48,
-                w: 172,
+                w: 176,
                 h: 40,
             },
             phrase_grid: Rect {
@@ -595,13 +632,25 @@ impl Layout {
             synth_vib: Rect {
                 x: 472,
                 y: HUD_H + 12,
-                w: 112,
+                w: 100,
                 h: 48,
             },
             synth_save_as: Rect {
-                x: 592,
+                x: 580,
                 y: HUD_H + 12,
-                w: 192,
+                w: 92,
+                h: 48,
+            },
+            synth_oct_down: Rect {
+                x: 680,
+                y: HUD_H + 12,
+                w: 52,
+                h: 48,
+            },
+            synth_oct_up: Rect {
+                x: 736,
+                y: HUD_H + 12,
+                w: 52,
                 h: 48,
             },
             synth_pick_grid: Rect {
@@ -969,7 +1018,19 @@ impl Layout {
                 w: 0,
                 h: 0,
             };
+            self.kaoss_oct_down = Rect {
+                x: 0,
+                y: 0,
+                w: 0,
+                h: 0,
+            };
             self.kaoss_oct = Rect {
+                x: 0,
+                y: 0,
+                w: 0,
+                h: 0,
+            };
+            self.kaoss_oct_up = Rect {
                 x: 0,
                 y: 0,
                 w: 0,
@@ -994,6 +1055,18 @@ impl Layout {
                 h: 0,
             };
             self.kaoss_bpm_up = Rect {
+                x: 0,
+                y: 0,
+                w: 0,
+                h: 0,
+            };
+            self.kaoss_bpm_down5 = Rect {
+                x: 0,
+                y: 0,
+                w: 0,
+                h: 0,
+            };
+            self.kaoss_bpm_up5 = Rect {
                 x: 0,
                 y: 0,
                 w: 0,
@@ -1169,6 +1242,43 @@ impl Layout {
         }
     }
 
+    pub fn kaoss_color_pick_cell(&self, index: usize) -> Rect {
+        let cols = 4i32;
+        let n = crate::kaoss_viz::pad_color_count() as i32;
+        let rows = ((n + cols - 1) / cols).max(1);
+        let cell_w = (self.content.w - 16) / cols;
+        let cell_h = ((self.content.h - 120) / rows).clamp(48, 72);
+        let col = (index as i32) % cols;
+        let row = (index as i32) / cols;
+        Rect {
+            x: self.content.x + 8 + col * cell_w + 2,
+            y: self.content.y + 56 + row * cell_h + 2,
+            w: cell_w - 4,
+            h: cell_h - 4,
+        }
+    }
+
+    pub fn kaoss_color_done(&self) -> Rect {
+        Rect {
+            x: self.content.x + 8,
+            y: self.content.y + self.content.h - 56,
+            w: self.content.w - 16,
+            h: 48,
+        }
+    }
+
+    pub fn hit_kaoss_color_picker(&self, px: i32, py: i32) -> Hit {
+        for i in 0..crate::kaoss_viz::pad_color_count() {
+            if self.kaoss_color_pick_cell(i).contains(px, py) {
+                return Hit::KaossColorPick(i);
+            }
+        }
+        if self.kaoss_color_done().contains(px, py) {
+            return Hit::KaossColorDone;
+        }
+        Hit::KaossColorDone
+    }
+
     pub fn hit_kaoss_settings(&self, px: i32, py: i32, scroll: i32) -> Hit {
         if self.kaoss_settings_row(52, scroll, 48).contains(px, py) {
             return Hit::KaossWipeFx;
@@ -1182,17 +1292,14 @@ impl Layout {
         if self.kaoss_settings_half_row(164, scroll, false, 48).contains(px, py) {
             return Hit::KaossGridLines;
         }
-        if self.kaoss_settings_third_row(232, scroll, 0, 48).contains(px, py) {
+        if self.kaoss_settings_half_row(232, scroll, true, 48).contains(px, py) {
             return Hit::KaossVizCells;
         }
-        if self.kaoss_settings_third_row(232, scroll, 1, 48).contains(px, py) {
-            return Hit::KaossVizMono;
-        }
-        if self.kaoss_settings_third_row(232, scroll, 2, 48).contains(px, py) {
+        if self.kaoss_settings_half_row(232, scroll, false, 48).contains(px, py) {
             return Hit::KaossVizGlow;
         }
         if self.kaoss_settings_row(288, scroll, 48).contains(px, py) {
-            return Hit::KaossMonoColor;
+            return Hit::KaossColor;
         }
         let grid_row = self.kaoss_settings_row(356, scroll, 48);
         let third = (grid_row.w - 16) / 3;
@@ -1318,9 +1425,13 @@ impl Layout {
         self.division_cell(index)
     }
 
-    /// One-octave piano keyboard (C4–B4) inside `synth_keys`.
+    /// One-octave piano keyboard inside `synth_keys`.
+    /// Notes are returned relative to C4 (MIDI 60); the model applies `synth_octave`.
     pub const SYNTH_KEY_BASE: u8 = 60;
     pub const SYNTH_WHITE_COUNT: usize = 7;
+    /// Octave shift range relative to C4 (C1 .. C7).
+    pub const SYNTH_OCTAVE_MIN: i8 = -3;
+    pub const SYNTH_OCTAVE_MAX: i8 = 3;
 
     pub fn synth_keyboard_white_rect(&self, index: usize) -> Rect {
         let i = index.min(Self::SYNTH_WHITE_COUNT - 1) as i32;
@@ -1432,14 +1543,26 @@ impl Layout {
         if self.kaoss_key.contains(px, py) {
             return Hit::KaossKey;
         }
+        if self.kaoss_oct_down.contains(px, py) {
+            return Hit::KaossOctDown;
+        }
         if self.kaoss_oct.contains(px, py) {
             return Hit::KaossOct;
+        }
+        if self.kaoss_oct_up.contains(px, py) {
+            return Hit::KaossOctUp;
         }
         if self.kaoss_hold.contains(px, py) {
             return Hit::KaossHold;
         }
         if self.kaoss_gate.contains(px, py) {
             return Hit::KaossGate;
+        }
+        if self.kaoss_bpm_up5.contains(px, py) {
+            return Hit::KaossBpmUp5;
+        }
+        if self.kaoss_bpm_down5.contains(px, py) {
+            return Hit::KaossBpmDown5;
         }
         if self.kaoss_bpm_up.contains(px, py) {
             return Hit::KaossBpmUp;
@@ -1568,6 +1691,12 @@ impl Layout {
         }
         if self.synth_vib.contains(px, py) {
             return Hit::SynthVib;
+        }
+        if self.synth_oct_down.contains(px, py) {
+            return Hit::SynthOctDown;
+        }
+        if self.synth_oct_up.contains(px, py) {
+            return Hit::SynthOctUp;
         }
         for index in 0..5 {
             if self.synth_slider(index).contains(px, py) {

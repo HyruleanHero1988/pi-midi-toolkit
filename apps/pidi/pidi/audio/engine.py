@@ -1007,6 +1007,14 @@ class SineEngine:
             self.set_vib_depth(value)
             self.set_vib_always(1.0 if float(value) > 0.02 else 0.0)
             return
+        if name == "pitch_bend":
+            # Pad Y 0..1 with midline = unison; edges = ±12 semis (native BEND).
+            y = max(0.0, min(1.0, float(value)))
+            semis = (y - 0.5) * 2.0 * 12.0
+            with self._lock:
+                self._bend_semitones = float(semis)
+            self._remote_synth("pitch_bend", float(semis))
+            return
         if name == "level":
             self.set_level(value)
             return
