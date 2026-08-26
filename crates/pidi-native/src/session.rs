@@ -34,6 +34,15 @@ impl OutMode {
         }
     }
 
+    /// Compact label for narrow chrome / pad buttons.
+    pub fn short_label(self) -> &'static str {
+        match self {
+            Self::Local => "LOCAL",
+            Self::Usb => "USB",
+            Self::Both => "BOTH",
+        }
+    }
+
     pub fn wire(self) -> &'static str {
         match self {
             Self::Local => "local",
@@ -83,6 +92,10 @@ pub struct SessionState {
     pub kaoss_channel: u8,
     #[serde(default)]
     pub vibrato_always: f32,
+    #[serde(default = "default_vibrato_depth")]
+    pub vibrato_depth: f32,
+    #[serde(default = "default_vibrato_rate")]
+    pub vibrato_rate: f32,
     #[serde(default)]
     pub mode: String,
     #[serde(default)]
@@ -95,6 +108,12 @@ pub struct SessionState {
     pub font_style: FontStyle,
     #[serde(default = "default_screensaver_sec")]
     pub screensaver_sec: f32,
+    /// Pad visualizer: "rainbow" | "mono" | "glow" (also accepts legacy "cells").
+    #[serde(default = "default_kaoss_viz_style")]
+    pub kaoss_viz_style: String,
+    /// Index into the mono LED color palette.
+    #[serde(default)]
+    pub kaoss_mono_color: usize,
 }
 
 fn default_screensaver_sec() -> f32 {
@@ -103,6 +122,18 @@ fn default_screensaver_sec() -> f32 {
 
 fn default_kaoss_out() -> OutMode {
     OutMode::Local
+}
+
+fn default_kaoss_viz_style() -> String {
+    "rainbow".into()
+}
+
+fn default_vibrato_depth() -> f32 {
+    0.5
+}
+
+fn default_vibrato_rate() -> f32 {
+    5.0
 }
 
 impl Default for SessionState {
@@ -127,12 +158,16 @@ impl Default for SessionState {
             kaoss_show_all: false,
             kaoss_channel: 0,
             vibrato_always: 0.0,
+            vibrato_depth: default_vibrato_depth(),
+            vibrato_rate: default_vibrato_rate(),
             mode: "kaoss".into(),
             pads_out: OutMode::Both,
             song_out: OutMode::Both,
             kaoss_out: OutMode::Local,
             font_style: FontStyle::Retro,
             screensaver_sec: crate::screensaver::DEFAULT_TIMEOUT_SEC,
+            kaoss_viz_style: default_kaoss_viz_style(),
+            kaoss_mono_color: 0,
         }
     }
 }

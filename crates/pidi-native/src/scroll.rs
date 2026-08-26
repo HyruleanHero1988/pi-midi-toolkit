@@ -8,7 +8,6 @@ pub const TOUCH_SCROLL_THRESH_PX: i32 = 10;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScrollKind {
     SynthMorphPick,
-    SynthVoiceGrid,
     KaossPicker,
     KaossSettings,
     SongList,

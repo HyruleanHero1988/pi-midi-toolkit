@@ -141,15 +141,19 @@ pub struct NativeModel {
     pub status_line: String,
     pub synth_params: [f32; 5],
     pub vibrato_always: f32,
+    /// Vibrato depth in semitones (0..2).
+    pub vibrato_depth: f32,
+    /// Vibrato rate in Hz (1..9).
+    pub vibrato_rate: f32,
     pub wave_names: Vec<String>,
     pub wave_bank: Option<jambox_core::WaveBank>,
     pub morph_a: u16,
     pub morph_b: u16,
     /// `Some(true)` = picking A, `Some(false)` = picking B.
     pub synth_pick_a: Option<bool>,
-    pub synth_voice_open: bool,
+    /// Vibrato depth / rate / always-on overlay (replaces redundant VOICES grid).
+    pub synth_vib_open: bool,
     pub synth_pick_scroll: i32,
-    pub synth_voice_scroll: i32,
     pub kaoss_picker_scroll: i32,
     pub log_scroll: usize,
     /// Kit macros: tone, noise/snap, pitch, decay.
@@ -213,12 +217,16 @@ pub struct NativeModel {
     kaoss_cc_touch_sent: Option<u8>,
     pub session_dirty: bool,
     pub last_autosave: Instant,
-    /// false = CELLS (default), true = GLOW (free-form gradient blob).
-    pub kaoss_viz_glow: bool,
+    /// Pad visualizer: rainbow cells / mono cells / free-form glow.
+    pub kaoss_viz_style: crate::kaoss_viz::KaossVizStyle,
+    /// Index into [`crate::kaoss_viz::MONO_PALETTE`].
+    pub kaoss_mono_color: usize,
     /// GLOW envelope 0..1 (Tk `_glow_amp`).
     pub kaoss_glow_amp: f32,
     /// Last finger XY for GLOW blooms (Tk `_glow_xy`).
     pub kaoss_glow_xy: (f32, f32),
+    /// Lagging concentric shells for GLOW (outer → core). Pad-normalized XY.
+    pub kaoss_glow_shells: [(f32, f32); crate::kaoss_viz::GLOW_LAG_COUNT],
     /// Accumulated viz time for wave / pulse animation.
     kaoss_viz_time: f32,
     /// Trail points `(x, y, age)` with age 1 = fresh.
@@ -262,14 +270,15 @@ impl NativeModel {
             status_line: String::new(),
             synth_params: [0.5, 0.5, 0.8, 0.05, 0.3],
             vibrato_always: 0.0,
+            vibrato_depth: 0.5,
+            vibrato_rate: 5.0,
             wave_names: waves::list_wave_names(&waves::waves_dirs_from_env()),
             wave_bank: None,
             morph_a: 0,
             morph_b: 1,
             synth_pick_a: None,
-            synth_voice_open: false,
+            synth_vib_open: false,
             synth_pick_scroll: 0,
-            synth_voice_scroll: 0,
             kaoss_picker_scroll: 0,
             log_scroll: 0,
             drum_macros: [0.60, 0.45, 0.50, 0.55],
@@ -329,9 +338,11 @@ impl NativeModel {
             kaoss_cc_touch_sent: None,
             session_dirty: false,
             last_autosave: Instant::now(),
-            kaoss_viz_glow: false,
+            kaoss_viz_style: crate::kaoss_viz::KaossVizStyle::Rainbow,
+            kaoss_mono_color: 0,
             kaoss_glow_amp: 0.0,
             kaoss_glow_xy: (0.5, 0.5),
+            kaoss_glow_shells: [(0.5, 0.5); crate::kaoss_viz::GLOW_LAG_COUNT],
             kaoss_viz_time: 0.0,
             kaoss_trail: Vec::new(),
             kaoss_ripples: Vec::new(),
@@ -425,9 +436,8 @@ impl NativeModel {
         self.kaoss_settings_open = false;
         self.kaoss_settings_scroll = 0;
         self.synth_pick_a = None;
-        self.synth_voice_open = false;
+        self.synth_vib_open = false;
         self.synth_pick_scroll = 0;
-        self.synth_voice_scroll = 0;
         if mode != UiMode::Kaoss && self.kaoss_full {
             self.kaoss_full = false;
             self.kaoss_full_exit_since = None;
@@ -484,8 +494,8 @@ impl NativeModel {
         if self.synth_pick_a.is_some() {
             return Some("morph");
         }
-        if self.synth_voice_open {
-            return Some("voices");
+        if self.synth_vib_open {
+            return Some("vib");
         }
         None
     }
@@ -544,9 +554,8 @@ impl NativeModel {
                 self.synth_pick_scroll = 0;
                 self.status_line.clear();
             }
-            Some("voices") => {
-                self.synth_voice_open = false;
-                self.synth_voice_scroll = 0;
+            Some("vib") => {
+                self.synth_vib_open = false;
                 self.status_line.clear();
             }
             _ => {
@@ -611,6 +620,26 @@ impl NativeModel {
         &self.kaoss_ripples
     }
 
+    /// Drop edit-only pad hits while PLAY view is active (rects stay laid out).
+    fn filter_hit(&self, hit: Hit) -> Hit {
+        if self.mode == UiMode::Pads && !self.pads_edit {
+            match hit {
+                Hit::PadsClearArm
+                | Hit::PadsTrig
+                | Hit::PadsModeArm
+                | Hit::PadsRec
+                | Hit::PadsVolUp
+                | Hit::PadsVolDown
+                | Hit::PadsVoice
+                | Hit::PadsChannel
+                | Hit::PadsSynth => Hit::None,
+                other => other,
+            }
+        } else {
+            hit
+        }
+    }
+
     /// 1 while GATE ARP is in the on phase — drives the LED field pulse.
     pub fn kaoss_gate_flash(&self) -> f32 {
         let prog = kaoss_ui::program(self.kaoss_program);
@@ -644,7 +673,7 @@ impl NativeModel {
         }
         if self.mode == UiMode::Kaoss {
             self.age_kaoss_viz(dt);
-            if !self.kaoss_viz_glow {
+            if self.kaoss_viz_style.is_cells() {
                 self.paint_cells();
             }
             self.tick_kaoss_full_exit();
@@ -681,7 +710,7 @@ impl NativeModel {
         self.mode_before_power = self.mode;
         self.kaoss_picker = None;
         self.kaoss_settings_open = false;
-        self.synth_voice_open = false;
+        self.synth_vib_open = false;
         self.synth_pick_a = None;
         self.power_menu_open = true;
         self.status_line = "power menu".into();
@@ -737,6 +766,8 @@ impl NativeModel {
         self.seq.bpm = self.bpm;
         self.synth_params = [s.morph, s.tone, s.level, s.attack, s.release];
         self.vibrato_always = s.vibrato_always.clamp(0.0, 1.0);
+        self.vibrato_depth = s.vibrato_depth.clamp(0.0, 2.0);
+        self.vibrato_rate = s.vibrato_rate.clamp(1.0, 9.0);
         self.morph_a = s.morph_a;
         self.morph_b = s.morph_b;
         self.kaoss_scale_index = if s.version < 2 {
@@ -760,6 +791,9 @@ impl NativeModel {
         self.song_out = s.song_out;
         self.kaoss_out = s.kaoss_out;
         self.font_style = s.font_style;
+        self.kaoss_viz_style = crate::kaoss_viz::KaossVizStyle::from_name(&s.kaoss_viz_style);
+        self.kaoss_mono_color =
+            s.kaoss_mono_color % crate::kaoss_viz::MONO_PALETTE.len();
         if s.screensaver_sec >= 0.0
             && std::env::var("MIDI_TONE_SCREENSAVER_SEC").is_err()
         {
@@ -775,6 +809,11 @@ impl NativeModel {
         outbox.synth("attack", self.synth_params[3]);
         outbox.synth("release", self.synth_params[4]);
         outbox.synth("vibrato_always", self.vibrato_always);
+        outbox.synth("vibrato_depth", self.vibrato_depth / 2.0);
+        outbox.synth(
+            "vibrato_rate",
+            ((self.vibrato_rate - 1.0) / 8.0).clamp(0.0, 1.0),
+        );
         for (i, name) in ["drive", "delay_mix", "reverb_mix"].iter().enumerate() {
             outbox.fx_bus(name, self.fx_bus[i]);
         }
@@ -808,12 +847,16 @@ impl NativeModel {
             kaoss_show_all: self.kaoss_show_all,
             kaoss_channel: self.kaoss_channel,
             vibrato_always: self.vibrato_always,
+            vibrato_depth: self.vibrato_depth,
+            vibrato_rate: self.vibrato_rate,
             mode: self.mode.label().to_ascii_lowercase(),
             pads_out: self.pads_out,
             song_out: self.song_out,
             kaoss_out: self.kaoss_out,
             font_style: self.font_style,
             screensaver_sec: self.screensaver.timeout_sec,
+            kaoss_viz_style: self.kaoss_viz_style.wire().into(),
+            kaoss_mono_color: self.kaoss_mono_color,
         }
     }
 
@@ -933,12 +976,12 @@ impl NativeModel {
                 self.layout.hit_power_menu(px, py)
             }
         } else if self.mode == UiMode::Synth
-            && (self.synth_pick_a.is_some() || self.synth_voice_open)
+            && (self.synth_pick_a.is_some() || self.synth_vib_open)
         {
             self.layout.hit_synth_overlay(
                 px,
                 py,
-                self.synth_voice_open,
+                self.synth_vib_open,
                 self.synth_pick_a.is_some(),
             )
         } else if self.mode == UiMode::Songs && self.layout.song_list.contains(px, py) {
@@ -954,6 +997,7 @@ impl NativeModel {
         } else {
             self.layout.hit(self.mode, px, py)
         };
+        let hit = self.filter_hit(hit);
 
         match hit {
             Hit::NavBack => {
@@ -1242,13 +1286,29 @@ impl NativeModel {
                 self.tap_ui(slot, id, gesture, px, py);
                 self.save_voice_as(outbox);
             }
-            Hit::SynthVibUp => {
+            Hit::SynthVib => {
                 self.tap_ui(slot, id, gesture, px, py);
-                self.nudge_vibrato(0.05, outbox);
+                self.open_vib_menu();
             }
-            Hit::SynthVibDown => {
+            Hit::SynthVibAlways => {
                 self.tap_ui(slot, id, gesture, px, py);
-                self.nudge_vibrato(-0.05, outbox);
+                self.toggle_vibrato_always(outbox);
+            }
+            Hit::SynthVibDepthUp => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.nudge_vibrato_depth(0.10, outbox);
+            }
+            Hit::SynthVibDepthDown => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.nudge_vibrato_depth(-0.10, outbox);
+            }
+            Hit::SynthVibRateUp => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.nudge_vibrato_rate(0.5, outbox);
+            }
+            Hit::SynthVibRateDown => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.nudge_vibrato_rate(-0.5, outbox);
             }
             Hit::DrumMacro(index) => {
                 self.tap_ui(slot, id, gesture, px, py);
@@ -1260,10 +1320,6 @@ impl NativeModel {
                 self.fx_target = FxEditTarget::DrumGroup;
                 self.status_line = "ALL DRUMS FX (shared kit bus)".into();
                 self.mark_dirty();
-            }
-            Hit::SynthVoices => {
-                self.tap_ui(slot, id, gesture, px, py);
-                self.open_voice_grid();
             }
             Hit::ScrollArea(kind) => {
                 self.fingers[slot] = Finger {
@@ -1286,7 +1342,7 @@ impl NativeModel {
             Hit::SynthPickDone => {
                 self.tap_ui(slot, id, gesture, px, py);
                 self.synth_pick_a = None;
-                self.synth_voice_open = false;
+                self.synth_vib_open = false;
                 self.status_line.clear();
             }
             Hit::SynthSlider(index) => {
@@ -1380,14 +1436,36 @@ impl NativeModel {
             }
             Hit::KaossViz | Hit::KaossVizCells => {
                 self.tap_ui(slot, id, gesture, px, py);
-                self.kaoss_viz_glow = false;
-                self.status_line = "PAD VIZ: CELLS".into();
+                self.kaoss_viz_style = crate::kaoss_viz::KaossVizStyle::Rainbow;
+                self.status_line = "PAD VIZ: RAINBOW".into();
+                self.mark_dirty();
+            }
+            Hit::KaossVizMono => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.kaoss_viz_style = crate::kaoss_viz::KaossVizStyle::Mono;
+                self.status_line = format!(
+                    "PAD VIZ: MONO {}",
+                    crate::kaoss_viz::mono_color_label(self.kaoss_mono_color)
+                );
                 self.mark_dirty();
             }
             Hit::KaossVizGlow => {
                 self.tap_ui(slot, id, gesture, px, py);
-                self.kaoss_viz_glow = true;
+                self.kaoss_viz_style = crate::kaoss_viz::KaossVizStyle::Glow;
                 self.status_line = "PAD VIZ: GLOW".into();
+                self.mark_dirty();
+            }
+            Hit::KaossMonoColor => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.kaoss_mono_color =
+                    crate::kaoss_viz::cycle_mono_color(self.kaoss_mono_color);
+                if self.kaoss_viz_style != crate::kaoss_viz::KaossVizStyle::Mono {
+                    self.kaoss_viz_style = crate::kaoss_viz::KaossVizStyle::Mono;
+                }
+                self.status_line = format!(
+                    "MONO COLOR → {}",
+                    crate::kaoss_viz::mono_color_label(self.kaoss_mono_color)
+                );
                 self.mark_dirty();
             }
             Hit::KaossAxes => {
@@ -1894,10 +1972,10 @@ impl NativeModel {
                 self.status_line = format!("UI font → {}", self.font_style.label());
                 self.mark_dirty();
             }
-            Hit::SettingsDrums => {
+            Hit::SettingsLog => {
                 self.tap_ui(slot, id, gesture, px, py);
-                self.push_nav_history(UiMode::Drums);
-                self.set_mode(UiMode::Drums);
+                self.push_nav_history(UiMode::Log);
+                self.set_mode(UiMode::Log);
             }
             Hit::SettingsMap => {
                 self.tap_ui(slot, id, gesture, px, py);
@@ -2453,11 +2531,46 @@ impl NativeModel {
         );
     }
 
-    fn nudge_vibrato(&mut self, delta: f32, outbox: &mut Outbox) {
-        self.vibrato_always = (self.vibrato_always + delta).clamp(0.0, 1.0);
-        outbox.synth("vibrato_always", self.vibrato_always);
-        self.status_line = format!("vib {:.2}", self.vibrato_always);
+    fn nudge_vibrato_depth(&mut self, delta_semis: f32, outbox: &mut Outbox) {
+        self.vibrato_depth = (self.vibrato_depth + delta_semis).clamp(0.0, 2.0);
+        outbox.synth("vibrato_depth", self.vibrato_depth / 2.0);
+        // Tk: bumping depth with wheel-gate off arms always-on so it is audible.
+        if self.vibrato_always < 0.01 && delta_semis > 0.0 {
+            self.vibrato_always = 1.0;
+            outbox.synth("vibrato_always", 1.0);
+        }
+        self.status_line = format!("vib depth {:.2} st", self.vibrato_depth);
         self.mark_dirty();
+    }
+
+    fn nudge_vibrato_rate(&mut self, delta_hz: f32, outbox: &mut Outbox) {
+        self.vibrato_rate = (self.vibrato_rate + delta_hz).clamp(1.0, 9.0);
+        outbox.synth(
+            "vibrato_rate",
+            ((self.vibrato_rate - 1.0) / 8.0).clamp(0.0, 1.0),
+        );
+        self.status_line = format!("vib rate {:.1} Hz", self.vibrato_rate);
+        self.mark_dirty();
+    }
+
+    fn toggle_vibrato_always(&mut self, outbox: &mut Outbox) {
+        self.vibrato_always = if self.vibrato_always > 0.01 { 0.0 } else { 1.0 };
+        outbox.synth("vibrato_always", self.vibrato_always);
+        self.status_line = if self.vibrato_always > 0.01 {
+            "Vibrato ON (screen control)".into()
+        } else {
+            "Vibrato follows mod wheel".into()
+        };
+        self.mark_dirty();
+    }
+
+    fn push_vibrato_params(&self, outbox: &mut Outbox) {
+        outbox.synth("vibrato_always", self.vibrato_always);
+        outbox.synth("vibrato_depth", self.vibrato_depth / 2.0);
+        outbox.synth(
+            "vibrato_rate",
+            ((self.vibrato_rate - 1.0) / 8.0).clamp(0.0, 1.0),
+        );
     }
 
     fn tap_ui(&mut self, slot: usize, id: i32, gesture: u32, px: i32, py: i32) {
@@ -3126,7 +3239,7 @@ impl NativeModel {
     }
 
     fn open_synth_pick(&mut self, pick_a: bool) {
-        self.synth_voice_open = false;
+        self.synth_vib_open = false;
         self.synth_pick_a = Some(pick_a);
         self.synth_pick_scroll = 0;
         self.status_line = if pick_a {
@@ -3136,20 +3249,25 @@ impl NativeModel {
         };
     }
 
-    fn open_voice_grid(&mut self) {
+    fn open_vib_menu(&mut self) {
         self.synth_pick_a = None;
-        self.synth_voice_open = true;
-        self.synth_voice_scroll = 0;
+        self.synth_vib_open = true;
         self.status_line = format!(
-            "VOICES — tap · drag to scroll · {} loaded",
-            self.wave_names.len()
+            "VIB {:.2} st · {:.1} Hz · {}",
+            self.vibrato_depth,
+            self.vibrato_rate,
+            if self.vibrato_always > 0.01 {
+                "ON"
+            } else {
+                "WHEEL"
+            }
         );
+        self.mark_dirty();
     }
 
     fn scroll_offset(&self, kind: ScrollKind) -> i32 {
         match kind {
             ScrollKind::SynthMorphPick => self.synth_pick_scroll,
-            ScrollKind::SynthVoiceGrid => self.synth_voice_scroll,
             ScrollKind::KaossPicker => self.kaoss_picker_scroll,
             ScrollKind::KaossSettings => self.kaoss_settings_scroll,
             ScrollKind::SongList => self.song_scroll as i32,
@@ -3164,12 +3282,6 @@ impl NativeModel {
                     .layout
                     .synth_voice_grid(self.wave_names.len());
                 self.synth_pick_scroll = grid.clamp_scroll(value);
-            }
-            ScrollKind::SynthVoiceGrid => {
-                let grid = self
-                    .layout
-                    .synth_voice_grid(self.wave_names.len());
-                self.synth_voice_scroll = grid.clamp_scroll(value);
             }
             ScrollKind::KaossPicker => {
                 if let Some(kind) = self.kaoss_picker {
@@ -3202,7 +3314,7 @@ impl NativeModel {
         scroll_at_start: i32,
     ) {
         match kind {
-            ScrollKind::SynthMorphPick | ScrollKind::SynthVoiceGrid | ScrollKind::KaossPicker | ScrollKind::KaossSettings => {
+            ScrollKind::SynthMorphPick | ScrollKind::KaossPicker | ScrollKind::KaossSettings => {
                 let delta = start_py - py;
                 self.set_scroll_offset(kind, scroll_at_start + delta);
             }
@@ -3247,14 +3359,6 @@ impl NativeModel {
                     self.assign_morph_endpoint(index, outbox);
                 }
             }
-            ScrollKind::SynthVoiceGrid => {
-                let grid = self
-                    .layout
-                    .synth_voice_grid(self.wave_names.len());
-                if let Some(index) = grid.index_at(px, py, self.synth_voice_scroll) {
-                    self.select_voice_index(index, true, outbox);
-                }
-            }
             ScrollKind::KaossPicker => {
                 if let Some(picker) = self.kaoss_picker {
                     let n = crate::kaoss_ui::picker_count(picker, self.kaoss_show_all);
@@ -3279,22 +3383,6 @@ impl NativeModel {
             ScrollKind::Log => {}
             ScrollKind::KaossSettings => {}
         }
-    }
-
-    fn select_voice_index(&mut self, index: usize, close_grid: bool, outbox: &mut Outbox) {
-        if index >= self.wave_names.len() {
-            return;
-        }
-        self.morph_a = index as u16;
-        self.synth_params[0] = 0.0;
-        outbox.morph_pair(self.morph_a, self.morph_b);
-        outbox.synth("morph", 0.0);
-        self.sync_wave_bank();
-        self.status_line = format!("Voice → {}", self.wave_label(index as u16));
-        if close_grid {
-            self.synth_voice_open = false;
-        }
-        self.mark_dirty();
     }
 
     fn in_kaoss_full_exit_zone(py: i32) -> bool {
@@ -3507,6 +3595,8 @@ impl NativeModel {
     fn factory_reset_synth(&mut self, outbox: &mut Outbox) {
         self.synth_params = [0.5, 0.5, 0.8, 0.05, 0.3];
         self.vibrato_always = 0.0;
+        self.vibrato_depth = 0.5;
+        self.vibrato_rate = 5.0;
         self.morph_a = 0;
         self.morph_b = 1;
         outbox.morph_pair(self.morph_a, self.morph_b);
@@ -3515,7 +3605,7 @@ impl NativeModel {
         outbox.synth("level", self.synth_params[2]);
         outbox.synth("attack", self.synth_params[3]);
         outbox.synth("release", self.synth_params[4]);
-        outbox.synth("vibrato_always", 0.0);
+        self.push_vibrato_params(outbox);
         self.sync_wave_bank();
         self.status_line = "synth factory defaults".into();
         self.mark_dirty();
@@ -3707,19 +3797,36 @@ impl NativeModel {
         let hold = self.kaoss_hold && self.kaoss_touching;
         let gate_flash = self.kaoss_gate_flash();
         let hue_shift = crate::kaoss_viz::program_hue(kaoss_ui::program(self.kaoss_program).id);
+        let (mono_h, mono_s) = crate::kaoss_viz::mono_color_hs(self.kaoss_mono_color);
+        let mono = self.kaoss_viz_style == crate::kaoss_viz::KaossVizStyle::Mono;
         for row in 0..LED_ROWS {
             for col in 0..LED_COLS {
-                self.cells[row][col] = crate::kaoss_viz::pad_led_rgb(
-                    col,
-                    row,
-                    t,
-                    finger,
-                    &trail,
-                    &ripples,
-                    hold,
-                    gate_flash,
-                    hue_shift,
-                );
+                self.cells[row][col] = if mono {
+                    crate::kaoss_viz::pad_led_mono(
+                        col,
+                        row,
+                        t,
+                        finger,
+                        &trail,
+                        &ripples,
+                        hold,
+                        gate_flash,
+                        mono_h,
+                        mono_s,
+                    )
+                } else {
+                    crate::kaoss_viz::pad_led_rgb(
+                        col,
+                        row,
+                        t,
+                        finger,
+                        &trail,
+                        &ripples,
+                        hold,
+                        gate_flash,
+                        hue_shift,
+                    )
+                };
             }
         }
     }
@@ -3751,9 +3858,10 @@ impl NativeModel {
         self.kaoss_trail.retain(|p| p.2 > 0.0);
         // Expanding touch rings removed — they punched a black hole into the pad.
         self.kaoss_ripples.clear();
-        if self.kaoss_viz_glow {
+        if self.kaoss_viz_style.is_glow() {
             let finger = self.kaoss_finger();
             let target = if finger.is_some() { 1.0 } else { 0.0 };
+            let was_idle = self.kaoss_glow_amp < 0.05;
             let mut glow_dt = dt;
             if target > self.kaoss_glow_amp && glow_dt <= 0.0 {
                 glow_dt = 0.02;
@@ -3762,6 +3870,31 @@ impl NativeModel {
                 crate::kaoss_viz::glow_step(self.kaoss_glow_amp, target, glow_dt);
             if let Some((x, y)) = finger {
                 self.kaoss_glow_xy = (x, y);
+                // On fresh touch, park every shell under the finger so we don't
+                // smear leftover lag from the last gesture.
+                if was_idle {
+                    self.kaoss_glow_shells = [(x, y); crate::kaoss_viz::GLOW_LAG_COUNT];
+                } else {
+                    for (i, shell) in self.kaoss_glow_shells.iter_mut().enumerate() {
+                        *shell = crate::kaoss_viz::glow_lag_step(
+                            *shell,
+                            (x, y),
+                            glow_dt.max(dt),
+                            crate::kaoss_viz::glow_lag_tau(i),
+                        );
+                    }
+                }
+            } else {
+                // Finger up — shells keep easing toward the last point while amp fades.
+                let target_xy = self.kaoss_glow_xy;
+                for (i, shell) in self.kaoss_glow_shells.iter_mut().enumerate() {
+                    *shell = crate::kaoss_viz::glow_lag_step(
+                        *shell,
+                        target_xy,
+                        glow_dt.max(dt),
+                        crate::kaoss_viz::glow_lag_tau(i),
+                    );
+                }
             }
         }
     }

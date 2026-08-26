@@ -12,15 +12,15 @@ pub const HUD_H: i32 = 52;
 /// Jam-mode tabs on the right of the top chrome (Tk order).
 pub const JAM_MODES: [UiMode; 4] = [UiMode::Synth, UiMode::Seq, UiMode::Pads, UiMode::Kaoss];
 
-/// Home grid entries — Tk `HOME_TILES` (4×2), Map lives under Settings.
+/// Home grid entries (4×2). DRUM KIT sits beside SYNTH; LOG / MAP live under Settings.
 pub const HOME_TILES: [(UiMode, &'static str, u32); 8] = [
-    (UiMode::Synth, "SYNTHESIZER", 0x458588),
-    (UiMode::Seq, "SEQUENCER", 0xb16286),
+    (UiMode::Synth, "SYNTH", 0x458588),
+    (UiMode::Drums, "DRUMS", 0x98971a),
+    (UiMode::Seq, "SEQ", 0xb16286),
     (UiMode::Pads, "PADS", 0xd79921),
     (UiMode::Kaoss, "KAOSS", 0xfe8019),
     (UiMode::Songs, "SONGS", 0x689d6a),
     (UiMode::Presets, "PRESETS", 0x83a598),
-    (UiMode::Log, "LOG", 0x504945),
     (UiMode::Settings, "SETTINGS", 0x665c54),
 ];
 
@@ -56,11 +56,14 @@ pub enum Hit {
     SynthWaveA,
     SynthWaveB,
     SynthSwap,
-    SynthVibUp,
-    SynthVibDown,
+    SynthVib,
+    SynthVibAlways,
+    SynthVibDepthUp,
+    SynthVibDepthDown,
+    SynthVibRateUp,
+    SynthVibRateDown,
     SynthPickDone,
     SynthSaveAs,
-    SynthVoices,
     ScrollArea(crate::scroll::ScrollKind),
     DrumMacro(usize),
     KitAllDrums,
@@ -85,7 +88,9 @@ pub enum Hit {
     KaossAxes,
     KaossGridLines,
     KaossVizCells,
+    KaossVizMono,
     KaossVizGlow,
+    KaossMonoColor,
     KaossOutPick(usize),
     KaossChannelPick(u8),
     KaossGridWidthUp,
@@ -129,7 +134,7 @@ pub enum Hit {
     SettingsWifi,
     SettingsUpdate,
     SettingsFont,
-    SettingsDrums,
+    SettingsLog,
     SettingsMap,
     LogClear,
     LogAllOff,
@@ -189,14 +194,12 @@ pub struct Layout {
     pub synth_wave_a: Rect,
     pub synth_wave_b: Rect,
     pub synth_swap: Rect,
-    pub synth_vib_down: Rect,
-    pub synth_vib_up: Rect,
+    pub synth_vib: Rect,
     pub synth_pick_done: Rect,
     pub synth_pick_prev: Rect,
     pub synth_pick_next: Rect,
     pub synth_pick_grid: Rect,
     pub synth_save_as: Rect,
-    pub synth_voices: Rect,
     pub synth_pick_save_as: Rect,
     pub map_thru_on: Rect,
     pub map_thru_off: Rect,
@@ -216,7 +219,7 @@ pub struct Layout {
     pub kaoss_viz: Rect,
     pub kaoss_out: Rect,
     pub kaoss_settings_btn: Rect,
-    pub settings_drum_kit: Rect,
+    pub settings_log: Rect,
     pub settings_map: Rect,
     pub seq_rec: Rect,
     pub seq_play: Rect,
@@ -382,19 +385,19 @@ impl Layout {
             kaoss_gate: Rect {
                 x: 8,
                 y: HUD_H + content_h - 48,
-                w: 120,
+                w: 140,
                 h: 40,
             },
             kaoss_bpm_down: Rect {
-                x: 136,
+                x: 156,
                 y: HUD_H + content_h - 48,
-                w: 72,
+                w: 140,
                 h: 40,
             },
             kaoss_bpm_up: Rect {
-                x: 224,
+                x: 304,
                 y: HUD_H + content_h - 48,
-                w: 90,
+                w: 140,
                 h: 40,
             },
             kaoss_show_all: Rect {
@@ -427,16 +430,16 @@ impl Layout {
                 w: 0,
                 h: 0,
             },
-            kaoss_settings_btn: Rect {
-                x: 692,
+            kaoss_full: Rect {
+                x: 452,
                 y: HUD_H + content_h - 48,
-                w: 100,
+                w: 160,
                 h: 40,
             },
-            kaoss_full: Rect {
-                x: 584,
+            kaoss_settings_btn: Rect {
+                x: 620,
                 y: HUD_H + content_h - 48,
-                w: 100,
+                w: 172,
                 h: 40,
             },
             phrase_grid: Rect {
@@ -457,6 +460,60 @@ impl Layout {
                 w: 120,
                 h: 48,
             },
+            pads_clear: Rect {
+                x: 16,
+                y: HUD_H + content_h - 56,
+                w: 72,
+                h: 48,
+            },
+            pads_trig: Rect {
+                x: 92,
+                y: HUD_H + content_h - 56,
+                w: 72,
+                h: 48,
+            },
+            pads_mode: Rect {
+                x: 168,
+                y: HUD_H + content_h - 56,
+                w: 64,
+                h: 48,
+            },
+            pads_rec: Rect {
+                x: 236,
+                y: HUD_H + content_h - 56,
+                w: 64,
+                h: 48,
+            },
+            pads_voice: Rect {
+                x: 304,
+                y: HUD_H + content_h - 56,
+                w: 72,
+                h: 48,
+            },
+            pads_channel: Rect {
+                x: 380,
+                y: HUD_H + content_h - 56,
+                w: 64,
+                h: 48,
+            },
+            pads_synth: Rect {
+                x: 448,
+                y: HUD_H + content_h - 56,
+                w: 64,
+                h: 48,
+            },
+            pads_vol_down: Rect {
+                x: 392,
+                y: HUD_H + 8,
+                w: 56,
+                h: 40,
+            },
+            pads_vol_up: Rect {
+                x: 452,
+                y: HUD_H + 8,
+                w: 56,
+                h: 40,
+            },
             pads_play: Rect {
                 x: 520,
                 y: HUD_H + 8,
@@ -468,60 +525,6 @@ impl Layout {
                 y: HUD_H + 8,
                 w: 136,
                 h: 40,
-            },
-            pads_clear: Rect {
-                x: 16,
-                y: HUD_H + content_h - 56,
-                w: 0,
-                h: 48,
-            },
-            pads_trig: Rect {
-                x: 112,
-                y: HUD_H + content_h - 56,
-                w: 0,
-                h: 48,
-            },
-            pads_mode: Rect {
-                x: 232,
-                y: HUD_H + content_h - 56,
-                w: 0,
-                h: 48,
-            },
-            pads_rec: Rect {
-                x: 340,
-                y: HUD_H + content_h - 56,
-                w: 0,
-                h: 48,
-            },
-            pads_vol_down: Rect {
-                x: 448,
-                y: HUD_H + content_h - 56,
-                w: 0,
-                h: 48,
-            },
-            pads_vol_up: Rect {
-                x: 536,
-                y: HUD_H + content_h - 56,
-                w: 0,
-                h: 48,
-            },
-            pads_voice: Rect {
-                x: 0,
-                y: HUD_H + content_h - 56,
-                w: 0,
-                h: 48,
-            },
-            pads_channel: Rect {
-                x: 0,
-                y: HUD_H + content_h - 56,
-                w: 0,
-                h: 48,
-            },
-            pads_synth: Rect {
-                x: 0,
-                y: HUD_H + content_h - 56,
-                w: 0,
-                h: 48,
             },
             synth_sliders: Rect {
                 x: 24,
@@ -589,28 +592,16 @@ impl Layout {
                 w: 72,
                 h: 48,
             },
-            synth_voices: Rect {
+            synth_vib: Rect {
                 x: 472,
                 y: HUD_H + 12,
-                w: 96,
+                w: 112,
                 h: 48,
             },
             synth_save_as: Rect {
-                x: 576,
+                x: 592,
                 y: HUD_H + 12,
-                w: 108,
-                h: 48,
-            },
-            synth_vib_down: Rect {
-                x: 692,
-                y: HUD_H + 12,
-                w: 52,
-                h: 48,
-            },
-            synth_vib_up: Rect {
-                x: 748,
-                y: HUD_H + 12,
-                w: 44,
+                w: 192,
                 h: 48,
             },
             synth_pick_grid: Rect {
@@ -890,7 +881,7 @@ impl Layout {
                 w: 240,
                 h: 56,
             },
-            settings_drum_kit: Rect {
+            settings_log: Rect {
                 x: 24,
                 y: HUD_H + 328,
                 w: 240,
@@ -1062,16 +1053,16 @@ impl Layout {
 
     pub fn nav_back(&self) -> Rect {
         Rect {
-            x: 58,
+            x: 96,
             y: 6,
-            w: 56,
+            w: 44,
             h: self.nav.h - 12,
         }
     }
 
     pub fn nav_home(&self) -> Rect {
         Rect {
-            x: 122,
+            x: 146,
             y: 6,
             w: 72,
             h: self.nav.h - 12,
@@ -1080,7 +1071,7 @@ impl Layout {
 
     pub fn nav_power(&self) -> Rect {
         Rect {
-            x: 202,
+            x: 224,
             y: 6,
             w: 72,
             h: self.nav.h - 12,
@@ -1089,13 +1080,14 @@ impl Layout {
 
     pub fn nav_jam(&self, index: usize) -> Rect {
         let n = JAM_MODES.len() as i32;
-        let w = 92;
-        let total = n * w;
+        let w = 84;
+        let gap = 4;
+        let total = n * w + (n - 1) * gap;
         let x0 = self.nav.w - total - 8;
         Rect {
-            x: x0 + (index as i32) * w + 2,
+            x: x0 + (index as i32) * (w + gap),
             y: self.nav.y + 6,
-            w: w - 4,
+            w,
             h: self.nav.h - 12,
         }
     }
@@ -1117,7 +1109,7 @@ impl Layout {
 
     /// Scrollable KAOSS settings panel (Tk ⚙ overlay).
     pub fn kaoss_settings_content_h(&self) -> i32 {
-        560
+        620
     }
 
     pub fn kaoss_settings_max_scroll(&self) -> i32 {
@@ -1151,6 +1143,18 @@ impl Layout {
         }
     }
 
+    pub fn kaoss_settings_third_row(&self, y_off: i32, scroll: i32, index: usize, h: i32) -> Rect {
+        let full = self.kaoss_settings_row(y_off, scroll, h);
+        let third = (full.w - 16) / 3;
+        let i = (index % 3) as i32;
+        Rect {
+            x: full.x + i * (third + 8),
+            y: full.y,
+            w: third,
+            h: full.h,
+        }
+    }
+
     pub fn kaoss_settings_channel(&self, ch: usize, y_off: i32, scroll: i32) -> Rect {
         let cols = 4i32;
         let cell_w = (self.content.w - 16) / cols;
@@ -1178,13 +1182,19 @@ impl Layout {
         if self.kaoss_settings_half_row(164, scroll, false, 48).contains(px, py) {
             return Hit::KaossGridLines;
         }
-        if self.kaoss_settings_half_row(232, scroll, true, 48).contains(px, py) {
+        if self.kaoss_settings_third_row(232, scroll, 0, 48).contains(px, py) {
             return Hit::KaossVizCells;
         }
-        if self.kaoss_settings_half_row(232, scroll, false, 48).contains(px, py) {
+        if self.kaoss_settings_third_row(232, scroll, 1, 48).contains(px, py) {
+            return Hit::KaossVizMono;
+        }
+        if self.kaoss_settings_third_row(232, scroll, 2, 48).contains(px, py) {
             return Hit::KaossVizGlow;
         }
-        let grid_row = self.kaoss_settings_row(300, scroll, 48);
+        if self.kaoss_settings_row(288, scroll, 48).contains(px, py) {
+            return Hit::KaossMonoColor;
+        }
+        let grid_row = self.kaoss_settings_row(356, scroll, 48);
         let third = (grid_row.w - 16) / 3;
         let minus = Rect {
             x: grid_row.x,
@@ -1204,7 +1214,7 @@ impl Layout {
         if plus.contains(px, py) {
             return Hit::KaossGridWidthUp;
         }
-        let out_y = 368;
+        let out_y = 424;
         for i in 0..3 {
             let cell_w = (self.content.w - 16) / 3;
             let r = Rect {
@@ -1218,7 +1228,7 @@ impl Layout {
             }
         }
         for ch in 0..16 {
-            if self.kaoss_settings_channel(ch, 440, scroll).contains(px, py) {
+            if self.kaoss_settings_channel(ch, 496, scroll).contains(px, py) {
                 return Hit::KaossChannelPick(ch as u8);
             }
         }
@@ -1556,14 +1566,8 @@ impl Layout {
         if self.synth_save_as.contains(px, py) {
             return Hit::SynthSaveAs;
         }
-        if self.synth_voices.contains(px, py) {
-            return Hit::SynthVoices;
-        }
-        if self.synth_vib_down.contains(px, py) {
-            return Hit::SynthVibDown;
-        }
-        if self.synth_vib_up.contains(px, py) {
-            return Hit::SynthVibUp;
+        if self.synth_vib.contains(px, py) {
+            return Hit::SynthVib;
         }
         for index in 0..5 {
             if self.synth_slider(index).contains(px, py) {
@@ -1606,17 +1610,17 @@ impl Layout {
         &self,
         px: i32,
         py: i32,
-        voice_open: bool,
+        vib_open: bool,
         morph_open: bool,
     ) -> Hit {
+        if vib_open {
+            return self.hit_synth_vib(px, py);
+        }
         if self.synth_pick_done.contains(px, py) {
             return Hit::SynthPickDone;
         }
         if self.synth_pick_save_as.contains(px, py) {
             return Hit::SynthSaveAs;
-        }
-        if voice_open && self.synth_pick_grid.contains(px, py) {
-            return Hit::ScrollArea(crate::scroll::ScrollKind::SynthVoiceGrid);
         }
         if morph_open && self.synth_pick_grid.contains(px, py) {
             return Hit::ScrollArea(crate::scroll::ScrollKind::SynthMorphPick);
@@ -1624,8 +1628,93 @@ impl Layout {
         Hit::None
     }
 
-    pub fn hit_synth_picker(&self, px: i32, py: i32, voice_open: bool, morph_open: bool) -> Hit {
-        self.hit_synth_overlay(px, py, voice_open, morph_open)
+    pub fn hit_synth_picker(&self, px: i32, py: i32, vib_open: bool, morph_open: bool) -> Hit {
+        self.hit_synth_overlay(px, py, vib_open, morph_open)
+    }
+
+    /// Vibrato menu: WHEEL/ON, DEPTH −/+, RATE −/+, DONE.
+    pub fn synth_vib_always(&self) -> Rect {
+        Rect {
+            x: self.content.x + 16,
+            y: self.content.y + 16,
+            w: self.content.w - 32,
+            h: 72,
+        }
+    }
+
+    fn synth_vib_pair_row(&self, y_off: i32) -> (Rect, Rect, Rect) {
+        let full = Rect {
+            x: self.content.x + 16,
+            y: self.content.y + y_off,
+            w: self.content.w - 32,
+            h: 72,
+        };
+        let third = (full.w - 16) / 3;
+        let left = Rect {
+            x: full.x,
+            y: full.y,
+            w: third,
+            h: full.h,
+        };
+        let mid = Rect {
+            x: full.x + third + 8,
+            y: full.y,
+            w: third,
+            h: full.h,
+        };
+        let right = Rect {
+            x: full.x + 2 * (third + 8),
+            y: full.y,
+            w: third,
+            h: full.h,
+        };
+        (left, mid, right)
+    }
+
+    pub fn synth_vib_depth_down(&self) -> Rect {
+        self.synth_vib_pair_row(108).0
+    }
+
+    pub fn synth_vib_depth_label(&self) -> Rect {
+        self.synth_vib_pair_row(108).1
+    }
+
+    pub fn synth_vib_depth_up(&self) -> Rect {
+        self.synth_vib_pair_row(108).2
+    }
+
+    pub fn synth_vib_rate_down(&self) -> Rect {
+        self.synth_vib_pair_row(200).0
+    }
+
+    pub fn synth_vib_rate_label(&self) -> Rect {
+        self.synth_vib_pair_row(200).1
+    }
+
+    pub fn synth_vib_rate_up(&self) -> Rect {
+        self.synth_vib_pair_row(200).2
+    }
+
+    pub fn hit_synth_vib(&self, px: i32, py: i32) -> Hit {
+        if self.synth_vib_always().contains(px, py) {
+            return Hit::SynthVibAlways;
+        }
+        if self.synth_vib_depth_down().contains(px, py) {
+            return Hit::SynthVibDepthDown;
+        }
+        if self.synth_vib_depth_up().contains(px, py) {
+            return Hit::SynthVibDepthUp;
+        }
+        if self.synth_vib_rate_down().contains(px, py) {
+            return Hit::SynthVibRateDown;
+        }
+        if self.synth_vib_rate_up().contains(px, py) {
+            return Hit::SynthVibRateUp;
+        }
+        if self.synth_pick_done.contains(px, py) {
+            return Hit::SynthPickDone;
+        }
+        Hit::None
     }
 
     pub fn synth_voice_grid(&self, item_count: usize) -> crate::scroll::GridScroll {
@@ -1796,8 +1885,8 @@ impl Layout {
         if self.settings_fx_target.contains(px, py) {
             return Hit::SettingsFxTarget;
         }
-        if self.settings_drum_kit.contains(px, py) {
-            return Hit::SettingsDrums;
+        if self.settings_log.contains(px, py) {
+            return Hit::SettingsLog;
         }
         if self.settings_map.contains(px, py) {
             return Hit::SettingsMap;

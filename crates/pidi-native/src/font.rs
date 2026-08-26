@@ -27,8 +27,8 @@ impl FontStyle {
 
     pub fn label(self) -> &'static str {
         match self {
-            Self::Retro => "FONT: RETRO",
-            Self::Smooth => "FONT: SMOOTH",
+            Self::Retro => "RETRO",
+            Self::Smooth => "SMOOTH",
         }
     }
 
@@ -39,12 +39,9 @@ impl FontStyle {
         }
     }
 
-    /// Default `text()` scale for this style (retro = chunky 2× bitmap).
+    /// Default `text()` scale for this style (same tier for both: ~14px).
     pub fn default_text_scale(self) -> i32 {
-        match self {
-            Self::Retro => 2,
-            Self::Smooth => 1,
-        }
+        2
     }
 
     pub fn uses_linear_filter(self) -> bool {

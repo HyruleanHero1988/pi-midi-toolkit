@@ -171,31 +171,31 @@ pub const KAOSS_PROGRAMS: &[KaossProgram] = &[
 pub const GATE_PATTERNS: &[GatePattern] = &[
     GatePattern {
         id: "off",
-        label: "GATE OFF",
+        label: "OFF",
         beats: 0.0,
         duty: 0.0,
     },
     GatePattern {
         id: "4th",
-        label: "GATE 1/4",
+        label: "1/4",
         beats: 1.0,
         duty: 0.55,
     },
     GatePattern {
         id: "8th",
-        label: "GATE 1/8",
+        label: "1/8",
         beats: 0.5,
         duty: 0.55,
     },
     GatePattern {
         id: "16th",
-        label: "GATE 1/16",
+        label: "1/16",
         beats: 0.25,
         duty: 0.50,
     },
     GatePattern {
         id: "trip",
-        label: "GATE TRIP",
+        label: "TRIP",
         beats: 1.0 / 3.0,
         duty: 0.50,
     },
@@ -356,7 +356,7 @@ mod tests {
     fn gate_set_includes_quarter() {
         assert_eq!(GATE_PATTERNS.len(), 5);
         assert_eq!(gate(1).id, "4th");
-        assert_eq!(gate(1).label, "GATE 1/4");
+        assert_eq!(gate(1).label, "1/4");
         assert_eq!(gate(1).beats, 1.0);
         assert_eq!(migrate_legacy_gate_index(1), 2); // old 1/8
         assert_eq!(migrate_legacy_gate_index(3), 4); // old trip

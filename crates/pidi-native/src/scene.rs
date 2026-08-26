@@ -171,59 +171,86 @@ impl Scene {
         }
     }
 
-    fn text_scaled_smooth(&mut self, x: &mut i32, y: i32, s: &str, color: u32, scale: i32) {
+    fn text_scaled_smooth(&mut self, x: &mut i32, y: i32, text: &str, color: u32, scale: i32) {
         let Some(atlas) = font::smooth_atlas() else {
             self.font_style = FontStyle::Retro;
-            self.text_scaled_retro(x, y, s, color, scale.max(2));
+            self.text_scaled_retro(x, y, text, color, scale.max(2));
             return;
         };
-        let scale_f = scale as f32;
-        let baseline = y as f32 + atlas.line_height * 0.78 * scale_f;
-        for ch in s.chars() {
+        // `y` is the top of the line box (same contract as retro). Baseline sits
+        // ascent below that; glyph tops use fontdue ymin (bottom vs baseline).
+        let ds = atlas.draw_scale(scale);
+        // Snap baseline once so every glyph shares the same pixel row.
+        let baseline = (y as f32 + atlas.ascent * ds).round();
+        let mut pen_x = *x as f32;
+        for ch in text.chars() {
             let g = atlas.glyph(ch);
-            let w = g.width * scale_f;
-            let h = g.height * scale_f;
+            if g.width < 0.5 || g.height < 0.5 {
+                pen_x += g.advance * ds;
+                continue;
+            }
+            // Snap the baseline edge (ymin) first, then height — capitals with
+            // ymin≈0 then share one bottom pixel row instead of drifting ±1.
+            let bottom = (baseline - g.ymin * ds).round();
+            let gh = (g.height * ds).round().max(1.0);
+            let gy = bottom - gh;
+            let gx = (pen_x + g.xmin * ds).round();
+            let gw = (g.width * ds).round().max(1.0);
             self.glyphs.push(GlyphQuad {
-                x: *x as f32 + g.x_offset * scale_f,
-                y: baseline + g.y_offset * scale_f,
-                w: w.max(1.0),
-                h: h.max(1.0),
+                x: gx,
+                y: gy,
+                w: gw,
+                h: gh,
                 u0: g.u0,
                 v0: g.v0,
                 u1: g.u1,
                 v1: g.v1,
                 color,
             });
-            *x += (g.advance * scale_f).round() as i32;
+            pen_x += g.advance * ds;
         }
+        *x = pen_x.round() as i32;
     }
 
     pub fn text_centered(&mut self, rect: Rect, s: &str, color: u32, scale: i32) {
         let style = self.font_style.resolved();
-        let scale = scale.max(1);
-        let (w, h) = match style {
-            FontStyle::Retro => (
-                (s.chars().count() as i32) * GLYPH_STRIDE * scale,
-                GLYPH_H * scale,
-            ),
-            FontStyle::Smooth => match font::smooth_atlas() {
-                Some(atlas) => {
-                    let width = s
-                        .chars()
-                        .map(|ch| (atlas.glyph(ch).advance * scale as f32).round() as i32)
-                        .sum();
-                    let height = (atlas.line_height * scale as f32).round() as i32;
-                    (width, height)
-                }
-                None => (
-                    (s.chars().count() as i32) * GLYPH_STRIDE * scale,
+        let max_w = (rect.w - 4).max(1);
+        let max_h = (rect.h - 4).max(1);
+        let measure = |text: &str, scale: i32| -> (i32, i32) {
+            match style {
+                FontStyle::Retro => (
+                    (text.chars().count() as i32) * GLYPH_STRIDE * scale,
                     GLYPH_H * scale,
                 ),
-            },
+                FontStyle::Smooth => match font::smooth_atlas() {
+                    Some(atlas) => atlas.measure(text, scale),
+                    None => (
+                        (text.chars().count() as i32) * GLYPH_STRIDE * scale,
+                        GLYPH_H * scale,
+                    ),
+                },
+            }
         };
+
+        let mut scale = scale.max(1);
+        let mut draw = s.to_string();
+        let (mut w, mut h) = measure(&draw, scale);
+        while scale > 1 && (w > max_w || h > max_h) {
+            scale -= 1;
+            let m = measure(&draw, scale);
+            w = m.0;
+            h = m.1;
+        }
+        while w > max_w && draw.chars().count() > 1 {
+            draw.pop();
+            let m = measure(&draw, scale);
+            w = m.0;
+            h = m.1;
+        }
+
         let x = rect.x + (rect.w - w).max(0) / 2;
         let y = rect.y + (rect.h - h).max(0) / 2;
-        self.text_scaled(x, y, s, color, scale);
+        self.text_scaled(x, y, &draw, color, scale);
     }
 }
 
@@ -349,32 +376,43 @@ fn draw_chrome(scene: &mut Scene, model: &NativeModel) {
         let cell = layout.nav_jam(i);
         let active = *mode == model.mode;
         scene.button(cell, if active { 0x458588 } else { 0x3c3836 });
-        scene.text_centered(cell, mode.title(), 0xfbf1c7, 2);
+        scene.text_centered(cell, mode.label(), 0xfbf1c7, 2);
     }
 
     let status = chrome_status(model);
     if !status.is_empty() {
-        scene.text_scaled(286, 18, &status, 0xfe8019, 2);
+        let status_x = layout.nav_power().x + layout.nav_power().w + 10;
+        let jam0 = layout.nav_jam(0).x;
+        let max_w = (jam0 - status_x - 8).max(24);
+        let slot = Rect {
+            x: status_x,
+            y: 10,
+            w: max_w,
+            h: 32,
+        };
+        scene.text_centered(slot, &status, 0xfe8019, 2);
     }
 }
 
 fn chrome_status(model: &NativeModel) -> String {
-    if !model.status_line.is_empty() {
-        return model.status_line.clone();
-    }
+    // Prefer a short live readout — long status_line belongs in the content area.
     match model.mode {
         UiMode::Kaoss => {
-            let gate = kaoss_ui::gate(model.kaoss_gate).label;
-            format!(
-                "{:.0} BPM  {}  {}",
-                model.bpm,
-                gate,
-                model.kaoss_out.label(),
-            )
+            if model.kaoss_settings_open {
+                return "SETTINGS".into();
+            }
+            format!("{:.0} BPM {}", model.bpm, kaoss_ui::gate(model.kaoss_gate).label)
         }
-        UiMode::Seq => model.seq.status.clone(),
-        UiMode::Presets => format!("slot {} — tap LOAD", model.preset_selected + 1),
-        _ => String::new(),
+        UiMode::Seq => format!("{:.0} BPM", model.bpm),
+        UiMode::Presets => format!("SLOT {}", model.preset_selected + 1),
+        UiMode::Synth if model.synth_vib_open => "VIB".into(),
+        _ => {
+            if !model.status_line.is_empty() && model.status_line.chars().count() <= 12 {
+                model.status_line.clone()
+            } else {
+                String::new()
+            }
+        }
     }
 }
 
@@ -430,7 +468,7 @@ fn draw_kaoss(scene: &mut Scene, model: &NativeModel) {
         }
     } else {
         scene.fill_rect(layout.kaoss, 0x08040a);
-        if model.kaoss_viz_glow {
+        if model.kaoss_viz_style.is_glow() {
             draw_kaoss_glow(scene, layout.kaoss, model);
         } else {
             for row in 0..LED_ROWS {
@@ -509,7 +547,7 @@ fn draw_kaoss_settings(scene: &mut Scene, model: &NativeModel) {
     let c = layout.content;
     scene.fill_rect(c, 0x111111);
     scene.text(c.x + 8, c.y + 8 - scroll, "KAOSS settings", 0xfbf1c7);
-    scene.text(c.x + c.w - 120, c.y + 8 - scroll, "drag to scroll", 0xa89984);
+    scene.text(c.x + c.w - 80, c.y + 8 - scroll, "SCROLL", 0xa89984);
 
     let wipe = layout.kaoss_settings_row(52, scroll, 48);
     scene.button(wipe, 0x9d0006);
@@ -523,9 +561,9 @@ fn draw_kaoss_settings(scene: &mut Scene, model: &NativeModel) {
     scene.text_centered(
         show_all,
         if model.kaoss_show_all {
-            "SHOW ALL: ON"
+            "ALL SCALES"
         } else {
-            "SHOW ALL: OFF"
+            "CURATED"
         },
         0xffffff,
         2,
@@ -564,21 +602,50 @@ fn draw_kaoss_settings(scene: &mut Scene, model: &NativeModel) {
     );
 
     scene.text(c.x + 8, c.y + 216 - scroll, "PAD VIZ", 0xa89984);
-    let cells = layout.kaoss_settings_half_row(232, scroll, true, 48);
+    let rainbow = layout.kaoss_settings_third_row(232, scroll, 0, 48);
     scene.button(
-        cells,
-        if !model.kaoss_viz_glow { 0x458588 } else { 0x3c3836 },
+        rainbow,
+        if model.kaoss_viz_style == kaoss_viz::KaossVizStyle::Rainbow {
+            0x458588
+        } else {
+            0x3c3836
+        },
     );
-    scene.text_centered(cells, "CELLS", 0xffffff, 2);
-    let glow = layout.kaoss_settings_half_row(232, scroll, false, 48);
+    scene.text_centered(rainbow, "RAINBOW", 0xffffff, 2);
+    let mono = layout.kaoss_settings_third_row(232, scroll, 1, 48);
+    scene.button(
+        mono,
+        if model.kaoss_viz_style == kaoss_viz::KaossVizStyle::Mono {
+            0xd79921
+        } else {
+            0x3c3836
+        },
+    );
+    scene.text_centered(mono, "MONO", 0xffffff, 2);
+    let glow = layout.kaoss_settings_third_row(232, scroll, 2, 48);
     scene.button(
         glow,
-        if model.kaoss_viz_glow { 0xb16286 } else { 0x3c3836 },
+        if model.kaoss_viz_style == kaoss_viz::KaossVizStyle::Glow {
+            0xb16286
+        } else {
+            0x3c3836
+        },
     );
     scene.text_centered(glow, "GLOW", 0xffffff, 2);
 
-    scene.text(c.x + 8, c.y + 284 - scroll, "GRID LINES", 0xa89984);
-    let grid_row = layout.kaoss_settings_row(300, scroll, 48);
+    let color_btn = layout.kaoss_settings_row(288, scroll, 48);
+    let (mh, ms) = kaoss_viz::mono_color_hs(model.kaoss_mono_color);
+    let swatch = kaoss_viz::hsv_color(mh, ms.max(0.35), 0.85);
+    scene.button(color_btn, swatch);
+    scene.text_centered(
+        color_btn,
+        &format!("COLOR {}", kaoss_viz::mono_color_label(model.kaoss_mono_color)),
+        0xffffff,
+        2,
+    );
+
+    scene.text(c.x + 8, c.y + 340 - scroll, "GRID LINES", 0xa89984);
+    let grid_row = layout.kaoss_settings_row(356, scroll, 48);
     let third = (grid_row.w - 16) / 3;
     let minus = Rect {
         x: grid_row.x,
@@ -610,7 +677,7 @@ fn draw_kaoss_settings(scene: &mut Scene, model: &NativeModel) {
     scene.button(plus, 0x3c3836);
     scene.text_centered(plus, "+", 0xffffff, 2);
 
-    scene.text(c.x + 8, c.y + 352 - scroll, "OUT", 0xa89984);
+    scene.text(c.x + 8, c.y + 408 - scroll, "OUT", 0xa89984);
     for (i, mode) in [
         crate::session::OutMode::Local,
         crate::session::OutMode::Usb,
@@ -622,18 +689,18 @@ fn draw_kaoss_settings(scene: &mut Scene, model: &NativeModel) {
         let cell_w = (c.w - 16) / 3;
         let r = Rect {
             x: c.x + 8 + i as i32 * cell_w + 2,
-            y: c.y + 368 - scroll + 2,
+            y: c.y + 424 - scroll + 2,
             w: cell_w - 4,
             h: 44,
         };
         let on = *mode == model.kaoss_out;
         scene.button(r, if on { mode.color() } else { 0x3c3836 });
-        scene.text_centered(r, mode.label(), 0xffffff, 2);
+        scene.text_centered(r, mode.short_label(), 0xffffff, 2);
     }
 
-    scene.text(c.x + 8, c.y + 424 - scroll, "MIDI channel", 0xa89984);
+    scene.text(c.x + 8, c.y + 480 - scroll, "MIDI channel", 0xa89984);
     for ch in 0..16 {
-        let cell = layout.kaoss_settings_channel(ch, 440, scroll);
+        let cell = layout.kaoss_settings_channel(ch, 496, scroll);
         let on = ch as u8 == model.kaoss_channel;
         scene.button(cell, if on { 0x458588 } else { 0x3c3836 });
         scene.text_centered(cell, &format!("{}", ch + 1), 0xffffff, 2);
@@ -651,25 +718,28 @@ fn draw_kaoss_glow(scene: &mut Scene, pad: crate::layout::Rect, model: &NativeMo
     let wash_v = (0.04 + 0.06 * pulse + if hold { 0.03 } else { 0.0 }) * (0.30 + 0.70 * amp);
     scene.fill_rect(pad, kaoss_viz::hsv_color(hue, 0.55, wash_v));
 
-    let (fx, fy) = model.kaoss_glow_xy;
-    let px = pad.x as f32 + fx.clamp(0.0, 1.0) * pad.w as f32;
-    let py = pad.y as f32 + (1.0 - fy.clamp(0.0, 1.0)) * pad.h as f32;
     let span = (pad.w.min(pad.h)) as f32;
     let clip = Some(pad);
 
     if amp >= 0.02 {
         let outer = kaoss_viz::glow_outer_radius(span, amp);
-        // Concentric discs outer→inner approximate a smooth radial gradient
-        // without a custom GLES shader (still one color mesh).
+        // Concentric discs outer→inner; each shell is centered on its own lagged
+        // XY so the halo has to catch up when the finger moves.
         let rings = (18 + (14.0 * amp).round() as i32).clamp(18, 32);
         for i in (0..rings).rev() {
             let u = (i as f32 + 1.0) / rings as f32;
             let radius = (outer * u).max(1.0);
             let fall = 1.0 - u;
+            let (sx, sy) = kaoss_viz::glow_lag_xy(&model.kaoss_glow_shells, fall);
+            let px = pad.x as f32 + sx.clamp(0.0, 1.0) * pad.w as f32;
+            let py = pad.y as f32 + (1.0 - sy.clamp(0.0, 1.0)) * pad.h as f32;
             let color = kaoss_viz::glow_sample(hue, amp, fall, pulse);
             scene.fill_disc_clipped(px, py, radius, color, clip);
         }
-        // Tiny hot core so the finger reads as a highlight, not a flat blob.
+        // Hot core rides the fastest (innermost) shell.
+        let (cx, cy) = model.kaoss_glow_shells[kaoss_viz::GLOW_LAG_COUNT - 1];
+        let px = pad.x as f32 + cx.clamp(0.0, 1.0) * pad.w as f32;
+        let py = pad.y as f32 + (1.0 - cy.clamp(0.0, 1.0)) * pad.h as f32;
         let core_r = (outer * 0.08).max(2.0);
         scene.fill_disc_clipped(
             px,
@@ -679,30 +749,12 @@ fn draw_kaoss_glow(scene: &mut Scene, pad: crate::layout::Rect, model: &NativeMo
             clip,
         );
     }
-
-    for &(tx, ty, age) in model.kaoss_trail_points() {
-        let tpx = pad.x as f32 + tx.clamp(0.0, 1.0) * pad.w as f32;
-        let tpy = pad.y as f32 + (1.0 - ty.clamp(0.0, 1.0)) * pad.h as f32;
-        let trail_amp = amp.max(0.2) * age;
-        let outer = (10.0 + 22.0 * age) * amp.max(0.25);
-        let rings = 8;
-        for i in (0..rings).rev() {
-            let u = (i as f32 + 1.0) / rings as f32;
-            let fall = 1.0 - u;
-            let color = kaoss_viz::glow_sample(hue, trail_amp, fall * 0.85, 0.0);
-            scene.fill_disc_clipped(tpx, tpy, (outer * u).max(1.0), color, clip);
-        }
-    }
 }
 
 fn draw_kaoss_axes(scene: &mut Scene, pad: crate::layout::Rect, model: &NativeModel) {
     let prog = kaoss_ui::program(model.kaoss_program);
-    let cx = pad.x as f32 + pad.w as f32 * 0.5;
-    let cy = pad.y as f32 + pad.h as f32 * 0.5;
     if model.kaoss_show_grid_lines {
-        let w = model.kaoss_grid_width.max(1) as f32;
-        scene.fill(cx - w * 0.5, pad.y as f32, w, pad.h as f32, 0x9d2449);
-        scene.fill(pad.x as f32, cy - w * 0.5, pad.w as f32, w, 0x9d2449);
+        draw_kaoss_grid(scene, pad, model, prog.note);
     }
     if model.kaoss_show_axis_labels {
         let y_label = match prog.y_param {
@@ -714,6 +766,11 @@ fn draw_kaoss_axes(scene: &mut Scene, pad: crate::layout::Rect, model: &NativeMo
             "attack" => "Y ATTACK",
             "delay_mix" => "Y DLY MIX",
             "reverb_mix" => "Y REVERB",
+            "octave" => "Y OCTAVE",
+            "drive" => "Y DRIVE",
+            "delay_fb" => "Y FB",
+            "reverb_size" => "Y SIZE",
+            "delay_time" => "Y DLY T",
             _ => "Y",
         };
         let x_label = if prog.note {
@@ -732,11 +789,99 @@ fn draw_kaoss_axes(scene: &mut Scene, pad: crate::layout::Rect, model: &NativeMo
         scene.text_scaled(pad.x + 6, pad.y + pad.h / 2 - 20, y_label, 0xd3869b, 2);
         scene.text_scaled(
             pad.x + pad.w / 2 - 40,
-            pad.y + pad.h - 22,
+            pad.y + pad.h - 36,
             x_label,
             0xd3869b,
             2,
         );
+    }
+}
+
+/// Scale / Y play-grid overlay (Tk `_kaoss_draw_grid` parity).
+fn draw_kaoss_grid(
+    scene: &mut Scene,
+    pad: crate::layout::Rect,
+    model: &NativeModel,
+    note_program: bool,
+) {
+    let regular = model.kaoss_grid_width.clamp(1, 6) as f32;
+    let octave_w = regular + 1.0;
+
+    // Horizontal guides at 25 / 50 / 75% of pad Y (brighter midline).
+    for &(frac, color) in &[
+        (0.25_f32, 0x3a1528_u32),
+        (0.50, 0x5b203c),
+        (0.75, 0x3a1528),
+    ] {
+        let stroke = if (frac - 0.5).abs() < 0.001 {
+            octave_w
+        } else {
+            regular
+        };
+        let y = pad.y as f32 + pad.h as f32 * (1.0 - frac);
+        scene.fill(
+            pad.x as f32,
+            y - stroke * 0.5,
+            pad.w as f32,
+            stroke,
+            color,
+        );
+    }
+
+    if note_program {
+        let scale = jambox_core::kaoss_scale(model.kaoss_scale_index as usize);
+        let notes = jambox_core::scale_notes(
+            scale.degrees,
+            model.kaoss_key,
+            match model.kaoss_octaves {
+                1 | 2 => 48,
+                3 => 36,
+                _ => 24,
+            },
+            model.kaoss_octaves,
+        );
+        let n = notes
+            .iter()
+            .rposition(|&n| n != 0)
+            .map(|i| i + 1)
+            .unwrap_or(1)
+            .max(1);
+        let key = model.kaoss_key % 12;
+        // Equal-width note cell edges (N notes → N+1 lines), roots brighter.
+        for i in 0..=n {
+            let frac = i as f32 / n as f32;
+            let x = pad.x as f32 + pad.w as f32 * frac;
+            let octave = i < n && (notes[i] % 12) == key;
+            let (color, stroke) = if octave {
+                (0xfb4934_u32, octave_w)
+            } else {
+                (0x4a2040_u32, regular)
+            };
+            scene.fill(
+                x - stroke * 0.5,
+                pad.y as f32,
+                stroke,
+                pad.h as f32,
+                color,
+            );
+        }
+    } else {
+        // FX programs: same 25/50/75% vertical guides as the Y axis.
+        for &frac in &[0.25_f32, 0.50, 0.75] {
+            let stroke = if (frac - 0.5).abs() < 0.001 {
+                octave_w
+            } else {
+                regular
+            };
+            let x = pad.x as f32 + pad.w as f32 * frac;
+            scene.fill(
+                x - stroke * 0.5,
+                pad.y as f32,
+                stroke,
+                pad.h as f32,
+                0x3a1528,
+            );
+        }
     }
 }
 
@@ -750,18 +895,26 @@ fn draw_kaoss_cursor(
     let cx = pad.x as f32 + fx.clamp(0.0, 1.0) * pad.w as f32;
     let cy = pad.y as f32 + (1.0 - fy.clamp(0.0, 1.0)) * pad.h as f32;
     // GLOW draws the finger blob; skip hard rings (Tk parity).
-    if model.kaoss_viz_glow {
+    if model.kaoss_viz_style.is_glow() {
         if kaoss_ui::program(model.kaoss_program).note {
             let note = jambox_core::NOTE_NAMES[model.kaoss_key as usize];
             scene.text_scaled((cx as i32) - 8, (cy as i32) - 28, note, 0xfbf1c7, 2);
         }
         return;
     }
-    let hue =
-        (fx.clamp(0.0, 1.0) * 0.70 + kaoss_viz::program_hue(kaoss_ui::program(model.kaoss_program).id))
-            .rem_euclid(1.0);
-    let outer = kaoss_viz::hsv_color(hue, 0.90, 0.55);
-    let mid = kaoss_viz::hsv_color(hue, 0.85, 1.0);
+    let (hue, sat) = if model.kaoss_viz_style == kaoss_viz::KaossVizStyle::Mono {
+        let (h, s) = kaoss_viz::mono_color_hs(model.kaoss_mono_color);
+        (h, s.max(0.35))
+    } else {
+        (
+            (fx.clamp(0.0, 1.0) * 0.70
+                + kaoss_viz::program_hue(kaoss_ui::program(model.kaoss_program).id))
+            .rem_euclid(1.0),
+            0.90,
+        )
+    };
+    let outer = kaoss_viz::hsv_color(hue, sat, 0.55);
+    let mid = kaoss_viz::hsv_color(hue, sat.min(0.85), 1.0);
     let core = kaoss_viz::hsv_color(hue, 0.12, 1.0);
     scene.stroke_disc(cx, cy, 34.0, 2.0, outer, 0x08040a);
     scene.stroke_disc(cx, cy, 20.0, 3.0, mid, 0x08040a);
@@ -781,12 +934,12 @@ fn draw_pads(scene: &mut Scene, model: &NativeModel) {
         layout.pads_play,
         if !model.pads_edit { 0x689d6a } else { 0x3c3836 },
     );
-    scene.text(layout.pads_play.x + 32, layout.pads_play.y + 12, "PLAY", 0xffffff);
+    scene.text_centered(layout.pads_play, "PLAY", 0xffffff, 2);
     scene.fill_rect(
         layout.pads_edit,
         if model.pads_edit { 0xd79921 } else { 0x3c3836 },
     );
-    scene.text(layout.pads_edit.x + 36, layout.pads_edit.y + 12, "EDIT", 0xffffff);
+    scene.text_centered(layout.pads_edit, "EDIT", 0xffffff, 2);
 
     if model.pads_edit {
         scene.fill_rect(
@@ -797,23 +950,23 @@ fn draw_pads(scene: &mut Scene, model: &NativeModel) {
                 0x9d0006
             },
         );
-        scene.text(
-            layout.pads_clear.x + 16,
-            layout.pads_clear.y + 16,
+        scene.text_centered(
+            layout.pads_clear,
             if model.pads_clear_armed {
                 "CLR?"
             } else {
                 "CLEAR"
             },
             0xffffff,
+            2,
         );
         let trig = if model.phrases[model.pads_selected.min(15)].loop_mode {
             "LOOP"
         } else {
-            "1SHOT"
+            "ONE"
         };
         scene.fill_rect(layout.pads_trig, 0x458588);
-        scene.text(layout.pads_trig.x + 24, layout.pads_trig.y + 16, trig, 0xffffff);
+        scene.text_centered(layout.pads_trig, trig, 0xffffff, 2);
         scene.fill_rect(
             layout.pads_mode,
             if model.pads_mode_armed {
@@ -822,78 +975,48 @@ fn draw_pads(scene: &mut Scene, model: &NativeModel) {
                 0x504945
             },
         );
-        scene.text(layout.pads_mode.x + 16, layout.pads_mode.y + 16, "MODE", 0xffffff);
+        scene.text_centered(layout.pads_mode, "MODE", 0xffffff, 2);
         let pad = &model.phrases[model.pads_selected.min(15)];
         let voice_bg = if pad.voice_locked { 0xb16286 } else { 0x689d6a };
-        let voice_label = if pad.voice_locked { "LOCK" } else { "FOLLOW" };
+        let voice_label = if pad.voice_locked { "LOCK" } else { "FLW" };
         scene.fill_rect(layout.pads_voice, voice_bg);
-        scene.text(
-            layout.pads_voice.x + 8,
-            layout.pads_voice.y + 16,
-            voice_label,
-            0xffffff,
-        );
+        scene.text_centered(layout.pads_voice, voice_label, 0xffffff, 2);
         let synth_bg = if pad.local_synth { 0xd65d0e } else { 0x504945 };
-        let synth_label = if pad.local_synth { "SYNTH" } else { "MIDI" };
+        let synth_label = if pad.local_synth { "SYN" } else { "MIDI" };
         scene.fill_rect(layout.pads_synth, synth_bg);
-        scene.text(
-            layout.pads_synth.x + 10,
-            layout.pads_synth.y + 16,
-            synth_label,
-            0xffffff,
-        );
+        scene.text_centered(layout.pads_synth, synth_label, 0xffffff, 2);
         let ch_label = if pad.out_channel < 0 {
-            "CH:rec".to_string()
+            "CH*".to_string()
         } else {
-            format!("CH:{}", pad.out_channel + 1)
+            format!("CH{}", pad.out_channel + 1)
         };
         scene.fill_rect(layout.pads_channel, 0x504945);
-        scene.text(
-            layout.pads_channel.x + 6,
-            layout.pads_channel.y + 16,
-            &ch_label,
-            0xffffff,
-        );
+        scene.text_centered(layout.pads_channel, &ch_label, 0xffffff, 2);
         let rec_on = model.pads_recording.is_some();
         scene.fill_rect(layout.pads_rec, if rec_on { 0xcc241d } else { 0x9d0006 });
-        scene.text(
-            layout.pads_rec.x + 12,
-            layout.pads_rec.y + 16,
+        scene.text_centered(
+            layout.pads_rec,
             if rec_on { "STOP" } else { "REC" },
             0xffffff,
+            2,
         );
         scene.fill_rect(layout.pads_vol_down, 0x3c3836);
-        scene.text(
-            layout.pads_vol_down.x + 8,
-            layout.pads_vol_down.y + 16,
-            "VOL-",
-            0xffffff,
-        );
+        scene.text_centered(layout.pads_vol_down, "V-", 0xffffff, 2);
         scene.fill_rect(layout.pads_vol_up, 0x3c3836);
-        scene.text(
-            layout.pads_vol_up.x + 8,
-            layout.pads_vol_up.y + 16,
-            "VOL+",
-            0xffffff,
-        );
+        scene.text_centered(layout.pads_vol_up, "V+", 0xffffff, 2);
     }
 
     if model.seq_to_pad_armed {
-        scene.text(16, HUD_H + 40, "→PAD armed — tap a slot", 0xfabd2f);
+        scene.text(16, HUD_H + 40, "PAD armed - tap a slot", 0xfabd2f);
     }
 
     if layout.pads_out.w > 0 {
         scene.fill_rect(layout.pads_out, model.pads_out.color());
-        scene.text(
-            layout.pads_out.x + 10,
-            layout.pads_out.y + 16,
-            model.pads_out.label(),
-            0xffffff,
-        );
+        scene.text_centered(layout.pads_out, model.pads_out.short_label(), 0xffffff, 2);
     }
 
     scene.fill_rect(layout.stop_all, 0x3c3836);
-    scene.text(layout.stop_all.x + 18, layout.stop_all.y + 16, "STOP", 0xffffff);
+    scene.text_centered(layout.stop_all, "STOP", 0xffffff, 2);
 
     for index in 0..16 {
         let cell = layout.phrase_cell(index);
@@ -912,13 +1035,28 @@ fn draw_pads(scene: &mut Scene, model: &NativeModel) {
         };
         scene.fill_rect(cell, color);
         let label = phrases::pad_label(index);
-        scene.text(cell.x + 10, cell.y + 16, &label, 0xfbf1c7);
+        scene.text_centered(
+            Rect {
+                x: cell.x,
+                y: cell.y + 8,
+                w: cell.w,
+                h: 20,
+            },
+            &label,
+            0xfbf1c7,
+            2,
+        );
         if !pad.empty {
-            scene.text(
-                cell.x + 10,
-                cell.y + 36,
-                if pad.loop_mode { "LOOP" } else { "1SHOT" },
+            scene.text_centered(
+                Rect {
+                    x: cell.x,
+                    y: cell.y + 30,
+                    w: cell.w,
+                    h: 18,
+                },
+                if pad.loop_mode { "LOOP" } else { "ONE" },
                 0xd5c4a1,
+                1,
             );
         }
     }
@@ -975,30 +1113,66 @@ fn draw_scroll_wave_grid(
     }
 }
 
+fn draw_synth_vib(scene: &mut Scene, model: &NativeModel) {
+    let layout = model.layout;
+    scene.fill_rect(layout.content, 0x111111);
+    scene.text(24, HUD_H + 8, "VIBRATO", 0xfbf1c7);
+    scene.text(
+        200,
+        HUD_H + 10,
+        "depth · rate · wheel / always-on",
+        0xa89984,
+    );
+
+    let always = layout.synth_vib_always();
+    let on = model.vibrato_always > 0.01;
+    scene.button(always, if on { 0xb16286 } else { 0x3c3836 });
+    scene.text_centered(
+        always,
+        if on { "ON - ALWAYS" } else { "WHEEL - MOD" },
+        0xffffff,
+        2,
+    );
+
+    let depth_down = layout.synth_vib_depth_down();
+    let depth_label = layout.synth_vib_depth_label();
+    let depth_up = layout.synth_vib_depth_up();
+    scene.button(depth_down, 0x504945);
+    scene.text_centered(depth_down, "DEPTH -", 0xffffff, 2);
+    scene.fill_rect(depth_label, 0x1d2021);
+    scene.text_centered(
+        depth_label,
+        &format!("{:.2} st", model.vibrato_depth),
+        0xfbf1c7,
+        2,
+    );
+    scene.button(depth_up, 0x504945);
+    scene.text_centered(depth_up, "DEPTH +", 0xffffff, 2);
+
+    let rate_down = layout.synth_vib_rate_down();
+    let rate_label = layout.synth_vib_rate_label();
+    let rate_up = layout.synth_vib_rate_up();
+    scene.button(rate_down, 0x504945);
+    scene.text_centered(rate_down, "RATE -", 0xffffff, 2);
+    scene.fill_rect(rate_label, 0x1d2021);
+    scene.text_centered(
+        rate_label,
+        &format!("{:.1} Hz", model.vibrato_rate),
+        0xfbf1c7,
+        2,
+    );
+    scene.button(rate_up, 0x504945);
+    scene.text_centered(rate_up, "RATE +", 0xffffff, 2);
+
+    scene.fill_rect(layout.synth_pick_done, 0x458588);
+    scene.text_centered(layout.synth_pick_done, "DONE", 0xffffff, 2);
+}
+
 fn draw_synth(scene: &mut Scene, model: &NativeModel) {
     let layout = model.layout;
 
-    if model.synth_voice_open {
-        scene.text(24, HUD_H + 4, "VOICES — tap · drag to scroll", 0xfbf1c7);
-        scene.text(
-            560,
-            HUD_H + 6,
-            &format!("{} loaded", model.wave_names.len()),
-            0xa89984,
-        );
-        draw_scroll_wave_grid(
-            scene,
-            &layout,
-            model,
-            model.synth_voice_scroll,
-            model.morph_a,
-            model.morph_b,
-            Some(model.morph_a),
-        );
-        scene.fill_rect(layout.synth_pick_save_as, 0x689d6a);
-        scene.text_centered(layout.synth_pick_save_as, "SAVE AS", 0xffffff, 2);
-        scene.fill_rect(layout.synth_pick_done, 0x458588);
-        scene.text_centered(layout.synth_pick_done, "DONE", 0xffffff, 2);
+    if model.synth_vib_open {
+        draw_synth_vib(scene, model);
         return;
     }
 
@@ -1050,33 +1224,20 @@ fn draw_synth(scene: &mut Scene, model: &NativeModel) {
     );
     scene.fill_rect(layout.synth_swap, 0x504945);
     scene.text(layout.synth_swap.x + 16, layout.synth_swap.y + 16, "SWAP", 0xffffff);
-    scene.fill_rect(layout.synth_voices, 0x458588);
-    scene.text_centered(layout.synth_voices, "VOICES", 0xffffff, 2);
+    let vib_on = model.vibrato_always > 0.01;
+    scene.fill_rect(layout.synth_vib, if vib_on { 0xb16286 } else { 0x458588 });
+    scene.text_centered(layout.synth_vib, "VIB", 0xffffff, 2);
     scene.fill_rect(layout.synth_save_as, 0x689d6a);
-    scene.text(
-        layout.synth_save_as.x + 20,
-        layout.synth_save_as.y + 16,
-        "SAVE AS",
-        0xffffff,
-    );
-    scene.fill_rect(layout.synth_vib_down, 0x3c3836);
-    scene.text(
-        layout.synth_vib_down.x + 8,
-        layout.synth_vib_down.y + 16,
-        "VIB-",
-        0xffffff,
-    );
-    scene.fill_rect(layout.synth_vib_up, 0x3c3836);
-    scene.text(
-        layout.synth_vib_up.x + 8,
-        layout.synth_vib_up.y + 16,
-        "VIB+",
-        0xffffff,
-    );
+    scene.text_centered(layout.synth_save_as, "SAVE AS", 0xffffff, 2);
     scene.text(
         24,
         HUD_H + 64,
-        &format!("vib {:.2}", model.vibrato_always),
+        &format!(
+            "vib {:.2}st · {:.1}Hz · {}",
+            model.vibrato_depth,
+            model.vibrato_rate,
+            if vib_on { "ON" } else { "WHEEL" }
+        ),
         0xa89984,
     );
 
@@ -1168,24 +1329,29 @@ fn stroke_scope_seg(scene: &mut Scene, x0: f32, y0: f32, x1: f32, y1: f32, color
 fn draw_drums(scene: &mut Scene, model: &NativeModel) {
     let layout = model.layout;
     scene.text(24, HUD_H + 8, "DRUM KIT", 0xfbf1c7);
-    scene.text(560, HUD_H + 10, "tap a pad · knobs reshape the wave", 0xa89984);
 
     let sel_cell = phrases::PHRASE_GRID_CELLS[model.kit_selected];
     let sel_note = phrases::mpk_note_for_phrase_cell(sel_cell);
     let model_name = drum_model_for_note(sel_note).name().replace('_', " ");
-    scene.text(
-        24,
-        HUD_H + 24,
-        &format!(
-            "{} · {} · tone {:.0} · snap {:.0} · pitch {:.0} · decay {:.0}",
-            phrases::pad_label(sel_cell),
-            model_name,
-            model.drum_macros[0] * 100.0,
-            model.drum_macros[1] * 100.0,
-            model.drum_macros[2] * 100.0,
-            model.drum_macros[3] * 100.0,
-        ),
+    let status = format!(
+        "{} {}  T{:.0} S{:.0} P{:.0} D{:.0}",
+        phrases::pad_label(sel_cell),
+        model_name,
+        model.drum_macros[0] * 100.0,
+        model.drum_macros[1] * 100.0,
+        model.drum_macros[2] * 100.0,
+        model.drum_macros[3] * 100.0,
+    );
+    scene.text_centered(
+        Rect {
+            x: 160,
+            y: HUD_H + 6,
+            w: 480,
+            h: 24,
+        },
+        &status,
         0xfabd2f,
+        2,
     );
 
     let scope = layout.kit_scope;
@@ -1209,23 +1375,39 @@ fn draw_drums(scene: &mut Scene, model: &NativeModel) {
         let selected = !model.kit_all_drums && screen_index == model.kit_selected;
         let bg = if selected { 0xd79921 } else { 0x3c3836 };
         scene.fill_rect(cell, bg);
-        let label = format!("{}\n{}", phrases::pad_label(phrase_cell), voice);
-        let lines: Vec<&str> = label.lines().collect();
-        scene.text(cell.x + 8, cell.y + cell.h / 2 - 10, lines[0], 0xfbf1c7);
-        if lines.len() > 1 {
-            scene.text(cell.x + 8, cell.y + cell.h / 2 + 6, lines[1], 0xa89984);
-        }
+        scene.text_centered(
+            Rect {
+                x: cell.x,
+                y: cell.y + 4,
+                w: cell.w,
+                h: 18,
+            },
+            &phrases::pad_label(phrase_cell),
+            0xfbf1c7,
+            2,
+        );
+        scene.text_centered(
+            Rect {
+                x: cell.x + 2,
+                y: cell.y + cell.h / 2 - 2,
+                w: cell.w - 4,
+                h: 18,
+            },
+            &voice,
+            0xa89984,
+            1,
+        );
     }
 
     const MACROS: [&str; 4] = ["TONE", "SNAP", "PITCH", "DECAY"];
     for index in 0..4 {
         let cell = layout.kit_macro_cell(index);
         scene.fill_rect(cell, 0x3c3836);
-        scene.text(
-            cell.x + 16,
-            cell.y + 12,
+        scene.text_centered(
+            cell,
             &format!("{} {:.0}", MACROS[index], model.drum_macros[index] * 100.0),
             0xfbf1c7,
+            2,
         );
     }
 
@@ -1235,7 +1417,7 @@ fn draw_drums(scene: &mut Scene, model: &NativeModel) {
         let choice = RepeatDivisionChoice::from_index(index);
         let active = model.division == choice;
         scene.fill_rect(cell, if active { 0x458588 } else { 0x282828 });
-        scene.text(cell.x + 16, cell.y + 8, DIV_LABELS[index], 0xffffff);
+        scene.text_centered(cell, DIV_LABELS[index], 0xffffff, 2);
     }
 
     let all_bg = if model.kit_all_drums { 0xb16286 } else { 0x504945 };
@@ -1260,9 +1442,9 @@ fn draw_seq(scene: &mut Scene, model: &NativeModel) {
     let (rec_label, rec_bg) = seq.rec_label();
     let (play_label, play_bg) = seq.play_label();
     scene.fill_rect(layout.seq_rec, rec_bg);
-    scene.text(layout.seq_rec.x + 48, layout.seq_rec.y + 30, rec_label, 0xffffff);
+    scene.text_centered(layout.seq_rec, rec_label, 0xffffff, 2);
     scene.fill_rect(layout.seq_play, play_bg);
-    scene.text(layout.seq_play.x + 140, layout.seq_play.y + 30, play_label, 0xffffff);
+    scene.text_centered(layout.seq_play, play_label, 0xffffff, 2);
 
     let pending = seq.has_pending();
     let keep_bg = if pending { 0x458588 } else { 0x3c3836 };
@@ -1273,44 +1455,29 @@ fn draw_seq(scene: &mut Scene, model: &NativeModel) {
         0x3c3836
     };
     scene.fill_rect(layout.seq_keep, keep_bg);
-    scene.text(layout.seq_keep.x + 88, layout.seq_keep.y + 18, "KEEP", 0xffffff);
+    scene.text_centered(layout.seq_keep, "KEEP", 0xffffff, 2);
     scene.fill_rect(layout.seq_drop, drop_bg);
-    scene.text(layout.seq_drop.x + 88, layout.seq_drop.y + 18, "DROP", 0xffffff);
+    scene.text_centered(layout.seq_drop, "DROP", 0xffffff, 2);
     scene.fill_rect(layout.seq_undo, undo_bg);
-    scene.text(layout.seq_undo.x + 88, layout.seq_undo.y + 18, "UNDO", 0xffffff);
+    scene.text_centered(layout.seq_undo, "UNDO", 0xffffff, 2);
 
     scene.fill_rect(layout.seq_len_double, 0x504945);
-    scene.text(
-        layout.seq_len_double.x + 44,
-        layout.seq_len_double.y + 14,
-        "LEN x2",
-        0xffffff,
-    );
+    scene.text_centered(layout.seq_len_double, "LEN x2", 0xffffff, 2);
     scene.fill_rect(layout.seq_len_halve, 0x504945);
-    scene.text(
-        layout.seq_len_halve.x + 44,
-        layout.seq_len_halve.y + 14,
-        "LEN /2",
-        0xffffff,
-    );
+    scene.text_centered(layout.seq_len_halve, "LEN /2", 0xffffff, 2);
     let extend_bg = if seq.extend_mode { 0x689d6a } else { 0x3c3836 };
     let extend_label = if seq.extend_mode {
-        "OVERDUB: EXTEND"
+        "EXTEND"
     } else {
-        "OVERDUB: WRAP"
+        "WRAP"
     };
     scene.fill_rect(layout.seq_extend, extend_bg);
-    scene.text(
-        layout.seq_extend.x + 100,
-        layout.seq_extend.y + 14,
-        extend_label,
-        0xffffff,
-    );
+    scene.text_centered(layout.seq_extend, extend_label, 0xffffff, 2);
 
     scene.fill_rect(layout.seq_stop, 0x504945);
-    scene.text(layout.seq_stop.x + 24, layout.seq_stop.y + 14, "STOP", 0xffffff);
+    scene.text_centered(layout.seq_stop, "STOP", 0xffffff, 2);
     scene.fill_rect(layout.seq_clear, 0x3c3836);
-    scene.text(layout.seq_clear.x + 20, layout.seq_clear.y + 14, "CLEAR", 0xffffff);
+    scene.text_centered(layout.seq_clear, "CLEAR", 0xffffff, 2);
     scene.fill_rect(
         layout.seq_to_pad,
         if model.seq_to_pad_armed {
@@ -1319,29 +1486,23 @@ fn draw_seq(scene: &mut Scene, model: &NativeModel) {
             0x458588
         },
     );
-    scene.text(layout.seq_to_pad.x + 28, layout.seq_to_pad.y + 14, "→PAD", 0xffffff);
+    scene.text_centered(layout.seq_to_pad, ">PAD", 0xffffff, 2);
     scene.fill_rect(layout.seq_all_off, 0x665c54);
-    scene.text(
-        layout.seq_all_off.x + 20,
-        layout.seq_all_off.y + 14,
-        "ALL OFF",
-        0xffffff,
-    );
+    scene.text_centered(layout.seq_all_off, "ALL OFF", 0xffffff, 2);
     scene.fill_rect(layout.seq_bpm_down, 0x282828);
-    scene.text(layout.seq_bpm_down.x + 36, layout.seq_bpm_down.y + 14, "- BPM", 0xffffff);
+    scene.text_centered(layout.seq_bpm_down, "- BPM", 0xffffff, 2);
     scene.fill_rect(layout.seq_bpm_up, 0x282828);
-    scene.text(layout.seq_bpm_up.x + 36, layout.seq_bpm_up.y + 14, "+ BPM", 0xffffff);
+    scene.text_centered(layout.seq_bpm_up, "+ BPM", 0xffffff, 2);
     if model.seq_to_pad_armed {
         scene.text(400, HUD_H + 30, "tap a PAD slot", 0xfabd2f);
     } else {
-        scene.text(400, HUD_H + 30, "→PAD assigns loop to a pad", 0x83a598);
+        scene.text(400, HUD_H + 30, ">PAD assigns loop", 0x83a598);
     }
 
-    // Tk howto abbreviated to one line.
     scene.text(
         12,
         HUD_H + layout.content.h - 18,
-        "REC locks loop · overdub · KEEP/DROP/UNDO · →PAD assigns clip",
+        "REC locks loop · overdub · KEEP/DROP/UNDO · >PAD assigns",
         0x83a598,
     );
 }
@@ -1449,12 +1610,7 @@ fn draw_songs(scene: &mut Scene, model: &NativeModel) {
         0xffffff,
     );
     scene.fill_rect(layout.song_out, model.song_out.color());
-    scene.text(
-        layout.song_out.x + 48,
-        layout.song_out.y + 14,
-        model.song_out.label(),
-        0xffffff,
-    );
+    scene.text_centered(layout.song_out, model.song_out.short_label(), 0xffffff, 2);
 }
 
 fn draw_map(scene: &mut Scene, model: &NativeModel) {
@@ -1508,14 +1664,9 @@ fn draw_map(scene: &mut Scene, model: &NativeModel) {
 fn draw_settings(scene: &mut Scene, model: &NativeModel) {
     let layout = model.layout;
     scene.fill_rect(layout.settings_panic, 0x9d0006);
-    scene.text(layout.settings_panic.x + 48, layout.settings_panic.y + 28, "PANIC", 0xffffff);
+    scene.text_centered(layout.settings_panic, "PANIC", 0xffffff, 2);
     scene.fill_rect(layout.settings_all_off, 0x504945);
-    scene.text(
-        layout.settings_all_off.x + 28,
-        layout.settings_all_off.y + 28,
-        "NOTES OFF",
-        0xffffff,
-    );
+    scene.text_centered(layout.settings_all_off, "NOTES OFF", 0xffffff, 2);
     scene.fill_rect(
         layout.settings_fx_target,
         match model.fx_target {
@@ -1524,15 +1675,15 @@ fn draw_settings(scene: &mut Scene, model: &NativeModel) {
             crate::model::FxEditTarget::DrumGroup => 0xd79921,
         },
     );
-    scene.text(
-        layout.settings_fx_target.x + 28,
-        layout.settings_fx_target.y + 28,
+    scene.text_centered(
+        layout.settings_fx_target,
         match model.fx_target {
             crate::model::FxEditTarget::Bus => "FX: BUS",
-            crate::model::FxEditTarget::Voice => "FX: VOICE 0",
+            crate::model::FxEditTarget::Voice => "FX: VOICE",
             crate::model::FxEditTarget::DrumGroup => "FX: DRUMS",
         },
         0xffffff,
+        2,
     );
     const LABELS: [&str; 3] = ["DRIVE", "DELAY", "REVERB"];
     let values = match model.fx_target {
@@ -1558,8 +1709,8 @@ fn draw_settings(scene: &mut Scene, model: &NativeModel) {
         };
         scene.fill_rect(fill, fill_color);
     }
-    scene.fill_rect(layout.settings_drum_kit, 0x98971a);
-    scene.text_centered(layout.settings_drum_kit, "DRUM KIT", 0xffffff, 2);
+    scene.fill_rect(layout.settings_log, 0x504945);
+    scene.text_centered(layout.settings_log, "LOG", 0xffffff, 2);
     scene.fill_rect(layout.settings_map, 0x83a598);
     scene.text_centered(layout.settings_map, "MAP", 0xffffff, 2);
     scene.fill_rect(layout.settings_wifi, 0xd79921);
@@ -1570,7 +1721,7 @@ fn draw_settings(scene: &mut Scene, model: &NativeModel) {
     );
     scene.text_centered(
         layout.settings_font,
-        model.font_style.label(),
+        &format!("FONT {}", model.font_style.label()),
         0xffffff,
         2,
     );
@@ -1632,7 +1783,7 @@ mod tests {
     #[test]
     fn cells_are_one_batched_field() {
         let mut model = NativeModel::new();
-        assert!(!model.kaoss_viz_glow);
+        assert!(model.kaoss_viz_style.is_cells());
         let mut out = Outbox::new();
         let k = model.layout.kaoss;
         model.finger_down(1, k.x + 40, k.y + 40, &mut out);
@@ -1659,7 +1810,7 @@ mod tests {
     #[test]
     fn glow_mode_skips_led_grid() {
         let mut model = NativeModel::new();
-        model.kaoss_viz_glow = true;
+        model.kaoss_viz_style = kaoss_viz::KaossVizStyle::Glow;
         let mut out = Outbox::new();
         let k = model.layout.kaoss;
         model.finger_down(1, k.x + 40, k.y + 40, &mut out);
@@ -1686,6 +1837,42 @@ mod tests {
             model.kaoss_glow_amp > 0.1,
             "touch should ramp the glow envelope"
         );
+    }
+
+    #[test]
+    fn note_program_draws_scale_grid_lines() {
+        let model = NativeModel::new();
+        assert!(model.kaoss_show_grid_lines);
+        assert!(kaoss_ui::program(model.kaoss_program).note);
+        let scene = build(&model);
+        let pad = model.layout.kaoss;
+        let vert = scene
+            .color
+            .iter()
+            .filter(|q| {
+                q.w <= 8.0
+                    && q.h >= (pad.h as f32) * 0.9
+                    && q.x >= pad.x as f32 - 4.0
+                    && q.x <= (pad.x + pad.w) as f32 + 4.0
+                    && q.y >= pad.y as f32 - 2.0
+            })
+            .count();
+        let horiz = scene
+            .color
+            .iter()
+            .filter(|q| {
+                q.h <= 8.0
+                    && q.w >= (pad.w as f32) * 0.9
+                    && q.y >= pad.y as f32 - 4.0
+                    && q.y <= (pad.y + pad.h) as f32 + 4.0
+                    && q.x >= pad.x as f32 - 2.0
+            })
+            .count();
+        assert!(
+            vert >= 8,
+            "expected scale-note vertical lines, got {vert}"
+        );
+        assert_eq!(horiz, 3, "expected Y guides at 25/50/75%, got {horiz}");
     }
 
     #[test]

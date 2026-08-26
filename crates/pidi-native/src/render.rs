@@ -102,6 +102,11 @@ fn blit_glyph(frame: &mut Frame, g: &scene::GlyphQuad, aw: u32, ah: u32, atlas: 
     let y0 = g.y as i32;
     let w = g.w.max(1.0) as i32;
     let h = g.h.max(1.0) as i32;
+    let (cr, cg, cb) = (
+        ((g.color >> 16) & 0xff) as u32,
+        ((g.color >> 8) & 0xff) as u32,
+        (g.color & 0xff) as u32,
+    );
     for dy in 0..h {
         for dx in 0..w {
             let u = g.u0 + (g.u1 - g.u0) * ((dx as f32 + 0.5) / w as f32);
@@ -113,14 +118,29 @@ fn blit_glyph(frame: &mut Frame, g: &scene::GlyphQuad, aw: u32, ah: u32, atlas: 
                 .floor()
                 .clamp(0.0, ah as f32 - 1.0) as u32;
             let idx = ((ay * aw + ax) * 4) as usize;
-            if atlas[idx + 3] == 0 {
+            let a = atlas[idx + 3] as u32;
+            if a == 0 {
                 continue;
             }
             let px = x0 + dx;
             let py = y0 + dy;
-            if px >= 0 && py >= 0 && px < SCREEN_W as i32 && py < SCREEN_H as i32 {
-                frame.pixels[py as usize * SCREEN_W + px as usize] = g.color;
+            if px < 0 || py < 0 || px >= SCREEN_W as i32 || py >= SCREEN_H as i32 {
+                continue;
             }
+            let di = py as usize * SCREEN_W + px as usize;
+            if a >= 250 {
+                frame.pixels[di] = g.color;
+                continue;
+            }
+            let dst = frame.pixels[di];
+            let dr = (dst >> 16) & 0xff;
+            let dg = (dst >> 8) & 0xff;
+            let db = dst & 0xff;
+            let inv = 255 - a;
+            let r = (cr * a + dr * inv) / 255;
+            let gch = (cg * a + dg * inv) / 255;
+            let b = (cb * a + db * inv) / 255;
+            frame.pixels[di] = (r << 16) | (gch << 8) | b;
         }
     }
 }
