@@ -179,6 +179,7 @@ class GatePattern:
 
 GATE_PATTERNS: Tuple[GatePattern, ...] = (
     GatePattern("off", "GATE OFF", 0.0, 0.0),
+    GatePattern("4th", "GATE 1/4", 1.0, 0.55),
     GatePattern("8th", "GATE 1/8", 0.5, 0.55),
     GatePattern("16th", "GATE 1/16", 0.25, 0.50),
     GatePattern("trip", "GATE TRIP", 1.0 / 3.0, 0.50),

@@ -86,6 +86,18 @@ impl Scene {
     }
 
     pub fn fill_disc(&mut self, cx: f32, cy: f32, radius: f32, color: u32) {
+        self.fill_disc_clipped(cx, cy, radius, color, None);
+    }
+
+    /// Filled disc, optionally clipped to a rect (for pad-local glows).
+    pub fn fill_disc_clipped(
+        &mut self,
+        cx: f32,
+        cy: f32,
+        radius: f32,
+        color: u32,
+        clip: Option<Rect>,
+    ) {
         if radius < 1.0 {
             return;
         }
@@ -93,12 +105,26 @@ impl Scene {
         let r2 = radius * radius;
         for dy in -r..=r {
             let y = cy + dy as f32;
+            if let Some(c) = clip {
+                if y < c.y as f32 || y >= (c.y + c.h) as f32 {
+                    continue;
+                }
+            }
             let dx_max_sq = r2 - (dy as f32 * dy as f32);
             if dx_max_sq <= 0.0 {
                 continue;
             }
             let half_w = dx_max_sq.sqrt();
-            self.fill(cx - half_w, y, half_w * 2.0, 1.0, color);
+            let mut x0 = cx - half_w;
+            let mut x1 = cx + half_w;
+            if let Some(c) = clip {
+                x0 = x0.max(c.x as f32);
+                x1 = x1.min((c.x + c.w) as f32);
+            }
+            let w = x1 - x0;
+            if w > 0.0 {
+                self.fill(x0, y, w, 1.0, color);
+            }
         }
     }
 
@@ -424,7 +450,6 @@ fn draw_kaoss(scene: &mut Scene, model: &NativeModel) {
             }
         }
         draw_kaoss_axes(scene, layout.kaoss, model);
-        draw_kaoss_ripples(scene, layout.kaoss, model);
         if let Some((fx, fy)) = model.kaoss_finger() {
             draw_kaoss_cursor(scene, layout.kaoss, fx, fy, model);
         }
@@ -623,47 +648,50 @@ fn draw_kaoss_glow(scene: &mut Scene, pad: crate::layout::Rect, model: &NativeMo
     let hold = model.kaoss_hold && model.kaoss_touching;
     let amp = model.kaoss_glow_amp;
 
-    let wash_v = (0.05 + 0.07 * pulse + if hold { 0.04 } else { 0.0 }) * (0.35 + 0.65 * amp);
+    let wash_v = (0.04 + 0.06 * pulse + if hold { 0.03 } else { 0.0 }) * (0.30 + 0.70 * amp);
     scene.fill_rect(pad, kaoss_viz::hsv_color(hue, 0.55, wash_v));
 
     let (fx, fy) = model.kaoss_glow_xy;
     let px = pad.x as f32 + fx.clamp(0.0, 1.0) * pad.w as f32;
     let py = pad.y as f32 + (1.0 - fy.clamp(0.0, 1.0)) * pad.h as f32;
     let span = (pad.w.min(pad.h)) as f32;
+    let clip = Some(pad);
 
     if amp >= 0.02 {
-        let (outer, mid, core) = kaoss_viz::glow_radii(span, amp);
-        let fills = [
-            kaoss_viz::hsv_color(hue, 0.85, 0.34 * amp),
-            kaoss_viz::hsv_color(hue, 0.70, 0.68 * amp),
-            kaoss_viz::hsv_color(hue, 0.18, 0.55 + 0.45 * amp),
-        ];
-        for (radius, color) in [(outer, fills[0]), (mid, fills[1]), (core, fills[2])] {
-            if radius >= 1.5 {
-                scene.fill_disc(px, py, radius, color);
-            }
+        let outer = kaoss_viz::glow_outer_radius(span, amp);
+        // Concentric discs outer→inner approximate a smooth radial gradient
+        // without a custom GLES shader (still one color mesh).
+        let rings = (18 + (14.0 * amp).round() as i32).clamp(18, 32);
+        for i in (0..rings).rev() {
+            let u = (i as f32 + 1.0) / rings as f32;
+            let radius = (outer * u).max(1.0);
+            let fall = 1.0 - u;
+            let color = kaoss_viz::glow_sample(hue, amp, fall, pulse);
+            scene.fill_disc_clipped(px, py, radius, color, clip);
         }
+        // Tiny hot core so the finger reads as a highlight, not a flat blob.
+        let core_r = (outer * 0.08).max(2.0);
+        scene.fill_disc_clipped(
+            px,
+            py,
+            core_r,
+            kaoss_viz::hsv_color(hue, 0.12, (0.55 + 0.45 * amp).min(1.0)),
+            clip,
+        );
     }
 
     for &(tx, ty, age) in model.kaoss_trail_points() {
         let tpx = pad.x as f32 + tx.clamp(0.0, 1.0) * pad.w as f32;
         let tpy = pad.y as f32 + (1.0 - ty.clamp(0.0, 1.0)) * pad.h as f32;
-        let radius = (8.0 + 18.0 * age) * amp.max(0.25);
-        let color = kaoss_viz::hsv_color(hue, 0.45, 0.50 * age * amp.max(0.2));
-        scene.fill_disc(tpx, tpy, radius, color);
-    }
-}
-
-fn draw_kaoss_ripples(scene: &mut Scene, pad: crate::layout::Rect, model: &NativeModel) {
-    let hue = kaoss_viz::program_hue(kaoss_ui::program(model.kaoss_program).id);
-    let pad_bg = 0x08040a;
-    let span = (pad.w.min(pad.h)) as f32;
-    for &(x, y, age) in model.kaoss_ripple_points() {
-        let px = pad.x as f32 + x.clamp(0.0, 1.0) * pad.w as f32;
-        let py = pad.y as f32 + (1.0 - y.clamp(0.0, 1.0)) * pad.h as f32;
-        let radius = 10.0 + age * span * 0.42;
-        let color = kaoss_viz::hsv_color(hue, 0.35, 0.95 * (1.0 - age));
-        scene.stroke_disc(px, py, radius, 2.0, color, pad_bg);
+        let trail_amp = amp.max(0.2) * age;
+        let outer = (10.0 + 22.0 * age) * amp.max(0.25);
+        let rings = 8;
+        for i in (0..rings).rev() {
+            let u = (i as f32 + 1.0) / rings as f32;
+            let fall = 1.0 - u;
+            let color = kaoss_viz::glow_sample(hue, trail_amp, fall * 0.85, 0.0);
+            scene.fill_disc_clipped(tpx, tpy, (outer * u).max(1.0), color, clip);
+        }
     }
 }
 

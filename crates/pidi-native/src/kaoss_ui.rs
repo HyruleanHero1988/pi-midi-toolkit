@@ -167,13 +167,19 @@ pub const KAOSS_PROGRAMS: &[KaossProgram] = &[
     },
 ];
 
-/// Match Tk gate set: off / 1/8 / 1/16 / trip.
+/// Gate set: off / 1/4 / 1/8 / 1/16 / trip (1/4 fills the gap vs drum divisions).
 pub const GATE_PATTERNS: &[GatePattern] = &[
     GatePattern {
         id: "off",
         label: "GATE OFF",
         beats: 0.0,
         duty: 0.0,
+    },
+    GatePattern {
+        id: "4th",
+        label: "GATE 1/4",
+        beats: 1.0,
+        duty: 0.55,
     },
     GatePattern {
         id: "8th",
@@ -203,6 +209,17 @@ pub fn program(index: usize) -> KaossProgram {
 
 pub fn gate(index: usize) -> GatePattern {
     GATE_PATTERNS[index % GATE_PATTERNS.len()]
+}
+
+/// Pre–GATE 1/4 sessions stored off=0, 1/8=1, 1/16=2, trip=3.
+pub fn migrate_legacy_gate_index(index: usize) -> usize {
+    match index {
+        0 => 0, // off
+        1 => 2, // was 1/8 → now index 2
+        2 => 3, // was 1/16
+        3 => 4, // was trip
+        n => n.min(GATE_PATTERNS.len() - 1),
+    }
 }
 
 pub fn program_count(show_all: bool) -> usize {
@@ -333,5 +350,15 @@ mod tests {
         let ionian = jambox_core::kaoss_scale_index_by_id("ionian");
         assert_eq!(scale_picker_index(false, ionian), 1);
         assert_eq!(scale_picker_index(true, ionian), ionian as usize);
+    }
+
+    #[test]
+    fn gate_set_includes_quarter() {
+        assert_eq!(GATE_PATTERNS.len(), 5);
+        assert_eq!(gate(1).id, "4th");
+        assert_eq!(gate(1).label, "GATE 1/4");
+        assert_eq!(gate(1).beats, 1.0);
+        assert_eq!(migrate_legacy_gate_index(1), 2); // old 1/8
+        assert_eq!(migrate_legacy_gate_index(3), 4); // old trip
     }
 }

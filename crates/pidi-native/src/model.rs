@@ -747,7 +747,11 @@ impl NativeModel {
         self.kaoss_key = s.kaoss_key.min(11);
         self.kaoss_octaves = s.kaoss_octaves.clamp(1, 4);
         self.kaoss_program = s.kaoss_program % KAOSS_PROGRAMS.len();
-        self.kaoss_gate = s.kaoss_gate % kaoss_ui::GATE_PATTERNS.len();
+        self.kaoss_gate = if s.version < 3 {
+            kaoss_ui::migrate_legacy_gate_index(s.kaoss_gate)
+        } else {
+            s.kaoss_gate % kaoss_ui::GATE_PATTERNS.len()
+        };
         self.kaoss_hold = s.kaoss_hold;
         self.kaoss_show_all = s.kaoss_show_all;
         self.kaoss_channel = s.kaoss_channel & 0x0f;
@@ -785,7 +789,7 @@ impl NativeModel {
 
     pub fn capture_session(&self) -> SessionState {
         SessionState {
-            version: 2,
+            version: 3,
             bpm: self.bpm,
             morph: self.synth_params[0],
             tone: self.synth_params[1],
@@ -2590,7 +2594,6 @@ impl NativeModel {
         self.kaoss_touching = true;
         self.kaoss_latched_xy = (x, y);
         self.push_kaoss_trail(x, y);
-        self.push_kaoss_ripple(x, y);
         let prog = kaoss_ui::program(self.kaoss_program);
         let gated = prog.note && kaoss_ui::gate(self.kaoss_gate).beats > 0.0;
         if prog.note && !gated {
@@ -3739,14 +3742,6 @@ impl NativeModel {
         }
     }
 
-    fn push_kaoss_ripple(&mut self, x: f32, y: f32) {
-        self.kaoss_ripples.push((x, y, 0.0));
-        if self.kaoss_ripples.len() > 4 {
-            let drop = self.kaoss_ripples.len() - 4;
-            self.kaoss_ripples.drain(0..drop);
-        }
-    }
-
     fn age_kaoss_viz(&mut self, dt: f32) {
         self.kaoss_viz_time += dt;
         let trail_life = 0.45_f32;
@@ -3754,11 +3749,8 @@ impl NativeModel {
             p.2 -= dt / trail_life;
         }
         self.kaoss_trail.retain(|p| p.2 > 0.0);
-        let ripple_life = 0.55_f32;
-        for p in &mut self.kaoss_ripples {
-            p.2 += dt / ripple_life;
-        }
-        self.kaoss_ripples.retain(|p| p.2 < 1.0);
+        // Expanding touch rings removed — they punched a black hole into the pad.
+        self.kaoss_ripples.clear();
         if self.kaoss_viz_glow {
             let finger = self.kaoss_finger();
             let target = if finger.is_some() { 1.0 } else { 0.0 };

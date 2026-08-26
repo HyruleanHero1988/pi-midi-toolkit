@@ -108,7 +108,7 @@ fn default_kaoss_out() -> OutMode {
 impl Default for SessionState {
     fn default() -> Self {
         Self {
-            version: 2,
+            version: 3,
             bpm: 120.0,
             morph: 0.5,
             tone: 0.5,

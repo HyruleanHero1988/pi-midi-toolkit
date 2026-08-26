@@ -80,14 +80,22 @@ pub fn glow_step(current: f32, target: f32, dt: f32) -> f32 {
     clamp01(cur - step / 0.32)
 }
 
-pub fn glow_radii(span: f32, amp: f32) -> (f32, f32, f32) {
+/// Outer radius of the soft radial bloom (span = min(pad w,h)).
+pub fn glow_outer_radius(span: f32, amp: f32) -> f32 {
     let span = span.max(1.0);
     let amp = clamp01(amp);
-    let scale = 0.82;
-    let outer = span * 0.52 * scale * amp.powf(1.35);
-    let mid = span * 0.28 * scale * amp.powf(1.12);
-    let core = span * 0.11 * scale * amp;
-    (outer, mid, core)
+    span * 0.55 * amp.powf(1.15)
+}
+
+/// Soft HSV for a radial sample: `fall` 0 = edge, 1 = core.
+pub fn glow_sample(hue: f32, amp: f32, fall: f32, pulse: f32) -> u32 {
+    let fall = clamp01(fall);
+    let amp = clamp01(amp);
+    // Ease so the bright core is small and the halo fades gently.
+    let soft = fall.powf(1.55);
+    let sat = (0.92 - 0.78 * soft.powf(1.1)).clamp(0.12, 0.95);
+    let val = ((0.08 + 0.90 * soft) * (0.35 + 0.65 * amp) + pulse * 0.06 * soft).min(1.0);
+    hsv_color(hue, sat, val)
 }
 
 pub fn viz_pulse(t: f32, bpm: f32, gate_flash: f32) -> f32 {
@@ -164,13 +172,19 @@ mod tests {
     }
 
     #[test]
-    fn glow_radii_scale_with_amp() {
+    fn glow_outer_scales_with_amp() {
         let span = 400.0;
-        let full = glow_radii(span, 1.0);
-        let faded = glow_radii(span, 0.2);
-        assert!(full.0 > faded.0);
-        assert!(full.1 > faded.1);
-        assert!(full.2 > faded.2);
+        assert!(glow_outer_radius(span, 1.0) > glow_outer_radius(span, 0.2));
+        assert!(glow_outer_radius(span, 1.0) > 100.0);
+    }
+
+    #[test]
+    fn glow_sample_brightens_toward_core() {
+        let edge = glow_sample(0.93, 1.0, 0.0, 0.0);
+        let core = glow_sample(0.93, 1.0, 1.0, 0.0);
+        let edge_v = ((edge >> 16) & 0xff).max((edge >> 8) & 0xff).max(edge & 0xff);
+        let core_v = ((core >> 16) & 0xff).max((core >> 8) & 0xff).max(core & 0xff);
+        assert!(core_v > edge_v + 40, "core should be brighter than the halo edge");
     }
 
     #[test]
