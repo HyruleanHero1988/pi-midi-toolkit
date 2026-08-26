@@ -91,7 +91,7 @@ pub fn rasterize(frame: &mut Frame, scene: &Scene) {
     for q in &scene.color {
         frame.fill_rect(q.x as i32, q.y as i32, q.w as i32, q.h as i32, q.color);
     }
-    let (aw, ah, atlas) = font::atlas_rgba();
+    let (aw, ah, atlas) = font::atlas_rgba_for(scene.font_style.resolved());
     for g in &scene.glyphs {
         blit_glyph(frame, g, aw, ah, &atlas);
     }

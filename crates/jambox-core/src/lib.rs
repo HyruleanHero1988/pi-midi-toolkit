@@ -33,9 +33,10 @@ pub use drums::{drum_model_for_note, DrumKit, DrumModel, DRUM_MODEL_COUNT};
 pub use engine::{EngineStatus, JamboxEngine, MidiOutSink, MAX_MIDI_OUT, MAX_RENDER_BLOCK};
 pub use fx::{FxParams, FxUnit};
 pub use kaoss::{
-    kaoss_scale, note_at_x, note_index_at_x, pack_xy, scale_notes, tone_at_y, unpack_xy,
-    velocity_at_y, KaossMapper, KaossScale, LatestTouch, TouchDelta, DEFAULT_ROOT_MIDI,
-    KAOSS_SCALES, MAX_TOUCH_VOICES, NOTE_NAMES,
+    kaoss_scale, kaoss_scale_index_by_id, migrate_legacy_scale_index, note_at_x, note_index_at_x,
+    pack_xy, scale_notes, tone_at_y, unpack_xy, velocity_at_y, KaossMapper, KaossScale,
+    LatestTouch, TouchDelta, DEFAULT_KAOSS_SCALE_INDEX, DEFAULT_ROOT_MIDI, KAOSS_SCALES,
+    MAX_TOUCH_VOICES, NOTE_NAMES,
 };
 pub use repeat::{
     RepeatDivision, RepeatEvent, RepeatRack, MAX_REPEAT_EVENTS_PER_BLOCK, MAX_REPEAT_LANES,

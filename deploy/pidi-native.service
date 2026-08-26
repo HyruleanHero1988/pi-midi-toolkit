@@ -1,5 +1,6 @@
 [Unit]
 Description=PiDI native jambox kiosk (SDL/KMSDRM)
+# After jambox only — jambox must not After=multi-user (ordering cycle drops us).
 After=jambox-engine.service sound.target
 Wants=jambox-engine.service
 

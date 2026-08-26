@@ -420,13 +420,14 @@ pub fn update_check() -> (String, Vec<String>) {
     (status, lines)
 }
 
-/// Soft poweroff via midi-tone `pi-power.sh` when present (Tk POWER button).
-pub fn power_action() -> (String, Vec<String>) {
+/// Soft reboot/poweroff via midi-tone `pi-power.sh` when present (Tk POWER menu).
+pub fn pi_power(action: &str) -> (String, Vec<String>) {
+    let action = if action == "reboot" { "reboot" } else { "poweroff" };
     #[cfg(not(target_os = "linux"))]
     {
         return (
-            "POWER — appliance only".into(),
-            vec!["POWER runs pi-power.sh on the Pi.".into()],
+            format!("POWER — {action} (appliance only)"),
+            vec![format!("POWER runs pi-power.sh on the Pi ({action}).")],
         );
     }
     #[cfg(target_os = "linux")]
@@ -438,27 +439,51 @@ pub fn power_action() -> (String, Vec<String>) {
         ];
         let Some(script) = candidates.into_iter().find(|p| p.is_file()) else {
             return (
-                "POWER: pi-power.sh missing".into(),
+                format!("POWER: pi-power.sh missing ({action})"),
                 vec!["expected apps/pidi/scripts/session/pi-power.sh".into()],
             );
         };
-        let (code, stdout, stderr) = run_capture(
-            Command::new("sudo")
-                .args(["-n", script.to_str().unwrap_or("pi-power.sh"), "poweroff"]),
-            8,
-        );
-        let mut lines = vec![format!("pi-power.sh poweroff exit {code}")];
-        if !stdout.is_empty() {
-            lines.push(truncate_lines(&stdout, 4, 240));
+        let script_arg = script.to_str().unwrap_or("pi-power.sh");
+        let attempts: &[(&str, &[&str])] = &[
+            ("pi-power.sh", &["sudo", "-n", script_arg, action]),
+            ("systemctl", &["sudo", "-n", "systemctl", action]),
+            (
+                "bin",
+                if action == "poweroff" {
+                    &["sudo", "-n", "poweroff"]
+                } else {
+                    &["sudo", "-n", "reboot"]
+                },
+            ),
+        ];
+        let mut lines = Vec::new();
+        for (label, args) in attempts {
+            let (code, stdout, stderr) = run_capture(
+                Command::new(args[0]).args(&args[1..]),
+                25,
+            );
+            if code == 0 {
+                return (
+                    format!("POWER: {action}…"),
+                    vec![format!("{label} ok")],
+                );
+            }
+            lines.push(format!("{label} exit {code}"));
+            if !stdout.is_empty() {
+                lines.push(truncate_lines(&stdout, 2, 240));
+            }
+            if !stderr.is_empty() {
+                lines.push(truncate_lines(&stderr, 2, 240));
+            }
         }
-        if !stderr.is_empty() {
-            lines.push(truncate_lines(&stderr, 4, 240));
-        }
-        let status = if code == 0 {
-            "POWER: shutting down…".into()
-        } else {
-            "POWER: failed (see LOG)".into()
-        };
-        (status, lines)
+        (
+            format!("POWER: {action} failed (see LOG)"),
+            lines,
+        )
     }
+}
+
+/// Legacy direct poweroff (tests / callers that skip the menu).
+pub fn power_action() -> (String, Vec<String>) {
+    pi_power("poweroff")
 }

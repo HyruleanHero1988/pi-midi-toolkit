@@ -15,75 +15,232 @@ pub struct KaossScale {
     pub id: &'static str,
     pub label: &'static str,
     pub degrees: &'static [u8],
+    pub curated: bool,
 }
 
+// Official Kaossilator PRO scale list (p.99) plus PRO+ / KO-2 extras — parity
+// with `apps/pidi/pidi/kaoss.py` `_SCALE_DEFS`.
 pub const KAOSS_SCALES: &[KaossScale] = &[
+    KaossScale {
+        id: "off",
+        label: "OFF",
+        degrees: &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+        curated: false,
+    },
     KaossScale {
         id: "chromatic",
         label: "CHROMATIC",
         degrees: &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+        curated: true,
     },
     KaossScale {
         id: "ionian",
         label: "MAJOR",
         degrees: &IONIAN,
+        curated: true,
     },
     KaossScale {
         id: "dorian",
         label: "DORIAN",
         degrees: &[0, 2, 3, 5, 7, 9, 10],
+        curated: true,
+    },
+    KaossScale {
+        id: "phrygian",
+        label: "PHRYGIAN",
+        degrees: &[0, 1, 3, 5, 7, 8, 10],
+        curated: false,
+    },
+    KaossScale {
+        id: "lydian",
+        label: "LYDIAN",
+        degrees: &[0, 2, 4, 6, 7, 9, 11],
+        curated: false,
     },
     KaossScale {
         id: "mixolydian",
         label: "MIXOLYDIAN",
         degrees: &[0, 2, 4, 5, 7, 9, 10],
+        curated: true,
     },
     KaossScale {
         id: "aeolian",
         label: "MINOR",
         degrees: &[0, 2, 3, 5, 7, 8, 10],
+        curated: true,
+    },
+    KaossScale {
+        id: "locrian",
+        label: "LOCRIAN",
+        degrees: &[0, 1, 3, 5, 6, 8, 10],
+        curated: false,
     },
     KaossScale {
         id: "harmonic",
         label: "HARM MINOR",
         degrees: &[0, 2, 3, 5, 7, 8, 11],
+        curated: true,
+    },
+    KaossScale {
+        id: "melodic",
+        label: "MEL MINOR",
+        degrees: &[0, 2, 3, 5, 7, 9, 11],
+        curated: false,
+    },
+    KaossScale {
+        id: "major_blues",
+        label: "MAJ BLUES",
+        degrees: &[0, 3, 4, 7, 9, 10],
+        curated: false,
     },
     KaossScale {
         id: "blues",
         label: "BLUES",
         degrees: &[0, 3, 5, 6, 7, 10],
+        curated: true,
+    },
+    KaossScale {
+        id: "diminish",
+        label: "DIMINISH",
+        degrees: &[0, 2, 3, 5, 6, 8, 9, 11],
+        curated: false,
+    },
+    KaossScale {
+        id: "combo_dim",
+        label: "COMBO DIM",
+        degrees: &[0, 1, 3, 4, 6, 7, 9, 10],
+        curated: false,
     },
     KaossScale {
         id: "major_pent",
         label: "MAJ PENT",
         degrees: &[0, 2, 4, 7, 9],
+        curated: true,
     },
     KaossScale {
         id: "minor_pent",
         label: "MIN PENT",
         degrees: &[0, 3, 5, 7, 10],
+        curated: true,
+    },
+    KaossScale {
+        id: "raga_bhairav",
+        label: "BHAIRAV",
+        degrees: &[0, 1, 4, 5, 7, 8, 11],
+        curated: false,
+    },
+    KaossScale {
+        id: "raga_gamanasrama",
+        label: "GAMANASRAMA",
+        degrees: &[0, 1, 4, 6, 7, 9, 11],
+        curated: false,
+    },
+    KaossScale {
+        id: "raga_todi",
+        label: "TODI",
+        degrees: &[0, 1, 3, 6, 7, 8, 11],
+        curated: false,
     },
     KaossScale {
         id: "spanish",
         label: "SPANISH",
         degrees: &[0, 1, 3, 4, 5, 7, 8, 10],
+        curated: true,
+    },
+    KaossScale {
+        id: "gypsy",
+        label: "GYPSY",
+        degrees: &[0, 2, 3, 6, 7, 8, 11],
+        curated: false,
+    },
+    KaossScale {
+        id: "arabian",
+        label: "ARABIAN",
+        degrees: &[0, 2, 4, 5, 6, 8, 10],
+        curated: false,
+    },
+    KaossScale {
+        id: "egyptian",
+        label: "EGYPTIAN",
+        degrees: &[0, 2, 5, 7, 10],
+        curated: false,
+    },
+    KaossScale {
+        id: "hawaiian",
+        label: "HAWAIIAN",
+        degrees: &[0, 2, 3, 7, 9],
+        curated: false,
+    },
+    KaossScale {
+        id: "pelog",
+        label: "PELOG",
+        degrees: &[0, 1, 3, 7, 8],
+        curated: false,
+    },
+    KaossScale {
+        id: "miyakobushi",
+        label: "MIYAKOBUSHI",
+        degrees: &[0, 1, 5, 7, 8],
+        curated: false,
     },
     KaossScale {
         id: "ryukyu",
         label: "RYUKYU",
         degrees: &[0, 4, 5, 7, 11],
+        curated: true,
+    },
+    KaossScale {
+        id: "chinese",
+        label: "CHINESE",
+        degrees: &[0, 4, 6, 7, 11],
+        curated: false,
     },
     KaossScale {
         id: "bassline",
         label: "BASS LINE",
         degrees: &[0, 7, 10],
+        curated: true,
     },
     KaossScale {
         id: "whole",
         label: "WHOLE TONE",
         degrees: &[0, 2, 4, 6, 8, 10],
+        curated: true,
+    },
+    KaossScale {
+        id: "min3",
+        label: "MIN 3RDS",
+        degrees: &[0, 3, 6, 9],
+        curated: false,
+    },
+    KaossScale {
+        id: "maj3",
+        label: "MAJ 3RDS",
+        degrees: &[0, 4, 8],
+        curated: false,
+    },
+    KaossScale {
+        id: "fourth",
+        label: "4THS",
+        degrees: &[0, 5, 10],
+        curated: false,
+    },
+    KaossScale {
+        id: "fifth",
+        label: "5THS",
+        degrees: &[0, 7],
+        curated: false,
+    },
+    KaossScale {
+        id: "octave",
+        label: "OCTAVE",
+        degrees: &[0],
+        curated: false,
     },
 ];
+
+/// Default MAJOR (ionian) index in [`KAOSS_SCALES`].
+pub const DEFAULT_KAOSS_SCALE_INDEX: u8 = 2;
 
 pub const NOTE_NAMES: [&str; 12] = [
     "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B",
@@ -91,6 +248,36 @@ pub const NOTE_NAMES: [&str; 12] = [
 
 pub fn kaoss_scale(index: usize) -> KaossScale {
     KAOSS_SCALES[index % KAOSS_SCALES.len()]
+}
+
+pub fn kaoss_scale_index_by_id(id: &str) -> u8 {
+    KAOSS_SCALES
+        .iter()
+        .position(|s| s.id == id)
+        .unwrap_or(DEFAULT_KAOSS_SCALE_INDEX as usize) as u8
+}
+
+/// Remap indices from the old 13-scale compact table (pre full factory list).
+pub fn migrate_legacy_scale_index(index: u8) -> u8 {
+    const LEGACY: [&str; 13] = [
+        "chromatic",
+        "ionian",
+        "dorian",
+        "mixolydian",
+        "aeolian",
+        "harmonic",
+        "blues",
+        "major_pent",
+        "minor_pent",
+        "spanish",
+        "ryukyu",
+        "bassline",
+        "whole",
+    ];
+    LEGACY
+        .get(index as usize)
+        .map(|id| kaoss_scale_index_by_id(id))
+        .unwrap_or(index.min(KAOSS_SCALES.len() as u8 - 1))
 }
 
 /// Latest XY for one contact. Copied across the lock-free mailbox.
@@ -241,7 +428,7 @@ impl KaossMapper {
             notes: [0; 32],
             n_notes: 0,
             voices: [TouchVoice::silent(); MAX_TOUCH_VOICES],
-            scale_index: 1, // ionian
+            scale_index: DEFAULT_KAOSS_SCALE_INDEX,
             key: 0,
             root_midi: DEFAULT_ROOT_MIDI,
             octaves: DEFAULT_OCTAVES,
@@ -447,5 +634,20 @@ mod tests {
     fn follow_without_down_is_idle() {
         let mut mapper = KaossMapper::new();
         assert_eq!(mapper.follow(9, 0.5, 0.5, 100), TouchDelta::Idle);
+    }
+
+    #[test]
+    fn full_factory_scale_table_matches_tk() {
+        assert_eq!(KAOSS_SCALES.len(), 36);
+        assert_eq!(
+            KAOSS_SCALES.iter().filter(|s| s.curated).count(),
+            13
+        );
+        assert_eq!(kaoss_scale_index_by_id("ionian"), DEFAULT_KAOSS_SCALE_INDEX);
+        assert_eq!(
+            migrate_legacy_scale_index(1),
+            kaoss_scale_index_by_id("ionian")
+        );
+        assert_eq!(kaoss_scale(4).id, "phrygian");
     }
 }

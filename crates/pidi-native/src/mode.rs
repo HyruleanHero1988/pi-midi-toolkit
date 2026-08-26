@@ -4,6 +4,7 @@
 pub enum UiMode {
     Home,
     Synth,
+    Drums,
     Seq,
     Pads,
     Kaoss,
@@ -15,9 +16,10 @@ pub enum UiMode {
 }
 
 impl UiMode {
-    pub const ALL: [UiMode; 10] = [
+    pub const ALL: [UiMode; 11] = [
         UiMode::Home,
         UiMode::Synth,
+        UiMode::Drums,
         UiMode::Seq,
         UiMode::Pads,
         UiMode::Kaoss,
@@ -32,6 +34,7 @@ impl UiMode {
         match self {
             Self::Home => "HOME",
             Self::Synth => "SYN",
+            Self::Drums => "KIT",
             Self::Seq => "SEQ",
             Self::Pads => "PAD",
             Self::Kaoss => "KAO",
@@ -47,6 +50,7 @@ impl UiMode {
         match self {
             Self::Home => "HOME",
             Self::Synth => "SYNTH",
+            Self::Drums => "DRUMS",
             Self::Seq => "SEQ",
             Self::Pads => "PADS",
             Self::Kaoss => "KAOSS",
@@ -73,7 +77,7 @@ mod tests {
 
     #[test]
     fn ten_modes_round_trip() {
-        assert_eq!(UiMode::ALL.len(), 10);
+        assert_eq!(UiMode::ALL.len(), 11);
         for (i, mode) in UiMode::ALL.iter().enumerate() {
             assert_eq!(UiMode::from_index(i), Some(*mode));
             assert_eq!(mode.index(), i);

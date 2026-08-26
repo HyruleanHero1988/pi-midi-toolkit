@@ -2,7 +2,7 @@
 
 use glow::{HasContext, NativeBuffer, NativeProgram, NativeTexture, NativeUniformLocation};
 
-use crate::font;
+use crate::font::{self, FontStyle};
 use crate::scene::{ColorQuad, GlyphQuad, Scene};
 
 const SCREEN_W: f32 = 800.0;
@@ -107,7 +107,8 @@ pub struct Renderer {
     tex_prog: NativeProgram,
     color_vbo: NativeBuffer,
     tex_vbo: NativeBuffer,
-    atlas: NativeTexture,
+    atlas_retro: NativeTexture,
+    atlas_smooth: NativeTexture,
     color_screen: NativeUniformLocation,
     tex_screen: NativeUniformLocation,
     tex_sampler: NativeUniformLocation,
@@ -146,48 +147,17 @@ impl Renderer {
             let tex_vbo = gl.create_buffer().map_err(|e| e.to_string())?;
 
             let (aw, ah, pixels) = font::atlas_rgba();
-            let atlas = gl.create_texture().map_err(|e| e.to_string())?;
-            gl.bind_texture(glow::TEXTURE_2D, Some(atlas));
-            gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
-            gl.tex_image_2d(
-                glow::TEXTURE_2D,
-                0,
-                glow::RGBA as i32,
-                aw as i32,
-                ah as i32,
-                0,
-                glow::RGBA,
-                glow::UNSIGNED_BYTE,
-                glow::PixelUnpackData::Slice(Some(&pixels)),
-            );
-            gl.tex_parameter_i32(
-                glow::TEXTURE_2D,
-                glow::TEXTURE_MIN_FILTER,
-                glow::NEAREST as i32,
-            );
-            gl.tex_parameter_i32(
-                glow::TEXTURE_2D,
-                glow::TEXTURE_MAG_FILTER,
-                glow::NEAREST as i32,
-            );
-            gl.tex_parameter_i32(
-                glow::TEXTURE_2D,
-                glow::TEXTURE_WRAP_S,
-                glow::CLAMP_TO_EDGE as i32,
-            );
-            gl.tex_parameter_i32(
-                glow::TEXTURE_2D,
-                glow::TEXTURE_WRAP_T,
-                glow::CLAMP_TO_EDGE as i32,
-            );
-            gl.bind_texture(glow::TEXTURE_2D, None);
+            let atlas_retro = upload_atlas(gl, aw, ah, &pixels, false)?;
+            let (sw, sh, smooth_pixels) = font::atlas_rgba_for(FontStyle::Smooth);
+            let atlas_smooth = upload_atlas(gl, sw, sh, &smooth_pixels, true)?;
 
             Ok(Self {
                 color_prog,
                 tex_prog,
                 color_vbo,
                 tex_vbo,
-                atlas,
+                atlas_retro,
+                atlas_smooth,
                 color_screen,
                 tex_screen,
                 tex_sampler,
@@ -236,7 +206,19 @@ impl Renderer {
         gl.uniform_2_f32(Some(&self.tex_screen), SCREEN_W, SCREEN_H);
         gl.uniform_1_i32(Some(&self.tex_sampler), 0);
         gl.active_texture(glow::TEXTURE0);
-        gl.bind_texture(glow::TEXTURE_2D, Some(self.atlas));
+        let style = scene.font_style.resolved();
+        let (atlas, linear) = match style {
+            FontStyle::Smooth => (self.atlas_smooth, true),
+            FontStyle::Retro => (self.atlas_retro, false),
+        };
+        gl.bind_texture(glow::TEXTURE_2D, Some(atlas));
+        let filter = if linear {
+            glow::LINEAR as i32
+        } else {
+            glow::NEAREST as i32
+        };
+        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, filter);
+        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, filter);
         gl.bind_buffer(glow::ARRAY_BUFFER, Some(self.tex_vbo));
         upload_f32(gl, &tex_verts);
         let tex_stride = 8 * 4;
@@ -254,6 +236,48 @@ impl Renderer {
         gl.disable(glow::BLEND);
         gl.use_program(None);
     }
+}
+
+unsafe fn upload_atlas(
+    gl: &glow::Context,
+    aw: u32,
+    ah: u32,
+    pixels: &[u8],
+    linear: bool,
+) -> Result<NativeTexture, String> {
+    let atlas = gl.create_texture().map_err(|e| e.to_string())?;
+    gl.bind_texture(glow::TEXTURE_2D, Some(atlas));
+    gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
+    gl.tex_image_2d(
+        glow::TEXTURE_2D,
+        0,
+        glow::RGBA as i32,
+        aw as i32,
+        ah as i32,
+        0,
+        glow::RGBA,
+        glow::UNSIGNED_BYTE,
+        glow::PixelUnpackData::Slice(Some(pixels)),
+    );
+    let filter = if linear {
+        glow::LINEAR as i32
+    } else {
+        glow::NEAREST as i32
+    };
+    gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, filter);
+    gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, filter);
+    gl.tex_parameter_i32(
+        glow::TEXTURE_2D,
+        glow::TEXTURE_WRAP_S,
+        glow::CLAMP_TO_EDGE as i32,
+    );
+    gl.tex_parameter_i32(
+        glow::TEXTURE_2D,
+        glow::TEXTURE_WRAP_T,
+        glow::CLAMP_TO_EDGE as i32,
+    );
+    gl.bind_texture(glow::TEXTURE_2D, None);
+    Ok(atlas)
 }
 
 unsafe fn attrib(gl: &glow::Context, program: NativeProgram, name: &str) -> Result<u32, String> {

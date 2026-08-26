@@ -5,11 +5,13 @@
 
 pub mod client;
 pub mod font;
+pub mod smooth_font;
 #[cfg(feature = "sdl")]
 pub mod gles;
 pub mod host;
 pub mod input;
 pub mod kaoss_ui;
+pub mod kaoss_viz;
 pub mod layout;
 pub mod mode;
 pub mod model;
@@ -17,6 +19,8 @@ pub mod phrases;
 pub mod presets;
 pub mod render;
 pub mod scene;
+pub mod scroll;
+pub mod screensaver;
 pub mod seq;
 pub mod session;
 pub mod songs;
@@ -27,6 +31,7 @@ pub mod sdl_backend;
 
 pub use client::NativeClient;
 pub use input::TouchEvent;
+pub use font::FontStyle;
 pub use layout::{Hit, Layout, Surface};
 pub use mode::UiMode;
 pub use model::{NativeModel, RepeatDivisionChoice};

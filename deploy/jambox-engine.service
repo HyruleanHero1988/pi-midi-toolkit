@@ -1,6 +1,8 @@
 [Unit]
 Description=pi-midi-toolkit jambox audio + sequencer engine (native kiosk)
-After=sound.target multi-user.target
+# Do not After=multi-user.target — that cycles with WantedBy=multi-user and
+# causes systemd to drop dependent units (e.g. pidi-native) from the boot job.
+After=sound.target
 
 [Service]
 Type=simple

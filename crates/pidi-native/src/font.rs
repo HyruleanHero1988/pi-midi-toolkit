@@ -1,8 +1,65 @@
 //! 5×7 bitmap font, ASCII 32..95. Packed as 5 columns of 7 bits.
 
+use serde::{Deserialize, Serialize};
+
+pub use crate::smooth_font::smooth_atlas;
+
 pub const GLYPH_W: i32 = 5;
 pub const GLYPH_H: i32 = 7;
 pub const GLYPH_STRIDE: i32 = 6;
+
+/// UI text style — retro bitmap (default) or anti-aliased TTF.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum FontStyle {
+    #[default]
+    Retro,
+    Smooth,
+}
+
+impl FontStyle {
+    pub fn cycle(self) -> Self {
+        match self {
+            Self::Retro => Self::Smooth,
+            Self::Smooth => Self::Retro,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Retro => "FONT: RETRO",
+            Self::Smooth => "FONT: SMOOTH",
+        }
+    }
+
+    pub fn settings_color(self) -> u32 {
+        match self {
+            Self::Retro => 0x504945,
+            Self::Smooth => 0x458588,
+        }
+    }
+
+    /// Default `text()` scale for this style (retro = chunky 2× bitmap).
+    pub fn default_text_scale(self) -> i32 {
+        match self {
+            Self::Retro => 2,
+            Self::Smooth => 1,
+        }
+    }
+
+    pub fn uses_linear_filter(self) -> bool {
+        matches!(self, Self::Smooth)
+    }
+
+    /// Effective style after checking smooth atlas availability.
+    pub fn resolved(self) -> Self {
+        if matches!(self, Self::Smooth) && smooth_atlas().is_none() {
+            Self::Retro
+        } else {
+            self
+        }
+    }
+}
 
 const FONT: [&[u8; 5]; 64] = [
     &[0x00, 0x00, 0x00, 0x00, 0x00], // space
@@ -138,6 +195,17 @@ pub fn glyph_uv(ch: char) -> (f32, f32, f32, f32) {
     let u1 = (ox + GLYPH_W as u32) as f32 / w as f32;
     let v1 = (oy + GLYPH_H as u32) as f32 / h as f32;
     (u0, v0, u1, v1)
+}
+
+pub fn atlas_rgba_for(style: FontStyle) -> (u32, u32, Vec<u8>) {
+    match style.resolved() {
+        FontStyle::Smooth => {
+            let atlas = smooth_atlas().expect("smooth atlas");
+            let (w, h, data) = atlas.atlas_rgba();
+            (w, h, data.to_vec())
+        }
+        FontStyle::Retro => atlas_rgba(),
+    }
 }
 
 #[cfg(test)]

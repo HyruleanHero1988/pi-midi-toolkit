@@ -222,20 +222,57 @@ pub fn program_at(show_all: bool, index: usize) -> KaossProgram {
     }
 }
 
-pub fn picker_count(kind: KaossPicker, show_all_programs: bool) -> usize {
+pub fn scale_count(show_all: bool) -> usize {
+    if show_all {
+        jambox_core::KAOSS_SCALES.len()
+    } else {
+        jambox_core::KAOSS_SCALES
+            .iter()
+            .filter(|s| s.curated)
+            .count()
+    }
+}
+
+pub fn scale_at(show_all: bool, index: usize) -> jambox_core::KaossScale {
+    if show_all {
+        jambox_core::kaoss_scale(index)
+    } else {
+        let curated: Vec<_> = jambox_core::KAOSS_SCALES
+            .iter()
+            .filter(|s| s.curated)
+            .collect();
+        *curated[index % curated.len()]
+    }
+}
+
+pub fn scale_picker_index(show_all: bool, scale_index: u8) -> usize {
+    let scale = jambox_core::kaoss_scale(scale_index as usize);
+    if show_all {
+        scale_index as usize
+    } else {
+        jambox_core::KAOSS_SCALES
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.curated)
+            .position(|(_, s)| s.id == scale.id)
+            .unwrap_or(0)
+    }
+}
+
+pub fn picker_count(kind: KaossPicker, show_all: bool) -> usize {
     match kind {
-        KaossPicker::Program => program_count(show_all_programs),
-        KaossPicker::Scale => jambox_core::KAOSS_SCALES.len(),
+        KaossPicker::Program => program_count(show_all),
+        KaossPicker::Scale => scale_count(show_all),
         KaossPicker::Key => 12,
         KaossPicker::Octave => 4,
         KaossPicker::Gate => GATE_PATTERNS.len(),
     }
 }
 
-pub fn picker_label(kind: KaossPicker, index: usize, show_all_programs: bool) -> String {
+pub fn picker_label(kind: KaossPicker, index: usize, show_all: bool) -> String {
     match kind {
-        KaossPicker::Program => program_at(show_all_programs, index).label.to_string(),
-        KaossPicker::Scale => jambox_core::kaoss_scale(index).label.to_string(),
+        KaossPicker::Program => program_at(show_all, index).label.to_string(),
+        KaossPicker::Scale => scale_at(show_all, index).label.to_string(),
         KaossPicker::Key => jambox_core::NOTE_NAMES[index % 12].to_string(),
         KaossPicker::Octave => OCTAVE_LABELS[index % 4].to_string(),
         KaossPicker::Gate => gate(index).label.to_string(),
@@ -246,9 +283,9 @@ pub fn picker_cell(
     bounds: crate::layout::Rect,
     kind: KaossPicker,
     index: usize,
-    show_all_programs: bool,
+    show_all: bool,
 ) -> crate::layout::Rect {
-    let n = picker_count(kind, show_all_programs).max(1);
+    let n = picker_count(kind, show_all).max(1);
     let cols = match kind {
         KaossPicker::Key | KaossPicker::Octave | KaossPicker::Gate => 4,
         KaossPicker::Program => 3,
@@ -273,4 +310,28 @@ pub fn gate_period_sec(gate: GatePattern, bpm: f32) -> f64 {
     }
     let bpm = bpm.clamp(40.0, 240.0) as f64;
     (60.0 / bpm) * gate.beats
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn show_all_expands_factory_scales() {
+        let starter = scale_count(false);
+        let all = scale_count(true);
+        assert_eq!(starter, 13);
+        assert_eq!(all, jambox_core::KAOSS_SCALES.len());
+        assert!(all > starter);
+        assert_eq!(scale_at(false, 0).id, "chromatic");
+        assert_eq!(scale_at(true, 4).id, "phrygian");
+        assert_eq!(scale_at(true, 25).id, "pelog");
+    }
+
+    #[test]
+    fn scale_picker_index_tracks_curated_subset() {
+        let ionian = jambox_core::kaoss_scale_index_by_id("ionian");
+        assert_eq!(scale_picker_index(false, ionian), 1);
+        assert_eq!(scale_picker_index(true, ionian), ionian as usize);
+    }
 }

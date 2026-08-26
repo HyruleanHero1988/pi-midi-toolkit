@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::font::FontStyle;
+
 /// Stored MIDI/audio routing preference (engine may still always play local).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
@@ -89,6 +91,14 @@ pub struct SessionState {
     pub song_out: OutMode,
     #[serde(default = "default_kaoss_out")]
     pub kaoss_out: OutMode,
+    #[serde(default)]
+    pub font_style: FontStyle,
+    #[serde(default = "default_screensaver_sec")]
+    pub screensaver_sec: f32,
+}
+
+fn default_screensaver_sec() -> f32 {
+    crate::screensaver::DEFAULT_TIMEOUT_SEC
 }
 
 fn default_kaoss_out() -> OutMode {
@@ -98,7 +108,7 @@ fn default_kaoss_out() -> OutMode {
 impl Default for SessionState {
     fn default() -> Self {
         Self {
-            version: 1,
+            version: 2,
             bpm: 120.0,
             morph: 0.5,
             tone: 0.5,
@@ -107,7 +117,7 @@ impl Default for SessionState {
             release: 0.3,
             morph_a: 0,
             morph_b: 1,
-            kaoss_scale_index: 1,
+            kaoss_scale_index: jambox_core::DEFAULT_KAOSS_SCALE_INDEX,
             kaoss_key: 0,
             kaoss_octaves: 2,
             kaoss_program: 0,
@@ -121,6 +131,8 @@ impl Default for SessionState {
             pads_out: OutMode::Both,
             song_out: OutMode::Both,
             kaoss_out: OutMode::Local,
+            font_style: FontStyle::Retro,
+            screensaver_sec: crate::screensaver::DEFAULT_TIMEOUT_SEC,
         }
     }
 }
@@ -180,5 +192,6 @@ mod tests {
         assert_eq!(s.pads_out, OutMode::Both);
         assert_eq!(s.song_out, OutMode::Both);
         assert_eq!(s.kaoss_out, OutMode::Local);
+        assert_eq!(s.font_style, FontStyle::Retro);
     }
 }

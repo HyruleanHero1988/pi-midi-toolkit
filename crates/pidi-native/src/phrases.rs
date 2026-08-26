@@ -273,6 +273,25 @@ pub fn pad_label(cell: usize) -> String {
     format!("{}{}", bank, (c % 8) + 1)
 }
 
+/// Factory MPK pad notes start at 36.
+pub const PHRASE_PAD_BASE: u8 = 36;
+
+/// Screen 4×4 order (top→bottom): A1–A4, A5–A8, B1–B4, B5–B8.
+pub const PHRASE_GRID_CELLS: [usize; 16] = [
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
+];
+
+fn mpk_row_swap(within_bank: usize) -> usize {
+    (within_bank + 4) & 7
+}
+
+/// Phrase cell 0..15 → factory MPK note (row-swapped to match the screen).
+pub fn mpk_note_for_phrase_cell(cell: usize) -> u8 {
+    let c = cell & 0x0F;
+    let bank = c & !7;
+    PHRASE_PAD_BASE + bank as u8 + mpk_row_swap(c & 7) as u8
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -281,6 +300,13 @@ mod tests {
     #[test]
     fn seconds_to_ticks_at_120_bpm() {
         assert_eq!(seconds_to_ticks(0.5, 120.0), 960);
+    }
+
+    #[test]
+    fn mpk_note_row_swap_matches_tk() {
+        assert_eq!(mpk_note_for_phrase_cell(0), 40);
+        assert_eq!(mpk_note_for_phrase_cell(4), 36);
+        assert_eq!(pad_label(0), "A1");
     }
 
     #[test]

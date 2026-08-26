@@ -11,8 +11,11 @@ use crate::mode::UiMode;
 use crate::phrases::{self, PhrasePad};
 use crate::presets::{self, PresetSnapshot};
 use crate::seq::{SeqAction, SeqModel, SEQ_CLIP_SLOT};
+use crate::font::FontStyle;
 use crate::session::{self, OutMode, SessionState};
 use crate::songs::{self, SONG_CLIP_SLOT};
+use crate::scroll::{self, ScrollKind, TOUCH_SCROLL_THRESH_PX};
+use crate::screensaver;
 use crate::voice_bake;
 use crate::waves;
 use jambox_core::{kaoss_scale, note_at_x, scale_notes, velocity_at_y};
@@ -144,9 +147,16 @@ pub struct NativeModel {
     pub morph_b: u16,
     /// `Some(true)` = picking A, `Some(false)` = picking B.
     pub synth_pick_a: Option<bool>,
-    pub synth_pick_page: usize,
+    pub synth_voice_open: bool,
+    pub synth_pick_scroll: i32,
+    pub synth_voice_scroll: i32,
+    pub kaoss_picker_scroll: i32,
+    pub log_scroll: usize,
     /// Kit macros: tone, noise/snap, pitch, decay.
     pub drum_macros: [f32; 4],
+    /// Selected kit pad (screen index 0..15 into `PHRASE_GRID_CELLS`).
+    pub kit_selected: usize,
+    pub kit_all_drums: bool,
     pub kaoss_scale_index: u8,
     pub kaoss_key: u8,
     pub kaoss_octaves: u8,
@@ -158,6 +168,13 @@ pub struct NativeModel {
     pub kaoss_gate: usize,
     pub kaoss_show_all: bool,
     pub kaoss_channel: u8,
+    pub kaoss_settings_open: bool,
+    pub kaoss_settings_scroll: i32,
+    pub kaoss_show_axis_labels: bool,
+    pub kaoss_show_grid_lines: bool,
+    pub kaoss_grid_width: i8,
+    nav_stack: Vec<UiMode>,
+    nav_back_navigating: bool,
     pub kaoss_gate_on: bool,
     pub kaoss_gate_t0: Option<Instant>,
     pub kaoss_latched_xy: (f32, f32),
@@ -181,6 +198,14 @@ pub struct NativeModel {
     pub pads_out: OutMode,
     pub song_out: OutMode,
     pub kaoss_out: OutMode,
+    pub font_style: FontStyle,
+    pub power_menu_open: bool,
+    mode_before_power: UiMode,
+    pub screensaver: screensaver::IdleWatch,
+    panel_backlight: screensaver::PanelBacklight,
+    pub ui_shift: (i32, i32),
+    screensaver_elapsed: f32,
+    screensaver_orbit: f32,
     /// Last USB Kaoss note (for retune / release).
     kaoss_usb_note: Option<u8>,
     kaoss_cc_x_sent: Option<u8>,
@@ -188,8 +213,14 @@ pub struct NativeModel {
     kaoss_cc_touch_sent: Option<u8>,
     pub session_dirty: bool,
     pub last_autosave: Instant,
-    /// false = CELLS (default), true = GLOW (larger soft finger blob).
+    /// false = CELLS (default), true = GLOW (free-form gradient blob).
     pub kaoss_viz_glow: bool,
+    /// GLOW envelope 0..1 (Tk `_glow_amp`).
+    pub kaoss_glow_amp: f32,
+    /// Last finger XY for GLOW blooms (Tk `_glow_xy`).
+    pub kaoss_glow_xy: (f32, f32),
+    /// Accumulated viz time for wave / pulse animation.
+    kaoss_viz_time: f32,
     /// Trail points `(x, y, age)` with age 1 = fresh.
     kaoss_trail: Vec<(f32, f32, f32)>,
     /// Ripples `(x, y, age)` with age 0 = fresh → 1 = gone.
@@ -236,9 +267,15 @@ impl NativeModel {
             morph_a: 0,
             morph_b: 1,
             synth_pick_a: None,
-            synth_pick_page: 0,
+            synth_voice_open: false,
+            synth_pick_scroll: 0,
+            synth_voice_scroll: 0,
+            kaoss_picker_scroll: 0,
+            log_scroll: 0,
             drum_macros: [0.60, 0.45, 0.50, 0.55],
-            kaoss_scale_index: 1,
+            kit_selected: 4,
+            kit_all_drums: false,
+            kaoss_scale_index: jambox_core::DEFAULT_KAOSS_SCALE_INDEX,
             kaoss_key: 0,
             kaoss_octaves: 2,
             kaoss_full: false,
@@ -248,6 +285,13 @@ impl NativeModel {
             kaoss_gate: 0,
             kaoss_show_all: false,
             kaoss_channel: 0,
+            kaoss_settings_open: false,
+            kaoss_settings_scroll: 0,
+            kaoss_show_axis_labels: true,
+            kaoss_show_grid_lines: true,
+            kaoss_grid_width: 2,
+            nav_stack: Vec::new(),
+            nav_back_navigating: false,
             kaoss_gate_on: false,
             kaoss_gate_t0: None,
             kaoss_latched_xy: (0.5, 0.5),
@@ -271,6 +315,14 @@ impl NativeModel {
             pads_out: OutMode::Both,
             song_out: OutMode::Both,
             kaoss_out: OutMode::Local,
+            font_style: FontStyle::Retro,
+            power_menu_open: false,
+            mode_before_power: UiMode::Kaoss,
+            screensaver: screensaver::IdleWatch::new(screensaver::timeout_from_env()),
+            panel_backlight: screensaver::PanelBacklight::new(),
+            ui_shift: (0, 0),
+            screensaver_elapsed: 0.0,
+            screensaver_orbit: 0.0,
             kaoss_usb_note: None,
             kaoss_cc_x_sent: None,
             kaoss_cc_y_sent: None,
@@ -278,6 +330,9 @@ impl NativeModel {
             session_dirty: false,
             last_autosave: Instant::now(),
             kaoss_viz_glow: false,
+            kaoss_glow_amp: 0.0,
+            kaoss_glow_xy: (0.5, 0.5),
+            kaoss_viz_time: 0.0,
             kaoss_trail: Vec::new(),
             kaoss_ripples: Vec::new(),
             fingers: [Finger::silent(); MAX_FINGERS],
@@ -314,6 +369,7 @@ impl NativeModel {
                 }
             }
         }
+        self.panel_backlight.ensure_lit();
     }
 
     fn sync_wave_bank(&mut self) {
@@ -361,14 +417,166 @@ impl NativeModel {
     }
 
     pub fn set_mode(&mut self, mode: UiMode) {
+        self.power_menu_open = false;
         self.mode = mode;
         self.status_line.clear();
         self.kaoss_picker = None;
+        self.kaoss_picker_scroll = 0;
+        self.kaoss_settings_open = false;
+        self.kaoss_settings_scroll = 0;
         self.synth_pick_a = None;
+        self.synth_voice_open = false;
+        self.synth_pick_scroll = 0;
+        self.synth_voice_scroll = 0;
         if mode != UiMode::Kaoss && self.kaoss_full {
             self.kaoss_full = false;
             self.kaoss_full_exit_since = None;
             self.layout.apply_kaoss_full(false);
+        }
+    }
+
+    fn tracks_nav_history(mode: UiMode) -> bool {
+        matches!(
+            mode,
+            UiMode::Home
+                | UiMode::Synth
+                | UiMode::Seq
+                | UiMode::Pads
+                | UiMode::Kaoss
+                | UiMode::Songs
+                | UiMode::Presets
+                | UiMode::Log
+                | UiMode::Settings
+        )
+    }
+
+    fn push_nav_history(&mut self, next: UiMode) {
+        if self.nav_back_navigating {
+            return;
+        }
+        let prev = self.mode;
+        if prev == next || !Self::tracks_nav_history(prev) {
+            return;
+        }
+        if self.nav_stack.last() == Some(&prev) {
+            return;
+        }
+        self.nav_stack.push(prev);
+        if self.nav_stack.len() > 16 {
+            self.nav_stack.remove(0);
+        }
+    }
+
+    pub fn can_nav_back(&self) -> bool {
+        self.overlay_nav_target().is_some() || !self.nav_stack.is_empty()
+    }
+
+    fn overlay_nav_target(&self) -> Option<&'static str> {
+        if self.power_menu_open {
+            return Some("power");
+        }
+        if self.kaoss_settings_open {
+            return Some("kaoss_settings");
+        }
+        if self.kaoss_picker.is_some() {
+            return Some("kaoss_picker");
+        }
+        if self.synth_pick_a.is_some() {
+            return Some("morph");
+        }
+        if self.synth_voice_open {
+            return Some("voices");
+        }
+        None
+    }
+
+    fn leave_kaoss_mode(&mut self, outbox: &mut Outbox) {
+        self.kaoss_settings_open = false;
+        self.kaoss_picker = None;
+        if self.kaoss_full {
+            self.leave_kaoss_full();
+        }
+        let ids: Vec<i32> = self
+            .fingers
+            .iter()
+            .filter(|f| f.active && f.surface == Surface::Kaoss)
+            .map(|f| f.id)
+            .collect();
+        for id in ids {
+            self.finger_up(id, outbox);
+        }
+        if !self.kaoss_hold && (self.kaoss_gate_on || self.kaoss_touching) {
+            self.release_kaoss_gate(outbox);
+            self.kaoss_touching = false;
+        }
+    }
+
+    fn close_kaoss_settings(&mut self) {
+        self.kaoss_settings_open = false;
+        self.kaoss_settings_scroll = 0;
+        self.status_line.clear();
+    }
+
+    fn open_kaoss_settings(&mut self) {
+        if self.kaoss_settings_open {
+            return;
+        }
+        if self.kaoss_full {
+            self.leave_kaoss_full();
+        }
+        self.kaoss_picker = None;
+        self.kaoss_settings_open = true;
+        self.kaoss_settings_scroll = 0;
+        self.status_line = "KAOSS settings".into();
+        self.mark_dirty();
+    }
+
+    fn nav_back(&mut self, outbox: &mut Outbox) {
+        if !self.can_nav_back() {
+            return;
+        }
+        match self.overlay_nav_target() {
+            Some("power") => self.close_power_menu(true),
+            Some("kaoss_settings") => self.close_kaoss_settings(),
+            Some("kaoss_picker") => self.kaoss_picker = None,
+            Some("morph") => {
+                self.synth_pick_a = None;
+                self.synth_pick_scroll = 0;
+                self.status_line.clear();
+            }
+            Some("voices") => {
+                self.synth_voice_open = false;
+                self.synth_voice_scroll = 0;
+                self.status_line.clear();
+            }
+            _ => {
+                if let Some(prev) = self.nav_stack.pop() {
+                    self.nav_back_navigating = true;
+                    if self.mode == UiMode::Kaoss {
+                        self.leave_kaoss_mode(outbox);
+                    }
+                    self.set_mode(prev);
+                    self.nav_back_navigating = false;
+                }
+            }
+        }
+        self.mark_dirty();
+    }
+
+    fn mode_from_session(raw: &str) -> UiMode {
+        match raw.to_ascii_lowercase().as_str() {
+            "home" => UiMode::Home,
+            "syn" | "synth" => UiMode::Synth,
+            "kit" | "drums" => UiMode::Drums,
+            "seq" => UiMode::Seq,
+            "pad" | "pads" => UiMode::Pads,
+            "kao" | "kaoss" => UiMode::Kaoss,
+            "sng" | "songs" => UiMode::Songs,
+            "pre" | "presets" => UiMode::Presets,
+            "map" => UiMode::Map,
+            "log" => UiMode::Log,
+            "set" | "settings" => UiMode::Settings,
+            _ => UiMode::Kaoss,
         }
     }
 
@@ -391,6 +599,35 @@ impl NativeModel {
             .map(|f| (f.x, f.y))
     }
 
+    pub fn kaoss_viz_time(&self) -> f32 {
+        self.kaoss_viz_time
+    }
+
+    pub fn kaoss_trail_points(&self) -> &[(f32, f32, f32)] {
+        &self.kaoss_trail
+    }
+
+    pub fn kaoss_ripple_points(&self) -> &[(f32, f32, f32)] {
+        &self.kaoss_ripples
+    }
+
+    /// 1 while GATE ARP is in the on phase — drives the LED field pulse.
+    pub fn kaoss_gate_flash(&self) -> f32 {
+        let prog = kaoss_ui::program(self.kaoss_program);
+        if !prog.note {
+            return 0.0;
+        }
+        let gate = kaoss_ui::gate(self.kaoss_gate);
+        if gate.beats <= 0.0 || !self.kaoss_touching {
+            return 0.0;
+        }
+        if self.kaoss_gate_on {
+            1.0
+        } else {
+            0.0
+        }
+    }
+
     pub fn cell(&self, col: usize, row: usize) -> u32 {
         self.cells[row][col]
     }
@@ -407,10 +644,88 @@ impl NativeModel {
         }
         if self.mode == UiMode::Kaoss {
             self.age_kaoss_viz(dt);
-            self.paint_cells();
+            if !self.kaoss_viz_glow {
+                self.paint_cells();
+            }
             self.tick_kaoss_full_exit();
         }
         self.tick_kaoss_gate(outbox);
+        self.tick_screensaver(dt);
+    }
+
+    pub fn screensaver_active(&self) -> bool {
+        self.screensaver.active
+    }
+
+    pub fn screensaver_orbit(&self) -> f32 {
+        self.screensaver_orbit
+    }
+
+    fn tick_screensaver(&mut self, dt: f32) {
+        self.screensaver_elapsed += dt;
+        if self.screensaver.active {
+            self.screensaver_orbit += dt;
+            self.ui_shift = (0, 0);
+            return;
+        }
+        self.ui_shift = screensaver::pixel_shift_xy(self.screensaver_elapsed);
+        if self.screensaver.due() {
+            self.show_screensaver();
+        }
+    }
+
+    fn open_power_menu(&mut self) {
+        if self.power_menu_open {
+            return;
+        }
+        self.mode_before_power = self.mode;
+        self.kaoss_picker = None;
+        self.kaoss_settings_open = false;
+        self.synth_voice_open = false;
+        self.synth_pick_a = None;
+        self.power_menu_open = true;
+        self.status_line = "power menu".into();
+        self.mark_dirty();
+    }
+
+    fn close_power_menu(&mut self, restore_mode: bool) {
+        if !self.power_menu_open {
+            return;
+        }
+        self.power_menu_open = false;
+        if restore_mode {
+            self.mode = self.mode_before_power;
+        }
+        self.mark_dirty();
+    }
+
+    fn show_screensaver(&mut self) {
+        if !self.screensaver.activate() {
+            return;
+        }
+        self.panel_backlight.dim();
+        self.close_power_menu(false);
+        self.mark_dirty();
+    }
+
+    fn wake_screensaver(&mut self) {
+        if self.screensaver.poke() {
+            self.panel_backlight.restore();
+            self.mark_dirty();
+        }
+    }
+
+    fn run_pi_power(&mut self, action: &str, outbox: &mut Outbox) {
+        outbox.panic();
+        self.panic_ui_state(outbox);
+        let path = session::session_path_from_env();
+        let _ = session::save(&path, &self.capture_session());
+        let (status, lines) = host::pi_power(action);
+        self.status_line = status;
+        for line in lines {
+            self.push_log(line);
+        }
+        self.mark_dirty();
     }
 
     pub fn mark_dirty(&mut self) {
@@ -424,7 +739,11 @@ impl NativeModel {
         self.vibrato_always = s.vibrato_always.clamp(0.0, 1.0);
         self.morph_a = s.morph_a;
         self.morph_b = s.morph_b;
-        self.kaoss_scale_index = s.kaoss_scale_index;
+        self.kaoss_scale_index = if s.version < 2 {
+            jambox_core::migrate_legacy_scale_index(s.kaoss_scale_index)
+        } else {
+            s.kaoss_scale_index.min(jambox_core::KAOSS_SCALES.len() as u8 - 1)
+        };
         self.kaoss_key = s.kaoss_key.min(11);
         self.kaoss_octaves = s.kaoss_octaves.clamp(1, 4);
         self.kaoss_program = s.kaoss_program % KAOSS_PROGRAMS.len();
@@ -436,6 +755,12 @@ impl NativeModel {
         self.pads_out = s.pads_out;
         self.song_out = s.song_out;
         self.kaoss_out = s.kaoss_out;
+        self.font_style = s.font_style;
+        if s.screensaver_sec >= 0.0
+            && std::env::var("MIDI_TONE_SCREENSAVER_SEC").is_err()
+        {
+            self.screensaver.timeout_sec = s.screensaver_sec;
+        }
         outbox.emit_mode("clips", self.pads_out.wire());
         outbox.emit_mode("kaoss", self.kaoss_out.wire());
         outbox.tempo(self.bpm);
@@ -451,13 +776,16 @@ impl NativeModel {
         }
         self.sync_wave_bank();
         self.push_kaoss_scale(outbox);
+        if !s.mode.is_empty() {
+            self.mode = Self::mode_from_session(&s.mode);
+        }
         self.session_dirty = false;
         self.status_line = "session loaded".into();
     }
 
     pub fn capture_session(&self) -> SessionState {
         SessionState {
-            version: 1,
+            version: 2,
             bpm: self.bpm,
             morph: self.synth_params[0],
             tone: self.synth_params[1],
@@ -480,6 +808,8 @@ impl NativeModel {
             pads_out: self.pads_out,
             song_out: self.song_out,
             kaoss_out: self.kaoss_out,
+            font_style: self.font_style,
+            screensaver_sec: self.screensaver.timeout_sec,
         }
     }
 
@@ -487,7 +817,7 @@ impl NativeModel {
         if !self.session_dirty {
             return;
         }
-        if self.last_autosave.elapsed().as_secs_f32() < 5.0 {
+        if self.last_autosave.elapsed().as_secs_f32() < 2.0 {
             return;
         }
         let path = session::session_path_from_env();
@@ -531,6 +861,11 @@ impl NativeModel {
     }
 
     pub fn finger_down(&mut self, id: i32, px: i32, py: i32, outbox: &mut Outbox) {
+        if self.screensaver.active {
+            self.wake_screensaver();
+            return;
+        }
+        self.screensaver.poke();
         if self.fingers.iter().any(|f| f.active && f.id == id) {
             self.finger_move(id, px, py, outbox);
             return;
@@ -542,7 +877,20 @@ impl NativeModel {
         let gesture = self.next_gesture;
         self.next_gesture = self.next_gesture.wrapping_add(1).max(1);
 
-        let hit = if let Some(kind) = self.kaoss_picker {
+        let hit = if self.kaoss_settings_open {
+            let base = self.layout.hit(self.mode, px, py);
+            if matches!(
+                base,
+                Hit::Nav(_) | Hit::NavBack | Hit::Power | Hit::HomeTile(_)
+            ) {
+                base
+            } else if self.layout.content.contains(px, py) {
+                self.layout
+                    .hit_kaoss_settings(px, py, self.kaoss_settings_scroll)
+            } else {
+                base
+            }
+        } else if let Some(_kind) = self.kaoss_picker {
             let base = self.layout.hit(self.mode, px, py);
             match base {
                 Hit::KaossProg
@@ -563,20 +911,51 @@ impl NativeModel {
                 | Hit::Drum { .. }
                 | Hit::Division(_)
                 | Hit::Nav(_)
+                | Hit::NavBack
                 | Hit::Power => base,
-                _ => self
-                    .layout
-                    .hit_kaoss_picker(kind, px, py, self.kaoss_show_all),
+                _ => {
+                    if self.layout.kaoss.contains(px, py) {
+                        Hit::ScrollArea(ScrollKind::KaossPicker)
+                    } else {
+                        base
+                    }
+                }
             }
-        } else if self.mode == UiMode::Synth && self.synth_pick_a.is_some() {
-            let page_len = self.wave_names.len().saturating_sub(self.synth_pick_page * 12);
-            self.layout
-                .hit_synth_picker(px, py, self.synth_pick_page, page_len)
+        } else if self.power_menu_open {
+            let base = self.layout.hit(self.mode, px, py);
+            if matches!(base, Hit::Nav(_) | Hit::NavBack | Hit::Power | Hit::HomeTile(_)) {
+                base
+            } else {
+                self.layout.hit_power_menu(px, py)
+            }
+        } else if self.mode == UiMode::Synth
+            && (self.synth_pick_a.is_some() || self.synth_voice_open)
+        {
+            self.layout.hit_synth_overlay(
+                px,
+                py,
+                self.synth_voice_open,
+                self.synth_pick_a.is_some(),
+            )
+        } else if self.mode == UiMode::Songs && self.layout.song_list.contains(px, py) {
+            Hit::ScrollArea(ScrollKind::SongList)
+        } else if self.mode == UiMode::Log {
+            let log_top = crate::layout::HUD_H + 70;
+            let log_bottom = log_top + 18 * 10;
+            if py >= log_top && py < log_bottom {
+                Hit::ScrollArea(ScrollKind::Log)
+            } else {
+                self.layout.hit(self.mode, px, py)
+            }
         } else {
             self.layout.hit(self.mode, px, py)
         };
 
         match hit {
+            Hit::NavBack => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.nav_back(outbox);
+            }
             Hit::Nav(mode) => {
                 self.fingers[slot] = Finger {
                     active: true,
@@ -587,8 +966,13 @@ impl NativeModel {
                     px,
                     py,
                     surface: Surface::UiTap,
-                                gate_on: false,
-            };
+                    gate_on: false,
+                };
+                self.close_power_menu(false);
+                if self.mode == UiMode::Kaoss && mode != UiMode::Kaoss {
+                    self.leave_kaoss_mode(outbox);
+                }
+                self.push_nav_history(mode);
                 self.set_mode(mode);
             }
             Hit::HomeTile(mode) => {
@@ -601,17 +985,45 @@ impl NativeModel {
                     px,
                     py,
                     surface: Surface::UiTap,
-                                gate_on: false,
-            };
+                    gate_on: false,
+                };
+                if self.mode == UiMode::Kaoss && mode != UiMode::Kaoss {
+                    self.leave_kaoss_mode(outbox);
+                }
+                self.push_nav_history(mode);
                 self.set_mode(mode);
             }
             Hit::Power => {
                 self.tap_ui(slot, id, gesture, px, py);
-                let (status, lines) = host::power_action();
-                self.status_line = status;
-                for line in lines {
-                    self.push_log(line);
+                if self.power_menu_open {
+                    self.close_power_menu(true);
+                } else {
+                    self.open_power_menu();
                 }
+            }
+            Hit::PowerShutdown => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.run_pi_power("poweroff", outbox);
+            }
+            Hit::PowerReboot => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.run_pi_power("reboot", outbox);
+            }
+            Hit::PowerScreenOff => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.close_power_menu(true);
+                self.show_screensaver();
+                self.status_line = "screen off — tap to wake".into();
+            }
+            Hit::PowerBlankCycle => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.screensaver.timeout_sec =
+                    screensaver::next_timeout_preset(self.screensaver.timeout_sec);
+                self.screensaver.poke();
+                let label = screensaver::timeout_label_dynamic(self.screensaver.timeout_sec);
+                self.status_line = format!("burn-in guard → {label}");
+                self.push_log(self.status_line.clone());
+                self.mark_dirty();
             }
             Hit::Kaoss { x, y } => {
                 self.fingers[slot] = Finger {
@@ -628,8 +1040,12 @@ impl NativeModel {
                 self.watch_kaoss_full_exit(py, true);
                 self.begin_kaoss_touch(gesture, x, y, outbox);
             }
-            Hit::Drum { note, .. } => {
-                let repeat = note == KICK_NOTE && matches!(self.mode, UiMode::Kaoss | UiMode::Seq);
+            Hit::Drum { index, note } => {
+                let repeat = note == KICK_NOTE && self.mode == UiMode::Drums;
+                if self.mode == UiMode::Drums {
+                    self.kit_selected = index;
+                    self.kit_all_drums = false;
+                }
                 self.fingers[slot] = Finger {
                     active: true,
                     id,
@@ -834,27 +1250,40 @@ impl NativeModel {
                 self.tap_ui(slot, id, gesture, px, py);
                 self.nudge_drum_macro(index, outbox);
             }
+            Hit::KitAllDrums => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.kit_all_drums = true;
+                self.fx_target = FxEditTarget::DrumGroup;
+                self.status_line = "ALL DRUMS FX (shared kit bus)".into();
+                self.mark_dirty();
+            }
+            Hit::SynthVoices => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.open_voice_grid();
+            }
+            Hit::ScrollArea(kind) => {
+                self.fingers[slot] = Finger {
+                    active: true,
+                    id,
+                    gesture,
+                    x: 0.0,
+                    y: 0.0,
+                    px,
+                    py,
+                    surface: Surface::ScrollDrag {
+                        kind,
+                        start_py: py,
+                        scroll_at_start: self.scroll_offset(kind),
+                        dragging: false,
+                    },
+                    gate_on: false,
+                };
+            }
             Hit::SynthPickDone => {
                 self.tap_ui(slot, id, gesture, px, py);
                 self.synth_pick_a = None;
+                self.synth_voice_open = false;
                 self.status_line.clear();
-            }
-            Hit::SynthPickPrev => {
-                self.tap_ui(slot, id, gesture, px, py);
-                if self.synth_pick_page > 0 {
-                    self.synth_pick_page -= 1;
-                }
-            }
-            Hit::SynthPickNext => {
-                self.tap_ui(slot, id, gesture, px, py);
-                let max_page = self.wave_names.len().saturating_sub(1) / 12;
-                if self.synth_pick_page < max_page {
-                    self.synth_pick_page += 1;
-                }
-            }
-            Hit::SynthPickWave(index) => {
-                self.tap_ui(slot, id, gesture, px, py);
-                self.assign_morph_endpoint(index, outbox);
             }
             Hit::SynthSlider(index) => {
                 self.fingers[slot] = Finger {
@@ -870,8 +1299,7 @@ impl NativeModel {
                 };
                 self.apply_synth_slider(index, px, py, outbox);
             }
-            Hit::SynthKey(index) => {
-                let note = 48 + index as u8;
+            Hit::SynthKey { note } => {
                 self.fingers[slot] = Finger {
                     active: true,
                     id,
@@ -932,7 +1360,7 @@ impl NativeModel {
                     self.mark_dirty();
                 }
             }
-            Hit::KaossShowAll | Hit::KaossSettings => {
+            Hit::KaossShowAll => {
                 self.tap_ui(slot, id, gesture, px, py);
                 self.kaoss_show_all = !self.kaoss_show_all;
                 self.status_line = if self.kaoss_show_all {
@@ -942,14 +1370,53 @@ impl NativeModel {
                 };
                 self.mark_dirty();
             }
-            Hit::KaossViz => {
+            Hit::KaossSettings => {
                 self.tap_ui(slot, id, gesture, px, py);
-                self.kaoss_viz_glow = !self.kaoss_viz_glow;
-                self.status_line = if self.kaoss_viz_glow {
-                    "PAD VIZ: GLOW".into()
+                self.open_kaoss_settings();
+            }
+            Hit::KaossViz | Hit::KaossVizCells => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.kaoss_viz_glow = false;
+                self.status_line = "PAD VIZ: CELLS".into();
+                self.mark_dirty();
+            }
+            Hit::KaossVizGlow => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.kaoss_viz_glow = true;
+                self.status_line = "PAD VIZ: GLOW".into();
+                self.mark_dirty();
+            }
+            Hit::KaossAxes => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.kaoss_show_axis_labels = !self.kaoss_show_axis_labels;
+                self.status_line = if self.kaoss_show_axis_labels {
+                    "axis labels ON".into()
                 } else {
-                    "PAD VIZ: CELLS".into()
+                    "axis labels OFF".into()
                 };
+                self.mark_dirty();
+            }
+            Hit::KaossGridLines => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.kaoss_show_grid_lines = !self.kaoss_show_grid_lines;
+                self.status_line = if self.kaoss_show_grid_lines {
+                    "grid lines ON".into()
+                } else {
+                    "grid lines OFF".into()
+                };
+                self.mark_dirty();
+            }
+            Hit::KaossGridWidthUp => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.kaoss_grid_width = (self.kaoss_grid_width + 1).clamp(1, 6);
+                self.status_line = format!("grid {} px", self.kaoss_grid_width);
+                self.mark_dirty();
+            }
+            Hit::KaossGridWidthDown => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.kaoss_grid_width = (self.kaoss_grid_width - 1).clamp(1, 6);
+                self.status_line = format!("grid {} px", self.kaoss_grid_width);
+                self.mark_dirty();
             }
             Hit::KaossWipeFx => {
                 self.tap_ui(slot, id, gesture, px, py);
@@ -961,9 +1428,27 @@ impl NativeModel {
                 self.status_line = format!("kaoss CH {}", self.kaoss_channel + 1);
                 self.mark_dirty();
             }
+            Hit::KaossChannelPick(ch) => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.kaoss_channel = ch.min(15);
+                self.status_line = format!("kaoss CH {}", self.kaoss_channel + 1);
+                self.mark_dirty();
+            }
             Hit::KaossOut => {
                 self.tap_ui(slot, id, gesture, px, py);
                 self.kaoss_out = self.kaoss_out.cycle();
+                outbox.emit_mode("kaoss", self.kaoss_out.wire());
+                self.status_line = self.kaoss_out.label().into();
+                self.push_log(format!("kaoss {}", self.kaoss_out.label()));
+                self.mark_dirty();
+            }
+            Hit::KaossOutPick(index) => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.kaoss_out = match index {
+                    0 => OutMode::Local,
+                    1 => OutMode::Usb,
+                    _ => OutMode::Both,
+                };
                 outbox.emit_mode("kaoss", self.kaoss_out.wire());
                 self.status_line = self.kaoss_out.label().into();
                 self.push_log(format!("kaoss {}", self.kaoss_out.label()));
@@ -1184,9 +1669,15 @@ impl NativeModel {
                     px,
                     py,
                     surface: Surface::UiTap,
-                                gate_on: false,
-            };
-                self.load_preset(index, outbox);
+                    gate_on: false,
+                };
+                self.preset_selected = index;
+                self.status_line = if self.preset_occupied[index] {
+                    format!("slot {} selected — tap LOAD", index + 1)
+                } else {
+                    format!("slot {} empty", index + 1)
+                };
+                self.mark_dirty();
             }
             Hit::PresetSave => {
                 self.fingers[slot] = Finger {
@@ -1228,12 +1719,7 @@ impl NativeModel {
             };
                 let idx = self.song_scroll + row;
                 if idx < self.song_files.len() {
-                    self.song_selected = idx;
-                    self.status_line = self.song_files[idx]
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or("song")
-                        .to_string();
+                    self.select_song(idx, outbox);
                 }
             }
             Hit::SongPlay => {
@@ -1398,6 +1884,22 @@ impl NativeModel {
                     self.push_log(line);
                 }
             }
+            Hit::SettingsFont => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.font_style = self.font_style.cycle();
+                self.status_line = format!("UI font → {}", self.font_style.label());
+                self.mark_dirty();
+            }
+            Hit::SettingsDrums => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.push_nav_history(UiMode::Drums);
+                self.set_mode(UiMode::Drums);
+            }
+            Hit::SettingsMap => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.push_nav_history(UiMode::Map);
+                self.set_mode(UiMode::Map);
+            }
             Hit::MapThruOn => {
                 self.tap_ui(slot, id, gesture, px, py);
                 let (status, lines) = host::map_thru_on();
@@ -1459,6 +1961,38 @@ impl NativeModel {
             Surface::SettingsFx { index } => {
                 self.apply_fx_slider(index, py, outbox);
             }
+            Surface::SynthKey { note } => {
+                if let Some(new_note) = self.layout.synth_keyboard_note_at(px, py) {
+                    if new_note != note {
+                        outbox.note_off(0, note);
+                        self.seq.push_note(false, 0, note, 0);
+                        self.push_pad_rec(false, 0, note, 0);
+                        outbox.note_on(0, new_note, 110);
+                        self.seq.push_note(true, 0, new_note, 110);
+                        self.push_pad_rec(true, 0, new_note, 110);
+                        self.fingers[slot].surface = Surface::SynthKey { note: new_note };
+                    }
+                }
+            }
+            Surface::ScrollDrag {
+                kind,
+                start_py,
+                scroll_at_start,
+                dragging,
+            } => {
+                let dy = (start_py - py).abs();
+                if !dragging && dy >= TOUCH_SCROLL_THRESH_PX {
+                    self.fingers[slot].surface = Surface::ScrollDrag {
+                        kind,
+                        start_py,
+                        scroll_at_start,
+                        dragging: true,
+                    };
+                }
+                if dragging || dy >= TOUCH_SCROLL_THRESH_PX {
+                    self.apply_scroll_drag(kind, start_py, py, scroll_at_start);
+                }
+            }
             _ => {}
         }
     }
@@ -1500,6 +2034,18 @@ impl NativeModel {
                 outbox.note_off(0, note);
                 self.seq.push_note(false, 0, note, 0);
                 self.push_pad_rec(false, 0, note, 0);
+            }
+            Surface::ScrollDrag {
+                kind,
+                start_py,
+                dragging,
+                ..
+            } => {
+                let scrolled =
+                    dragging || (finger.py - start_py).abs() >= TOUCH_SCROLL_THRESH_PX;
+                if !scrolled {
+                    self.resolve_scroll_tap(kind, finger.px, finger.py, outbox);
+                }
             }
             Surface::Phrase { .. }
             | Surface::SynthSlider { .. }
@@ -1929,6 +2475,7 @@ impl NativeModel {
             Some(open) if open == kind => None,
             _ => Some(kind),
         };
+        self.kaoss_picker_scroll = 0;
         if self.kaoss_picker.is_some() {
             self.status_line = match kind {
                 KaossPicker::Program => "pick program".into(),
@@ -1955,11 +2502,10 @@ impl NativeModel {
                 self.mark_dirty();
             }
             KaossPicker::Scale => {
-                self.kaoss_scale_index = (index % jambox_core::KAOSS_SCALES.len()) as u8;
+                let s = kaoss_ui::scale_at(self.kaoss_show_all, index);
+                self.kaoss_scale_index = jambox_core::kaoss_scale_index_by_id(s.id);
                 self.push_kaoss_scale(outbox);
-                self.status_line = jambox_core::kaoss_scale(self.kaoss_scale_index as usize)
-                    .label
-                    .to_string();
+                self.status_line = s.label.to_string();
                 self.mark_dirty();
             }
             KaossPicker::Key => {
@@ -2577,13 +3123,175 @@ impl NativeModel {
     }
 
     fn open_synth_pick(&mut self, pick_a: bool) {
+        self.synth_voice_open = false;
         self.synth_pick_a = Some(pick_a);
-        self.synth_pick_page = 0;
+        self.synth_pick_scroll = 0;
         self.status_line = if pick_a {
-            "pick wave A".into()
+            "pick wave A · drag to scroll".into()
         } else {
-            "pick wave B".into()
+            "pick wave B · drag to scroll".into()
         };
+    }
+
+    fn open_voice_grid(&mut self) {
+        self.synth_pick_a = None;
+        self.synth_voice_open = true;
+        self.synth_voice_scroll = 0;
+        self.status_line = format!(
+            "VOICES — tap · drag to scroll · {} loaded",
+            self.wave_names.len()
+        );
+    }
+
+    fn scroll_offset(&self, kind: ScrollKind) -> i32 {
+        match kind {
+            ScrollKind::SynthMorphPick => self.synth_pick_scroll,
+            ScrollKind::SynthVoiceGrid => self.synth_voice_scroll,
+            ScrollKind::KaossPicker => self.kaoss_picker_scroll,
+            ScrollKind::KaossSettings => self.kaoss_settings_scroll,
+            ScrollKind::SongList => self.song_scroll as i32,
+            ScrollKind::Log => self.log_scroll as i32,
+        }
+    }
+
+    fn set_scroll_offset(&mut self, kind: ScrollKind, value: i32) {
+        match kind {
+            ScrollKind::SynthMorphPick => {
+                let grid = self
+                    .layout
+                    .synth_voice_grid(self.wave_names.len());
+                self.synth_pick_scroll = grid.clamp_scroll(value);
+            }
+            ScrollKind::SynthVoiceGrid => {
+                let grid = self
+                    .layout
+                    .synth_voice_grid(self.wave_names.len());
+                self.synth_voice_scroll = grid.clamp_scroll(value);
+            }
+            ScrollKind::KaossPicker => {
+                if let Some(kind) = self.kaoss_picker {
+                    let n = crate::kaoss_ui::picker_count(kind, self.kaoss_show_all);
+                    let grid = self.layout.kaoss_picker_grid(kind, n, self.kaoss_show_all);
+                    self.kaoss_picker_scroll = grid.clamp_scroll(value);
+                }
+            }
+            ScrollKind::KaossSettings => {
+                self.kaoss_settings_scroll =
+                    value.clamp(0, self.layout.kaoss_settings_max_scroll());
+            }
+            ScrollKind::SongList => {
+                let list = self.layout.song_list_scroll(self.song_files.len());
+                self.song_scroll = list.clamp_scroll(value.max(0) as usize);
+            }
+            ScrollKind::Log => {
+                let list = self.layout.log_list_scroll(self.log_lines.len());
+                self.log_scroll = list.clamp_scroll(value.max(0) as usize);
+            }
+        }
+        self.mark_dirty();
+    }
+
+    fn apply_scroll_drag(
+        &mut self,
+        kind: ScrollKind,
+        start_py: i32,
+        py: i32,
+        scroll_at_start: i32,
+    ) {
+        match kind {
+            ScrollKind::SynthMorphPick | ScrollKind::SynthVoiceGrid | ScrollKind::KaossPicker | ScrollKind::KaossSettings => {
+                let delta = start_py - py;
+                self.set_scroll_offset(kind, scroll_at_start + delta);
+            }
+            ScrollKind::SongList => {
+                let list = self.layout.song_list_scroll(self.song_files.len());
+                let next = scroll::ListScroll::scroll_from_drag(
+                    scroll_at_start as usize,
+                    start_py,
+                    py,
+                    list.row_h,
+                    list.max_scroll(),
+                );
+                if next != self.song_scroll {
+                    self.song_scroll = next;
+                    self.mark_dirty();
+                }
+            }
+            ScrollKind::Log => {
+                let list = self.layout.log_list_scroll(self.log_lines.len());
+                let next = scroll::ListScroll::scroll_from_drag(
+                    scroll_at_start as usize,
+                    start_py,
+                    py,
+                    list.row_h,
+                    list.max_scroll(),
+                );
+                if next != self.log_scroll {
+                    self.log_scroll = next;
+                    self.mark_dirty();
+                }
+            }
+        }
+    }
+
+    fn resolve_scroll_tap(&mut self, kind: ScrollKind, px: i32, py: i32, outbox: &mut Outbox) {
+        match kind {
+            ScrollKind::SynthMorphPick => {
+                let grid = self
+                    .layout
+                    .synth_voice_grid(self.wave_names.len());
+                if let Some(index) = grid.index_at(px, py, self.synth_pick_scroll) {
+                    self.assign_morph_endpoint(index, outbox);
+                }
+            }
+            ScrollKind::SynthVoiceGrid => {
+                let grid = self
+                    .layout
+                    .synth_voice_grid(self.wave_names.len());
+                if let Some(index) = grid.index_at(px, py, self.synth_voice_scroll) {
+                    self.select_voice_index(index, true, outbox);
+                }
+            }
+            ScrollKind::KaossPicker => {
+                if let Some(picker) = self.kaoss_picker {
+                    let n = crate::kaoss_ui::picker_count(picker, self.kaoss_show_all);
+                    let grid = self.layout.kaoss_picker_grid(picker, n, self.kaoss_show_all);
+                    if let Some(index) = grid.index_at(px, py, self.kaoss_picker_scroll) {
+                        self.apply_kaoss_picker(index, outbox);
+                    }
+                }
+            }
+            ScrollKind::SongList => {
+                for row in 0..5 {
+                    let cell = self.layout.song_row(row);
+                    if cell.contains(px, py) {
+                        let idx = self.song_scroll + row;
+                        if idx < self.song_files.len() {
+                            self.select_song(idx, outbox);
+                        }
+                        break;
+                    }
+                }
+            }
+            ScrollKind::Log => {}
+            ScrollKind::KaossSettings => {}
+        }
+    }
+
+    fn select_voice_index(&mut self, index: usize, close_grid: bool, outbox: &mut Outbox) {
+        if index >= self.wave_names.len() {
+            return;
+        }
+        self.morph_a = index as u16;
+        self.synth_params[0] = 0.0;
+        outbox.morph_pair(self.morph_a, self.morph_b);
+        outbox.synth("morph", 0.0);
+        self.sync_wave_bank();
+        self.status_line = format!("Voice → {}", self.wave_label(index as u16));
+        if close_grid {
+            self.synth_voice_open = false;
+        }
+        self.mark_dirty();
     }
 
     fn in_kaoss_full_exit_zone(py: i32) -> bool {
@@ -2763,7 +3471,7 @@ impl NativeModel {
     fn save_preset(&mut self, index: usize) {
         let dir = presets::presets_dir_from_env();
         let preset = PresetSnapshot {
-            version: 1,
+            version: 2,
             name: format!("SLOT {}", index + 1),
             morph: self.synth_params[0],
             tone: self.synth_params[1],
@@ -2942,6 +3650,30 @@ impl NativeModel {
         }
     }
 
+    fn select_song(&mut self, idx: usize, outbox: &mut Outbox) {
+        if idx >= self.song_files.len() {
+            return;
+        }
+        self.song_selected = idx;
+        let path = self.song_files[idx].clone();
+        self.apply_song_file_tempo(&path, outbox);
+        self.status_line = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("song")
+            .to_string();
+        self.mark_dirty();
+    }
+
+    fn apply_song_file_tempo(&mut self, path: &std::path::Path, outbox: &mut Outbox) {
+        let Some(bpm) = songs::load_smf_bpm(path) else {
+            return;
+        };
+        self.bpm = bpm.clamp(40.0, 240.0);
+        self.seq.bpm = self.bpm;
+        outbox.tempo(self.bpm);
+    }
+
     fn play_selected_song(&mut self, outbox: &mut Outbox) {
         let Some(path) = self.song_files.get(self.song_selected).cloned() else {
             self.status_line = "no songs in songs/".into();
@@ -2956,7 +3688,8 @@ impl NativeModel {
         outbox.clip_load(SONG_CLIP_SLOT, length_ticks, mode, events);
         outbox.clip_launch(SONG_CLIP_SLOT, "bar");
         self.song_playing = true;
-        self.bpm = bpm;
+        self.bpm = bpm.clamp(40.0, 240.0);
+        self.seq.bpm = self.bpm;
         self.status_line = format!(
             "play {}",
             path.file_name().and_then(|n| n.to_str()).unwrap_or("song")
@@ -2964,16 +3697,26 @@ impl NativeModel {
     }
 
     fn paint_cells(&mut self) {
-        let t = self.frame as f32 / 60.0;
+        let t = self.kaoss_viz_time;
         let finger = self.kaoss_finger();
         let trail = self.kaoss_trail.clone();
         let ripples = self.kaoss_ripples.clone();
-        let glow = self.kaoss_viz_glow;
-        let hold = self.kaoss_hold;
+        let hold = self.kaoss_hold && self.kaoss_touching;
+        let gate_flash = self.kaoss_gate_flash();
+        let hue_shift = crate::kaoss_viz::program_hue(kaoss_ui::program(self.kaoss_program).id);
         for row in 0..LED_ROWS {
             for col in 0..LED_COLS {
-                self.cells[row][col] =
-                    pad_led_rgb(col, row, t, finger, &trail, &ripples, glow, hold);
+                self.cells[row][col] = crate::kaoss_viz::pad_led_rgb(
+                    col,
+                    row,
+                    t,
+                    finger,
+                    &trail,
+                    &ripples,
+                    hold,
+                    gate_flash,
+                    hue_shift,
+                );
             }
         }
     }
@@ -3005,6 +3748,7 @@ impl NativeModel {
     }
 
     fn age_kaoss_viz(&mut self, dt: f32) {
+        self.kaoss_viz_time += dt;
         let trail_life = 0.45_f32;
         for p in &mut self.kaoss_trail {
             p.2 -= dt / trail_life;
@@ -3015,69 +3759,20 @@ impl NativeModel {
             p.2 += dt / ripple_life;
         }
         self.kaoss_ripples.retain(|p| p.2 < 1.0);
+        if self.kaoss_viz_glow {
+            let finger = self.kaoss_finger();
+            let target = if finger.is_some() { 1.0 } else { 0.0 };
+            let mut glow_dt = dt;
+            if target > self.kaoss_glow_amp && glow_dt <= 0.0 {
+                glow_dt = 0.02;
+            }
+            self.kaoss_glow_amp =
+                crate::kaoss_viz::glow_step(self.kaoss_glow_amp, target, glow_dt);
+            if let Some((x, y)) = finger {
+                self.kaoss_glow_xy = (x, y);
+            }
+        }
     }
-}
-
-pub fn pad_led_rgb(
-    col: usize,
-    row: usize,
-    t: f32,
-    finger: Option<(f32, f32)>,
-    trail: &[(f32, f32, f32)],
-    ripples: &[(f32, f32, f32)],
-    glow_mode: bool,
-    hold: bool,
-) -> u32 {
-    let base = 0x18u32 + ((col + row) as u32 % 3) * 8;
-    let mut r = base;
-    let mut g = base + 8;
-    let mut b = base + 24;
-    if hold {
-        r = r.saturating_add(10);
-        b = b.saturating_add(14);
-    }
-    let cx = (col as f32 + 0.5) / LED_COLS as f32;
-    let cy = (row as f32 + 0.5) / LED_ROWS as f32;
-    if let Some((fx, fy)) = finger {
-        let dx = cx - fx;
-        let dy = cy - fy;
-        let d = (dx * dx + dy * dy).sqrt();
-        let radius = if glow_mode { 0.55 } else { 0.40 };
-        let falloff = if glow_mode { 1.2 } else { 2.2 };
-        let glow = (1.0 - d / radius * falloff / 2.2).clamp(0.0, 1.0);
-        let glow = if glow_mode {
-            glow.powf(1.1)
-        } else {
-            glow
-        };
-        let pulse = 0.65 + 0.35 * (t * 6.0).sin();
-        let amp = if glow_mode { 220.0 } else { 180.0 };
-        r = (r as f32 + glow * amp * pulse) as u32;
-        g = (g as f32 + glow * 40.0) as u32;
-        b = (b as f32 + glow * 120.0 * pulse) as u32;
-    }
-    for &(tx, ty, age) in trail {
-        let dx = cx - tx;
-        let dy = cy - ty;
-        let d = (dx * dx + dy * dy).sqrt();
-        let spark = (1.0 - d / 0.22).clamp(0.0, 1.0).powf(1.8) * age.clamp(0.0, 1.0) * 0.55;
-        r = (r as f32 + spark * 160.0) as u32;
-        g = (g as f32 + spark * 60.0) as u32;
-        b = (b as f32 + spark * 100.0) as u32;
-    }
-    for &(rx, ry, age) in ripples {
-        let age = age.clamp(0.0, 1.0);
-        let radius = 0.08 + age * 0.72;
-        let dx = cx - rx;
-        let dy = cy - ry;
-        let d = (dx * dx + dy * dy).sqrt();
-        let ring = (1.0 - (d - radius).abs() / 0.10).clamp(0.0, 1.0);
-        let amp = ring * (1.0 - age) * 0.65;
-        r = (r as f32 + amp * 200.0) as u32;
-        g = (g as f32 + amp * 120.0) as u32;
-        b = (b as f32 + amp * 180.0) as u32;
-    }
-    ((r.min(255) << 16) | (g.min(255) << 8) | b.min(255)) as u32
 }
 
 #[cfg(test)]
@@ -3154,10 +3849,10 @@ mod tests {
     #[test]
     fn a_snare_can_fire_while_kick_repeats() {
         let mut model = NativeModel::new();
-        model.set_mode(UiMode::Seq);
+        model.set_mode(UiMode::Drums);
         let mut out = Outbox::new();
-        let kick = model.layout.seq_drum_cell(0);
-        let snare = model.layout.seq_drum_cell(1);
+        let kick = model.layout.kit_pad_cell(4);
+        let snare = model.layout.kit_pad_cell(5);
         model.finger_down(1, kick.x + 4, kick.y + 4, &mut out);
         model.finger_down(2, snare.x + 4, snare.y + 4, &mut out);
         assert_eq!(model.active_fingers(), 2);
@@ -3279,10 +3974,10 @@ mod tests {
     #[test]
     fn drum_macro_emits_kit_param() {
         let mut model = NativeModel::new();
-        model.set_mode(UiMode::Synth);
+        model.set_mode(UiMode::Drums);
         model.ensure_library_loaded();
         let mut out = Outbox::new();
-        let cell = model.layout.synth_macro_cell(0);
+        let cell = model.layout.kit_macro_cell(0);
         model.finger_down(1, cell.x + 4, cell.y + 4, &mut out);
         let batch = out.take();
         assert!(batch.iter().any(|r| matches!(

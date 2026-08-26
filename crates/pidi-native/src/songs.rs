@@ -55,7 +55,27 @@ pub fn load_smf_as_clip(path: &Path) -> Option<(Vec<WireClipEvent>, u32, f32)> {
     parse_smf(&data)
 }
 
-fn parse_smf(data: &[u8]) -> Option<(Vec<WireClipEvent>, u32, f32)> {
+/// Recommended playback tempo from the first `set_tempo` meta event (Tk parity).
+pub fn load_smf_bpm(path: &Path) -> Option<f32> {
+    let data = fs::read(path).ok()?;
+    smf_recommended_bpm(&data)
+}
+
+const DEFAULT_SONG_BPM: f32 = 120.0;
+
+fn clamp_song_bpm(bpm: f32) -> f32 {
+    bpm.clamp(20.0, 400.0)
+}
+
+fn smf_recommended_bpm(data: &[u8]) -> Option<f32> {
+    let (_, ntrks, _, offset) = parse_smf_header(data)?;
+    if let Some(bpm) = scan_smf_first_tempo(data, offset, ntrks) {
+        return Some(clamp_song_bpm(bpm));
+    }
+    Some(DEFAULT_SONG_BPM)
+}
+
+fn parse_smf_header(data: &[u8]) -> Option<(u16, u16, u32, usize)> {
     if data.len() < 14 || &data[0..4] != b"MThd" {
         return None;
     }
@@ -70,9 +90,76 @@ fn parse_smf(data: &[u8]) -> Option<(Vec<WireClipEvent>, u32, f32)> {
         return None; // SMPTE not supported
     }
     let tpq = division.max(1) as u32;
-    let mut offset = 8 + header_len;
+    let offset = 8 + header_len;
+    Some((format, ntrks, tpq, offset))
+}
+
+fn scan_smf_first_tempo(data: &[u8], mut offset: usize, ntrks: u16) -> Option<f32> {
+    for _ in 0..ntrks {
+        if offset + 8 > data.len() || &data[offset..offset + 4] != b"MTrk" {
+            break;
+        }
+        let track_len = u32::from_be_bytes(data[offset + 4..offset + 8].try_into().ok()?) as usize;
+        offset += 8;
+        let end = (offset + track_len).min(data.len());
+        let mut running: Option<u8> = None;
+        let mut i = offset;
+        while i < end {
+            let start = i;
+            let (_, consumed) = read_vlq(&data[i..end])?;
+            i = start + consumed;
+            if i >= end {
+                break;
+            }
+            let mut status = data[i];
+            if status < 0x80 {
+                status = running?;
+            } else {
+                i += 1;
+                running = if status < 0xf0 { Some(status) } else { None };
+            }
+            match status {
+                0xf0 => {
+                    if i >= end {
+                        break;
+                    }
+                    let sysex_start = i;
+                    let (len, consumed) = read_vlq(&data[i..end])?;
+                    i = sysex_start + consumed + len as usize;
+                    running = None;
+                }
+                0xff => {
+                    if i + 1 >= end {
+                        break;
+                    }
+                    let meta = data[i];
+                    i += 1;
+                    let meta_start = i;
+                    let (len, consumed) = read_vlq(&data[i..end])?;
+                    i = meta_start + consumed;
+                    if meta == 0x51 && len >= 3 && i + 3 <= end {
+                        let us = u32::from_be_bytes([0, data[i], data[i + 1], data[i + 2]]);
+                        if us > 0 {
+                            return Some(60_000_000.0 / us as f32);
+                        }
+                    }
+                    i += len as usize;
+                    running = None;
+                }
+                0x90 | 0x80 | 0xa0 | 0xb0 | 0xe0 => i += 2,
+                0xc0 | 0xd0 => i += 1,
+                _ => break,
+            }
+        }
+        offset = end;
+    }
+    None
+}
+
+fn parse_smf(data: &[u8]) -> Option<(Vec<WireClipEvent>, u32, f32)> {
+    let (format, ntrks, tpq, mut offset) = parse_smf_header(data)?;
+    let bpm = smf_recommended_bpm(data)?;
     let mut events = Vec::new();
-    let mut bpm = 120.0_f32;
     let mut max_tick = 0u32;
 
     for _ in 0..ntrks {
@@ -132,14 +219,8 @@ fn parse_smf(data: &[u8]) -> Option<(Vec<WireClipEvent>, u32, f32)> {
                         let meta_start = i;
                         let (len, consumed) = read_vlq(&data[i..end])?;
                         i = meta_start + consumed;
-                        if meta == 0x51 && len >= 3 && i + 3 <= end {
-                            let us =
-                                u32::from_be_bytes([0, data[i], data[i + 1], data[i + 2]]);
-                            if us > 0 {
-                                bpm = 60_000_000.0 / us as f32;
-                            }
-                        }
                         i += len as usize;
+                        let _ = meta;
                     } else {
                         let sysex_start = i;
                         let (len, consumed) = read_vlq(&data[i..end])?;
@@ -158,7 +239,7 @@ fn parse_smf(data: &[u8]) -> Option<(Vec<WireClipEvent>, u32, f32)> {
     if events.is_empty() {
         return None;
     }
-    Some((events, max_tick.max(PPQ), bpm.clamp(40.0, 240.0)))
+    Some((events, max_tick.max(PPQ), bpm))
 }
 
 fn scale_tick(tick: u32, from_tpq: u32, to_ppq: u32) -> u32 {
@@ -343,6 +424,31 @@ mod tests {
         assert!(events[0].on);
         assert_eq!(events[0].note, 60);
         assert!(len >= 1);
+    }
+
+    #[test]
+    fn reads_first_set_tempo_meta() {
+        let mut data = Vec::new();
+        data.extend_from_slice(b"MThd");
+        data.extend_from_slice(&6u32.to_be_bytes());
+        data.extend_from_slice(&0u16.to_be_bytes());
+        data.extend_from_slice(&1u16.to_be_bytes());
+        data.extend_from_slice(&480u16.to_be_bytes());
+        data.extend_from_slice(b"MTrk");
+        // 100 BPM = 600_000 µs/beat, then a later 140 BPM that must be ignored.
+        let track: &[u8] = &[
+            0x00, 0xff, 0x51, 0x03, 0x09, 0x27, 0xc0, // 100 BPM
+            0x00, 0x90, 60, 100,
+            0x00, 0xff, 0x51, 0x03, 0x07, 0xa1, 0x20, // 140 BPM
+            0x00, 0x80, 60, 0,
+            0x00, 0xff, 0x2f, 0x00,
+        ];
+        data.extend_from_slice(&(track.len() as u32).to_be_bytes());
+        data.extend_from_slice(track);
+        let bpm = smf_recommended_bpm(&data).expect("tempo");
+        assert!((bpm - 100.0).abs() < 0.5);
+        let (_, _, parsed_bpm) = parse_smf(&data).expect("parse");
+        assert!((parsed_bpm - 100.0).abs() < 0.5);
     }
 
     #[test]
