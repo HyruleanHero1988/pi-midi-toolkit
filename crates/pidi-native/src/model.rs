@@ -5,7 +5,8 @@
 
 use crate::chords::{self, ChordSpec, Overlay as ChordsOverlay, QualityRow, PALETTE_SLOTS};
 use crate::client::Outbox;
-use crate::host;
+use crate::host::{self, HostTask};
+use std::sync::mpsc::{Receiver, TryRecvError};
 use crate::kaoss_ui::{self, KaossPicker, KAOSS_PROGRAMS};
 use crate::layout::{Hit, Layout, Rect, Surface, NAV_H, SCREEN_H};
 use crate::mode::UiMode;
@@ -268,6 +269,9 @@ pub struct NativeModel {
     cells: [[u32; LED_COLS]; LED_ROWS],
     phrases_loaded: bool,
     session_loaded: bool,
+    /// In-flight SET/MAP host subprocess (UPDATE/WIFI/THRU). Polled from tick.
+    host_rx: Option<Receiver<(String, Vec<String>)>>,
+    host_busy: Option<HostTask>,
 }
 
 impl Default for NativeModel {
@@ -398,6 +402,8 @@ impl NativeModel {
             cells: [[0; LED_COLS]; LED_ROWS],
             phrases_loaded: false,
             session_loaded: false,
+            host_rx: None,
+            host_busy: None,
         }
     }
 
@@ -769,8 +775,52 @@ impl NativeModel {
         }
         self.tick_kaoss_gate(outbox);
         self.tick_screensaver(dt);
+        self.poll_host_job();
         if self.mode == UiMode::Drums && self.kit_wave_dirty {
             self.rebuild_kit_wave();
+        }
+    }
+
+    pub fn host_busy(&self) -> Option<HostTask> {
+        self.host_busy
+    }
+
+    fn start_host_job(&mut self, task: HostTask) {
+        if self.host_busy.is_some() {
+            self.status_line = "busy — wait".into();
+            self.push_log("host job already running");
+            self.mark_dirty();
+            return;
+        }
+        self.status_line = task.busy_status().into();
+        self.push_log(task.busy_status());
+        self.host_rx = Some(task.spawn());
+        self.host_busy = Some(task);
+        self.mark_dirty();
+    }
+
+    fn poll_host_job(&mut self) {
+        let Some(rx) = self.host_rx.as_ref() else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok((status, lines)) => {
+                self.host_rx = None;
+                self.host_busy = None;
+                self.status_line = status;
+                for line in lines {
+                    self.push_log(line);
+                }
+                self.mark_dirty();
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {
+                self.host_rx = None;
+                self.host_busy = None;
+                self.status_line = "host job failed".into();
+                self.push_log("host worker exited without a result");
+                self.mark_dirty();
+            }
         }
     }
 
@@ -2151,19 +2201,11 @@ impl NativeModel {
             }
             Hit::SettingsWifi => {
                 self.tap_ui(slot, id, gesture, px, py);
-                let (status, lines) = host::wifi_action();
-                self.status_line = status;
-                for line in lines {
-                    self.push_log(line);
-                }
+                self.start_host_job(HostTask::Wifi);
             }
             Hit::SettingsUpdate => {
                 self.tap_ui(slot, id, gesture, px, py);
-                let (status, lines) = host::update_check();
-                self.status_line = status;
-                for line in lines {
-                    self.push_log(line);
-                }
+                self.start_host_job(HostTask::UpdateCheck);
             }
             Hit::SettingsFont => {
                 self.tap_ui(slot, id, gesture, px, py);
@@ -2183,27 +2225,15 @@ impl NativeModel {
             }
             Hit::MapThruOn => {
                 self.tap_ui(slot, id, gesture, px, py);
-                let (status, lines) = host::map_thru_on();
-                self.status_line = status;
-                for line in lines {
-                    self.push_log(line);
-                }
+                self.start_host_job(HostTask::MapThruOn);
             }
             Hit::MapThruOff => {
                 self.tap_ui(slot, id, gesture, px, py);
-                let (status, lines) = host::map_thru_off();
-                self.status_line = status;
-                for line in lines {
-                    self.push_log(line);
-                }
+                self.start_host_job(HostTask::MapThruOff);
             }
             Hit::MapRefresh => {
                 self.tap_ui(slot, id, gesture, px, py);
-                let (status, lines) = host::map_list_ports();
-                self.status_line = status;
-                for line in lines {
-                    self.push_log(line);
-                }
+                self.start_host_job(HostTask::MapList);
             }
             Hit::ChordsOut => {
                 self.tap_ui(slot, id, gesture, px, py);
@@ -5008,6 +5038,29 @@ mod tests {
             model.kit_wave.iter().any(|s| s.abs() > 0.01),
             "selected drum waveform should be non-silent"
         );
+    }
+
+    #[test]
+    fn settings_update_does_not_block_the_ui() {
+        host::set_dry_run(true);
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Settings);
+        let mut out = Outbox::new();
+        let btn = model.layout.settings_update;
+        let start = Instant::now();
+        model.finger_down(1, btn.x + 4, btn.y + 4, &mut out);
+        model.finger_up(1, &mut out);
+        assert!(
+            start.elapsed() < std::time::Duration::from_millis(200),
+            "UPDATE tap blocked for {:?}",
+            start.elapsed()
+        );
+        assert_eq!(model.host_busy(), Some(HostTask::UpdateCheck));
+        assert!(model.status_line.to_ascii_lowercase().contains("check"));
+        let home = model.layout.nav_home();
+        model.finger_down(2, home.x + 4, home.y + 4, &mut out);
+        assert_eq!(model.mode, UiMode::Home);
+        host::set_dry_run(false);
     }
 
     #[test]

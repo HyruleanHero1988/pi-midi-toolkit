@@ -1928,21 +1928,33 @@ fn draw_map(scene: &mut Scene, model: &NativeModel) {
     scene.text(
         layout.map_thru_on.x + 56,
         layout.map_thru_on.y + 28,
-        "THRU ON",
+        if model.host_busy() == Some(crate::host::HostTask::MapThruOn) {
+            "WAIT"
+        } else {
+            "THRU ON"
+        },
         0xffffff,
     );
     scene.fill_rect(layout.map_thru_off, 0x9d0006);
     scene.text(
         layout.map_thru_off.x + 48,
         layout.map_thru_off.y + 28,
-        "THRU OFF",
+        if model.host_busy() == Some(crate::host::HostTask::MapThruOff) {
+            "WAIT"
+        } else {
+            "THRU OFF"
+        },
         0xffffff,
     );
     scene.fill_rect(layout.map_refresh, 0x458588);
     scene.text(
         layout.map_refresh.x + 28,
         layout.map_refresh.y + 28,
-        "REFRESH PORTS",
+        if model.host_busy() == Some(crate::host::HostTask::MapList) {
+            "WAIT"
+        } else {
+            "REFRESH PORTS"
+        },
         0xffffff,
     );
     // Recent log peek for list output
@@ -2008,8 +2020,14 @@ fn draw_settings(scene: &mut Scene, model: &NativeModel) {
     scene.text_centered(layout.settings_log, "LOG", 0xffffff, 2);
     scene.fill_rect(layout.settings_map, 0x83a598);
     scene.text_centered(layout.settings_map, "MAP", 0xffffff, 2);
-    scene.fill_rect(layout.settings_wifi, 0xd79921);
-    scene.text_centered(layout.settings_wifi, "WIFI", 0xffffff, 2);
+    let wifi_busy = model.host_busy() == Some(crate::host::HostTask::Wifi);
+    scene.fill_rect(layout.settings_wifi, if wifi_busy { 0x504945 } else { 0xd79921 });
+    scene.text_centered(
+        layout.settings_wifi,
+        if wifi_busy { "WAIT" } else { "WIFI" },
+        0xffffff,
+        2,
+    );
     scene.fill_rect(
         layout.settings_font,
         model.font_style.resolved().settings_color(),
@@ -2020,8 +2038,20 @@ fn draw_settings(scene: &mut Scene, model: &NativeModel) {
         0xffffff,
         2,
     );
-    scene.fill_rect(layout.settings_update, 0x689d6a);
-    scene.text_centered(layout.settings_update, "UPDATE", 0xffffff, 2);
+    let upd_busy = model.host_busy() == Some(crate::host::HostTask::UpdateCheck);
+    scene.fill_rect(
+        layout.settings_update,
+        if upd_busy { 0x504945 } else { 0x689d6a },
+    );
+    scene.text_centered(
+        layout.settings_update,
+        if upd_busy { "WAIT" } else { "UPDATE" },
+        0xffffff,
+        2,
+    );
+    if !model.status_line.is_empty() {
+        scene.text(24, HUD_H + 316, &model.status_line, 0xfabd2f);
+    }
 }
 
 fn draw_log(scene: &mut Scene, model: &NativeModel) {
