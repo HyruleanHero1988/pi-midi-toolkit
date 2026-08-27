@@ -324,7 +324,10 @@ pub fn viz_pulse(t: f32, bpm: f32, gate_flash: f32) -> f32 {
 }
 
 /// One LED in rainbow CELLS mode (Tk colorful `pad_led_hex`).
-/// `excit` is the smoothed touch envelope (0..1); idle shimmer stays instant.
+///
+/// `excit` drives brightness (smoothed finger + trail). Hue pull must use
+/// **instant finger proximity only** — blending hue with trail excit made
+/// cells thrash through the spectrum as sparks aged behind the finger.
 pub fn pad_led_rgb(
     col: usize,
     row: usize,
@@ -337,14 +340,22 @@ pub fn pad_led_rgb(
 ) -> u32 {
     let (_h, _s, val) = pad_led_base(col, row, t, excit, hold, gate_flash);
     let cols = LED_COLS.max(2);
+    let rows = LED_ROWS.max(2);
     let lx = col as f32 / (cols - 1) as f32;
+    let ly = row as f32 / (rows - 1) as f32;
     let mut hue = (lx * 0.70 + hue_shift + t * 0.035).rem_euclid(1.0);
-    let glow = clamp01(excit);
-    let sat = (0.55 + glow * 0.45).min(1.0);
+    let hue_glow = match finger {
+        Some((fx, fy)) => {
+            let dist = ((lx - fx).hypot(ly - fy)).abs();
+            (1.0 - dist / 0.40).max(0.0).powf(1.45)
+        }
+        None => 0.0,
+    };
+    let sat = (0.55 + hue_glow * 0.45).min(1.0);
     if let Some((fx, _fy)) = finger {
-        hue = (hue * (1.0 - glow * 0.55) + (fx * 0.70 + hue_shift) * glow).rem_euclid(1.0);
+        hue = (hue * (1.0 - hue_glow * 0.55) + (fx * 0.70 + hue_shift) * hue_glow).rem_euclid(1.0);
     }
-    hsv_color(hue, if glow < 0.02 { 0.82 } else { sat }, val)
+    hsv_color(hue, if hue_glow < 0.02 { 0.82 } else { sat }, val)
 }
 
 /// Monochrome LED field — same motion response, fixed palette hue/sat.
@@ -461,6 +472,28 @@ mod tests {
         assert!(
             r_a.max(g_a).max(b_a) > r_a.min(g_a).min(b_a) + 5,
             "idle cells should be chromatic, not gray"
+        );
+    }
+
+    #[test]
+    fn rainbow_hue_ignores_trail_excit() {
+        // Far from the finger: trail-pumped excit must not retint the cell.
+        fn rgb_dir(c: u32) -> (f32, f32, f32) {
+            let r = ((c >> 16) & 0xff) as f32;
+            let g = ((c >> 8) & 0xff) as f32;
+            let b = (c & 0xff) as f32;
+            let n = (r + g + b).max(1.0);
+            (r / n, g / n, b / n)
+        }
+        let finger = Some((0.08, 0.5));
+        let idle = pad_led_rgb(11, 3, 0.0, None, 0.0, false, 0.0, 0.0);
+        let trail_pumped = pad_led_rgb(11, 3, 0.0, finger, 1.0, false, 0.0, 0.0);
+        let (ir, ig, ib) = rgb_dir(idle);
+        let (tr, tg, tb) = rgb_dir(trail_pumped);
+        let drift = (ir - tr).abs() + (ig - tg).abs() + (ib - tb).abs();
+        assert!(
+            drift < 0.12,
+            "trail excit should brighten without hue thrash (drift={drift})"
         );
     }
 
