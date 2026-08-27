@@ -262,12 +262,8 @@ pub struct NativeModel {
     pub kaoss_viz_style: crate::kaoss_viz::KaossVizStyle,
     /// Index into [`crate::kaoss_viz::PAD_COLORS`] (0 = RAINBOW).
     pub kaoss_mono_color: usize,
-    /// GLOW envelope 0..1 (Tk `_glow_amp`).
-    pub kaoss_glow_amp: f32,
-    /// Last finger XY for GLOW blooms (Tk `_glow_xy`).
-    pub kaoss_glow_xy: (f32, f32),
-    /// Lagging concentric shells for GLOW (outer → core). Pad-normalized XY.
-    pub kaoss_glow_shells: [(f32, f32); crate::kaoss_viz::GLOW_LAG_COUNT],
+    /// GLOW blooms — one track per finger slot (multi-touch).
+    pub kaoss_glow: [crate::kaoss_viz::GlowTouch; MAX_FINGERS],
     /// Accumulated viz time for wave / pulse animation.
     kaoss_viz_time: f32,
     /// Trail points `(x, y, age)` with age 1 = fresh.
@@ -416,9 +412,7 @@ impl NativeModel {
             last_autosave: Instant::now(),
             kaoss_viz_style: crate::kaoss_viz::KaossVizStyle::Cells,
             kaoss_mono_color: 0,
-            kaoss_glow_amp: 0.0,
-            kaoss_glow_xy: (0.5, 0.5),
-            kaoss_glow_shells: [(0.5, 0.5); crate::kaoss_viz::GLOW_LAG_COUNT],
+            kaoss_glow: [crate::kaoss_viz::GlowTouch::idle(); MAX_FINGERS],
             kaoss_viz_time: 0.0,
             kaoss_trail: Vec::new(),
             kaoss_ripples: Vec::new(),
@@ -743,6 +737,29 @@ impl NativeModel {
             .iter()
             .find(|f| f.active && f.surface == Surface::Kaoss)
             .map(|f| (f.x, f.y))
+    }
+
+    /// Fill `out` with live Kaoss pad contacts (pad-normalized XY). Returns count.
+    pub fn copy_kaoss_fingers(&self, out: &mut [(f32, f32)]) -> usize {
+        let mut n = 0;
+        for f in &self.fingers {
+            if n >= out.len() {
+                break;
+            }
+            if f.active && f.surface == Surface::Kaoss {
+                out[n] = (f.x, f.y);
+                n += 1;
+            }
+        }
+        n
+    }
+
+    /// Peak GLOW envelope across all finger blooms (wash / tests).
+    pub fn kaoss_glow_amp(&self) -> f32 {
+        self.kaoss_glow
+            .iter()
+            .map(|g| g.amp)
+            .fold(0.0_f32, f32::max)
     }
 
     /// Pad X for the note currently sounding (live finger or HOLD latch).
@@ -5090,7 +5107,9 @@ impl NativeModel {
 
     fn paint_cells(&mut self) {
         let t = self.kaoss_viz_time;
-        let finger = self.kaoss_finger();
+        let mut finger_buf = [(0.0_f32, 0.0_f32); MAX_FINGERS];
+        let n = self.copy_kaoss_fingers(&mut finger_buf);
+        let fingers = &finger_buf[..n];
         let hold = self.kaoss_hold && self.kaoss_touching;
         let gate_flash = self.kaoss_gate_flash();
         let hue_shift = crate::kaoss_viz::program_hue(kaoss_ui::program(self.kaoss_program).id);
@@ -5104,7 +5123,7 @@ impl NativeModel {
                         col,
                         row,
                         t,
-                        finger,
+                        fingers,
                         excit,
                         hold,
                         gate_flash,
@@ -5121,19 +5140,29 @@ impl NativeModel {
     }
 
     fn push_kaoss_trail(&mut self, x: f32, y: f32) {
-        if let Some(last) = self.kaoss_trail.last_mut() {
-            let dx = last.0 - x;
-            let dy = last.1 - y;
-            if dx * dx + dy * dy < 0.0004 {
-                last.0 = x;
-                last.1 = y;
-                last.2 = 1.0;
-                return;
+        // Prefer updating the nearest recent spark so two fingers don't thrash
+        // a single shared "last" point.
+        const NEAR: f32 = 0.0004;
+        let mut best: Option<usize> = None;
+        let mut best_d2 = NEAR;
+        for (i, p) in self.kaoss_trail.iter().enumerate() {
+            let dx = p.0 - x;
+            let dy = p.1 - y;
+            let d2 = dx * dx + dy * dy;
+            if d2 < best_d2 {
+                best_d2 = d2;
+                best = Some(i);
             }
         }
+        if let Some(i) = best {
+            self.kaoss_trail[i].0 = x;
+            self.kaoss_trail[i].1 = y;
+            self.kaoss_trail[i].2 = 1.0;
+            return;
+        }
         self.kaoss_trail.push((x, y, 1.0));
-        if self.kaoss_trail.len() > 12 {
-            let drop = self.kaoss_trail.len() - 12;
+        if self.kaoss_trail.len() > 24 {
+            let drop = self.kaoss_trail.len() - 24;
             self.kaoss_trail.drain(0..drop);
         }
     }
@@ -5148,57 +5177,65 @@ impl NativeModel {
         // Expanding touch rings removed — they punched a black hole into the pad.
         self.kaoss_ripples.clear();
         if self.kaoss_viz_style.is_cells() {
-            let finger = self.kaoss_finger();
+            let mut finger_buf = [(0.0_f32, 0.0_f32); MAX_FINGERS];
+            let n = self.copy_kaoss_fingers(&mut finger_buf);
+            let fingers = &finger_buf[..n];
             let trail = self.kaoss_trail.clone();
             let mut cell_dt = dt;
             // First frame after a touch can be dt≈0 — still nudge attack forward.
-            if finger.is_some() && cell_dt <= 0.0 {
+            if n > 0 && cell_dt <= 0.0 {
                 cell_dt = 0.02;
             }
             for row in 0..LED_ROWS {
                 for col in 0..LED_COLS {
-                    let target = crate::kaoss_viz::cell_excit_target(col, row, finger, &trail);
+                    let target = crate::kaoss_viz::cell_excit_target(col, row, fingers, &trail);
                     self.cell_amp[row][col] =
                         crate::kaoss_viz::cell_step(self.cell_amp[row][col], target, cell_dt);
                 }
             }
         }
         if self.kaoss_viz_style.is_glow() {
-            let finger = self.kaoss_finger();
-            let target = if finger.is_some() { 1.0 } else { 0.0 };
-            let was_idle = self.kaoss_glow_amp < 0.05;
-            let mut glow_dt = dt;
-            if target > self.kaoss_glow_amp && glow_dt <= 0.0 {
-                glow_dt = 0.02;
-            }
-            self.kaoss_glow_amp =
-                crate::kaoss_viz::glow_step(self.kaoss_glow_amp, target, glow_dt);
-            if let Some((x, y)) = finger {
-                self.kaoss_glow_xy = (x, y);
-                // On fresh touch, park every shell under the finger so we don't
-                // smear leftover lag from the last gesture.
-                if was_idle {
-                    self.kaoss_glow_shells = [(x, y); crate::kaoss_viz::GLOW_LAG_COUNT];
-                } else {
-                    for (i, shell) in self.kaoss_glow_shells.iter_mut().enumerate() {
+            for slot in 0..MAX_FINGERS {
+                let live = self.fingers[slot].active
+                    && self.fingers[slot].surface == Surface::Kaoss;
+                let target = if live { 1.0 } else { 0.0 };
+                let was_idle = self.kaoss_glow[slot].amp < 0.05;
+                let mut glow_dt = dt;
+                if target > self.kaoss_glow[slot].amp && glow_dt <= 0.0 {
+                    glow_dt = 0.02;
+                }
+                self.kaoss_glow[slot].amp = crate::kaoss_viz::glow_step(
+                    self.kaoss_glow[slot].amp,
+                    target,
+                    glow_dt,
+                );
+                if live {
+                    let x = self.fingers[slot].x;
+                    let y = self.fingers[slot].y;
+                    self.kaoss_glow[slot].xy = (x, y);
+                    if was_idle {
+                        self.kaoss_glow[slot].shells =
+                            [(x, y); crate::kaoss_viz::GLOW_LAG_COUNT];
+                    } else {
+                        for (i, shell) in self.kaoss_glow[slot].shells.iter_mut().enumerate() {
+                            *shell = crate::kaoss_viz::glow_lag_step(
+                                *shell,
+                                (x, y),
+                                glow_dt.max(dt),
+                                crate::kaoss_viz::glow_lag_tau(i),
+                            );
+                        }
+                    }
+                } else if self.kaoss_glow[slot].amp > 0.001 {
+                    let target_xy = self.kaoss_glow[slot].xy;
+                    for (i, shell) in self.kaoss_glow[slot].shells.iter_mut().enumerate() {
                         *shell = crate::kaoss_viz::glow_lag_step(
                             *shell,
-                            (x, y),
+                            target_xy,
                             glow_dt.max(dt),
                             crate::kaoss_viz::glow_lag_tau(i),
                         );
                     }
-                }
-            } else {
-                // Finger up — shells keep easing toward the last point while amp fades.
-                let target_xy = self.kaoss_glow_xy;
-                for (i, shell) in self.kaoss_glow_shells.iter_mut().enumerate() {
-                    *shell = crate::kaoss_viz::glow_lag_step(
-                        *shell,
-                        target_xy,
-                        glow_dt.max(dt),
-                        crate::kaoss_viz::glow_lag_tau(i),
-                    );
                 }
             }
         }
@@ -5413,6 +5450,46 @@ mod tests {
         assert!(
             batch.iter().any(|r| matches!(r, Request::Touch { .. })),
             "remaining finger should still receive gated touches: {batch:?}"
+        );
+    }
+
+    #[test]
+    fn kaoss_viz_tracks_multiple_fingers() {
+        let mut model = NativeModel::new();
+        model.kaoss_viz_style = crate::kaoss_viz::KaossVizStyle::Glow;
+        let mut out = Outbox::new();
+        let a = model.layout.kaoss_cell(1, 3);
+        let b = model.layout.kaoss_cell(10, 3);
+        model.finger_down(1, a.x + 4, a.y + 4, &mut out);
+        model.finger_down(2, b.x + 4, b.y + 4, &mut out);
+        for _ in 0..10 {
+            model.tick(1.0 / 60.0, &mut out);
+        }
+        let lit: Vec<_> = model
+            .kaoss_glow
+            .iter()
+            .enumerate()
+            .filter(|(_, g)| g.amp > 0.2)
+            .collect();
+        assert!(
+            lit.len() >= 2,
+            "each Kaoss contact should drive its own glow bloom: {:?}",
+            model.kaoss_glow.iter().map(|g| g.amp).collect::<Vec<_>>()
+        );
+        let dx = (lit[0].1.xy.0 - lit[1].1.xy.0).abs();
+        assert!(dx > 0.4, "blooms should sit under different pad X positions");
+
+        model.kaoss_viz_style = crate::kaoss_viz::KaossVizStyle::Cells;
+        for _ in 0..10 {
+            model.tick(1.0 / 60.0, &mut out);
+        }
+        let left = model.cell(1, 3);
+        let right = model.cell(10, 3);
+        let mid = model.cell(5, 3);
+        let bright = |c: u32| ((c >> 16) & 0xff).max((c >> 8) & 0xff).max(c & 0xff);
+        assert!(
+            bright(left) > bright(mid) && bright(right) > bright(mid),
+            "CELLS should light both fingers, not only the first"
         );
     }
 

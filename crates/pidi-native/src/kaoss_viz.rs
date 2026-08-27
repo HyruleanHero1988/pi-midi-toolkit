@@ -209,7 +209,7 @@ pub fn cell_step(current: f32, target: f32, dt: f32) -> f32 {
 pub fn cell_excit_target(
     col: usize,
     row: usize,
-    finger: Option<(f32, f32)>,
+    fingers: &[(f32, f32)],
     trail: &[(f32, f32, f32)],
 ) -> f32 {
     let cols = LED_COLS.max(2);
@@ -217,7 +217,7 @@ pub fn cell_excit_target(
     let lx = col as f32 / (cols - 1) as f32;
     let ly = row as f32 / (rows - 1) as f32;
     let mut e = 0.0_f32;
-    if let Some((fx, fy)) = finger {
+    for &(fx, fy) in fingers {
         let dist = ((lx - fx).hypot(ly - fy)).abs();
         let glow = (1.0 - dist / 0.40).max(0.0).powf(1.45);
         e = (e + glow).min(1.0);
@@ -228,6 +228,39 @@ pub fn cell_excit_target(
         e = (e + spark).min(1.0);
     }
     e
+}
+
+/// Strongest finger proximity at a pad cell, plus that finger's X (for hue pull).
+pub fn strongest_finger_glow(lx: f32, ly: f32, fingers: &[(f32, f32)]) -> (f32, f32) {
+    let mut best_g = 0.0_f32;
+    let mut best_fx = 0.5_f32;
+    for &(fx, fy) in fingers {
+        let dist = ((lx - fx).hypot(ly - fy)).abs();
+        let g = (1.0 - dist / 0.40).max(0.0).powf(1.45);
+        if g >= best_g {
+            best_g = g;
+            best_fx = fx;
+        }
+    }
+    (best_g, best_fx)
+}
+
+/// Per-finger GLOW bloom state (one slot mirrors one [`Finger`] index).
+#[derive(Debug, Clone, Copy)]
+pub struct GlowTouch {
+    pub amp: f32,
+    pub xy: (f32, f32),
+    pub shells: [(f32, f32); GLOW_LAG_COUNT],
+}
+
+impl GlowTouch {
+    pub const fn idle() -> Self {
+        Self {
+            amp: 0.0,
+            xy: (0.5, 0.5),
+            shells: [(0.5, 0.5); GLOW_LAG_COUNT],
+        }
+    }
 }
 
 /// Outer radius of the soft radial bloom (span = min(pad w,h)).
@@ -332,7 +365,7 @@ pub fn pad_led_rgb(
     col: usize,
     row: usize,
     t: f32,
-    finger: Option<(f32, f32)>,
+    fingers: &[(f32, f32)],
     excit: f32,
     hold: bool,
     gate_flash: f32,
@@ -344,15 +377,9 @@ pub fn pad_led_rgb(
     let lx = col as f32 / (cols - 1) as f32;
     let ly = row as f32 / (rows - 1) as f32;
     let mut hue = (lx * 0.70 + hue_shift + t * 0.035).rem_euclid(1.0);
-    let hue_glow = match finger {
-        Some((fx, fy)) => {
-            let dist = ((lx - fx).hypot(ly - fy)).abs();
-            (1.0 - dist / 0.40).max(0.0).powf(1.45)
-        }
-        None => 0.0,
-    };
+    let (hue_glow, fx) = strongest_finger_glow(lx, ly, fingers);
     let sat = (0.55 + hue_glow * 0.45).min(1.0);
-    if let Some((fx, _fy)) = finger {
+    if hue_glow > 0.0 {
         hue = (hue * (1.0 - hue_glow * 0.55) + (fx * 0.70 + hue_shift) * hue_glow).rem_euclid(1.0);
     }
     hsv_color(hue, if hue_glow < 0.02 { 0.82 } else { sat }, val)
@@ -463,8 +490,8 @@ mod tests {
 
     #[test]
     fn cells_are_colorful_not_monotone() {
-        let a = pad_led_rgb(0, 0, 0.0, None, 0.0, false, 0.0, 0.93);
-        let b = pad_led_rgb(11, 0, 0.0, None, 0.0, false, 0.0, 0.93);
+        let a = pad_led_rgb(0, 0, 0.0, &[], 0.0, false, 0.0, 0.93);
+        let b = pad_led_rgb(11, 0, 0.0, &[], 0.0, false, 0.0, 0.93);
         assert_ne!(a, b, "columns should differ in hue");
         let r_a = (a >> 16) & 0xff;
         let g_a = (a >> 8) & 0xff;
@@ -485,15 +512,27 @@ mod tests {
             let n = (r + g + b).max(1.0);
             (r / n, g / n, b / n)
         }
-        let finger = Some((0.08, 0.5));
-        let idle = pad_led_rgb(11, 3, 0.0, None, 0.0, false, 0.0, 0.0);
-        let trail_pumped = pad_led_rgb(11, 3, 0.0, finger, 1.0, false, 0.0, 0.0);
+        let fingers = [(0.08_f32, 0.5_f32)];
+        let idle = pad_led_rgb(11, 3, 0.0, &[], 0.0, false, 0.0, 0.0);
+        let trail_pumped = pad_led_rgb(11, 3, 0.0, &fingers, 1.0, false, 0.0, 0.0);
         let (ir, ig, ib) = rgb_dir(idle);
         let (tr, tg, tb) = rgb_dir(trail_pumped);
         let drift = (ir - tr).abs() + (ig - tg).abs() + (ib - tb).abs();
         assert!(
             drift < 0.12,
             "trail excit should brighten without hue thrash (drift={drift})"
+        );
+    }
+
+    #[test]
+    fn cell_excit_sums_multiple_fingers() {
+        let one = cell_excit_target(2, 3, &[(0.18, 0.5)], &[]);
+        let two = cell_excit_target(2, 3, &[(0.18, 0.5), (0.85, 0.5)], &[]);
+        let other = cell_excit_target(10, 3, &[(0.18, 0.5), (0.85, 0.5)], &[]);
+        assert!(two >= one, "second finger must not reduce excit at first");
+        assert!(
+            other > 0.3,
+            "far column should light under the second finger"
         );
     }
 

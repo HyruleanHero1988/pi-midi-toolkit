@@ -931,18 +931,22 @@ fn draw_kaoss_glow(scene: &mut Scene, pad: crate::layout::Rect, model: &NativeMo
     let t = model.kaoss_viz_time();
     let pulse = kaoss_viz::viz_pulse(t, model.bpm, model.kaoss_gate_flash());
     let hold = model.kaoss_hold && model.kaoss_touching;
-    let amp = model.kaoss_glow_amp;
+    let amp_max = model.kaoss_glow_amp();
     let color_idx = model.kaoss_mono_color;
     let wash_hue = kaoss_viz::glow_ring_hue(color_idx, 0.35, t);
     let wash_sat = kaoss_viz::glow_ring_sat(color_idx) * 0.6;
 
-    let wash_v = (0.04 + 0.06 * pulse + if hold { 0.03 } else { 0.0 }) * (0.30 + 0.70 * amp);
+    let wash_v = (0.04 + 0.06 * pulse + if hold { 0.03 } else { 0.0 }) * (0.30 + 0.70 * amp_max);
     scene.fill_rect(pad, kaoss_viz::hsv_color(wash_hue, wash_sat, wash_v));
 
     let span = (pad.w.min(pad.h)) as f32;
     let clip = Some(pad);
 
-    if amp >= 0.02 {
+    for glow in &model.kaoss_glow {
+        let amp = glow.amp;
+        if amp < 0.02 {
+            continue;
+        }
         let outer = kaoss_viz::glow_outer_radius(span, amp);
         // Concentric discs outer→inner; each shell is centered on its own lagged
         // XY so the halo has to catch up when the finger moves.
@@ -951,7 +955,7 @@ fn draw_kaoss_glow(scene: &mut Scene, pad: crate::layout::Rect, model: &NativeMo
             let u = (i as f32 + 1.0) / rings as f32;
             let radius = (outer * u).max(1.0);
             let fall = 1.0 - u;
-            let (sx, sy) = kaoss_viz::glow_lag_xy(&model.kaoss_glow_shells, fall);
+            let (sx, sy) = kaoss_viz::glow_lag_xy(&glow.shells, fall);
             let px = pad.x as f32 + sx.clamp(0.0, 1.0) * pad.w as f32;
             let py = pad.y as f32 + (1.0 - sy.clamp(0.0, 1.0)) * pad.h as f32;
             let hue = kaoss_viz::glow_ring_hue(color_idx, fall, t);
@@ -959,7 +963,7 @@ fn draw_kaoss_glow(scene: &mut Scene, pad: crate::layout::Rect, model: &NativeMo
             scene.fill_disc_clipped(px, py, radius, color, clip);
         }
         // Hot core rides the fastest (innermost) shell.
-        let (cx, cy) = model.kaoss_glow_shells[kaoss_viz::GLOW_LAG_COUNT - 1];
+        let (cx, cy) = glow.shells[kaoss_viz::GLOW_LAG_COUNT - 1];
         let px = pad.x as f32 + cx.clamp(0.0, 1.0) * pad.w as f32;
         let py = pad.y as f32 + (1.0 - cy.clamp(0.0, 1.0)) * pad.h as f32;
         let core_r = (outer * 0.08).max(2.0);
@@ -2212,7 +2216,7 @@ mod tests {
             .count();
         assert_eq!(grid_cells, 0, "GLOW should not paint the 12×7 LED grid");
         assert!(
-            model.kaoss_glow_amp > 0.1,
+            model.kaoss_glow_amp() > 0.1,
             "touch should ramp the glow envelope"
         );
     }
