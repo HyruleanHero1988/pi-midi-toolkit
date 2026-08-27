@@ -80,6 +80,12 @@ pub enum Command {
         param: SynthParam,
         value: f32,
     },
+    /// One kit voice. `model` is `DrumModel::index()` (0..15).
+    SetDrumMacro {
+        model: u8,
+        param: SynthParam,
+        value: f32,
+    },
     SetFx {
         target: FxTarget,
         param: FxParam,

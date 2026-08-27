@@ -121,9 +121,14 @@ impl Outbox {
     }
 
     pub fn synth(&mut self, param: &str, value: f32) {
+        self.synth_drum(param, value, None);
+    }
+
+    pub fn synth_drum(&mut self, param: &str, value: f32, drum: Option<u8>) {
         self.reliable.push_back(Request::Synth {
             param: param.to_string(),
             value,
+            drum,
         });
     }
 

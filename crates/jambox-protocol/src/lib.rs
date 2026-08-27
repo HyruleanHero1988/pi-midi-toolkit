@@ -65,6 +65,9 @@ pub enum Request {
     Synth {
         param: String,
         value: f32,
+        /// When set, drum_* params apply to that kit model index (0..15).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        drum: Option<u8>,
     },
     Fx {
         target: FxTargetSpec,
@@ -313,5 +316,27 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn synth_drum_index_round_trips() {
+        let request = Request::Synth {
+            param: "drum_tone".into(),
+            value: 0.7,
+            drum: Some(3),
+        };
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(json.contains("\"drum\":3"));
+        let decoded: Request = serde_json::from_str(&json).unwrap();
+        assert!(matches!(
+            decoded,
+            Request::Synth {
+                drum: Some(3),
+                ..
+            }
+        ));
+        let legacy: Request =
+            serde_json::from_str(r#"{"cmd":"synth","param":"drum_tone","value":0.7}"#).unwrap();
+        assert!(matches!(legacy, Request::Synth { drum: None, .. }));
     }
 }
