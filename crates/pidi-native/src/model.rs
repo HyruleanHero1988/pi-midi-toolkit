@@ -559,6 +559,7 @@ impl NativeModel {
                 | UiMode::Chords
                 | UiMode::Songs
                 | UiMode::Presets
+                | UiMode::Fx
                 | UiMode::Log
                 | UiMode::Settings
         )
@@ -717,6 +718,7 @@ impl NativeModel {
             "chd" | "chords" => UiMode::Chords,
             "sng" | "songs" => UiMode::Songs,
             "pre" | "presets" => UiMode::Presets,
+            "fx" => UiMode::Fx,
             "map" => UiMode::Map,
             "log" => UiMode::Log,
             "set" | "settings" => UiMode::Settings,
@@ -741,6 +743,20 @@ impl NativeModel {
             .iter()
             .find(|f| f.active && f.surface == Surface::Kaoss)
             .map(|f| (f.x, f.y))
+    }
+
+    /// Pad X for the note currently sounding (live finger or HOLD latch).
+    pub fn kaoss_sounding_x(&self) -> Option<f32> {
+        if !kaoss_ui::program(self.kaoss_program).note {
+            return None;
+        }
+        if let Some((x, _)) = self.kaoss_finger() {
+            return Some(x);
+        }
+        if self.kaoss_hold_gesture.is_some() || (self.kaoss_hold && self.kaoss_gate_on) {
+            return Some(self.kaoss_latched_xy.0);
+        }
+        None
     }
 
     pub fn kaoss_viz_time(&self) -> f32 {
@@ -1298,8 +1314,13 @@ impl NativeModel {
         self.kaoss_hold = s.kaoss_hold;
         self.kaoss_show_all = s.kaoss_show_all;
         self.kaoss_channel = s.kaoss_channel & 0x0f;
-        self.fx_bus = [s.fx_bus[0], s.fx_bus[1], s.fx_bus[2], 0.0];
-        // Flange is per-voice (SYNTH). Migrate any older bus `fx_flanger` here.
+        self.fx_bus = [
+            s.fx_bus[0],
+            s.fx_bus[1],
+            s.fx_bus[2],
+            s.fx_bus_flanger.clamp(0.0, 1.0),
+        ];
+        // Voice flange (SYNTH / FX→VOICE); bus flange is independent global wet.
         self.fx_voice[3] = s.fx_flanger.clamp(0.0, 1.0);
         self.pads_out = s.pads_out;
         self.song_out = s.song_out;
@@ -1336,8 +1357,7 @@ impl NativeModel {
         for (i, name) in ["drive", "delay_mix", "reverb_mix"].iter().enumerate() {
             outbox.fx_bus(name, self.fx_bus[i]);
         }
-        // Keep bus flange dry; voice flange follows the morph pair inserts.
-        outbox.fx_bus("flanger_mix", 0.0);
+        outbox.fx_bus("flanger_mix", self.fx_bus[3]);
         self.push_voice_fx("flanger_mix", self.fx_voice[3], outbox);
         self.sync_wave_bank();
         self.push_kaoss_scale(outbox);
@@ -1369,6 +1389,7 @@ impl NativeModel {
             kaoss_hold: self.kaoss_hold,
             fx_bus: [self.fx_bus[0], self.fx_bus[1], self.fx_bus[2]],
             fx_flanger: self.fx_voice[3],
+            fx_bus_flanger: self.fx_bus[3],
             kaoss_show_all: self.kaoss_show_all,
             kaoss_channel: self.kaoss_channel,
             vibrato_always: self.vibrato_always,
@@ -2569,11 +2590,11 @@ impl NativeModel {
                 self.status_line = "audio reopen".into();
                 self.push_log("audio reopen");
             }
-            Hit::SettingsFxTarget => {
+            Hit::FxTarget => {
                 self.tap_ui(slot, id, gesture, px, py);
                 self.cycle_fx_target();
             }
-            Hit::SettingsFx(index) => {
+            Hit::FxSlider(index) => {
                 self.fingers[slot] = Finger {
                     active: true,
                     id,
@@ -2582,7 +2603,7 @@ impl NativeModel {
                     y: 0.0,
                     px,
                     py,
-                    surface: Surface::SettingsFx { index },
+                    surface: Surface::FxSlider { index },
                     gate_on: false,
                 };
                 self.apply_fx_slider(index, py, outbox);
@@ -2832,7 +2853,7 @@ impl NativeModel {
             Surface::SynthSlider { index } => {
                 self.apply_synth_slider(index, px, py, outbox);
             }
-            Surface::SettingsFx { index } => {
+            Surface::FxSlider { index } => {
                 self.apply_fx_slider(index, py, outbox);
             }
             Surface::ChordsStrum => {
@@ -2949,7 +2970,7 @@ impl NativeModel {
             }
             Surface::Phrase { .. }
             | Surface::SynthSlider { .. }
-            | Surface::SettingsFx { .. }
+            | Surface::FxSlider { .. }
             | Surface::UiTap => {}
         }
     }
@@ -3281,7 +3302,8 @@ impl NativeModel {
 
     const SYNTH_PARAM_NAMES: [&'static str; 5] =
         ["morph", "tone", "level", "attack", "release"];
-    const FX_PARAM_NAMES: [&'static str; 3] = ["drive", "delay_mix", "reverb_mix"];
+    const FX_PARAM_NAMES: [&'static str; 4] =
+        ["drive", "delay_mix", "reverb_mix", "flanger_mix"];
     const DRUM_MACRO_NAMES: [&'static str; 4] =
         ["drum_tone", "drum_noise", "drum_pitch", "drum_decay"];
     const DRUM_MACRO_LABELS: [&'static str; 4] = ["TONE", "SNAP", "PITCH", "DECAY"];
@@ -3293,7 +3315,7 @@ impl NativeModel {
         if index == 5 {
             self.fx_voice[3] = value;
             self.push_voice_fx("flanger_mix", value, outbox);
-            self.status_line = format!("flange {:.2}", value);
+            self.status_line = format!("voice flange {:.2}", value);
             self.mark_dirty();
             return;
         }
@@ -3310,27 +3332,28 @@ impl NativeModel {
     }
 
     fn apply_fx_slider(&mut self, index: usize, py: i32, outbox: &mut Outbox) {
-        if index >= 3 {
+        if index >= 4 {
             return;
         }
         let track = self.layout.settings_fx_slider(index);
         let y = 1.0 - ((py - track.y) as f32 / track.h.max(1) as f32);
         let value = y.clamp(0.0, 1.0);
+        let name = Self::FX_PARAM_NAMES[index];
         match self.fx_target {
             FxEditTarget::Bus => {
                 self.fx_bus[index] = value;
-                outbox.fx_bus(Self::FX_PARAM_NAMES[index], value);
-                self.status_line = format!("bus {} {:.2}", Self::FX_PARAM_NAMES[index], value);
+                outbox.fx_bus(name, value);
+                self.status_line = format!("bus {name} {:.2}", value);
             }
             FxEditTarget::Voice => {
                 self.fx_voice[index] = value;
-                self.push_voice_fx(Self::FX_PARAM_NAMES[index], value, outbox);
-                self.status_line = format!("voice {} {:.2}", Self::FX_PARAM_NAMES[index], value);
+                self.push_voice_fx(name, value, outbox);
+                self.status_line = format!("voice {name} {:.2}", value);
             }
             FxEditTarget::DrumGroup => {
                 self.fx_drum[index] = value;
-                outbox.fx_drum_group(Self::FX_PARAM_NAMES[index], value);
-                self.status_line = format!("drums {} {:.2}", Self::FX_PARAM_NAMES[index], value);
+                outbox.fx_drum_group(name, value);
+                self.status_line = format!("drums {name} {:.2}", value);
             }
         }
         self.mark_dirty();
@@ -3659,6 +3682,7 @@ impl NativeModel {
             if prog.note {
                 if !gated {
                     self.kaoss_hold_gesture = Some(gesture);
+                    self.kaoss_latched_xy = (x, y);
                 } else {
                     // Preserve on-phase across the latch so HOLD doesn't click off.
                     self.kaoss_gate_gesture = Some(gesture);
@@ -4932,7 +4956,6 @@ impl NativeModel {
         for name in Self::FX_PARAM_NAMES {
             outbox.fx_bus(name, 0.0);
         }
-        outbox.fx_bus("flanger_mix", 0.0);
         self.push_voice_fx("flanger_mix", 0.0, outbox);
         let defaults = session::SessionState::default();
         self.synth_params[0] = defaults.morph;
@@ -5500,9 +5523,9 @@ mod tests {
     }
 
     #[test]
-    fn settings_fx_target_routes_to_voice() {
+    fn fx_target_routes_to_voice() {
         let mut model = NativeModel::new();
-        model.set_mode(UiMode::Settings);
+        model.set_mode(UiMode::Fx);
         model.fx_target = FxEditTarget::Voice;
         let mut out = Outbox::new();
         let track = model.layout.settings_fx_slider(0);
@@ -5856,19 +5879,41 @@ mod tests {
     }
 
     #[test]
-    fn settings_no_longer_has_flange_slider() {
+    fn fx_menu_bus_flange_sends_global_flanger_mix() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Fx);
+        model.fx_target = FxEditTarget::Bus;
+        let mut out = Outbox::new();
+        let track = model.layout.settings_fx_slider(3);
+        // Top of the slider → wet ≈ 1.
+        model.finger_down(1, track.x + 8, track.y + 4, &mut out);
+        let batch = out.take();
+        assert!(
+            batch.iter().any(|r| matches!(
+                r,
+                Request::Fx {
+                    target: jambox_protocol::FxTargetSpec::Bus,
+                    param,
+                    ..
+                } if param == "flanger_mix"
+            )),
+            "expected bus flanger_mix, got {batch:?}"
+        );
+        assert!(model.fx_bus[3] > 0.5);
+    }
+
+    #[test]
+    fn settings_no_longer_hosts_fx_sliders() {
         let mut model = NativeModel::new();
         model.set_mode(UiMode::Settings);
         let mut out = Outbox::new();
-        // Old 4th column region should not emit flanger_mix anymore.
-        let ghost = model.layout.settings_fx_slider(2);
-        let right = ghost.x + ghost.w + 40;
-        model.finger_down(1, right, ghost.y + 8, &mut out);
+        let track = model.layout.settings_fx_slider(0);
+        model.finger_down(1, track.x + 8, track.y + 8, &mut out);
         let batch = out.take();
-        assert!(batch.iter().all(|r| !matches!(
-            r,
-            Request::Fx { param, .. } if param == "flanger_mix"
-        )));
+        assert!(
+            batch.iter().all(|r| !matches!(r, Request::Fx { .. })),
+            "Settings must not own FX sliders: {batch:?}"
+        );
     }
 
     #[test]

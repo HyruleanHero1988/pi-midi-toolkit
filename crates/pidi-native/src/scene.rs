@@ -284,6 +284,7 @@ pub fn build(model: &NativeModel) -> Scene {
             UiMode::Songs => draw_songs(&mut scene, model),
             UiMode::Map => draw_map(&mut scene, model),
             UiMode::Settings => draw_settings(&mut scene, model),
+            UiMode::Fx => draw_fx(&mut scene, model),
             UiMode::Log => draw_log(&mut scene, model),
             UiMode::Chords => draw_chords(&mut scene, model),
         }
@@ -668,9 +669,7 @@ fn draw_kaoss(scene: &mut Scene, model: &NativeModel) {
             }
         }
         draw_kaoss_axes(scene, layout.kaoss, model);
-        if let Some((fx, fy)) = model.kaoss_finger() {
-            draw_kaoss_cursor(scene, layout.kaoss, fx, fy, model);
-        }
+        draw_kaoss_note_readout(scene, layout.kaoss, model);
     }
 
     let prog = kaoss_ui::program(model.kaoss_program);
@@ -1119,21 +1118,27 @@ fn draw_kaoss_grid(
     }
 }
 
-fn draw_kaoss_cursor(
+/// Fixed note HUD (chord-mode style) — never sits under the finger.
+fn draw_kaoss_note_readout(
     scene: &mut Scene,
     pad: crate::layout::Rect,
-    fx: f32,
-    fy: f32,
     model: &NativeModel,
 ) {
-    let cx = pad.x as f32 + fx.clamp(0.0, 1.0) * pad.w as f32;
-    let cy = pad.y as f32 + (1.0 - fy.clamp(0.0, 1.0)) * pad.h as f32;
-    // No hard rings / crosshair — they punched a black disc into the LED field.
-    // Pitch programs still get a floating note label at the finger.
-    if kaoss_ui::program(model.kaoss_program).note {
-        let label = kaoss_ui::midi_note_label(model.kaoss_note_at(fx));
-        scene.text_scaled((cx as i32) - 12, (cy as i32) - 28, &label, 0xfbf1c7, 2);
-    }
+    let Some(fx) = model.kaoss_sounding_x() else {
+        return;
+    };
+    let label = kaoss_ui::midi_note_label(model.kaoss_note_at(fx));
+    // Top-right of the pad: clear of Y-axis labels (left) and typical play area.
+    let w = 104;
+    let h = 40;
+    let r = Rect {
+        x: pad.x + pad.w - w - 8,
+        y: pad.y + 8,
+        w,
+        h,
+    };
+    scene.fill_rect(r, 0x1d2021);
+    scene.text_centered(r, &label, 0xfbf1c7, 3);
 }
 
 fn draw_pads(scene: &mut Scene, model: &NativeModel) {
@@ -2024,54 +2029,13 @@ fn draw_map(scene: &mut Scene, model: &NativeModel) {
 
 fn draw_settings(scene: &mut Scene, model: &NativeModel) {
     let layout = model.layout;
+    scene.text_scaled(layout.content.x + 12, layout.content.y + 8, "SETTINGS", 0xfbf1c7, 2);
     scene.fill_rect(layout.settings_panic, 0x9d0006);
     scene.text_centered(layout.settings_panic, "PANIC", 0xffffff, 2);
     scene.fill_rect(layout.settings_all_off, 0x504945);
     scene.text_centered(layout.settings_all_off, "NOTES OFF", 0xffffff, 2);
     scene.fill_rect(layout.settings_audio, 0x458588);
     scene.text_centered(layout.settings_audio, "AUDIO", 0xffffff, 2);
-    scene.fill_rect(
-        layout.settings_fx_target,
-        match model.fx_target {
-            crate::model::FxEditTarget::Bus => 0x458588,
-            crate::model::FxEditTarget::Voice => 0xb16286,
-            crate::model::FxEditTarget::DrumGroup => 0xd79921,
-        },
-    );
-    scene.text_centered(
-        layout.settings_fx_target,
-        match model.fx_target {
-            crate::model::FxEditTarget::Bus => "FX: BUS",
-            crate::model::FxEditTarget::Voice => "FX: VOICE",
-            crate::model::FxEditTarget::DrumGroup => "FX: DRUMS",
-        },
-        0xffffff,
-        2,
-    );
-    const LABELS: [&str; 3] = ["DRIVE", "DELAY", "REVERB"];
-    let values = match model.fx_target {
-        crate::model::FxEditTarget::Bus => &model.fx_bus,
-        crate::model::FxEditTarget::Voice => &model.fx_voice,
-        crate::model::FxEditTarget::DrumGroup => &model.fx_drum,
-    };
-    let fill_color = match model.fx_target {
-        crate::model::FxEditTarget::Bus => 0x458588,
-        crate::model::FxEditTarget::Voice => 0xb16286,
-        crate::model::FxEditTarget::DrumGroup => 0xd79921,
-    };
-    for index in 0..3 {
-        let track = layout.settings_fx_slider(index);
-        scene.fill_rect(track, 0x20202c);
-        scene.text(track.x + 8, track.y - 18, LABELS[index], 0xc0c0d0);
-        let fill_h = (track.h as f32 * values[index]) as i32;
-        let fill = Rect {
-            x: track.x + 4,
-            y: track.y + track.h - fill_h,
-            w: track.w - 8,
-            h: fill_h,
-        };
-        scene.fill_rect(fill, fill_color);
-    }
     scene.fill_rect(layout.settings_log, 0x504945);
     scene.text_centered(layout.settings_log, "LOG", 0xffffff, 2);
     scene.fill_rect(layout.settings_map, 0x83a598);
@@ -2090,11 +2054,56 @@ fn draw_settings(scene: &mut Scene, model: &NativeModel) {
     );
     scene.fill_rect(layout.settings_update, 0x689d6a);
     scene.text_centered(layout.settings_update, "UPDATE", 0xffffff, 2);
-    // WIFI / UPDATE / MAP write status_line — show it here (chrome truncates >12 chars).
-    // UPDATE opens its own panel; keep a short hint on the hub.
     if !model.status_line.is_empty() && !model.update_panel_open && !model.wifi_panel_open {
         let c = layout.content;
         scene.text(c.x + 16, c.y + c.h - 28, &model.status_line, 0xfabd2f);
+    }
+}
+
+fn draw_fx(scene: &mut Scene, model: &NativeModel) {
+    let layout = model.layout;
+    scene.text_scaled(layout.content.x + 12, layout.content.y + 8, "FX", 0xfbf1c7, 2);
+    scene.fill_rect(
+        layout.settings_fx_target,
+        match model.fx_target {
+            crate::model::FxEditTarget::Bus => 0x458588,
+            crate::model::FxEditTarget::Voice => 0xb16286,
+            crate::model::FxEditTarget::DrumGroup => 0xd79921,
+        },
+    );
+    scene.text_centered(
+        layout.settings_fx_target,
+        match model.fx_target {
+            crate::model::FxEditTarget::Bus => "TARGET: BUS (global)",
+            crate::model::FxEditTarget::Voice => "TARGET: VOICE",
+            crate::model::FxEditTarget::DrumGroup => "TARGET: DRUMS",
+        },
+        0xffffff,
+        2,
+    );
+    const LABELS: [&str; 4] = ["DRIVE", "DELAY", "REVERB", "FLANGE"];
+    let values = match model.fx_target {
+        crate::model::FxEditTarget::Bus => &model.fx_bus,
+        crate::model::FxEditTarget::Voice => &model.fx_voice,
+        crate::model::FxEditTarget::DrumGroup => &model.fx_drum,
+    };
+    let fill_color = match model.fx_target {
+        crate::model::FxEditTarget::Bus => 0x458588,
+        crate::model::FxEditTarget::Voice => 0xb16286,
+        crate::model::FxEditTarget::DrumGroup => 0xd79921,
+    };
+    for index in 0..4 {
+        let track = layout.settings_fx_slider(index);
+        scene.fill_rect(track, 0x20202c);
+        scene.text(track.x + 4, track.y - 18, LABELS[index], 0xc0c0d0);
+        let fill_h = (track.h as f32 * values[index]) as i32;
+        let fill = Rect {
+            x: track.x + 4,
+            y: track.y + track.h - fill_h,
+            w: track.w - 8,
+            h: fill_h,
+        };
+        scene.fill_rect(fill, fill_color);
     }
 }
 

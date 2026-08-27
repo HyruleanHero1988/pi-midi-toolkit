@@ -18,8 +18,8 @@ pub const JAM_MODES: [UiMode; 5] = [
     UiMode::Chords,
 ];
 
-/// Home grid entries (3×3). LOG / MAP live under Settings.
-pub const HOME_TILES: [(UiMode, &'static str, u32); 9] = [
+/// Home grid entries (5×2). LOG / MAP live under Settings.
+pub const HOME_TILES: [(UiMode, &'static str, u32); 10] = [
     (UiMode::Synth, "SYNTH", 0x458588),
     (UiMode::Drums, "DRUMS", 0x98971a),
     (UiMode::Seq, "SEQ", 0xb16286),
@@ -28,6 +28,7 @@ pub const HOME_TILES: [(UiMode, &'static str, u32); 9] = [
     (UiMode::Chords, "CHORDS", 0xcc241d),
     (UiMode::Songs, "SONGS", 0x689d6a),
     (UiMode::Presets, "PRESETS", 0x83a598),
+    (UiMode::Fx, "FX", 0xb16286),
     (UiMode::Settings, "SETTINGS", 0x665c54),
 ];
 
@@ -144,8 +145,8 @@ pub enum Hit {
     SettingsPanic,
     SettingsAllOff,
     SettingsAudio,
-    SettingsFxTarget,
-    SettingsFx(usize),
+    FxTarget,
+    FxSlider(usize),
     SettingsWifi,
     SettingsUpdate,
     SettingsFont,
@@ -957,62 +958,63 @@ impl Layout {
             settings_panic: Rect {
                 x: 24,
                 y: HUD_H + 24,
-                w: 168,
+                w: 240,
                 h: 72,
             },
             settings_all_off: Rect {
-                x: 204,
+                x: 280,
                 y: HUD_H + 24,
-                w: 168,
+                w: 240,
                 h: 72,
             },
             settings_audio: Rect {
-                x: 384,
+                x: 536,
                 y: HUD_H + 24,
-                w: 168,
+                w: 240,
                 h: 72,
             },
+            // FX mode owns these rects (not Settings).
             settings_fx_target: Rect {
-                x: 564,
+                x: 24,
                 y: HUD_H + 24,
-                w: 212,
-                h: 72,
+                w: 752,
+                h: 64,
             },
             settings_fx: Rect {
                 x: 24,
-                y: HUD_H + 112,
+                y: HUD_H + 108,
                 w: 752,
-                h: 200,
+                h: 280,
             },
             settings_wifi: Rect {
                 x: 280,
-                y: HUD_H + 328,
+                y: HUD_H + 220,
                 w: 240,
-                h: 56,
+                h: 72,
             },
             settings_font: Rect {
                 x: 536,
-                y: HUD_H + 328,
+                y: HUD_H + 220,
                 w: 240,
-                h: 56,
+                h: 72,
             },
             settings_update: Rect {
                 x: 536,
-                y: HUD_H + 392,
+                y: HUD_H + 308,
                 w: 240,
-                h: 56,
+                h: 72,
             },
             settings_log: Rect {
                 x: 24,
-                y: HUD_H + 328,
+                y: HUD_H + 220,
                 w: 240,
-                h: 56,
+                h: 72,
             },
             settings_map: Rect {
                 x: 24,
-                y: HUD_H + 392,
+                y: HUD_H + 308,
                 w: 240,
-                h: 56,
+                h: 72,
             },
             log_clear: Rect {
                 x: 24,
@@ -1447,8 +1449,8 @@ impl Layout {
     }
 
     pub fn home_tile(&self, index: usize) -> Rect {
-        let cols = 3i32;
-        let rows = 3i32;
+        let cols = 5i32;
+        let rows = 2i32;
         let gw = (self.content.w - 24) / cols;
         let gh = (self.content.h - 40) / rows;
         let col = (index as i32) % cols;
@@ -1918,6 +1920,7 @@ impl Layout {
             UiMode::Presets => self.hit_presets(px, py),
             UiMode::Songs => self.hit_songs(px, py),
             UiMode::Settings => self.hit_settings(px, py),
+            UiMode::Fx => self.hit_fx(px, py),
             UiMode::Log => self.hit_log(px, py),
             UiMode::Map => self.hit_map(px, py),
             UiMode::Chords => self.hit_chords(px, py),
@@ -2426,8 +2429,8 @@ impl Layout {
     }
 
     pub fn settings_fx_slider(&self, index: usize) -> Rect {
-        // Bus / voice / drum inserts: drive + delay + reverb. Flange lives on SYNTH.
-        let n = 3i32;
+        // Bus / voice / drum inserts: drive + delay + reverb + flange.
+        let n = 4i32;
         let w = self.settings_fx.w / n;
         Rect {
             x: self.settings_fx.x + (index as i32) * w + 8,
@@ -2447,9 +2450,6 @@ impl Layout {
         if self.settings_audio.contains(px, py) {
             return Hit::SettingsAudio;
         }
-        if self.settings_fx_target.contains(px, py) {
-            return Hit::SettingsFxTarget;
-        }
         if self.settings_log.contains(px, py) {
             return Hit::SettingsLog;
         }
@@ -2465,9 +2465,16 @@ impl Layout {
         if self.settings_update.contains(px, py) {
             return Hit::SettingsUpdate;
         }
-        for index in 0..3 {
+        Hit::None
+    }
+
+    fn hit_fx(&self, px: i32, py: i32) -> Hit {
+        if self.settings_fx_target.contains(px, py) {
+            return Hit::FxTarget;
+        }
+        for index in 0..4 {
             if self.settings_fx_slider(index).contains(px, py) {
-                return Hit::SettingsFx(index);
+                return Hit::FxSlider(index);
             }
         }
         Hit::None
@@ -2538,7 +2545,7 @@ pub enum Surface {
     Phrase { slot: usize },
     SynthKey { note: u8 },
     SynthSlider { index: usize },
-    SettingsFx { index: usize },
+    FxSlider { index: usize },
     ChordsButton { col: usize, row: usize },
     ChordsStrum,
     ChordsPalette { slot: usize },
