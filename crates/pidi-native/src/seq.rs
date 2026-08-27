@@ -22,12 +22,12 @@ pub enum SeqState {
 }
 
 #[derive(Debug, Clone)]
-struct RecEvent {
-    t: f64,
-    on: bool,
-    channel: u8,
-    note: u8,
-    velocity: u8,
+pub struct RecEvent {
+    pub t: f64,
+    pub on: bool,
+    pub channel: u8,
+    pub note: u8,
+    pub velocity: u8,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -373,6 +373,7 @@ impl SeqModel {
             self.refresh_lines();
             return SeqAction::None;
         }
+        let trimmed = close_open_notes(trimmed, length);
         self.sequence.set_backbone(trimmed, length);
         self.state = SeqState::Playing;
         self.refresh_lines();
@@ -410,29 +411,37 @@ impl SeqModel {
 
     pub fn finish_overdub(&mut self) -> SeqAction {
         self.take_started = None;
-        let (trimmed, length) = trim_take(&self.take);
-        self.take.clear();
-        if trimmed.is_empty() {
+        let raw = std::mem::take(&mut self.take);
+        if raw.is_empty() {
             self.sequence.pending = None;
             self.state = SeqState::Playing;
             self.status = "empty overdub — dropped".into();
             self.refresh_lines();
             return SeqAction::None;
         }
+        // Overdub is timed from take start ≈ loop restart (engine relaunches on
+        // arm). Do NOT auto-trim — that would slam the first hit to t=0 and
+        // destroy in-loop placement (Tk records phase, never trims overdubs).
         let span = if self.extend_mode {
-            cycles_for_take(length, self.sequence.cycle_len)
+            let take_len = raw.iter().map(|e| e.t).fold(0.0_f64, f64::max) + 1e-3;
+            cycles_for_take(take_len, self.sequence.cycle_len)
         } else {
             1
         };
-        let events = if self.extend_mode {
-            trimmed
+        let span_secs = if self.extend_mode {
+            span as f64 * self.sequence.cycle_len
         } else {
-            trimmed
+            self.sequence.cycle_len.max(0.05)
+        };
+        let closed = close_open_notes(raw, span_secs);
+        let events = if self.extend_mode {
+            closed
+        } else {
+            let cycle = self.sequence.cycle_len.max(1e-6);
+            closed
                 .into_iter()
                 .map(|mut e| {
-                    if self.sequence.cycle_len > 0.0 {
-                        e.t %= self.sequence.cycle_len;
-                    }
+                    e.t %= cycle;
                     e
                 })
                 .collect()
@@ -631,41 +640,129 @@ impl SeqModel {
 }
 
 fn trim_take(events: &[RecEvent]) -> (Vec<RecEvent>, f64) {
+    trim_loop_take(events, 0.35, 0.05, 2.0)
+}
+
+/// Trim leading/trailing dead space from a free-timing take (Tk `trim_loop_take`).
+///
+/// - Shift so the first note-on starts at t=0.
+/// - Trailing silence after the last note-on is capped to the largest inter-onset
+///   gap (so a slow finger on STOP does not inflate the loop).
+/// - Note-offs after the last hit are kept; trail is measured from ons.
+pub fn trim_loop_take(
+    events: &[RecEvent],
+    default_gap: f64,
+    min_gap: f64,
+    max_gap: f64,
+) -> (Vec<RecEvent>, f64) {
     if events.is_empty() {
         return (Vec::new(), 0.0);
     }
-    let ons: Vec<f64> = events.iter().filter(|e| e.on).map(|e| e.t).collect();
+    let mut ons: Vec<f64> = events.iter().filter(|e| e.on).map(|e| e.t).collect();
+    ons.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     if ons.is_empty() {
-        return (Vec::new(), 0.0);
-    }
-    let t0 = ons[0];
-    let mut gaps = Vec::new();
-    for w in ons.windows(2) {
-        gaps.push(w[1] - w[0]);
-    }
-    let gap = gaps
-        .into_iter()
-        .fold(0.35_f64, f64::max)
-        .clamp(0.05, 2.0);
-    let last_on = *ons.last().unwrap();
-    let length = (last_on - t0) + gap;
-    let trimmed: Vec<RecEvent> = events
-        .iter()
-        .filter_map(|e| {
-            let t = e.t - t0;
-            if t < 0.0 || t > length {
-                return None;
-            }
-            Some(RecEvent {
-                t,
+        let t0 = events.iter().map(|e| e.t).fold(f64::INFINITY, f64::min);
+        let shifted: Vec<RecEvent> = events
+            .iter()
+            .map(|e| RecEvent {
+                t: (e.t - t0).max(0.0),
                 on: e.on,
                 channel: e.channel,
                 note: e.note,
                 velocity: e.velocity,
             })
+            .collect();
+        let length = shifted
+            .iter()
+            .map(|e| e.t)
+            .fold(0.0_f64, f64::max)
+            + min_gap;
+        return (shifted, length.max(min_gap));
+    }
+
+    let t0 = ons[0];
+    let gaps: Vec<f64> = ons.windows(2).map(|w| w[1] - w[0]).filter(|g| *g > 0.0).collect();
+    let trail = if gaps.is_empty() {
+        default_gap.clamp(min_gap, max_gap)
+    } else {
+        gaps.into_iter()
+            .fold(f64::NEG_INFINITY, f64::max)
+            .clamp(min_gap, max_gap)
+    };
+
+    let last_on = *ons.last().unwrap();
+    let last_ev = events.iter().map(|e| e.t).fold(f64::NEG_INFINITY, f64::max);
+    let end_abs = (last_on + trail).max(last_ev + 0.01);
+    let length = (end_abs - t0).max(min_gap);
+
+    let mut shifted: Vec<RecEvent> = events
+        .iter()
+        .filter(|e| e.t >= t0 - 1e-6)
+        .map(|e| RecEvent {
+            t: (e.t - t0).max(0.0),
+            on: e.on,
+            channel: e.channel,
+            note: e.note,
+            velocity: e.velocity,
         })
+        .filter(|e| e.t <= length + 1e-6)
         .collect();
-    (trimmed, length.max(0.05))
+    if shifted.is_empty() {
+        return (Vec::new(), 0.0);
+    }
+    shifted.sort_by(|a, b| {
+        a.t.partial_cmp(&b.t)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| match (a.on, b.on) {
+                (false, true) => std::cmp::Ordering::Less,
+                (true, false) => std::cmp::Ordering::Greater,
+                _ => a
+                    .channel
+                    .cmp(&b.channel)
+                    .then(a.note.cmp(&b.note)),
+            })
+    });
+    (shifted, length)
+}
+
+/// Give every note-on a note-off inside `span` (a take can end mid-note).
+pub fn close_open_notes(events: Vec<RecEvent>, span: f64) -> Vec<RecEvent> {
+    if span <= 0.0 {
+        return events;
+    }
+    let mut held: std::collections::HashMap<(u8, u8), f64> = std::collections::HashMap::new();
+    for ev in &events {
+        let key = (ev.channel, ev.note);
+        if ev.on {
+            held.insert(key, ev.t);
+        } else {
+            held.remove(&key);
+        }
+    }
+    if held.is_empty() {
+        return events;
+    }
+    let end = (span - 1e-3).max(0.0);
+    let mut out = events;
+    for ((channel, note), on_t) in held {
+        out.push(RecEvent {
+            t: (on_t + 1e-3).max(end),
+            on: false,
+            channel,
+            note,
+            velocity: 0,
+        });
+    }
+    out.sort_by(|a, b| {
+        a.t.partial_cmp(&b.t)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| match (a.on, b.on) {
+                (false, true) => std::cmp::Ordering::Less,
+                (true, false) => std::cmp::Ordering::Greater,
+                _ => a.channel.cmp(&b.channel).then(a.note.cmp(&b.note)),
+            })
+    });
+    out
 }
 
 #[cfg(test)]
@@ -708,5 +805,111 @@ mod tests {
         );
         seq.state = SeqState::Stopped;
         assert!(matches!(seq.undo(), SeqAction::None));
+    }
+
+    #[test]
+    fn trim_drops_leading_silence_and_caps_trail() {
+        let events = vec![
+            RecEvent {
+                t: 0.40,
+                on: true,
+                channel: 9,
+                note: 36,
+                velocity: 100,
+            },
+            RecEvent {
+                t: 0.50,
+                on: false,
+                channel: 9,
+                note: 36,
+                velocity: 0,
+            },
+            RecEvent {
+                t: 0.75,
+                on: true,
+                channel: 9,
+                note: 38,
+                velocity: 100,
+            },
+            RecEvent {
+                t: 0.85,
+                on: false,
+                channel: 9,
+                note: 38,
+                velocity: 0,
+            },
+        ];
+        let (trimmed, length) = trim_loop_take(&events, 0.35, 0.05, 2.0);
+        assert!((trimmed[0].t).abs() < 1e-6, "first on at 0");
+        // Inter-onset gap is 0.35s → trail 0.35; length ≈ 0.35 + 0.35 = 0.70
+        assert!(length < 1.0, "trail capped by inter-onset gap, got {length}");
+        assert!(
+            trimmed.iter().any(|e| e.note == 38 && e.on),
+            "second hit kept"
+        );
+    }
+
+    #[test]
+    fn trim_keeps_hanging_note_off_past_trail() {
+        let events = vec![
+            RecEvent {
+                t: 1.0,
+                on: true,
+                channel: 0,
+                note: 60,
+                velocity: 100,
+            },
+            RecEvent {
+                t: 1.9,
+                on: false,
+                channel: 0,
+                note: 60,
+                velocity: 0,
+            },
+        ];
+        let (trimmed, length) = trim_loop_take(&events, 0.35, 0.05, 2.0);
+        assert!(
+            length >= 0.89,
+            "held note-off must extend past default trail, got {length}"
+        );
+        assert!(trimmed.iter().any(|e| !e.on && e.note == 60));
+    }
+
+    #[test]
+    fn trim_single_hit_uses_default_gap() {
+        let events = vec![
+            RecEvent {
+                t: 1.0,
+                on: true,
+                channel: 0,
+                note: 60,
+                velocity: 100,
+            },
+            RecEvent {
+                t: 1.1,
+                on: false,
+                channel: 0,
+                note: 60,
+                velocity: 0,
+            },
+        ];
+        let (trimmed, length) = trim_loop_take(&events, 0.35, 0.05, 2.0);
+        assert!((trimmed[0].t).abs() < 1e-6);
+        assert!((length - 0.35).abs() < 0.05, "single-hit trail ≈ default, got {length}");
+    }
+
+    #[test]
+    fn close_open_notes_adds_missing_offs() {
+        let events = vec![RecEvent {
+            t: 0.0,
+            on: true,
+            channel: 0,
+            note: 60,
+            velocity: 100,
+        }];
+        let closed = close_open_notes(events, 1.0);
+        assert_eq!(closed.len(), 2);
+        assert!(!closed[1].on);
+        assert!((closed[1].t - 0.999).abs() < 0.01);
     }
 }
