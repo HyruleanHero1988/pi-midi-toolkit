@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
 use jambox_core::{Clip, ClipEvent, ClipEventKind, Command, JamboxEngine, Quantize, WaveBank, PPQ};
-use tracing::{error, info};
+use tracing::info;
 
 #[derive(Parser)]
 #[command(name = "jambox-engine", about = "Realtime jambox audio + sequencer")]
@@ -178,8 +178,7 @@ fn run(
     // RT hints before the stream so the callback thread inherits the policy.
     rt::apply_rt_hints(rt);
 
-    // Keep the stream alive for the life of `run`.
-    let _stream = if null_audio {
+    if null_audio {
         let running = running.clone();
         std::thread::spawn(move || {
             headless::run(
@@ -190,31 +189,10 @@ fn run(
                 running,
             );
         });
-        None
     } else {
-        let device = match audio::pick_output(&output) {
-            Ok(d) => d,
-            Err(err) => {
-                error!(%err, "audio: no usable output (try --null-audio for host testing)");
-                return;
-            }
-        };
-        match audio::start(&device, audio_side, bank, buffer_frames) {
-            Ok(stream) => {
-                info!(
-                    sample_rate = stream.sample_rate,
-                    channels = stream.channels,
-                    buffer = %stream.buffer_label,
-                    "audio: running"
-                );
-                Some(stream)
-            }
-            Err(err) => {
-                error!(%err, "audio: stream failed (try --null-audio for host testing)");
-                return;
-            }
-        }
-    };
+        // Reopens after cable unplug / ALSA death; does not kill the control socket.
+        audio::spawn_output(output, audio_side, bank, buffer_frames, running.clone());
+    }
 
     midi::spawn_input(
         midi_in,
