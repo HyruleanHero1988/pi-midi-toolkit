@@ -54,7 +54,10 @@ Modes today in `tools/midi-tone`:
 
 `tools/midi-tone` / `apps/pidi` — historical Tk kiosk (not used on this branch).
 
-See `apps/pidi/README.md`. Session: `settings.json`; slots: `user-presets/`; phrases: `phrases/`.
+See `apps/pidi/README.md`. **User data** lives under `~/.local/share/pidi/`
+(`PIDI_DATA_ROOT`): `settings.json`, `songs/`, `phrases/`, `user-presets/`,
+`user-wavetables/`. Code/engines stay in `~/pi-midi-toolkit`. Migrate with
+`deploy/migrate-user-data.sh`.
 
 Branch stack (recent): drum voices → phrase pads → pad enhance → wave viz → plan north-star → jambox FX → Rust jambox engine → overdub sequencer.
 
@@ -74,7 +77,7 @@ Still needs hardware / machine:
 
 Rust toolchain on PATH for engine work. midi-tone is Python venv on the Pi.
 
-When crates land on `master`, CI cross-builds `dist/armv7` and commits the ELFs; SET→UPDATE copies them onto `bin/` (`midi-engine`, `jambox-engine`, `pidi-native`). Manual rebuild (`./deploy/build-pi-bins.sh` then `git add dist/armv7`) is still fine for LAN SSH. Do not use Git LFS for them (archive downloads would get pointer files). On Windows, use **WSL2 Ubuntu 22.04** for that script (see [NATIVE_SLICE.md](NATIVE_SLICE.md) “Fast host loop”); Ubuntu 24.04 bins need a newer glibc than Pi Bookworm.
+When crates land on `master`, CI cross-builds `dist/armv7` and commits the ELFs; SET→UPDATE copies them onto `bin/` (`midi-engine`, `jambox-engine`, `pidi-native`). **Local builds are first-class:** from Windows run `.\deploy\build-pi-bins.ps1` (Ubuntu 22.04 WSL or Docker — same glibc floor as CI). Do not stage bins from Debian 13 / Ubuntu 24.04 WSL (they need newer glibc than Pi Bookworm). Do not use Git LFS for the ELFs (archive downloads would get pointer files).
 
 ## Not related to play-my-synth
 

@@ -92,26 +92,37 @@ cargo run -p pidi-native -- --tcp --control 127.0.0.1:17890 --display sdl --wind
 
 ## Deploy to the Pi
 
-### Fast host loop (WSL — recommended)
+### Fast host loop (this PC — required for Pi-compatible bins)
 
-Windows cannot cross-link these crates cleanly. Install **WSL2 + Ubuntu 22.04**
-(jammy): its glibc is ≤ Pi Bookworm’s 2.36. Avoid Ubuntu 24.04 for staging
-bins — they need GLIBC 2.38+ and fail on the Pi.
+Pi Bookworm has **glibc 2.36**. Bins linked on Ubuntu 24.04 / Debian 13 need
+**2.38+** and will not start on the device. GitHub Actions is optional backup;
+local builds must use the same floor as CI (**Ubuntu 22.04 / glibc 2.35**).
+
+**Windows (recommended):**
 
 ```powershell
-# Admin PowerShell once; reboot if prompted
-wsl --install -d Ubuntu-22.04
+# One-time: installs Ubuntu-22.04 WSL if needed, then cross-builds
+.\deploy\build-pi-bins.ps1 -InstallDistro
+
+# Later rebuilds
+.\deploy\build-pi-bins.ps1
+.\deploy\build-pi-bins.ps1 -Packages "jambox-engine,pidi-native"
 ```
 
-Then in the Ubuntu shell (repo path via `/mnt/c/...`):
+Docker Desktop alternative: `.\deploy\build-pi-bins.ps1 -PreferDocker`
+(builds `deploy/Dockerfile.pi-bins`).
+
+**Already inside Ubuntu 22.04 WSL:**
 
 ```bash
 cd /mnt/c/Users/Raymond/Documents/Development/pi-midi-toolkit
 # first time: rustup + passwordless sudo helps apt in the script
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-PACKAGES=jambox-engine,pidi-native ./deploy/build-pi-bins.sh
-# copy dist/armv7/* to the Pi and restart units (or deploy-native-slice.sh)
+./deploy/build-pi-bins.sh
 ```
+
+`./deploy/build-pi-bins.sh` **refuses** hosts with glibc > 2.36 unless you set
+`FORCE_NEW_GLIBC=1` (bins will not run on the Pi).
 
 CI (`.github/workflows/build-pi-bins.yml` on ubuntu-22.04) cross-builds and,
 on `master`, commits `dist/armv7` so SET→UPDATE can install the ELFs.
