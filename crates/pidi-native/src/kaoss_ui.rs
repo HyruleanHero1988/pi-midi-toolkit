@@ -78,6 +78,14 @@ pub const KAOSS_PROGRAMS: &[KaossProgram] = &[
         curated: true,
     },
     KaossProgram {
+        id: "flange",
+        label: "FLANGE",
+        note: false,
+        y_param: "flanger_mix",
+        x_param: Some("flanger_rate"),
+        curated: true,
+    },
+    KaossProgram {
         id: "level",
         label: "LEVEL",
         note: true,

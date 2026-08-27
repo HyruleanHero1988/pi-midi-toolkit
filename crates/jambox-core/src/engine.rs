@@ -865,6 +865,10 @@ impl JamboxEngine {
             FxParam::DelayMix => params.delay_mix = unit,
             FxParam::ReverbSize => params.reverb_size = unit,
             FxParam::ReverbMix => params.reverb_mix = unit,
+            FxParam::FlangerMix => params.flanger_mix = unit,
+            FxParam::FlangerRate => params.flanger_rate = unit,
+            FxParam::FlangerDepth => params.flanger_depth = unit,
+            FxParam::FlangerFb => params.flanger_fb = unit,
         }
         slot.set_params(params);
     }

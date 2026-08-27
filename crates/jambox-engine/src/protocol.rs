@@ -483,6 +483,10 @@ fn parse_fx_param(name: &str) -> Option<FxParam> {
         "delay_mix" => FxParam::DelayMix,
         "reverb_size" => FxParam::ReverbSize,
         "reverb_mix" => FxParam::ReverbMix,
+        "flanger_mix" => FxParam::FlangerMix,
+        "flanger_rate" => FxParam::FlangerRate,
+        "flanger_depth" => FxParam::FlangerDepth,
+        "flanger_fb" => FxParam::FlangerFb,
         _ => return None,
     })
 }

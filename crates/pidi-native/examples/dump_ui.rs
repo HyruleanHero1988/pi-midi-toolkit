@@ -27,6 +27,7 @@ fn main() {
         ("seq", UiMode::Seq),
         ("pads", UiMode::Pads),
         ("kaoss", UiMode::Kaoss),
+        ("chords", UiMode::Chords),
         ("songs", UiMode::Songs),
         ("presets", UiMode::Presets),
         ("settings", UiMode::Settings),

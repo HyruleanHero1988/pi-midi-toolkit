@@ -9,16 +9,23 @@ pub const NAV_H: i32 = 0;
 /// Top chrome: PiDI brand + HOME/POWER + jam tabs (matches Tk nav height).
 pub const HUD_H: i32 = 52;
 
-/// Jam-mode tabs on the right of the top chrome (Tk order).
-pub const JAM_MODES: [UiMode; 4] = [UiMode::Synth, UiMode::Seq, UiMode::Pads, UiMode::Kaoss];
+/// Jam-mode tabs on the right of the top chrome (Tk order + chords).
+pub const JAM_MODES: [UiMode; 5] = [
+    UiMode::Synth,
+    UiMode::Seq,
+    UiMode::Pads,
+    UiMode::Kaoss,
+    UiMode::Chords,
+];
 
-/// Home grid entries (4×2). DRUM KIT sits beside SYNTH; LOG / MAP live under Settings.
-pub const HOME_TILES: [(UiMode, &'static str, u32); 8] = [
+/// Home grid entries (3×3). LOG / MAP live under Settings.
+pub const HOME_TILES: [(UiMode, &'static str, u32); 9] = [
     (UiMode::Synth, "SYNTH", 0x458588),
     (UiMode::Drums, "DRUMS", 0x98971a),
     (UiMode::Seq, "SEQ", 0xb16286),
     (UiMode::Pads, "PADS", 0xd79921),
     (UiMode::Kaoss, "KAOSS", 0xfe8019),
+    (UiMode::Chords, "CHORDS", 0xcc241d),
     (UiMode::Songs, "SONGS", 0x689d6a),
     (UiMode::Presets, "PRESETS", 0x83a598),
     (UiMode::Settings, "SETTINGS", 0x665c54),
@@ -145,6 +152,17 @@ pub enum Hit {
     SettingsMap,
     LogClear,
     LogAllOff,
+    ChordsButton { col: usize, row: usize },
+    ChordsStrum { y: f32 },
+    ChordsPalette { slot: usize },
+    ChordsOut,
+    ChordsHold,
+    ChordsKey,
+    ChordsChanges,
+    ChordsArm,
+    ChordsKeyPick(u8),
+    ChordsChangesPick(usize),
+    ChordsOverlayClose,
     None,
 }
 
@@ -274,6 +292,10 @@ pub struct Layout {
     pub settings_update: Rect,
     pub log_clear: Rect,
     pub log_all_off: Rect,
+    pub chords_toolbar: Rect,
+    pub chords_grid: Rect,
+    pub chords_strum: Rect,
+    pub chords_palette: Rect,
     pub power_blank_cycle: Rect,
     pub power_shutdown: Rect,
     pub power_reboot: Rect,
@@ -954,6 +976,30 @@ impl Layout {
                 w: 200,
                 h: 48,
             },
+            chords_toolbar: Rect {
+                x: 8,
+                y: HUD_H + 6,
+                w: SCREEN_W - 16,
+                h: 44,
+            },
+            chords_grid: Rect {
+                x: 8,
+                y: HUD_H + 54,
+                w: 560,
+                h: 248,
+            },
+            chords_strum: Rect {
+                x: 576,
+                y: HUD_H + 54,
+                w: 216,
+                h: 248,
+            },
+            chords_palette: Rect {
+                x: 8,
+                y: HUD_H + 310,
+                w: SCREEN_W - 16,
+                h: 110,
+            },
             power_blank_cycle,
             power_shutdown,
             power_reboot,
@@ -1153,7 +1199,7 @@ impl Layout {
 
     pub fn nav_jam(&self, index: usize) -> Rect {
         let n = JAM_MODES.len() as i32;
-        let w = 84;
+        let w = 70;
         let gap = 4;
         let total = n * w + (n - 1) * gap;
         let x0 = self.nav.w - total - 8;
@@ -1166,8 +1212,8 @@ impl Layout {
     }
 
     pub fn home_tile(&self, index: usize) -> Rect {
-        let cols = 4i32;
-        let rows = 2i32;
+        let cols = 3i32;
+        let rows = 3i32;
         let gw = (self.content.w - 24) / cols;
         let gh = (self.content.h - 40) / rows;
         let col = (index as i32) % cols;
@@ -1500,6 +1546,64 @@ impl Layout {
         self.kit_pad_cell(index)
     }
 
+    /// Toolbar: OUT, HOLD, KEY, CHANGES, ARM.
+    pub fn chords_tool(&self, index: usize) -> Rect {
+        let n = 5i32;
+        let w = self.chords_toolbar.w / n;
+        Rect {
+            x: self.chords_toolbar.x + (index as i32) * w + 3,
+            y: self.chords_toolbar.y,
+            w: w - 6,
+            h: self.chords_toolbar.h,
+        }
+    }
+
+    pub fn chords_button(&self, col: usize, row: usize) -> Rect {
+        let gw = self.chords_grid.w / 12;
+        let gh = self.chords_grid.h / 3;
+        Rect {
+            x: self.chords_grid.x + (col as i32) * gw + 1,
+            y: self.chords_grid.y + (row as i32) * gh + 1,
+            w: gw - 2,
+            h: gh - 2,
+        }
+    }
+
+    pub fn chords_palette_slot(&self, slot: usize) -> Rect {
+        let n = 8i32;
+        let w = self.chords_palette.w / n;
+        Rect {
+            x: self.chords_palette.x + (slot as i32) * w + 3,
+            y: self.chords_palette.y + 22,
+            w: w - 6,
+            h: self.chords_palette.h - 26,
+        }
+    }
+
+    pub fn chords_overlay_cell(&self, index: usize, count: usize) -> Rect {
+        let cols = 4i32;
+        let rows = ((count as i32) + cols - 1) / cols;
+        let gw = (self.content.w - 24) / cols;
+        let gh = ((self.content.h - 80) / rows.max(1)).min(88);
+        let col = (index as i32) % cols;
+        let row = (index as i32) / cols;
+        Rect {
+            x: self.content.x + 12 + col * gw + 4,
+            y: self.content.y + 52 + row * gh + 4,
+            w: gw - 8,
+            h: gh - 8,
+        }
+    }
+
+    pub fn chords_overlay_close(&self) -> Rect {
+        Rect {
+            x: self.content.x + self.content.w - 120,
+            y: self.content.y + 8,
+            w: 108,
+            h: 40,
+        }
+    }
+
     pub fn hit(&self, mode: UiMode, px: i32, py: i32) -> Hit {
         if self.nav.contains(px, py) {
             if self.nav_back().contains(px, py) {
@@ -1530,6 +1634,7 @@ impl Layout {
             UiMode::Settings => self.hit_settings(px, py),
             UiMode::Log => self.hit_log(px, py),
             UiMode::Map => self.hit_map(px, py),
+            UiMode::Chords => self.hit_chords(px, py),
         }
     }
 
@@ -1993,8 +2098,43 @@ impl Layout {
         Hit::None
     }
 
+    fn hit_chords(&self, px: i32, py: i32) -> Hit {
+        if self.chords_tool(0).contains(px, py) {
+            return Hit::ChordsOut;
+        }
+        if self.chords_tool(1).contains(px, py) {
+            return Hit::ChordsHold;
+        }
+        if self.chords_tool(2).contains(px, py) {
+            return Hit::ChordsKey;
+        }
+        if self.chords_tool(3).contains(px, py) {
+            return Hit::ChordsChanges;
+        }
+        if self.chords_tool(4).contains(px, py) {
+            return Hit::ChordsArm;
+        }
+        if self.chords_strum.contains(px, py) {
+            let (_x, y) = self.chords_strum.pad_xy(px, py);
+            return Hit::ChordsStrum { y };
+        }
+        for slot in 0..8 {
+            if self.chords_palette_slot(slot).contains(px, py) {
+                return Hit::ChordsPalette { slot };
+            }
+        }
+        for row in 0..3 {
+            for col in 0..12 {
+                if self.chords_button(col, row).contains(px, py) {
+                    return Hit::ChordsButton { col, row };
+                }
+            }
+        }
+        Hit::None
+    }
+
     pub fn settings_fx_slider(&self, index: usize) -> Rect {
-        let n = 3i32;
+        let n = 4i32;
         let w = self.settings_fx.w / n;
         Rect {
             x: self.settings_fx.x + (index as i32) * w + 8,
@@ -2029,7 +2169,7 @@ impl Layout {
         if self.settings_update.contains(px, py) {
             return Hit::SettingsUpdate;
         }
-        for index in 0..3 {
+        for index in 0..4 {
             if self.settings_fx_slider(index).contains(px, py) {
                 return Hit::SettingsFx(index);
             }
@@ -2103,6 +2243,9 @@ pub enum Surface {
     SynthKey { note: u8 },
     SynthSlider { index: usize },
     SettingsFx { index: usize },
+    ChordsButton { col: usize, row: usize },
+    ChordsStrum,
+    ChordsPalette { slot: usize },
     ScrollDrag {
         kind: crate::scroll::ScrollKind,
         start_py: i32,

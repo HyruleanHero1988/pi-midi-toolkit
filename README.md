@@ -3,7 +3,7 @@
 Raspberry Pi **MIDI appliance**: one kiosk UI for local soft-synth play **and**
 low-latency MIDI thru/remap to a hardware synth. **Not** related to play-my-synth.
 
-**North star:** power on → kiosk → modes (Synth / Seq / Pads / Kaoss / Log / Map). See [PLAN.md](PLAN.md).
+**North star:** power on → kiosk → modes (Synth / Seq / Pads / Kaoss / Chords / Log / Map). See [PLAN.md](PLAN.md).
 
 - **Kiosk UI (active):** [`crates/pidi-native`](crates/pidi-native) — SDL/KMSDRM + GLES2 over `jambox-engine`. See [NATIVE_KIOSK.md](NATIVE_KIOSK.md).
 - **Python Tk kiosk (archived):** [`apps/pidi`](apps/pidi) on `cursor/python-kiosk-archive-dfc2`

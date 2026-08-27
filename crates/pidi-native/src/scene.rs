@@ -279,6 +279,7 @@ pub fn build(model: &NativeModel) -> Scene {
             UiMode::Map => draw_map(&mut scene, model),
             UiMode::Settings => draw_settings(&mut scene, model),
             UiMode::Log => draw_log(&mut scene, model),
+            UiMode::Chords => draw_chords(&mut scene, model),
         }
         apply_content_shift(&mut scene, model.ui_shift, crate::layout::HUD_H);
     }
@@ -404,6 +405,10 @@ fn chrome_status(model: &NativeModel) -> String {
             format!("{:.0} BPM {}", model.bpm, kaoss_ui::gate(model.kaoss_gate).label)
         }
         UiMode::Seq => format!("{:.0} BPM", model.bpm),
+        UiMode::Chords => model
+            .chords_current
+            .map(|c| c.name())
+            .unwrap_or_else(|| "CHORDS".into()),
         UiMode::Presets => format!("SLOT {}", model.preset_selected + 1),
         UiMode::Synth if model.synth_vib_open => "VIB".into(),
         _ => {
@@ -1152,6 +1157,135 @@ fn draw_home(scene: &mut Scene, model: &NativeModel) {
     }
 }
 
+fn draw_chords(scene: &mut Scene, model: &NativeModel) {
+    use crate::chords::{self, Overlay, QualityRow, KEY_NAMES, PALETTE_SLOTS, ROOT_NAMES};
+
+    let layout = model.layout;
+    if let Some(overlay) = model.chords_overlay {
+        let title = match overlay {
+            Overlay::Key => "KEY",
+            Overlay::Changes => "CHANGES",
+        };
+        scene.text_scaled(layout.content.x + 12, layout.content.y + 14, title, 0xfbf1c7, 3);
+        scene.button(layout.chords_overlay_close(), 0x9d0006);
+        scene.text_centered(layout.chords_overlay_close(), "CLOSE", 0xfbf1c7, 2);
+        match overlay {
+            Overlay::Key => {
+                for pc in 0..12u8 {
+                    let cell = layout.chords_overlay_cell(pc as usize, 12);
+                    let on = model.chords_key == pc;
+                    scene.button(cell, if on { 0xcc241d } else { 0x3c3836 });
+                    scene.text_centered(cell, KEY_NAMES[pc as usize], 0xfbf1c7, 2);
+                }
+            }
+            Overlay::Changes => {
+                let n = chords::PROGRESSIONS.len();
+                for (i, prog) in chords::PROGRESSIONS.iter().enumerate() {
+                    let cell = layout.chords_overlay_cell(i, n);
+                    scene.button(cell, 0x504945);
+                    scene.text(cell.x + 8, cell.y + 10, prog.name, 0xfbf1c7);
+                    scene.text(cell.x + 8, cell.y + 32, prog.label, 0xa89984);
+                }
+            }
+        }
+        return;
+    }
+
+    let tools = [
+        model.chords_out.short_label(),
+        if model.chords_hold { "HOLD" } else { "MOM" },
+        KEY_NAMES[model.chords_key as usize],
+        "CHANGES",
+        if model.chords_arm { "ARM*" } else { "ARM" },
+    ];
+    let tool_colors = [
+        model.chords_out.color(),
+        if model.chords_hold { 0xb16286 } else { 0x3c3836 },
+        0x458588,
+        0xd79921,
+        if model.chords_arm { 0xcc241d } else { 0x3c3836 },
+    ];
+    for i in 0..5 {
+        let cell = layout.chords_tool(i);
+        scene.button(cell, tool_colors[i]);
+        scene.text_centered(cell, tools[i], 0xfbf1c7, 2);
+    }
+
+    let current_col = model.chords_current.map(|c| chords::col_for_root_pc(c.root));
+    for row in 0..3 {
+        let qrow = QualityRow::from_index(row).unwrap();
+        for col in 0..12 {
+            let cell = layout.chords_button(col, row);
+            let lit = current_col == Some(col);
+            let color = match (qrow, lit) {
+                (QualityRow::Maj, true) => 0xcc241d,
+                (QualityRow::Maj, false) => 0x9d0006,
+                (QualityRow::Min, true) => 0x458588,
+                (QualityRow::Min, false) => 0x076678,
+                (QualityRow::Seven, true) => 0xd79921,
+                (QualityRow::Seven, false) => 0xb57614,
+            };
+            scene.button(cell, color);
+            let label = if row == 0 {
+                ROOT_NAMES[col]
+            } else {
+                qrow.label()
+            };
+            scene.text_centered(cell, label, 0xfbf1c7, 1);
+        }
+    }
+
+    scene.fill_rect(layout.chords_strum, 0x1d2021);
+    scene.text(
+        layout.chords_strum.x + 8,
+        layout.chords_strum.y + 8,
+        "STRUM",
+        0xfbf1c7,
+    );
+    if let Some(spec) = model.chords_current {
+        scene.text(
+            layout.chords_strum.x + 8,
+            layout.chords_strum.y + 28,
+            &spec.name(),
+            0xfe8019,
+        );
+    }
+    let strings = 8;
+    for i in 0..strings {
+        let y = layout.chords_strum.y + 48 + i * ((layout.chords_strum.h - 56) / strings);
+        scene.fill_rect(
+            Rect {
+                x: layout.chords_strum.x + 12,
+                y,
+                w: layout.chords_strum.w - 24,
+                h: 3,
+            },
+            if i % 4 == 0 { 0xebdbb2 } else { 0x504945 },
+        );
+    }
+
+    scene.text(
+        layout.chords_palette.x + 4,
+        layout.chords_palette.y + 2,
+        "PALETTE",
+        0xa89984,
+    );
+    for slot in 0..PALETTE_SLOTS {
+        let cell = layout.chords_palette_slot(slot);
+        match model.chords_palette[slot] {
+            Some(spec) => {
+                let on = model.chords_current == Some(spec);
+                scene.button(cell, if on { 0xcc241d } else { 0x689d6a });
+                scene.text_centered(cell, &spec.name(), 0xfbf1c7, 1);
+            }
+            None => {
+                scene.button(cell, 0x3c3836);
+                scene.text_centered(cell, "+", 0x665c54, 2);
+            }
+        }
+    }
+}
+
 fn draw_scroll_wave_grid(
     scene: &mut Scene,
     layout: &Layout,
@@ -1766,7 +1900,7 @@ fn draw_settings(scene: &mut Scene, model: &NativeModel) {
         0xffffff,
         2,
     );
-    const LABELS: [&str; 3] = ["DRIVE", "DELAY", "REVERB"];
+    const LABELS: [&str; 4] = ["DRIVE", "DELAY", "REVERB", "FLANGE"];
     let values = match model.fx_target {
         crate::model::FxEditTarget::Bus => &model.fx_bus,
         crate::model::FxEditTarget::Voice => &model.fx_voice,
@@ -1777,7 +1911,7 @@ fn draw_settings(scene: &mut Scene, model: &NativeModel) {
         crate::model::FxEditTarget::Voice => 0xb16286,
         crate::model::FxEditTarget::DrumGroup => 0xd79921,
     };
-    for index in 0..3 {
+    for index in 0..4 {
         let track = layout.settings_fx_slider(index);
         scene.fill_rect(track, 0x20202c);
         scene.text(track.x + 8, track.y - 18, LABELS[index], 0xc0c0d0);

@@ -205,7 +205,12 @@ pub fn write_wavetable_wav(path: &Path, table: &[f32], sample_rate: u32) -> Resu
 }
 
 /// Sidecar matching Python `write_voice_fx_sidecar` keys (delay/reverb from bus).
-pub fn write_fx_sidecar(path: &Path, delay_mix: f32, reverb_mix: f32) -> Result<(), String> {
+pub fn write_fx_sidecar(
+    path: &Path,
+    delay_mix: f32,
+    reverb_mix: f32,
+    flanger_mix: f32,
+) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
@@ -216,6 +221,7 @@ pub fn write_fx_sidecar(path: &Path, delay_mix: f32, reverb_mix: f32) -> Result<
         "fx_delay_mix": delay_mix.clamp(0.0, 1.0),
         "fx_reverb_size": 0.0,
         "fx_reverb_mix": reverb_mix.clamp(0.0, 1.0),
+        "fx_flanger_mix": flanger_mix.clamp(0.0, 1.0),
     });
     fs::write(
         path,
@@ -242,6 +248,7 @@ pub fn save_as(
     tone: f32,
     delay_mix: f32,
     reverb_mix: f32,
+    flanger_mix: f32,
 ) -> Result<BakeResult, String> {
     let base = suggest_voice_name(name_a, name_b, morph);
     let name = unique_voice_name(&base, wave_names);
@@ -250,7 +257,7 @@ pub fn save_as(
     let wav_path = dir.join(format!("{name}.wav"));
     let fx_path = dir.join(format!("{name}.fx.json"));
     write_wavetable_wav(&wav_path, &cycle, SAMPLE_RATE)?;
-    write_fx_sidecar(&fx_path, delay_mix, reverb_mix)?;
+    write_fx_sidecar(&fx_path, delay_mix, reverb_mix, flanger_mix)?;
     let index = bank.insert(&name, &cycle);
     bank.set_morph_pair(index, index);
     bank.set_morph(0.0);
@@ -298,6 +305,7 @@ mod tests {
             0.7,
             0.3,
             0.1,
+            0.4,
         )
         .unwrap();
         assert!(result.wav_path.is_file());
@@ -306,6 +314,7 @@ mod tests {
             serde_json::from_str(&fs::read_to_string(&result.fx_path).unwrap()).unwrap();
         assert!((fx["fx_delay_mix"].as_f64().unwrap() - 0.3).abs() < 1e-6);
         assert!((fx["fx_reverb_mix"].as_f64().unwrap() - 0.1).abs() < 1e-6);
+        assert!((fx["fx_flanger_mix"].as_f64().unwrap() - 0.4).abs() < 1e-6);
         let meta = fs::metadata(&result.wav_path).unwrap();
         assert!(meta.len() > 44);
 

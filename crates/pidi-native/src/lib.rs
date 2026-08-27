@@ -14,6 +14,7 @@ pub mod kaoss_ui;
 pub mod kaoss_viz;
 pub mod layout;
 pub mod mode;
+pub mod chords;
 pub mod model;
 pub mod phrases;
 pub mod presets;

@@ -34,6 +34,10 @@ pub enum FxParam {
     DelayMix,
     ReverbSize,
     ReverbMix,
+    FlangerMix,
+    FlangerRate,
+    FlangerDepth,
+    FlangerFb,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

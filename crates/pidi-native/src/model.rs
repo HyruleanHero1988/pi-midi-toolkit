@@ -3,6 +3,7 @@
 //! Remaining Tk gaps (see NATIVE_KIOSK.md): deeper Map remap UI.
 //! Map/WIFI/UPDATE are appliance-oriented host hooks.
 
+use crate::chords::{self, ChordSpec, Overlay as ChordsOverlay, QualityRow, PALETTE_SLOTS};
 use crate::client::Outbox;
 use crate::host;
 use crate::kaoss_ui::{self, KaossPicker, KAOSS_PROGRAMS};
@@ -200,14 +201,24 @@ pub struct NativeModel {
     pub song_scroll: usize,
     pub song_playing: bool,
     pub song_loop: bool,
-    pub fx_bus: [f32; 3],
-    pub fx_voice: [f32; 3],
-    pub fx_drum: [f32; 3],
+    pub fx_bus: [f32; 4],
+    pub fx_voice: [f32; 4],
+    pub fx_drum: [f32; 4],
     pub fx_target: FxEditTarget,
     pub log_lines: Vec<String>,
     pub pads_out: OutMode,
     pub song_out: OutMode,
     pub kaoss_out: OutMode,
+    pub chords_out: OutMode,
+    pub chords_hold: bool,
+    pub chords_key: u8,
+    pub chords_arm: bool,
+    pub chords_current: Option<ChordSpec>,
+    pub chords_palette: [Option<ChordSpec>; PALETTE_SLOTS],
+    pub chords_overlay: Option<ChordsOverlay>,
+    chords_held: [(Option<u32>, usize, QualityRow); MAX_FINGERS],
+    chords_block: [Option<u8>; 4],
+    chords_strum_note: Option<u8>,
     pub font_style: FontStyle,
     pub power_menu_open: bool,
     mode_before_power: UiMode,
@@ -325,14 +336,24 @@ impl NativeModel {
             song_scroll: 0,
             song_playing: false,
             song_loop: false,
-            fx_bus: [0.0, 0.0, 0.0],
-            fx_voice: [0.0, 0.0, 0.0],
-            fx_drum: [0.0, 0.0, 0.0],
+            fx_bus: [0.0, 0.0, 0.0, 0.0],
+            fx_voice: [0.0, 0.0, 0.0, 0.0],
+            fx_drum: [0.0, 0.0, 0.0, 0.0],
             fx_target: FxEditTarget::Bus,
             log_lines: Vec::new(),
             pads_out: OutMode::Both,
             song_out: OutMode::Both,
             kaoss_out: OutMode::Local,
+            chords_out: OutMode::Both,
+            chords_hold: true,
+            chords_key: 0,
+            chords_arm: false,
+            chords_current: Some(ChordSpec::new(0, chords::ChordQuality::Maj)),
+            chords_palette: [None; PALETTE_SLOTS],
+            chords_overlay: None,
+            chords_held: [(None, 0, QualityRow::Maj); MAX_FINGERS],
+            chords_block: [None; 4],
+            chords_strum_note: None,
             font_style: FontStyle::Retro,
             power_menu_open: false,
             mode_before_power: UiMode::Kaoss,
@@ -459,6 +480,8 @@ impl NativeModel {
         self.synth_pick_a = None;
         self.synth_vib_open = false;
         self.synth_pick_scroll = 0;
+        self.chords_overlay = None;
+        self.chords_arm = false;
         if mode != UiMode::Kaoss && self.kaoss_full {
             self.kaoss_full = false;
             self.kaoss_full_exit_since = None;
@@ -474,6 +497,7 @@ impl NativeModel {
                 | UiMode::Seq
                 | UiMode::Pads
                 | UiMode::Kaoss
+                | UiMode::Chords
                 | UiMode::Songs
                 | UiMode::Presets
                 | UiMode::Log
@@ -619,6 +643,7 @@ impl NativeModel {
             "seq" => UiMode::Seq,
             "pad" | "pads" => UiMode::Pads,
             "kao" | "kaoss" => UiMode::Kaoss,
+            "chd" | "chords" => UiMode::Chords,
             "sng" | "songs" => UiMode::Songs,
             "pre" | "presets" => UiMode::Presets,
             "map" => UiMode::Map,
@@ -831,10 +856,13 @@ impl NativeModel {
         self.kaoss_hold = s.kaoss_hold;
         self.kaoss_show_all = s.kaoss_show_all;
         self.kaoss_channel = s.kaoss_channel & 0x0f;
-        self.fx_bus = s.fx_bus;
+        self.fx_bus = [s.fx_bus[0], s.fx_bus[1], s.fx_bus[2], s.fx_flanger];
         self.pads_out = s.pads_out;
         self.song_out = s.song_out;
         self.kaoss_out = s.kaoss_out;
+        self.chords_out = s.chords_out;
+        self.chords_hold = s.chords_hold;
+        self.chords_key = s.chords_key.min(11);
         self.font_style = s.font_style;
         let (style, color) =
             crate::kaoss_viz::load_viz_from_session(&s.kaoss_viz_style, s.kaoss_mono_color);
@@ -860,7 +888,10 @@ impl NativeModel {
             "vibrato_rate",
             ((self.vibrato_rate - 1.0) / 8.0).clamp(0.0, 1.0),
         );
-        for (i, name) in ["drive", "delay_mix", "reverb_mix"].iter().enumerate() {
+        for (i, name) in ["drive", "delay_mix", "reverb_mix", "flanger_mix"]
+            .iter()
+            .enumerate()
+        {
             outbox.fx_bus(name, self.fx_bus[i]);
         }
         self.sync_wave_bank();
@@ -891,7 +922,8 @@ impl NativeModel {
             kaoss_program: self.kaoss_program,
             kaoss_gate: self.kaoss_gate,
             kaoss_hold: self.kaoss_hold,
-            fx_bus: self.fx_bus,
+            fx_bus: [self.fx_bus[0], self.fx_bus[1], self.fx_bus[2]],
+            fx_flanger: self.fx_bus[3],
             kaoss_show_all: self.kaoss_show_all,
             kaoss_channel: self.kaoss_channel,
             vibrato_always: self.vibrato_always,
@@ -901,6 +933,9 @@ impl NativeModel {
             pads_out: self.pads_out,
             song_out: self.song_out,
             kaoss_out: self.kaoss_out,
+            chords_out: self.chords_out,
+            chords_hold: self.chords_hold,
+            chords_key: self.chords_key,
             font_style: self.font_style,
             screensaver_sec: self.screensaver.timeout_sec,
             kaoss_viz_style: self.kaoss_viz_style.wire().into(),
@@ -1058,6 +1093,8 @@ impl NativeModel {
             } else {
                 self.layout.hit(self.mode, px, py)
             }
+        } else if self.mode == UiMode::Chords && self.chords_overlay.is_some() {
+            self.hit_chords_overlay(px, py)
         } else {
             self.layout.hit(self.mode, px, py)
         };
@@ -1084,6 +1121,10 @@ impl NativeModel {
                 if self.mode == UiMode::Kaoss && mode != UiMode::Kaoss {
                     self.leave_kaoss_mode(outbox);
                 }
+                if self.mode == UiMode::Chords && mode != UiMode::Chords {
+                    self.chords_block_off(outbox);
+                    self.chords_strum_off(outbox);
+                }
                 self.push_nav_history(mode);
                 self.set_mode(mode);
             }
@@ -1101,6 +1142,10 @@ impl NativeModel {
                 };
                 if self.mode == UiMode::Kaoss && mode != UiMode::Kaoss {
                     self.leave_kaoss_mode(outbox);
+                }
+                if self.mode == UiMode::Chords && mode != UiMode::Chords {
+                    self.chords_block_off(outbox);
+                    self.chords_strum_off(outbox);
                 }
                 self.push_nav_history(mode);
                 self.set_mode(mode);
@@ -2096,6 +2141,91 @@ impl NativeModel {
                     self.push_log(line);
                 }
             }
+            Hit::ChordsOut => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.chords_out = self.chords_out.cycle();
+                self.status_line = format!("chords {}", self.chords_out.label());
+                self.mark_dirty();
+            }
+            Hit::ChordsHold => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.chords_hold = !self.chords_hold;
+                self.status_line = if self.chords_hold {
+                    "HOLD on".into()
+                } else {
+                    "HOLD off".into()
+                };
+                self.mark_dirty();
+            }
+            Hit::ChordsKey => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.chords_overlay = Some(ChordsOverlay::Key);
+                self.status_line = "pick key".into();
+            }
+            Hit::ChordsChanges => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.chords_overlay = Some(ChordsOverlay::Changes);
+                self.status_line = "pick changes".into();
+            }
+            Hit::ChordsArm => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.chords_arm = !self.chords_arm;
+                self.status_line = if self.chords_arm {
+                    "ARM: tap a palette pad to store".into()
+                } else {
+                    "ARM off".into()
+                };
+            }
+            Hit::ChordsKeyPick(pc) => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.chords_key = pc.min(11);
+                self.chords_overlay = None;
+                self.status_line = format!("key {}", chords::KEY_NAMES[self.chords_key as usize]);
+                self.mark_dirty();
+            }
+            Hit::ChordsChangesPick(index) => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.load_changes(index);
+                self.chords_overlay = None;
+            }
+            Hit::ChordsOverlayClose => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.chords_overlay = None;
+            }
+            Hit::ChordsButton { col, row } => {
+                if let Some(qrow) = QualityRow::from_index(row) {
+                    self.fingers[slot] = Finger {
+                        active: true,
+                        id,
+                        gesture,
+                        x: 0.0,
+                        y: 0.0,
+                        px,
+                        py,
+                        surface: Surface::ChordsButton { col, row },
+                        gate_on: false,
+                    };
+                    self.chords_press_button(gesture, col, qrow, outbox);
+                }
+            }
+            Hit::ChordsStrum { y } => {
+                self.fingers[slot] = Finger {
+                    active: true,
+                    id,
+                    gesture,
+                    x: 0.0,
+                    y,
+                    px,
+                    py,
+                    surface: Surface::ChordsStrum,
+                    gate_on: false,
+                };
+                self.chords_strum_to(y, outbox);
+            }
+            Hit::ChordsPalette { slot: pal } => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.chords_palette_tap(pal, outbox);
+            }
             Hit::LogClear => {
                 self.tap_ui(slot, id, gesture, px, py);
                 self.log_lines.clear();
@@ -2132,6 +2262,11 @@ impl NativeModel {
             }
             Surface::SettingsFx { index } => {
                 self.apply_fx_slider(index, py, outbox);
+            }
+            Surface::ChordsStrum => {
+                let (_x, y) = self.layout.chords_strum.pad_xy(px, py);
+                self.fingers[slot].y = y;
+                self.chords_strum_to(y, outbox);
             }
             Surface::SynthKey { note } => {
                 if let Some(raw) = self.layout.synth_keyboard_note_at(px, py) {
@@ -2208,6 +2343,14 @@ impl NativeModel {
                 self.seq.push_note(false, 0, note, 0);
                 self.push_pad_rec(false, 0, note, 0);
             }
+            Surface::ChordsButton { col, row } => {
+                if let Some(qrow) = QualityRow::from_index(row) {
+                    self.chords_release_button(finger.gesture, col, qrow, outbox);
+                }
+            }
+            Surface::ChordsStrum => {
+                self.chords_strum_off(outbox);
+            }
             Surface::ScrollDrag {
                 kind,
                 start_py,
@@ -2223,6 +2366,7 @@ impl NativeModel {
             Surface::Phrase { .. }
             | Surface::SynthSlider { .. }
             | Surface::SettingsFx { .. }
+            | Surface::ChordsPalette { .. }
             | Surface::UiTap => {}
         }
     }
@@ -2561,13 +2705,14 @@ impl NativeModel {
         self.mark_dirty();
     }
 
-    const FX_PARAM_NAMES: [&'static str; 3] = ["drive", "delay_mix", "reverb_mix"];
+    const FX_PARAM_NAMES: [&'static str; 4] =
+        ["drive", "delay_mix", "reverb_mix", "flanger_mix"];
     const DRUM_MACRO_NAMES: [&'static str; 4] =
         ["drum_tone", "drum_noise", "drum_pitch", "drum_decay"];
     const DRUM_MACRO_LABELS: [&'static str; 4] = ["TONE", "SNAP", "PITCH", "DECAY"];
 
     fn apply_fx_slider(&mut self, index: usize, py: i32, outbox: &mut Outbox) {
-        if index >= 3 {
+        if index >= 4 {
             return;
         }
         let track = self.layout.settings_fx_slider(index);
@@ -3396,7 +3541,10 @@ impl NativeModel {
     }
 
     fn is_bus_param(name: &str) -> bool {
-        matches!(name, "drive" | "delay_mix" | "reverb_mix" | "delay_time")
+        matches!(
+            name,
+            "drive" | "delay_mix" | "reverb_mix" | "delay_time" | "flanger_mix" | "flanger_rate"
+        )
     }
 
     fn apply_seq_action(&mut self, action: SeqAction, outbox: &mut Outbox) {
@@ -3659,6 +3807,11 @@ impl NativeModel {
         let tone = self.synth_params[1];
         let delay_mix = self.fx_bus[1];
         let reverb_mix = self.fx_bus[2];
+        let flanger_mix = if self.fx_target == FxEditTarget::Voice {
+            self.fx_voice[3]
+        } else {
+            self.fx_bus[3]
+        };
         let existing = self.wave_names.clone();
         let morph_a = self.morph_a as usize;
         let morph_b = self.morph_b as usize;
@@ -3678,6 +3831,7 @@ impl NativeModel {
             tone,
             delay_mix,
             reverb_mix,
+            flanger_mix,
         ) {
             Ok(baked) => {
                 self.wave_names = waves::list_wave_names(&waves::waves_dirs_from_env());
@@ -3868,8 +4022,185 @@ impl NativeModel {
         };
     }
 
+    fn hit_chords_overlay(&self, px: i32, py: i32) -> Hit {
+        if self.layout.chords_overlay_close().contains(px, py) {
+            return Hit::ChordsOverlayClose;
+        }
+        match self.chords_overlay {
+            Some(ChordsOverlay::Key) => {
+                for pc in 0..12u8 {
+                    if self
+                        .layout
+                        .chords_overlay_cell(pc as usize, 12)
+                        .contains(px, py)
+                    {
+                        return Hit::ChordsKeyPick(pc);
+                    }
+                }
+            }
+            Some(ChordsOverlay::Changes) => {
+                let n = chords::PROGRESSIONS.len();
+                for i in 0..n {
+                    if self.layout.chords_overlay_cell(i, n).contains(px, py) {
+                        return Hit::ChordsChangesPick(i);
+                    }
+                }
+            }
+            None => {}
+        }
+        Hit::ChordsOverlayClose
+    }
+
+    fn chords_press_button(
+        &mut self,
+        gesture: u32,
+        col: usize,
+        row: QualityRow,
+        outbox: &mut Outbox,
+    ) {
+        if let Some(slot) = self.chords_held.iter().position(|(g, _, _)| g.is_none()) {
+            self.chords_held[slot] = (Some(gesture), col, row);
+        }
+        self.chords_sync_from_held(outbox);
+    }
+
+    fn chords_release_button(
+        &mut self,
+        gesture: u32,
+        _col: usize,
+        _row: QualityRow,
+        outbox: &mut Outbox,
+    ) {
+        for slot in &mut self.chords_held {
+            if slot.0 == Some(gesture) {
+                *slot = (None, 0, QualityRow::Maj);
+            }
+        }
+        if self.chords_hold {
+            // Memory: keep last resolved chord sounding until a new one is chosen.
+            return;
+        }
+        self.chords_sync_from_held(outbox);
+        if self.chords_held.iter().all(|(g, _, _)| g.is_none()) {
+            self.chords_block_off(outbox);
+        }
+    }
+
+    fn chords_held_list(&self) -> Vec<(usize, QualityRow)> {
+        self.chords_held
+            .iter()
+            .filter_map(|(g, col, row)| g.map(|_| (*col, *row)))
+            .collect()
+    }
+
+    fn chords_sync_from_held(&mut self, outbox: &mut Outbox) {
+        let held = self.chords_held_list();
+        if let Some(spec) = chords::resolve_held(&held) {
+            self.chords_select(spec, true, outbox);
+        }
+    }
+
+    fn chords_select(&mut self, spec: ChordSpec, play_block: bool, outbox: &mut Outbox) {
+        self.chords_current = Some(spec);
+        self.status_line = spec.name();
+        if play_block {
+            self.chords_block_on(spec, outbox);
+        }
+    }
+
+    fn chords_block_on(&mut self, spec: ChordSpec, outbox: &mut Outbox) {
+        self.chords_block_off(outbox);
+        let notes = spec.block_notes();
+        self.chords_block = notes;
+        for note in notes.into_iter().flatten() {
+            self.chords_note_on(note, 110, outbox);
+        }
+    }
+
+    fn chords_block_off(&mut self, outbox: &mut Outbox) {
+        for note in self.chords_block.into_iter().flatten() {
+            self.chords_note_off(note, outbox);
+        }
+        self.chords_block = [None; 4];
+    }
+
+    fn chords_strum_to(&mut self, y: f32, outbox: &mut Outbox) {
+        let Some(spec) = self.chords_current else {
+            return;
+        };
+        let strings = spec.strum_strings();
+        let note = chords::string_at(y, &strings);
+        if self.chords_strum_note == Some(note) {
+            return;
+        }
+        if let Some(prev) = self.chords_strum_note.take() {
+            self.chords_note_off(prev, outbox);
+        }
+        self.chords_strum_note = Some(note);
+        self.chords_note_on(note, 118, outbox);
+    }
+
+    fn chords_strum_off(&mut self, outbox: &mut Outbox) {
+        if let Some(note) = self.chords_strum_note.take() {
+            self.chords_note_off(note, outbox);
+        }
+    }
+
+    fn chords_palette_tap(&mut self, slot: usize, outbox: &mut Outbox) {
+        if slot >= PALETTE_SLOTS {
+            return;
+        }
+        if self.chords_arm {
+            self.chords_palette[slot] = self.chords_current;
+            self.chords_arm = false;
+            self.status_line = match self.chords_current {
+                Some(c) => format!("palette {} ← {}", slot + 1, c.name()),
+                None => format!("palette {} empty", slot + 1),
+            };
+            return;
+        }
+        if let Some(spec) = self.chords_palette[slot] {
+            self.chords_select(spec, true, outbox);
+        } else if let Some(spec) = self.chords_current {
+            self.chords_palette[slot] = Some(spec);
+            self.status_line = format!("palette {} ← {}", slot + 1, spec.name());
+        }
+    }
+
+    fn load_changes(&mut self, index: usize) {
+        let Some(prog) = chords::PROGRESSIONS.get(index) else {
+            return;
+        };
+        self.chords_palette = chords::progression_in_key(prog, self.chords_key);
+        self.chords_current = self.chords_palette.iter().copied().flatten().next();
+        self.status_line = format!(
+            "{} in {}",
+            prog.name,
+            chords::KEY_NAMES[self.chords_key as usize]
+        );
+        self.mark_dirty();
+    }
+
+    fn chords_note_on(&mut self, note: u8, vel: u8, outbox: &mut Outbox) {
+        if self.chords_out.includes_local() {
+            outbox.note_on(0, note, vel);
+        }
+        if self.chords_out.includes_usb() {
+            outbox.midi_emit("note_on", 0, Some(note), Some(vel), None, None);
+        }
+    }
+
+    fn chords_note_off(&mut self, note: u8, outbox: &mut Outbox) {
+        if self.chords_out.includes_local() {
+            outbox.note_off(0, note);
+        }
+        if self.chords_out.includes_usb() {
+            outbox.midi_emit("note_off", 0, Some(note), Some(0), None, None);
+        }
+    }
+
     fn wipe_kaoss_fx(&mut self, outbox: &mut Outbox) {
-        self.fx_bus = [0.0, 0.0, 0.0];
+        self.fx_bus = [0.0, 0.0, 0.0, 0.0];
         for name in Self::FX_PARAM_NAMES {
             outbox.fx_bus(name, 0.0);
         }
@@ -4433,6 +4764,63 @@ mod tests {
                 note: 72,
                 velocity: 110
             }
+        )));
+    }
+
+    #[test]
+    fn chords_c_major_button_plays_local_triad() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Chords);
+        model.chords_out = OutMode::Local;
+        model.chords_hold = true;
+        let mut out = Outbox::new();
+        let c = crate::chords::col_for_root_pc(0);
+        let cell = model.layout.chords_button(c, 0);
+        model.finger_down(1, cell.x + 4, cell.y + 4, &mut out);
+        let batch = out.take();
+        let notes: Vec<u8> = batch
+            .iter()
+            .filter_map(|r| match r {
+                Request::NoteOn { channel: 0, note, .. } => Some(*note),
+                _ => None,
+            })
+            .collect();
+        assert!(notes.len() >= 3, "expected a triad, got {notes:?}");
+        let pcs: Vec<u8> = notes.iter().map(|n| n % 12).collect();
+        assert!(pcs.contains(&0) && pcs.contains(&4) && pcs.contains(&7));
+        assert_eq!(model.chords_current.unwrap().name(), "C");
+    }
+
+    #[test]
+    fn chords_changes_fill_palette_in_key() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Chords);
+        model.chords_key = 0;
+        let pop = crate::chords::PROGRESSIONS
+            .iter()
+            .position(|p| p.id == "pop")
+            .unwrap();
+        model.load_changes(pop);
+        let names: Vec<String> = model
+            .chords_palette
+            .iter()
+            .flatten()
+            .map(|c| c.name())
+            .collect();
+        assert_eq!(names, ["C", "G", "Am", "F"]);
+    }
+
+    #[test]
+    fn settings_flange_slider_sends_flanger_mix() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Settings);
+        let mut out = Outbox::new();
+        let track = model.layout.settings_fx_slider(3);
+        model.finger_down(1, track.x + 4, track.y + 8, &mut out);
+        let batch = out.take();
+        assert!(batch.iter().any(|r| matches!(
+            r,
+            Request::Fx { param, .. } if param == "flanger_mix"
         )));
     }
 }

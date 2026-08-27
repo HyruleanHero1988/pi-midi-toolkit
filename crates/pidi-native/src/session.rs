@@ -92,6 +92,9 @@ pub struct SessionState {
     pub kaoss_gate: usize,
     pub kaoss_hold: bool,
     pub fx_bus: [f32; 3],
+    /// Flanger wet (4th Settings slider). Split from `fx_bus` so old sessions still parse.
+    #[serde(default)]
+    pub fx_flanger: f32,
     #[serde(default)]
     pub kaoss_show_all: bool,
     #[serde(default)]
@@ -110,6 +113,12 @@ pub struct SessionState {
     pub song_out: OutMode,
     #[serde(default = "default_kaoss_out")]
     pub kaoss_out: OutMode,
+    #[serde(default)]
+    pub chords_out: OutMode,
+    #[serde(default)]
+    pub chords_hold: bool,
+    #[serde(default)]
+    pub chords_key: u8,
     #[serde(default)]
     pub font_style: FontStyle,
     #[serde(default = "default_screensaver_sec")]
@@ -168,6 +177,7 @@ impl Default for SessionState {
             kaoss_gate: 0,
             kaoss_hold: false,
             fx_bus: [0.0, 0.0, 0.0],
+            fx_flanger: 0.0,
             kaoss_show_all: false,
             kaoss_channel: 0,
             vibrato_always: 0.0,
@@ -177,6 +187,9 @@ impl Default for SessionState {
             pads_out: OutMode::Both,
             song_out: OutMode::Both,
             kaoss_out: OutMode::Local,
+            chords_out: OutMode::Both,
+            chords_hold: true,
+            chords_key: 0,
             font_style: FontStyle::Retro,
             screensaver_sec: crate::screensaver::DEFAULT_TIMEOUT_SEC,
             kaoss_viz_style: default_kaoss_viz_style(),
