@@ -24,12 +24,22 @@ on:
       - "deploy/ubuntu-armhf-ports.sh"
       - ".github/workflows/build-pi-bins.yml"
 
+# Bin commits use [skip ci] and do not match the path filters above
+# (dist/armv7 is omitted on purpose) so they cannot loop this workflow.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
+
 jobs:
   build:
     # Ubuntu 22.04 ships glibc 2.35 — older than Pi Bookworm 2.36, so binaries run.
     runs-on: ubuntu-22.04
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: true
 
       - name: Install armhf cross toolchain + SDL/ALSA
         run: |
@@ -61,3 +71,52 @@ jobs:
           name: armv7-bins
           path: dist/armv7/
           if-no-files-found: error
+
+      - name: Commit staged binaries to master
+        if: github.ref == 'refs/heads/master' && github.event_name != 'pull_request'
+        env:
+          BUILT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          git fetch origin master
+          remote="$(git rev-parse origin/master)"
+          if [ "$remote" != "$BUILT_SHA" ]; then
+            echo "master moved past $BUILT_SHA (now $remote); skip commit-back"
+            echo "the newer run will publish bins for the current tree"
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add dist/armv7/midi-engine dist/armv7/jambox-engine dist/armv7/pidi-native
+          if git diff --staged --quiet; then
+            echo "armv7 ELFs match master — nothing to publish"
+            exit 0
+          fi
+          git add dist/armv7/VERSION
+
+          MSG=$(printf '%s\n' \
+            "Rebuild Pi armv7 engines from CI." \
+            "" \
+            "Built from ${BUILT_SHA} so SET→UPDATE can copy" \
+            "dist/armv7/{midi-engine,jambox-engine,pidi-native} onto bin/." \
+            "" \
+            "[skip ci]")
+          git commit -m "$MSG"
+
+          if git push origin HEAD:refs/heads/master; then
+            echo "published dist/armv7 to master"
+            exit 0
+          fi
+
+          echo "push rejected — checking why"
+          git fetch origin master
+          if [ "$(git rev-parse origin/master)" != "$BUILT_SHA" ]; then
+            echo "master moved during the build; skip (newer run publishes)"
+            exit 0
+          fi
+          echo "push failed while master is still $BUILT_SHA" >&2
+          echo "if branch protection blocks github-actions[bot], allow it to push" >&2
+          echo "or grant contents:write / a PAT that can update master" >&2
+          exit 1

@@ -74,7 +74,7 @@ Still needs hardware / machine:
 
 Rust toolchain on PATH for engine work. midi-tone is Python venv on the Pi.
 
-When crates change, compile Pi binaries **before commit** (PC Linux/WSL or cloud-agent VM): `./deploy/build-pi-bins.sh` then `git add dist/armv7`. SET→UPDATE copies those files onto `bin/` on the box. Do not use Git LFS for them (archive downloads would get pointer files). On Windows, use **WSL2 Ubuntu 22.04** for that script (see [NATIVE_SLICE.md](NATIVE_SLICE.md) “Fast host loop”); Ubuntu 24.04 bins need a newer glibc than Pi Bookworm.
+When crates land on `master`, CI cross-builds `dist/armv7` and commits the ELFs; SET→UPDATE copies them onto `bin/` (`midi-engine`, `jambox-engine`, `pidi-native`). Manual rebuild (`./deploy/build-pi-bins.sh` then `git add dist/armv7`) is still fine for LAN SSH. Do not use Git LFS for them (archive downloads would get pointer files). On Windows, use **WSL2 Ubuntu 22.04** for that script (see [NATIVE_SLICE.md](NATIVE_SLICE.md) “Fast host loop”); Ubuntu 24.04 bins need a newer glibc than Pi Bookworm.
 
 ## Not related to play-my-synth
 

@@ -113,8 +113,8 @@ PACKAGES=jambox-engine,pidi-native ./deploy/build-pi-bins.sh
 # copy dist/armv7/* to the Pi and restart units (or deploy-native-slice.sh)
 ```
 
-CI (`.github/workflows/build-pi-bins.yml` on ubuntu-22.04) remains the backup
-when you are not on WSL.
+CI (`.github/workflows/build-pi-bins.yml` on ubuntu-22.04) cross-builds and,
+on `master`, commits `dist/armv7` so SET→UPDATE can install the ELFs.
 
 Cross-build needs `gcc-arm-linux-gnueabihf`, rustc **1.83+**, and the armhf SDL
 + GLES development packages (`libsdl2-dev:armhf`, `libgles2-mesa-dev:armhf`,

@@ -111,13 +111,16 @@ sudo bash deploy/setup-pi.sh
 
 ### From the PC (daily)
 
-Cross-compile is preferred for Pi 2. **Standard procedure:** build the Pi
-ELFs on the PC (or a Cursor cloud-agent VM) *before* committing crate
-changes, so SET→UPDATE can install them:
+Cross-compile is preferred for Pi 2. **SET→UPDATE** installs committed
+`dist/armv7/{midi-engine,jambox-engine,pidi-native}` onto `bin/`. A green
+push to `master` that touches crates runs
+[`.github/workflows/build-pi-bins.yml`](.github/workflows/build-pi-bins.yml),
+which rebuilds those ELFs and commits them back so cloud-agent merges are
+OTA-ready. Manual rebuild is still useful for LAN SSH deploys:
 
 ```bash
-./deploy/build-pi-bins.sh          # stages dist/armv7/{midi-engine,jambox-engine}
-git add dist/armv7 && git commit   # required for SET→UPDATE
+./deploy/build-pi-bins.sh          # stages dist/armv7/{midi-engine,jambox-engine,pidi-native}
+git add dist/armv7 && git commit   # optional when CI commit-back will run
 ```
 
 SSH deploy still works the same way. Easiest linker path is often Debian/WSL
