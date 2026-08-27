@@ -216,18 +216,18 @@ impl DrumKit {
                     // ~50 Hz. Older 50→28 Hz tuning vanished on many speakers;
                     // only the noise click remained.
                     Kick => (
-                        110.0,
-                        48.0,
-                        18.0,
-                        0.022 + 0.055 * (1.0 - m.decay),
-                        0.09 + 0.45 * m.decay,
+                        115.0,
+                        55.0,
+                        22.0,
+                        0.028 + 0.065 * (1.0 - m.decay),
+                        0.12 + 0.55 * m.decay,
                     ),
                     KickTight => (
-                        68.0,
-                        40.0,
-                        20.0,
-                        0.010 + 0.03 * (1.0 - m.decay),
-                        0.035 + 0.18 * m.decay,
+                        85.0,
+                        48.0,
+                        22.0,
+                        0.014 + 0.04 * (1.0 - m.decay),
+                        0.055 + 0.26 * m.decay,
                     ),
                     TomLo => (
                         85.0,
@@ -258,8 +258,8 @@ impl DrumKit {
                 hit.body_tau = body;
                 hit.noise_tau = body;
                 hit.body_amp = match model {
-                    Kick => 0.62,
-                    KickTight => 0.34,
+                    Kick => 0.92,
+                    KickTight => 0.62,
                     TomLo => 0.32,
                     TomMid => 0.30,
                     _ => 0.28,
@@ -381,12 +381,18 @@ impl DrumKit {
                     | DrumModel::TomMid
                     | DrumModel::TomHi => {
                         // Exponential approach: f_end + (f - f_end) * exp(-dt/tau).
-                        // (The old `+= (end-f)*coef` form jumped to end in ~1 sample.)
                         hit.freq = hit.freq_end + (hit.freq - hit.freq_end) * freq_coef;
                         hit.phase += (hit.freq as f64 / sr as f64) * std::f64::consts::TAU;
-                        let body = (hit.phase.sin() as f32) * hit.body_env * hit.body_amp * vel;
-                        let click = hit.click_env * 0.14 * vel * white;
-                        body + click + noise * 0.035 * noise_amt * vel * hit.body_env
+                        let raw = (hit.phase.sin() as f32) * hit.body_env * hit.body_amp * vel;
+                        // Soft saturate so the sine body reads louder on small speakers.
+                        let body = (raw * 1.35).tanh();
+                        let (click_amt, noise_scale) = match hit.model {
+                            DrumModel::Kick => (0.055, 0.010),
+                            DrumModel::KickTight => (0.050, 0.012),
+                            _ => (0.14, 0.035),
+                        };
+                        let click = hit.click_env * click_amt * vel * white;
+                        body + click + noise * noise_scale * noise_amt * vel * hit.body_env
                     }
                     DrumModel::Snare | DrumModel::Rimshot => {
                         hit.phase += (hit.freq as f64 / sr as f64) * std::f64::consts::TAU;
@@ -491,6 +497,32 @@ impl DrumKit {
     }
 }
 
+/// Offline one-shot preview for UI scopes (not used on the audio thread).
+pub fn preview_drum(
+    model: DrumModel,
+    macros: DrumMacros,
+    sample_rate: f32,
+    seconds: f32,
+) -> Vec<f32> {
+    let sr = sample_rate.max(8000.0);
+    let n = ((seconds.clamp(0.05, 2.0) * sr) as usize).max(64);
+    let mut kit = DrumKit::new(sr);
+    kit.set_macros(macros);
+    kit.trigger(model, 120);
+    let mut out = vec![0.0f32; n];
+    let mut pos = 0;
+    while pos < n && kit.active_count() > 0 {
+        let end = (pos + 256).min(n);
+        let slice = &mut out[pos..end];
+        for s in slice.iter_mut() {
+            *s = 0.0;
+        }
+        kit.render_model(model, slice);
+        pos = end;
+    }
+    out
+}
+
 #[inline]
 fn decay_coef(tau_sec: f32, sample_rate: f32) -> f32 {
     let n = (tau_sec.max(0.0005) * sample_rate).max(1.0);
@@ -568,6 +600,25 @@ mod tests {
             let peak = buf.iter().fold(0.0f32, |m, v| m.max(v.abs()));
             assert!(peak > 0.005, "{} was silent (peak {peak})", model.name());
         }
+    }
+
+    #[test]
+    fn kick_body_dominates_click_noise() {
+        let mut kit = DrumKit::new(48_000.0);
+        kit.set_macros(DrumMacros {
+            pitch: 0.5,
+            decay: 0.55,
+            noise: 0.2,
+            tone: 0.55,
+        });
+        kit.trigger(DrumModel::Kick, 127);
+        let mut buf = vec![0.0f32; 2048];
+        kit.render_model(DrumModel::Kick, &mut buf);
+        let peak = buf.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+        assert!(peak > 0.25, "kick body should be strong, peak={peak}");
+        // Later samples (after click dies) should still carry body energy.
+        let late = buf[800..].iter().fold(0.0f32, |m, v| m.max(v.abs()));
+        assert!(late > 0.05, "sustained body after click, late={late}");
     }
 
     #[test]

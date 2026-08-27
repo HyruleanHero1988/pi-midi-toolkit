@@ -29,7 +29,7 @@ pub use clip::{Clip, ClipEvent, ClipEventKind, ClipSlot, LaunchMode, Sequencer, 
 pub use command::{
     Command, EmitMode, FxParam, FxTarget, ScheduledCommand, SynthParam, MAX_BLOCK_COMMANDS,
 };
-pub use drums::{drum_model_for_note, DrumKit, DrumModel, DRUM_MODEL_COUNT};
+pub use drums::{drum_model_for_note, preview_drum, DrumKit, DrumMacros, DrumModel, DRUM_MODEL_COUNT};
 pub use engine::{EngineStatus, JamboxEngine, MidiOutSink, MAX_MIDI_OUT, MAX_RENDER_BLOCK};
 pub use fx::{FxParams, FxUnit};
 pub use kaoss::{

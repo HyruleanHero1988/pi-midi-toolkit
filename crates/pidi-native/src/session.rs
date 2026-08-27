@@ -122,7 +122,7 @@ pub struct SessionState {
     pub chords_hold: bool,
     #[serde(default)]
     pub chords_key: u8,
-    /// Block + strum octave relative to factory C3 / C2 (−2..+2).
+    /// Block + strum octave relative to factory C3 (−2..+2).
     #[serde(default)]
     pub chords_octave: i8,
     #[serde(default)]

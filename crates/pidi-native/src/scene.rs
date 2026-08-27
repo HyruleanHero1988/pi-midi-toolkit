@@ -1353,16 +1353,27 @@ fn draw_chords(scene: &mut Scene, model: &NativeModel) {
         scene.text_centered(cell, tools[i], 0xfbf1c7, 2);
     }
 
-    let current_col = model.chords_current.map(|c| chords::col_for_root_pc(c.root));
     for col in 0..12 {
         let label = layout.chords_root_label(col);
         scene.text_centered(label, ROOT_NAMES[col], 0xa89984, 1);
     }
+    let held = model.chords_held_buttons();
     for row in 0..3 {
         let qrow = QualityRow::from_index(row).unwrap();
         for col in 0..12 {
             let cell = layout.chords_button(col, row);
-            let lit = current_col == Some(col);
+            let lit = if !held.is_empty() {
+                held.iter().any(|&(c, r)| c == col && r == qrow)
+            } else {
+                model
+                    .chords_current
+                    .map(|spec| {
+                        chords::lit_buttons_for_chord(spec)
+                            .iter()
+                            .any(|&(c, r)| c == col && r == qrow)
+                    })
+                    .unwrap_or(false)
+            };
             let color = match (qrow, lit) {
                 (QualityRow::Maj, true) => 0xcc241d,
                 (QualityRow::Maj, false) => 0x9d0006,
@@ -1698,6 +1709,11 @@ fn stroke_scope_seg(scene: &mut Scene, x0: f32, y0: f32, x1: f32, y1: f32, color
 
 fn draw_drums(scene: &mut Scene, model: &NativeModel) {
     let layout = model.layout;
+    if model.kit_edit_open {
+        draw_drums_edit(scene, model);
+        return;
+    }
+
     scene.text(24, HUD_H + 8, "DRUM KIT", 0xfbf1c7);
 
     let sel_cell = phrases::PHRASE_GRID_CELLS[model.kit_selected];
@@ -1724,25 +1740,14 @@ fn draw_drums(scene: &mut Scene, model: &NativeModel) {
         2,
     );
 
-    let scope = layout.kit_scope;
-    scene.fill_rect(scope, 0x1a1a12);
-    for i in 1..4 {
-        let y = scope.y + (scope.h * i) / 4;
-        scene.fill(scope.x as f32, y as f32, scope.w as f32, 1.0, 0x2a2a18);
-    }
-    scene.text(
-        scope.x + 24,
-        scope.y + scope.h / 2 - 4,
-        &format!("{} waveform", model_name),
-        0x504945,
-    );
+    draw_kit_waveform(scene, layout.kit_scope, model);
 
     for screen_index in 0..16 {
         let cell = layout.kit_pad_cell(screen_index);
         let phrase_cell = phrases::PHRASE_GRID_CELLS[screen_index];
         let note = phrases::mpk_note_for_phrase_cell(phrase_cell);
         let voice = drum_model_for_note(note).name().replace('_', " ");
-        let selected = !model.kit_all_drums && screen_index == model.kit_selected;
+        let selected = screen_index == model.kit_selected;
         let bg = if selected { 0xd79921 } else { 0x3c3836 };
         scene.fill_rect(cell, bg);
         scene.text_centered(
@@ -1769,18 +1774,6 @@ fn draw_drums(scene: &mut Scene, model: &NativeModel) {
         );
     }
 
-    const MACROS: [&str; 4] = ["TONE", "SNAP", "PITCH", "DECAY"];
-    for index in 0..4 {
-        let cell = layout.kit_macro_cell(index);
-        scene.fill_rect(cell, 0x3c3836);
-        scene.text_centered(
-            cell,
-            &format!("{} {:.0}", MACROS[index], model.drum_macros[index] * 100.0),
-            0xfbf1c7,
-            2,
-        );
-    }
-
     const DIV_LABELS: [&str; 4] = ["1/4", "1/8", "1/8T", "1/16"];
     for index in 0..4 {
         let cell = layout.kit_division_cell(index);
@@ -1790,9 +1783,105 @@ fn draw_drums(scene: &mut Scene, model: &NativeModel) {
         scene.text_centered(cell, DIV_LABELS[index], 0xffffff, 2);
     }
 
-    let all_bg = if model.kit_all_drums { 0xb16286 } else { 0x504945 };
-    scene.fill_rect(layout.kit_all, all_bg);
-    scene.text_centered(layout.kit_all, "ALL DRUMS", 0xfbf1c7, 2);
+    scene.fill_rect(layout.kit_all, 0x458588);
+    scene.text_centered(layout.kit_all, "EDIT", 0xfbf1c7, 2);
+    scene.text(
+        layout.kit_macros.x + 8,
+        layout.kit_macros.y + 12,
+        "tap waveform or EDIT for sliders · hold pad to repeat",
+        0x665c54,
+    );
+}
+
+fn draw_drums_edit(scene: &mut Scene, model: &NativeModel) {
+    let layout = model.layout;
+    let sel_cell = phrases::PHRASE_GRID_CELLS[model.kit_selected];
+    let sel_note = phrases::mpk_note_for_phrase_cell(sel_cell);
+    let model_name = drum_model_for_note(sel_note).name().replace('_', " ");
+
+    scene.button(layout.kit_edit_back(), 0x9d0006);
+    scene.text_centered(layout.kit_edit_back(), "BACK", 0xfbf1c7, 2);
+    scene.text_scaled(
+        layout.kit_edit_back().x + 120,
+        HUD_H + 16,
+        &format!("{} · {}", phrases::pad_label(sel_cell), model_name),
+        0xfbf1c7,
+        2,
+    );
+
+    draw_kit_waveform(scene, layout.kit_edit_scope(), model);
+    scene.text(
+        layout.kit_edit_scope().x + 12,
+        layout.kit_edit_scope().y + 8,
+        "tap wave to audition",
+        0x665c54,
+    );
+
+    const MACROS: [&str; 4] = ["TONE", "SNAP", "PITCH", "DECAY"];
+    for index in 0..4 {
+        let track = layout.kit_edit_slider(index);
+        scene.fill_rect(track, 0x1d2021);
+        let fill_h = ((model.drum_macros[index].clamp(0.0, 1.0)) * track.h as f32) as i32;
+        let fill = Rect {
+            x: track.x + 4,
+            y: track.y + track.h - fill_h,
+            w: track.w - 8,
+            h: fill_h.max(2),
+        };
+        scene.fill_rect(fill, 0x689d6a);
+        scene.text_centered(
+            Rect {
+                x: track.x,
+                y: track.y + 6,
+                w: track.w,
+                h: 20,
+            },
+            MACROS[index],
+            0xfbf1c7,
+            2,
+        );
+        scene.text_centered(
+            Rect {
+                x: track.x,
+                y: track.y + track.h - 28,
+                w: track.w,
+                h: 20,
+            },
+            &format!("{:.0}", model.drum_macros[index] * 100.0),
+            0xa89984,
+            2,
+        );
+    }
+}
+
+fn draw_kit_waveform(scene: &mut Scene, scope: Rect, model: &NativeModel) {
+    scene.fill_rect(scope, 0x1a1a12);
+    for i in 1..4 {
+        let y = scope.y + (scope.h * i) / 4;
+        scene.fill(scope.x as f32, y as f32, scope.w as f32, 1.0, 0x2a2a18);
+    }
+    let samples = model.kit_wave_samples();
+    if samples.is_empty() {
+        scene.text(
+            scope.x + 24,
+            scope.y + scope.h / 2 - 4,
+            "waveform",
+            0x504945,
+        );
+        return;
+    }
+    let mid = scope.y as f32 + scope.h as f32 * 0.5;
+    let amp = scope.h as f32 * 0.42;
+    let n = samples.len().max(2);
+    let mut prev_x = scope.x as f32;
+    let mut prev_y = mid - samples[0].clamp(-1.0, 1.0) * amp;
+    for i in 1..n {
+        let x = scope.x as f32 + (i as f32 / (n - 1) as f32) * scope.w as f32;
+        let y = mid - samples[i].clamp(-1.0, 1.0) * amp;
+        stroke_scope_seg(scene, prev_x, prev_y, x, y, 0xb8bb26);
+        prev_x = x;
+        prev_y = y;
+    }
 }
 
 fn draw_seq(scene: &mut Scene, model: &NativeModel) {

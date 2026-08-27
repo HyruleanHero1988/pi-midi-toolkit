@@ -4,7 +4,7 @@
 //! - 12 roots in **circle-of-fifths** order (F C G D A E B F# Db Ab Eb Bb)
 //! - three rows: MAJOR / minor / 7th
 //! - same-root and neighbour combos for M7, m7, dim, aug, sus4, add9
-//! - a vertical **strumplate** of four octaves of the selected chord
+//! - a vertical **strumplate** of about two octaves of the selected chord
 //!
 //! The 8-slot **palette** is a harmonic palette: tap to play a stored chord as a
 //! block, or load a named set of **changes** (common progressions) in the
@@ -29,23 +29,24 @@ pub const KEY_NAMES: [&str; 12] = [
 
 pub const QUALITY_ROWS: usize = 3;
 pub const PALETTE_SLOTS: usize = 8;
-pub const STRUM_STRINGS: usize = 16;
-/// Lowest strum string ≈ C2 (MIDI 36) for a C chord; others wrap around.
-pub const STRUM_BASE: u8 = 36;
+/// Harp strings on the strum plate (matches the drawn lines).
+pub const STRUM_STRINGS: usize = 8;
+/// Lowest strum string ≈ C3 (MIDI 48) for a C chord — midrange, not sub-bass.
+pub const STRUM_BASE: u8 = 48;
 /// Close-position block voicing around C3 (MIDI 48).
 pub const BLOCK_BASE: u8 = 48;
-/// Octave shift range for block chords + strumplate (0 = factory C3 / C2).
+/// Octave shift range for block chords + strumplate (0 = factory C3).
 pub const OCTAVE_MIN: i8 = -2;
 pub const OCTAVE_MAX: i8 = 2;
 
 pub fn block_base_for_octave(octave: i8) -> u8 {
     let o = octave.clamp(OCTAVE_MIN, OCTAVE_MAX) as i16;
-    (i16::from(BLOCK_BASE) + o * 12).clamp(24, 96) as u8
+    (i16::from(BLOCK_BASE) + o * 12).clamp(24, 84) as u8
 }
 
 pub fn strum_base_for_octave(octave: i8) -> u8 {
     let o = octave.clamp(OCTAVE_MIN, OCTAVE_MAX) as i16;
-    (i16::from(STRUM_BASE) + o * 12).clamp(12, 84) as u8
+    (i16::from(STRUM_BASE) + o * 12).clamp(24, 84) as u8
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -142,7 +143,7 @@ impl ChordSpec {
         voicing_midi(self, base)
     }
 
-    /// 16 harp strings spanning four octaves, low → high.
+    /// 8 harp strings spanning about two octaves, low → high.
     pub fn strum_strings(self) -> [u8; STRUM_STRINGS] {
         self.strum_strings_at(STRUM_BASE)
     }
@@ -167,6 +168,28 @@ pub fn col_for_root_pc(pc: u8) -> usize {
         .iter()
         .position(|&r| r == pc % 12)
         .unwrap_or(1)
+}
+
+/// Which quality-row buttons should light for a resolved chord on its root column
+/// (and neighbour columns for sus4 / add9).
+pub fn lit_buttons_for_chord(spec: ChordSpec) -> Vec<(usize, QualityRow)> {
+    let col = col_for_root_pc(spec.root);
+    let neighbour = col_for_root_pc(fourth_above(spec.root));
+    match spec.quality {
+        ChordQuality::Maj => vec![(col, QualityRow::Maj)],
+        ChordQuality::Min => vec![(col, QualityRow::Min)],
+        ChordQuality::Dom7 => vec![(col, QualityRow::Seven)],
+        ChordQuality::Maj7 => vec![(col, QualityRow::Maj), (col, QualityRow::Seven)],
+        ChordQuality::Min7 => vec![(col, QualityRow::Min), (col, QualityRow::Seven)],
+        ChordQuality::Dim => vec![(col, QualityRow::Maj), (col, QualityRow::Min)],
+        ChordQuality::Aug => vec![
+            (col, QualityRow::Maj),
+            (col, QualityRow::Min),
+            (col, QualityRow::Seven),
+        ],
+        ChordQuality::Sus4 => vec![(col, QualityRow::Maj), (neighbour, QualityRow::Seven)],
+        ChordQuality::Add9 => vec![(col, QualityRow::Maj), (neighbour, QualityRow::Min)],
+    }
 }
 
 /// Fourth above `pc` — the column to the left on the Omnichord fifths row.
@@ -541,6 +564,13 @@ mod tests {
         for n in strings {
             assert!(allowed.contains(&(n % 12)), "out of chord: {n}");
         }
+        let span = strings[STRUM_STRINGS - 1] as i16 - strings[0] as i16;
+        assert!(
+            span <= 30,
+            "strum should stay ~2 octaves, got {span} semis ({:?})",
+            strings
+        );
+        assert_eq!(strings[0], 48, "default C major starts at C3");
     }
 
     #[test]

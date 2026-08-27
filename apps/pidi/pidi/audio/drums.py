@@ -150,18 +150,18 @@ def synthesize_drum(
     # Pitch-envelope body (kick / toms / tight kick)
     if model in ("kick", "kick_tight", "tom_lo", "tom_mid", "tom_hi"):
         if model == "kick":
-            # Match Rust: audible thump (~100 Hz) falling toward ~50 Hz.
-            f0 = 110.0 * (2.0 ** ((pitch - 0.5) * 1.8))
-            f_end = 48.0 + 18.0 * pitch
-            drop_tau = 0.022 + 0.055 * (1.0 - decay)
-            body_tau = 0.09 + 0.45 * decay
-            amp = 0.62
+            # Audible thump on small speakers; body-forward, low click/noise.
+            f0 = 115.0 * (2.0 ** ((pitch - 0.5) * 1.8))
+            f_end = 55.0 + 22.0 * pitch
+            drop_tau = 0.028 + 0.065 * (1.0 - decay)
+            body_tau = 0.12 + 0.55 * decay
+            amp = 0.92
         elif model == "kick_tight":
-            f0 = 68.0 * (2.0 ** ((pitch - 0.5) * 1.6))
-            f_end = 40.0 + 20.0 * pitch
-            drop_tau = 0.010 + 0.03 * (1.0 - decay)
-            body_tau = 0.035 + 0.18 * decay
-            amp = 0.34
+            f0 = 85.0 * (2.0 ** ((pitch - 0.5) * 1.6))
+            f_end = 48.0 + 22.0 * pitch
+            drop_tau = 0.014 + 0.04 * (1.0 - decay)
+            body_tau = 0.055 + 0.26 * decay
+            amp = 0.62
         elif model == "tom_lo":
             f0 = 85.0 * (2.0 ** ((pitch - 0.5) * 1.8))
             f_end = 55.0 + 25.0 * pitch
@@ -185,10 +185,14 @@ def synthesize_drum(
         phases = phase + np.cumsum(phase_inc)
         new_phase = float(phases[-1] % two_pi)
         env = np.exp(-t / np.float32(body_tau))
-        click_amp = 0.14 if model == "kick" else 0.18
-        noise_amp = 0.035 if model == "kick" else 0.05
+        if model == "kick":
+            click_amp, noise_amp = 0.055, 0.010
+        elif model == "kick_tight":
+            click_amp, noise_amp = 0.050, 0.012
+        else:
+            click_amp, noise_amp = 0.14, 0.035
         click = np.exp(-t / np.float32(0.0035)) * np.float32(click_amp * vel)
-        body = np.sin(phases) * env * np.float32(amp * vel)
+        body = np.tanh(np.sin(phases) * env * np.float32(amp * vel) * 1.35)
         sig = body + click * white + noise * np.float32(noise_amp * noise_amt * vel) * env
         return sig.astype(np.float32, copy=False), body_tau * 4.5, new_phase
 

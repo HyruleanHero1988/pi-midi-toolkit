@@ -19,7 +19,10 @@ use crate::scroll::{self, ScrollKind, TOUCH_SCROLL_THRESH_PX};
 use crate::screensaver;
 use crate::voice_bake;
 use crate::waves;
-use jambox_core::{kaoss_scale, note_at_x, scale_notes, velocity_at_y};
+use jambox_core::{
+    drum_model_for_note, kaoss_scale, note_at_x, preview_drum, scale_notes, velocity_at_y,
+    DrumMacros,
+};
 use jambox_protocol::{MidiNotice, RepeatDivision, RepeatPhase, StatusReply, TouchPhase, WireClipEvent};
 use std::path::PathBuf;
 use std::time::Instant;
@@ -159,11 +162,17 @@ pub struct NativeModel {
     pub synth_octave: i8,
     pub kaoss_picker_scroll: i32,
     pub log_scroll: usize,
-    /// Kit macros: tone, noise/snap, pitch, decay.
+    /// Kit macros mirror of the selected pad (TONE / SNAP / PITCH / DECAY).
     pub drum_macros: [f32; 4],
+    /// Per-pad body macros. Engine macros are kit-global, so we push the pad's
+    /// values before each hit / repeat start.
+    pub drum_pad_macros: [[f32; 4]; 16],
     /// Selected kit pad (screen index 0..15 into `PHRASE_GRID_CELLS`).
     pub kit_selected: usize,
-    pub kit_all_drums: bool,
+    pub kit_edit_open: bool,
+    /// Cached offline preview for the selected drum scope.
+    kit_wave: Vec<f32>,
+    kit_wave_dirty: bool,
     pub kaoss_scale_index: u8,
     pub kaoss_key: u8,
     /// Left-edge MIDI of the pad window (C1..C5 typically).
@@ -212,7 +221,7 @@ pub struct NativeModel {
     pub chords_out: OutMode,
     pub chords_hold: bool,
     pub chords_key: u8,
-    /// Block chords + strumplate octave (−2..+2; 0 = C3 / C2 factory).
+    /// Block chords + strumplate octave (−2..+2; 0 = C3 factory).
     pub chords_octave: i8,
     pub chords_arm: bool,
     pub chords_current: Option<ChordSpec>,
@@ -321,9 +330,12 @@ impl NativeModel {
             synth_octave: 0,
             kaoss_picker_scroll: 0,
             log_scroll: 0,
-            drum_macros: [0.60, 0.45, 0.50, 0.55],
+            drum_macros: [0.60, 0.22, 0.50, 0.55],
+            drum_pad_macros: [[0.60, 0.22, 0.50, 0.55]; 16],
             kit_selected: 4,
-            kit_all_drums: false,
+            kit_edit_open: false,
+            kit_wave: Vec::new(),
+            kit_wave_dirty: true,
             kaoss_scale_index: jambox_core::DEFAULT_KAOSS_SCALE_INDEX,
             kaoss_key: 0,
             kaoss_root_midi: jambox_core::DEFAULT_ROOT_MIDI,
@@ -535,6 +547,11 @@ impl NativeModel {
         self.synth_pick_scroll = 0;
         self.chords_overlay = None;
         self.chords_arm = false;
+        self.kit_edit_open = false;
+        if mode == UiMode::Drums {
+            self.kit_wave_dirty = true;
+            self.sync_selected_drum_macros();
+        }
         if mode != UiMode::Kaoss && self.kaoss_full {
             self.kaoss_full = false;
             self.kaoss_full_exit_since = None;
@@ -845,6 +862,9 @@ impl NativeModel {
                 self.paint_cells();
             }
             self.tick_kaoss_full_exit();
+        }
+        if self.mode == UiMode::Drums {
+            self.ensure_kit_wave();
         }
         self.tick_kaoss_gate(outbox);
         self.tick_screensaver(dt);
@@ -1613,6 +1633,16 @@ impl NativeModel {
             }
         } else if self.mode == UiMode::Chords && self.chords_overlay.is_some() {
             self.hit_chords_overlay(px, py)
+        } else if self.mode == UiMode::Drums && self.kit_edit_open {
+            let base = self.layout.hit(self.mode, px, py);
+            if matches!(
+                base,
+                Hit::Nav(_) | Hit::NavBack | Hit::Power | Hit::HomeTile(_) | Hit::SeqRec
+            ) {
+                base
+            } else {
+                self.layout.hit_drums_edit(px, py)
+            }
         } else {
             self.layout.hit(self.mode, px, py)
         };
@@ -1716,11 +1746,13 @@ impl NativeModel {
                 self.begin_kaoss_touch(gesture, x, y, outbox);
             }
             Hit::Drum { index, note } => {
-                let repeat = note == KICK_NOTE && self.mode == UiMode::Drums;
+                let repeat = self.mode == UiMode::Drums;
                 if self.mode == UiMode::Drums {
                     self.kit_selected = index;
-                    self.kit_all_drums = false;
+                    self.sync_selected_drum_macros();
+                    self.kit_wave_dirty = true;
                 }
+                self.push_pad_drum_macros(index, outbox);
                 self.fingers[slot] = Finger {
                     active: true,
                     id,
@@ -1945,15 +1977,46 @@ impl NativeModel {
                 self.tap_ui(slot, id, gesture, px, py);
                 self.nudge_vibrato_rate(-0.5, outbox);
             }
-            Hit::DrumMacro(index) => {
-                self.tap_ui(slot, id, gesture, px, py);
-                self.nudge_drum_macro(index, outbox);
+            Hit::DrumMacroSlider(index) => {
+                self.fingers[slot] = Finger {
+                    active: true,
+                    id,
+                    gesture,
+                    x: 0.0,
+                    y: 0.0,
+                    px,
+                    py,
+                    surface: Surface::DrumMacroSlider { index },
+                    gate_on: false,
+                };
+                self.apply_drum_macro_slider(index, py, outbox);
             }
-            Hit::KitAllDrums => {
+            Hit::KitEdit => {
                 self.tap_ui(slot, id, gesture, px, py);
-                self.kit_all_drums = true;
-                self.fx_target = FxEditTarget::DrumGroup;
-                self.status_line = "ALL DRUMS FX (shared kit bus)".into();
+                if self.kit_edit_open {
+                    // Audition selected drum from the edit waveform.
+                    let note = self.selected_drum_note();
+                    self.push_pad_drum_macros(self.kit_selected, outbox);
+                    outbox.note_on(DRUM_CHANNEL, note, 110);
+                    outbox.note_off(DRUM_CHANNEL, note);
+                } else {
+                    self.kit_edit_open = true;
+                    self.sync_selected_drum_macros();
+                    self.push_pad_drum_macros(self.kit_selected, outbox);
+                    self.kit_wave_dirty = true;
+                    self.status_line = format!(
+                        "EDIT {}",
+                        drum_model_for_note(self.selected_drum_note())
+                            .name()
+                            .replace('_', " ")
+                    );
+                }
+                self.mark_dirty();
+            }
+            Hit::KitEditBack => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.kit_edit_open = false;
+                self.status_line = "kit".into();
                 self.mark_dirty();
             }
             Hit::ScrollArea(kind) => {
@@ -2870,6 +2933,9 @@ impl NativeModel {
             Surface::SynthSlider { index } => {
                 self.apply_synth_slider(index, px, py, outbox);
             }
+            Surface::DrumMacroSlider { index } => {
+                self.apply_drum_macro_slider(index, py, outbox);
+            }
             Surface::FxSlider { index } => {
                 self.apply_fx_slider(index, py, outbox);
             }
@@ -2987,6 +3053,7 @@ impl NativeModel {
             }
             Surface::Phrase { .. }
             | Surface::SynthSlider { .. }
+            | Surface::DrumMacroSlider { .. }
             | Surface::FxSlider { .. }
             | Surface::UiTap => {}
         }
@@ -3325,6 +3392,62 @@ impl NativeModel {
         ["drum_tone", "drum_noise", "drum_pitch", "drum_decay"];
     const DRUM_MACRO_LABELS: [&'static str; 4] = ["TONE", "SNAP", "PITCH", "DECAY"];
 
+    fn selected_drum_note(&self) -> u8 {
+        let cell = phrases::PHRASE_GRID_CELLS[self.kit_selected.min(15)];
+        phrases::mpk_note_for_phrase_cell(cell)
+    }
+
+    fn sync_selected_drum_macros(&mut self) {
+        let pad = self.kit_selected.min(15);
+        self.drum_macros = self.drum_pad_macros[pad];
+    }
+
+    fn push_pad_drum_macros(&mut self, pad: usize, outbox: &mut Outbox) {
+        let pad = pad.min(15);
+        let m = self.drum_pad_macros[pad];
+        self.drum_macros = m;
+        for i in 0..4 {
+            outbox.synth(Self::DRUM_MACRO_NAMES[i], m[i]);
+        }
+    }
+
+    fn apply_drum_macro_slider(&mut self, index: usize, py: i32, outbox: &mut Outbox) {
+        if index >= 4 {
+            return;
+        }
+        let track = self.layout.kit_edit_slider(index);
+        let y = 1.0 - ((py - track.y) as f32 / track.h.max(1) as f32);
+        let value = y.clamp(0.0, 1.0);
+        let pad = self.kit_selected.min(15);
+        self.drum_pad_macros[pad][index] = value;
+        self.drum_macros[index] = value;
+        outbox.synth(Self::DRUM_MACRO_NAMES[index], value);
+        self.kit_wave_dirty = true;
+        self.status_line = format!("{} {:.2}", Self::DRUM_MACRO_LABELS[index], value);
+        self.mark_dirty();
+    }
+
+    pub fn ensure_kit_wave(&mut self) {
+        if !self.kit_wave_dirty && !self.kit_wave.is_empty() {
+            return;
+        }
+        let note = self.selected_drum_note();
+        let model = drum_model_for_note(note);
+        let m = self.drum_pad_macros[self.kit_selected.min(15)];
+        let macros = DrumMacros {
+            tone: m[0],
+            noise: m[1],
+            pitch: m[2],
+            decay: m[3],
+        };
+        self.kit_wave = preview_drum(model, macros, 44_100.0, 0.40);
+        self.kit_wave_dirty = false;
+    }
+
+    pub fn kit_wave_samples(&self) -> &[f32] {
+        &self.kit_wave
+    }
+
     fn apply_synth_slider(&mut self, index: usize, _px: i32, py: i32, outbox: &mut Outbox) {
         let track = self.layout.synth_slider(index);
         let y = 1.0 - ((py - track.y) as f32 / track.h.max(1) as f32);
@@ -3398,21 +3521,6 @@ impl NativeModel {
             FxEditTarget::DrumGroup => "FX target: DRUM GROUP".into(),
         };
         self.mark_dirty();
-    }
-
-    fn nudge_drum_macro(&mut self, index: usize, outbox: &mut Outbox) {
-        if index >= 4 {
-            return;
-        }
-        let next = (self.drum_macros[index] + 0.15) % 1.05;
-        let value = if next > 1.0 { 0.0 } else { next };
-        self.drum_macros[index] = value;
-        outbox.synth(Self::DRUM_MACRO_NAMES[index], value);
-        self.status_line = format!(
-            "{} {:.2}",
-            Self::DRUM_MACRO_LABELS[index],
-            value
-        );
     }
 
     fn nudge_vibrato_depth(&mut self, delta_semis: f32, outbox: &mut Outbox) {
@@ -4814,6 +4922,11 @@ impl NativeModel {
             .collect()
     }
 
+    /// Buttons currently held (for chord-grid highlight). Empty → use resolved chord.
+    pub fn chords_held_buttons(&self) -> Vec<(usize, QualityRow)> {
+        self.chords_held_list()
+    }
+
     fn chords_sync_from_held(&mut self, outbox: &mut Outbox) {
         let held = self.chords_held_list();
         if let Some(spec) = chords::resolve_held(&held) {
@@ -5514,12 +5627,29 @@ mod tests {
         )));
         assert!(batch.iter().any(|r| matches!(
             r,
-            Request::NoteOn {
+            Request::Repeat {
                 note: 37,
-                channel: 9,
+                phase: RepeatPhase::Down,
                 ..
             }
         )));
+    }
+
+    #[test]
+    fn drum_edit_slider_emits_pad_macro() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Drums);
+        model.kit_edit_open = true;
+        model.kit_selected = 4;
+        let mut out = Outbox::new();
+        let track = model.layout.kit_edit_slider(0);
+        model.finger_down(1, track.x + 4, track.y + track.h / 4, &mut out);
+        let batch = out.take();
+        assert!(batch.iter().any(|r| matches!(
+            r,
+            Request::Synth { param, .. } if param == "drum_tone"
+        )));
+        assert!(model.drum_pad_macros[4][0] > 0.5);
     }
 
     #[test]
@@ -5622,10 +5752,11 @@ mod tests {
     fn drum_macro_emits_kit_param() {
         let mut model = NativeModel::new();
         model.set_mode(UiMode::Drums);
+        model.kit_edit_open = true;
         model.ensure_library_loaded();
         let mut out = Outbox::new();
-        let cell = model.layout.kit_macro_cell(0);
-        model.finger_down(1, cell.x + 4, cell.y + 4, &mut out);
+        let cell = model.layout.kit_edit_slider(0);
+        model.finger_down(1, cell.x + 4, cell.y + cell.h / 3, &mut out);
         let batch = out.take();
         assert!(batch.iter().any(|r| matches!(
             r,

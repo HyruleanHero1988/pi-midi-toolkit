@@ -75,8 +75,9 @@ pub enum Hit {
     SynthOctUp,
     SynthOctDown,
     ScrollArea(crate::scroll::ScrollKind),
-    DrumMacro(usize),
-    KitAllDrums,
+    DrumMacroSlider(usize),
+    KitEdit,
+    KitEditBack,
     MapThruOn,
     MapThruOff,
     MapRefresh,
@@ -1704,6 +1705,43 @@ impl Layout {
         self.synth_macro_cell(index)
     }
 
+    /// Vertical macro slider in the kit EDIT drilldown.
+    pub fn kit_edit_slider(&self, index: usize) -> Rect {
+        let n = 4i32;
+        let i = (index as i32).clamp(0, n - 1);
+        let area = Rect {
+            x: 24,
+            y: HUD_H + 250,
+            w: 752,
+            h: 170,
+        };
+        let w = area.w / n;
+        Rect {
+            x: area.x + i * w + 10,
+            y: area.y,
+            w: w - 20,
+            h: area.h,
+        }
+    }
+
+    pub fn kit_edit_scope(&self) -> Rect {
+        Rect {
+            x: 24,
+            y: HUD_H + 56,
+            w: 752,
+            h: 180,
+        }
+    }
+
+    pub fn kit_edit_back(&self) -> Rect {
+        Rect {
+            x: 24,
+            y: HUD_H + 8,
+            w: 100,
+            h: 40,
+        }
+    }
+
     pub fn kit_division_cell(&self, index: usize) -> Rect {
         self.division_cell(index)
     }
@@ -2104,6 +2142,7 @@ impl Layout {
     }
 
     fn hit_drums(&self, px: i32, py: i32) -> Hit {
+        // Edit drilldown uses a different hit map (callers pass via layout.hit with mode).
         for index in 0..16 {
             if self.kit_pad_cell(index).contains(px, py) {
                 let cell = crate::phrases::PHRASE_GRID_CELLS[index];
@@ -2111,10 +2150,8 @@ impl Layout {
                 return Hit::Drum { index, note };
             }
         }
-        for index in 0..4 {
-            if self.kit_macro_cell(index).contains(px, py) {
-                return Hit::DrumMacro(index);
-            }
+        if self.kit_scope.contains(px, py) {
+            return Hit::KitEdit;
         }
         if self.kit_divisions.contains(px, py) {
             for index in 0..4 {
@@ -2124,7 +2161,23 @@ impl Layout {
             }
         }
         if self.kit_all.contains(px, py) {
-            return Hit::KitAllDrums;
+            return Hit::KitEdit;
+        }
+        Hit::None
+    }
+
+    pub fn hit_drums_edit(&self, px: i32, py: i32) -> Hit {
+        if self.kit_edit_back().contains(px, py) {
+            return Hit::KitEditBack;
+        }
+        for index in 0..4 {
+            if self.kit_edit_slider(index).contains(px, py) {
+                return Hit::DrumMacroSlider(index);
+            }
+        }
+        // Tap waveform to audition selected drum.
+        if self.kit_edit_scope().contains(px, py) {
+            return Hit::KitEdit;
         }
         Hit::None
     }
@@ -2545,6 +2598,7 @@ pub enum Surface {
     Phrase { slot: usize },
     SynthKey { note: u8 },
     SynthSlider { index: usize },
+    DrumMacroSlider { index: usize },
     FxSlider { index: usize },
     ChordsButton { col: usize, row: usize },
     ChordsStrum,
