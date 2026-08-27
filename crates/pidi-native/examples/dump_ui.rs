@@ -1,4 +1,6 @@
-//! Dump one PPM per mode for host UI review:
+//! Dump one PPM per mode for host UI review.
+//! Official docs captures: `./scripts/capture-pidi-docs.sh` (example dump_docs).
+//!
 //! `cargo run -p pidi-native --example dump_ui --no-default-features`
 
 use std::path::PathBuf;

@@ -1,4 +1,8 @@
-# midi-tone kiosk — new Pi bring-up guide
+# midi-tone kiosk — Tk / LightDM bring-up (archived)
+
+The live appliance is **`pidi-native`** over KMSDRM (no LightDM). See
+[NATIVE_KIOSK.md](../../NATIVE_KIOSK.md). This page is the old X11 / Openbox
+session used by the Python Tk kiosk.
 
 Goal: a Raspberry Pi that **powers on into fullscreen midi-tone** (no desktop
 wallpaper, panel, or file manager). Keyboard/mouse are fine; resistive touch is
