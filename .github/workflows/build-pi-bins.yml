@@ -2,8 +2,19 @@ name: Build Pi armv7 bins
 
 on:
   workflow_dispatch:
+  pull_request:
+    branches:
+      - master
+    paths:
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "deploy/build-pi-bins.sh"
+      - "deploy/ubuntu-armhf-ports.sh"
+      - ".github/workflows/build-pi-bins.yml"
   push:
     branches:
+      - master
       - cursor/native-jambox-vertical-slice-010c
     paths:
       - "crates/**"
