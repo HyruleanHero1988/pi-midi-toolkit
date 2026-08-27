@@ -212,12 +212,15 @@ impl DrumKit {
         match model {
             Kick | KickTight | TomLo | TomMid | TomHi => {
                 let (base, end_lo, end_span, drop, body) = match model {
+                    // Start in the audible thump band (~100 Hz) and fall toward
+                    // ~50 Hz. Older 50→28 Hz tuning vanished on many speakers;
+                    // only the noise click remained.
                     Kick => (
-                        50.0,
-                        28.0,
-                        16.0,
-                        0.016 + 0.05 * (1.0 - m.decay),
-                        0.07 + 0.40 * m.decay,
+                        110.0,
+                        48.0,
+                        18.0,
+                        0.022 + 0.055 * (1.0 - m.decay),
+                        0.09 + 0.45 * m.decay,
                     ),
                     KickTight => (
                         68.0,
@@ -255,7 +258,7 @@ impl DrumKit {
                 hit.body_tau = body;
                 hit.noise_tau = body;
                 hit.body_amp = match model {
-                    Kick => 0.38,
+                    Kick => 0.62,
                     KickTight => 0.34,
                     TomLo => 0.32,
                     TomMid => 0.30,
@@ -377,11 +380,13 @@ impl DrumKit {
                     | DrumModel::TomLo
                     | DrumModel::TomMid
                     | DrumModel::TomHi => {
-                        hit.freq += (hit.freq_end - hit.freq) * freq_coef;
+                        // Exponential approach: f_end + (f - f_end) * exp(-dt/tau).
+                        // (The old `+= (end-f)*coef` form jumped to end in ~1 sample.)
+                        hit.freq = hit.freq_end + (hit.freq - hit.freq_end) * freq_coef;
                         hit.phase += (hit.freq as f64 / sr as f64) * std::f64::consts::TAU;
                         let body = (hit.phase.sin() as f32) * hit.body_env * hit.body_amp * vel;
-                        let click = hit.click_env * 0.18 * vel * white;
-                        body + click + noise * 0.05 * noise_amt * vel * hit.body_env
+                        let click = hit.click_env * 0.14 * vel * white;
+                        body + click + noise * 0.035 * noise_amt * vel * hit.body_env
                     }
                     DrumModel::Snare | DrumModel::Rimshot => {
                         hit.phase += (hit.freq as f64 / sr as f64) * std::f64::consts::TAU;
@@ -563,5 +568,31 @@ mod tests {
             let peak = buf.iter().fold(0.0f32, |m, v| m.max(v.abs()));
             assert!(peak > 0.005, "{} was silent (peak {peak})", model.name());
         }
+    }
+
+    #[test]
+    fn kick_pitch_sweep_starts_above_end_and_falls() {
+        let mut kit = DrumKit::new(48_000.0);
+        kit.trigger(DrumModel::Kick, 127);
+        let start = kit.hits.iter().find(|h| h.active).unwrap().freq;
+        let end = kit.hits.iter().find(|h| h.active).unwrap().freq_end;
+        assert!(
+            start > end + 20.0,
+            "kick should start well above its floor (start={start}, end={end})"
+        );
+        assert!(
+            start > 80.0,
+            "kick start should sit in the audible thump band, got {start}"
+        );
+
+        // ~5 ms — should still be closer to start than to end.
+        let mut buf = vec![0.0f32; 256];
+        kit.render_model(DrumModel::Kick, &mut buf);
+        let mid = kit.hits.iter().find(|h| h.active).unwrap().freq;
+        assert!(
+            mid > end + 10.0,
+            "pitch sweep jumped to the floor too fast (mid={mid}, end={end})"
+        );
+        assert!(mid < start, "pitch should fall over time (mid={mid}, start={start})");
     }
 }
