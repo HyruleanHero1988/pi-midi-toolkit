@@ -1,5 +1,8 @@
 # PiDI (kiosk UI)
 
+> **Archived on this branch.** This is the frozen Python / Tk PiDI kiosk
+> (v0.2.0). Do not land new kiosk features here — see [`ARCHIVE.md`](../../ARCHIVE.md).
+
 Raspberry Pi TFT kiosk for the MIDI box — soft-synth, drums, sequencer, phrase
 pads, Kaoss XY, songs, and presets. Talks to **`jambox-engine`** over a socket
 when available; falls back to an in-process PortAudio engine.
