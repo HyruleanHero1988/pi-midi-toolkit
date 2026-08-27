@@ -180,6 +180,10 @@ impl Outbox {
         self.reliable.push_back(Request::AllNotesOff);
     }
 
+    pub fn audio_reopen(&mut self) {
+        self.reliable.push_back(Request::AudioReopen);
+    }
+
     pub fn fx_bus(&mut self, param: &str, value: f32) {
         self.reliable.push_back(Request::Fx {
             target: jambox_protocol::FxTargetSpec::Bus,

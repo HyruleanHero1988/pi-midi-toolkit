@@ -14,6 +14,7 @@ pub const NATIVE_FEATURES: &[&str] = &[
     "disconnect_release",
     "sample_clock_repeat",
     "runtime_diagnostics",
+    "audio_reopen",
 ];
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -182,6 +183,9 @@ pub enum Request {
         target: String, // "clips" | "kaoss"
         mode: String,   // "local" | "usb" | "both"
     },
+    /// Drop and reopen the ALSA/cpal output stream without resetting engine state.
+    /// Used after a headphone jack swap leaves the PCM open but silent.
+    AudioReopen,
 }
 
 const fn default_velocity() -> u8 {

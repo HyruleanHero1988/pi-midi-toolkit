@@ -178,10 +178,12 @@ fn run(
     // RT hints before the stream so the callback thread inherits the policy.
     rt::apply_rt_hints(rt);
 
-    // Keep the stream alive for the life of `run`.
-    let _stream = if null_audio {
+    let audio_health = Arc::new(audio::AudioHealth::new());
+
+    // Supervised audio (or headless) runs for the life of `run`.
+    let _audio_thread = if null_audio {
         let running = running.clone();
-        std::thread::spawn(move || {
+        Some(std::thread::spawn(move || {
             headless::run(
                 48_000,
                 buffer_frames.max(64) as usize,
@@ -189,31 +191,21 @@ fn run(
                 bank,
                 running,
             );
-        });
-        None
+        }))
     } else {
-        let device = match audio::pick_output(&output) {
-            Ok(d) => d,
-            Err(err) => {
-                error!(%err, "audio: no usable output (try --null-audio for host testing)");
-                return;
-            }
-        };
-        match audio::start(&device, audio_side, bank, buffer_frames) {
-            Ok(stream) => {
-                info!(
-                    sample_rate = stream.sample_rate,
-                    channels = stream.channels,
-                    buffer = %stream.buffer_label,
-                    "audio: running"
-                );
-                Some(stream)
-            }
-            Err(err) => {
-                error!(%err, "audio: stream failed (try --null-audio for host testing)");
-                return;
-            }
+        // Probe once so a missing card fails fast for the operator.
+        if let Err(err) = audio::pick_output(&output) {
+            error!(%err, "audio: no usable output (try --null-audio for host testing)");
+            return;
         }
+        Some(audio::spawn_supervised(
+            output,
+            buffer_frames,
+            audio_side,
+            bank,
+            Arc::clone(&audio_health),
+            Arc::clone(&running),
+        ))
     };
 
     midi::spawn_input(
@@ -239,6 +231,7 @@ fn run(
     };
 
     let ipc_running = running.clone();
+    let ipc_health = Arc::clone(&audio_health);
     let ipc_thread = std::thread::spawn(move || {
         ipc::serve(
             endpoint,
@@ -246,6 +239,7 @@ fn run(
             hub,
             midi_map,
             midi_in_bus,
+            ipc_health,
             ipc_running,
         );
     });

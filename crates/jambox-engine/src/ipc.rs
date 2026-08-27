@@ -14,6 +14,7 @@ use std::sync::{Arc, Mutex};
 use jambox_core::{pack_xy, Command, LatestTouch};
 use tracing::{debug, info, warn};
 
+use crate::audio::AudioHealth;
 use crate::bus::{ClipUpdate, ControlSide, MidiInSide};
 use crate::midi::{ingest, MidiMap};
 use crate::protocol::{decode, Decoded, MidiNotice, Request, Response, StatusReply};
@@ -161,6 +162,7 @@ fn serve_client<R: BufRead>(
     hub: &ClientHub,
     map: &MidiMap,
     midi_in: &Mutex<MidiInSide>,
+    health: &AudioHealth,
 ) {
     let mut session = ClientSession::new();
     for line in reader.lines() {
@@ -185,7 +187,16 @@ fn serve_client<R: BufRead>(
                 Err(poisoned) => poisoned.into_inner(),
             };
             let (control, cache) = &mut *guard;
-            handle_line(trimmed, control, cache, hub, map, midi_in, &mut session)
+            handle_line(
+                trimmed,
+                control,
+                cache,
+                hub,
+                map,
+                midi_in,
+                health,
+                &mut session,
+            )
         };
         if let Ok(json) = serde_json::to_string(&response) {
             if tx.send(json).is_err() {
@@ -247,6 +258,7 @@ pub fn handle_line(
     hub: &ClientHub,
     map: &MidiMap,
     midi_in: &Mutex<MidiInSide>,
+    health: &AudioHealth,
     session: &mut ClientSession,
 ) -> Response {
     control.collect_garbage();
@@ -339,6 +351,11 @@ pub fn handle_line(
         }) => handle_repeat(
             control, cache, session, gesture, phase, note, channel, velocity, division,
         ),
+        Ok(Decoded::AudioReopen) => {
+            info!("control: audio reopen requested");
+            health.request_reopen();
+            Response::Ok
+        }
     }
 }
 
@@ -462,6 +479,7 @@ pub fn serve(
     hub: Arc<ClientHub>,
     map: Arc<MidiMap>,
     midi_in: Arc<Mutex<MidiInSide>>,
+    health: Arc<AudioHealth>,
     running: Arc<AtomicBool>,
 ) {
     let shared: Shared = Arc::new(Mutex::new((control, StatusCache::default())));
@@ -484,7 +502,9 @@ pub fn serve(
                     break;
                 }
                 match stream {
-                    Ok(stream) => spawn_client(stream, &shared, &hub, &map, &midi_in, &running),
+                    Ok(stream) => {
+                        spawn_client(stream, &shared, &hub, &map, &midi_in, &health, &running)
+                    }
                     Err(err) => warn!(%err, "control: accept failed"),
                 }
             }
@@ -504,7 +524,9 @@ pub fn serve(
                     break;
                 }
                 match stream {
-                    Ok(stream) => spawn_client(stream, &shared, &hub, &map, &midi_in, &running),
+                    Ok(stream) => {
+                        spawn_client(stream, &shared, &hub, &map, &midi_in, &health, &running)
+                    }
                     Err(err) => warn!(%err, "control: accept failed"),
                 }
             }
@@ -542,6 +564,7 @@ fn spawn_client<S: ClientStream>(
     hub: &Arc<ClientHub>,
     map: &Arc<MidiMap>,
     midi_in: &Arc<Mutex<MidiInSide>>,
+    health: &Arc<AudioHealth>,
     running: &Arc<AtomicBool>,
 ) {
     let reader = match stream.duplicate() {
@@ -558,6 +581,7 @@ fn spawn_client<S: ClientStream>(
     let hub = Arc::clone(hub);
     let map = Arc::clone(map);
     let midi_in = Arc::clone(midi_in);
+    let health = Arc::clone(health);
     std::thread::spawn(move || {
         serve_client(
             BufReader::new(reader),
@@ -567,6 +591,7 @@ fn spawn_client<S: ClientStream>(
             &hub,
             &map,
             &midi_in,
+            &health,
         );
     });
     std::thread::spawn(move || {
@@ -598,6 +623,7 @@ mod tests {
             &ClientHub::default(),
             &MidiMap::default(),
             midi_in,
+            &AudioHealth::new(),
             session,
         )
     }
@@ -805,5 +831,26 @@ mod tests {
         }
         assert!(saw_cancel && saw_stop);
         assert!(session.gestures.is_empty());
+    }
+
+    #[test]
+    fn audio_reopen_sets_health_flag() {
+        let (mut control, midi_in, _midi_out, _audio) = bus::channel();
+        let midi_in = Mutex::new(midi_in);
+        let mut cache = StatusCache::default();
+        let mut session = ClientSession::new();
+        let health = AudioHealth::new();
+        let response = handle_line(
+            r#"{"cmd":"audio_reopen"}"#,
+            &mut control,
+            &mut cache,
+            &ClientHub::default(),
+            &MidiMap::default(),
+            &midi_in,
+            &health,
+            &mut session,
+        );
+        assert!(matches!(response, Response::Ok));
+        assert!(health.take_reopen());
     }
 }

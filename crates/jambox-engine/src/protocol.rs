@@ -151,6 +151,8 @@ pub enum Request {
         target: String,
         mode: String,
     },
+    /// Drop and reopen the ALSA/cpal output stream without resetting engine state.
+    AudioReopen,
 }
 
 const fn default_velocity() -> u8 {
@@ -391,6 +393,8 @@ pub enum Decoded {
         velocity: u8,
         division: RepeatDivision,
     },
+    /// Rebuild the host audio device stream (engine + rings stay up).
+    AudioReopen,
 }
 
 pub fn parse_quantize(value: Option<&str>) -> Quantize {
@@ -663,6 +667,7 @@ pub fn decode(request: Request) -> Result<Decoded, String> {
             velocity,
             division: map_repeat_division(division),
         },
+        Request::AudioReopen => Decoded::AudioReopen,
     })
 }
 
@@ -821,5 +826,11 @@ mod tests {
             }
             _ => panic!("wrong decode"),
         }
+    }
+
+    #[test]
+    fn audio_reopen_decodes() {
+        let d = decode_line(r#"{"cmd":"audio_reopen"}"#);
+        assert!(matches!(d, Decoded::AudioReopen));
     }
 }
