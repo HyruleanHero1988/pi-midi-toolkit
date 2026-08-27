@@ -3,19 +3,20 @@
 //! The callback body is deliberately boring — every expensive thing (allocating a
 //! clip, sending MIDI bytes, writing a log line) happens on another thread.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{Device, SampleFormat, StreamConfig};
+use cpal::{BufferSize, Device, SampleFormat, StreamConfig};
 use jambox_core::{
-    JamboxEngine, MidiOutSink, ScheduledCommand, WaveBank, MAX_BLOCK_COMMANDS, MAX_RENDER_BLOCK,
+    JamboxEngine, LatestTouch, MidiOutSink, ScheduledCommand, WaveBank, MAX_BLOCK_COMMANDS,
+    MAX_RENDER_BLOCK, MAX_TOUCH_VOICES,
 };
 use tracing::{info, warn};
 
-use crate::bus::AudioSide;
+use crate::bus::{AudioSide, StatusPacket};
 
-/// Same ballpark as the Python kiosk (`MIDI_TONE_BLOCKSIZE=1536`).
-pub const PREFERRED_BLOCK: u32 = 1536;
+/// Conservative first explicit period; architecture primary target is 512.
+pub const PREFERRED_BLOCK: u32 = 512;
 const SCRATCH_FRAMES: usize = MAX_RENDER_BLOCK;
 
 #[derive(Debug, thiserror::Error)]
@@ -64,17 +65,54 @@ pub struct RunningStream {
     _stream: cpal::Stream,
     pub sample_rate: u32,
     pub channels: u16,
+    pub buffer_label: String,
 }
 
-/// Build and start the output stream.
-pub fn start(device: &Device, mut audio: AudioSide, bank: WaveBank) -> Result<RunningStream, AudioError> {
+/// Probe which explicit period sizes the device will accept, then open for real.
+pub fn start(
+    device: &Device,
+    audio: AudioSide,
+    bank: WaveBank,
+    preferred_frames: u32,
+) -> Result<RunningStream, AudioError> {
     let supported = device
         .default_output_config()
         .map_err(|e| AudioError::Config(e.to_string()))?;
     let sample_rate = supported.sample_rate().0;
     let channels = supported.channels();
     let format = supported.sample_format();
-    let (config, chosen) = pick_stream_config(channels, sample_rate);
+
+    // cpal Fixed sizes often probe OK on bcm2835 Headphones then immediately
+    // XRUN/POLLERR at runtime. Only try Fixed when the operator asks
+    // (--buffer-frames N with N>0); otherwise keep ALSA default periods.
+    let mut chosen = "alsa-default".to_string();
+    let mut config = StreamConfig {
+        channels,
+        sample_rate: cpal::SampleRate(sample_rate),
+        buffer_size: BufferSize::Default,
+    };
+
+    if preferred_frames > 0 {
+        let mut candidates = vec![preferred_frames];
+        for size in [PREFERRED_BLOCK, 1024, 256] {
+            if !candidates.contains(&size) {
+                candidates.push(size);
+            }
+        }
+        for frames in candidates {
+            let trial = StreamConfig {
+                channels,
+                sample_rate: cpal::SampleRate(sample_rate),
+                buffer_size: BufferSize::Fixed(frames),
+            };
+            if probe_config(device, &trial, format) {
+                config = trial;
+                chosen = format!("fixed-{frames}");
+                break;
+            }
+            warn!(frames, "audio: fixed period rejected");
+        }
+    }
 
     info!(
         device = %device.name().unwrap_or_default(),
@@ -85,26 +123,63 @@ pub fn start(device: &Device, mut audio: AudioSide, bank: WaveBank) -> Result<Ru
         "audio: opening output"
     );
 
+    build_stream(device, &config, format, audio, bank, sample_rate, channels, chosen)
+}
+
+fn probe_config(device: &Device, config: &StreamConfig, format: SampleFormat) -> bool {
+    let err_fn = |_err| {};
+    let result = match format {
+        SampleFormat::F32 => device.build_output_stream(config, |_data: &mut [f32], _| {}, err_fn, None),
+        SampleFormat::I16 => device.build_output_stream(config, |_data: &mut [i16], _| {}, err_fn, None),
+        SampleFormat::U16 => device.build_output_stream(config, |_data: &mut [u16], _| {}, err_fn, None),
+        _ => return false,
+    };
+    result.is_ok()
+}
+
+fn build_stream(
+    device: &Device,
+    config: &StreamConfig,
+    format: SampleFormat,
+    mut audio: AudioSide,
+    bank: WaveBank,
+    sample_rate: u32,
+    channels: u16,
+    chosen: String,
+) -> Result<RunningStream, AudioError> {
     let mut engine = JamboxEngine::with_bank(sample_rate as f64, bank);
     engine.sync_fx_slots();
     let mut midi_out = MidiOutSink::new();
     let mut scheduled: Vec<ScheduledCommand> = Vec::with_capacity(MAX_BLOCK_COMMANDS);
     let mut mono: Vec<f32> = vec![0.0; SCRATCH_FRAMES];
+    let mut touch_scratch = [LatestTouch {
+        owner: 0,
+        x: 0.0,
+        y: 0.0,
+        channel: 0,
+        velocity: 0,
+    }; MAX_TOUCH_VOICES + 3];
+    let mut peak_micros = 0u32;
+    let mut xruns = 0u64;
 
     let err_fn = |err| warn!(%err, "audio stream error");
 
     let stream = match format {
         SampleFormat::F32 => device.build_output_stream(
-            &config,
+            config,
             move |data: &mut [f32], _| {
                 callback_body(
                     data,
                     channels as usize,
+                    sample_rate,
                     &mut audio,
                     &mut engine,
                     &mut scheduled,
                     &mut midi_out,
                     &mut mono,
+                    &mut touch_scratch,
+                    &mut peak_micros,
+                    &mut xruns,
                     |s| s,
                 );
             },
@@ -112,16 +187,20 @@ pub fn start(device: &Device, mut audio: AudioSide, bank: WaveBank) -> Result<Ru
             None,
         ),
         SampleFormat::I16 => device.build_output_stream(
-            &config,
+            config,
             move |data: &mut [i16], _| {
                 callback_body(
                     data,
                     channels as usize,
+                    sample_rate,
                     &mut audio,
                     &mut engine,
                     &mut scheduled,
                     &mut midi_out,
                     &mut mono,
+                    &mut touch_scratch,
+                    &mut peak_micros,
+                    &mut xruns,
                     |s| (s.clamp(-1.0, 1.0) * 32767.0) as i16,
                 );
             },
@@ -129,16 +208,20 @@ pub fn start(device: &Device, mut audio: AudioSide, bank: WaveBank) -> Result<Ru
             None,
         ),
         SampleFormat::U16 => device.build_output_stream(
-            &config,
+            config,
             move |data: &mut [u16], _| {
                 callback_body(
                     data,
                     channels as usize,
+                    sample_rate,
                     &mut audio,
                     &mut engine,
                     &mut scheduled,
                     &mut midi_out,
                     &mut mono,
+                    &mut touch_scratch,
+                    &mut peak_micros,
+                    &mut xruns,
                     |s| ((s.clamp(-1.0, 1.0) * 0.5 + 0.5) * 65535.0) as u16,
                 );
             },
@@ -161,47 +244,42 @@ pub fn start(device: &Device, mut audio: AudioSide, bank: WaveBank) -> Result<Ru
         _stream: stream,
         sample_rate,
         channels,
+        buffer_label: chosen,
     })
-}
-
-fn pick_stream_config(channels: u16, sample_rate: u32) -> (StreamConfig, String) {
-    // Fixed(256) is Invalid argument on bcm2835 Headphones. Default opens and
-    // typically yields ~100 ms / ~4410 frames — now fully rendered.
-    let config = StreamConfig {
-        channels,
-        sample_rate: cpal::SampleRate(sample_rate),
-        buffer_size: cpal::BufferSize::Default,
-    };
-    (config, "alsa-default".into())
 }
 
 /// Render one device block. `to_sample` is the only format-specific work.
 fn callback_body<S: Copy>(
     data: &mut [S],
     channels: usize,
+    sample_rate: u32,
     audio: &mut AudioSide,
     engine: &mut JamboxEngine,
     scheduled: &mut Vec<ScheduledCommand>,
     midi_out: &mut MidiOutSink,
     mono: &mut [f32],
+    touch_scratch: &mut [LatestTouch],
+    peak_micros: &mut u32,
+    xruns: &mut u64,
     to_sample: impl Fn(f32) -> S,
 ) {
+    let started = Instant::now();
     let frames = data.len() / channels.max(1);
-    static LOGGED_FRAMES: AtomicBool = AtomicBool::new(false);
-    if !LOGGED_FRAMES.swap(true, Ordering::Relaxed) {
-        info!(frames, "audio: callback frames");
-    }
     if frames == 0 {
         return;
     }
     if frames > mono.len() {
-        warn!(frames, scratch = mono.len(), "audio: callback larger than scratch; silencing");
         let zero = to_sample(0.0);
         data.iter_mut().for_each(|s| *s = zero);
+        *xruns = xruns.saturating_add(1);
+        publish_status(audio, engine, frames as u32, 0, *peak_micros, *xruns);
         return;
     }
 
     drain(audio, engine, scheduled);
+    let n_touch = audio.latest.snapshot(touch_scratch);
+    engine.sync_touches(&touch_scratch[..n_touch]);
+
     let mut offset = 0usize;
     while offset < frames {
         let n = (frames - offset).min(MAX_RENDER_BLOCK);
@@ -221,7 +299,30 @@ fn callback_body<S: Copy>(
         }
     }
 
-    let _ = audio.status.push(engine.status());
+    let micros = started.elapsed().as_micros().min(u128::from(u32::MAX)) as u32;
+    *peak_micros = (*peak_micros).max(micros);
+    let period_micros = (frames as u64).saturating_mul(1_000_000) / u64::from(sample_rate.max(1));
+    if u64::from(micros) > period_micros && period_micros > 0 {
+        *xruns = xruns.saturating_add(1);
+    }
+    publish_status(audio, engine, frames as u32, micros, *peak_micros, *xruns);
+}
+
+fn publish_status(
+    audio: &mut AudioSide,
+    engine: &JamboxEngine,
+    callback_frames: u32,
+    callback_micros: u32,
+    callback_peak_micros: u32,
+    xruns: u64,
+) {
+    let _ = audio.status.push(StatusPacket {
+        engine: engine.status(),
+        callback_frames,
+        callback_micros,
+        callback_peak_micros,
+        xruns,
+    });
 }
 
 fn block_sample(mono: &[f32], i: usize) -> f32 {
@@ -232,17 +333,14 @@ fn block_sample(mono: &[f32], i: usize) -> f32 {
 fn drain(audio: &mut AudioSide, engine: &mut JamboxEngine, scheduled: &mut Vec<ScheduledCommand>) {
     scheduled.clear();
 
-    // Clip swaps: move the pointer in, send the old allocation back to be freed.
     while let Ok(update) = audio.clips.pop() {
         let slot_index = update.slot as usize;
         if let Some(slot) = engine.sequencer_mut().slot_mut(slot_index) {
-            let previous = slot.take_clip();
-            slot.set_clip(update.clip.map(|b| *b));
             if let Some(mode) = update.mode {
                 slot.set_mode(mode);
             }
-            if let Some(previous) = previous {
-                let _ = audio.garbage.push(Box::new(previous));
+            if let Some(previous) = slot.swap_boxed(update.clip) {
+                let _ = audio.garbage.push(previous);
             }
         }
     }

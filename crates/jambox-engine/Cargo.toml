@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 jambox-core = { workspace = true }
+jambox-protocol = { workspace = true }
 midi-core = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

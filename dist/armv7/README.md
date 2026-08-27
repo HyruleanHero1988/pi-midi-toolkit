@@ -1,7 +1,7 @@
 # Pi armv7 engines (committed)
 
 These binaries are the **Raspberry Pi 2** (`armv7-unknown-linux-gnueabihf`)
-builds of `midi-engine` and `jambox-engine`.
+builds of `midi-engine`, `jambox-engine`, and `pidi-native`.
 
 The Pi never `cargo build`s. **SET → UPDATE** copies this directory into
 `~/pi-midi-toolkit/bin/` (the live systemd paths) after overlaying the rest
@@ -19,10 +19,11 @@ git commit -m "Rebuild Pi armv7 engines"
 ```
 
 Needs `gcc-arm-linux-gnueabihf`, `libasound2-dev:armhf` (both engines link
-ALSA via midir/cpal), `rustup target add armv7-unknown-linux-gnueabihf`,
-and rustc **1.85+** (clap 4.6 in the lockfile). The script installs the
-armhf toolchain with passwordless sudo when it can. On Ubuntu it also
-pins `archive.ubuntu.com` to amd64 and adds `ports.ubuntu.com` for armhf.
+ALSA via midir/cpal), `libsdl2-dev:armhf` plus GLES/EGL/GBM/DRM headers
+(`pidi-native` links SDL2), `rustup target add armv7-unknown-linux-gnueabihf`,
+and rustc **1.83+**. The script installs the armhf toolchain with passwordless
+sudo when it can. On Ubuntu it also pins `archive.ubuntu.com` to amd64 and
+adds `ports.ubuntu.com` for armhf.
 
 Do **not** put these files in Git LFS. GitHub archive downloads used by
 UPDATE would then contain pointer files instead of real ELFs.

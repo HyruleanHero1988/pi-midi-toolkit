@@ -32,6 +32,7 @@ apps/pidi/settings.json
 apps/pidi/version.json
 apps/pidi/user-presets/
 apps/pidi/user-wavetables/
+# User song library (any .mid you drop here — not committed; demo-songs/ ships in repo)
 apps/pidi/songs/
 apps/pidi/phrases/
 apps/pidi/archive/debug/

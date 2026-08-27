@@ -113,6 +113,7 @@ PROGRAMS: Tuple[KaossProgram, ...] = (
     KaossProgram("lead", "LEAD", "note", y_param="tone", x_axis="PITCH", y_axis="TONE", curated=True),
     KaossProgram("morph", "MORPH", "note", y_param="morph", x_axis="PITCH", y_axis="MORPH", curated=True),
     KaossProgram("vib", "VIB", "note", y_param="vib", x_axis="PITCH", y_axis="VIB", curated=True),
+    KaossProgram("bend", "BEND", "note", y_param="pitch_bend", x_axis="PITCH", y_axis="BEND", curated=True),
     KaossProgram("level", "LEVEL", "note", y_param="level", x_axis="PITCH", y_axis="LEVEL"),
     KaossProgram("decay", "DECAY", "note", y_param="release", x_axis="PITCH", y_axis="DECAY"),
     KaossProgram("attack", "ATTACK", "note", y_param="attack", x_axis="PITCH", y_axis="ATTACK"),
@@ -179,6 +180,7 @@ class GatePattern:
 
 GATE_PATTERNS: Tuple[GatePattern, ...] = (
     GatePattern("off", "GATE OFF", 0.0, 0.0),
+    GatePattern("4th", "GATE 1/4", 1.0, 0.55),
     GatePattern("8th", "GATE 1/8", 0.5, 0.55),
     GatePattern("16th", "GATE 1/16", 0.25, 0.50),
     GatePattern("trip", "GATE TRIP", 1.0 / 3.0, 0.50),

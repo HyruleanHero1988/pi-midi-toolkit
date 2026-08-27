@@ -1,6 +1,8 @@
 [Unit]
-Description=pi-midi-toolkit jambox audio + sequencer engine
-After=sound.target multi-user.target
+Description=pi-midi-toolkit jambox audio + sequencer engine (native kiosk)
+# Do not After=multi-user.target — that cycles with WantedBy=multi-user and
+# causes systemd to drop dependent units (e.g. pidi-native) from the boot job.
+After=sound.target
 
 [Service]
 Type=simple
@@ -14,6 +16,7 @@ ExecStart=/home/pi/pi-midi-toolkit/bin/jambox-engine run \
   --control /tmp/jambox.sock \
   --waves /home/pi/pi-midi-toolkit/apps/pidi/wavetables \
   --user-waves /home/pi/pi-midi-toolkit/apps/pidi/user-wavetables \
+  --buffer-frames 0 \
   --rt
 Restart=on-failure
 RestartSec=2

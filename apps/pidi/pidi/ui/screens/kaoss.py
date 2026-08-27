@@ -1456,8 +1456,10 @@ class KaossScreenMixin:
         left = 22
         bottom = max(28, h - 18)
         right = max(left + 40, w - 16)
+        # BEND: X PITCH sits on the horizontal midline (bend zero).
+        x_y = h // 2 if self._kaoss.program().y_param == "pitch_bend" else bottom - 13
         self._kaoss_axis_caption(
-            canvas, (left + right) // 2, bottom - 13, x_label
+            canvas, (left + right) // 2, x_y, x_label
         )
         try:
             self._kaoss_axis_caption(

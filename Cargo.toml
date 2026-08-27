@@ -5,12 +5,16 @@ members = [
     "crates/midi-engine",
     "crates/jambox-core",
     "crates/jambox-engine",
+    "crates/jambox-protocol",
+    "crates/pidi-native",
 ]
 default-members = [
     "crates/midi-core",
     "crates/midi-engine",
     "crates/jambox-core",
     "crates/jambox-engine",
+    "crates/jambox-protocol",
+    "crates/pidi-native",
 ]
 
 [workspace.package]
@@ -21,6 +25,7 @@ license = "MIT"
 [workspace.dependencies]
 midi-core = { path = "crates/midi-core" }
 jambox-core = { path = "crates/jambox-core" }
+jambox-protocol = { path = "crates/jambox-protocol" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
@@ -28,7 +33,7 @@ midir = "0.10"
 parking_lot = "0.12"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-clap = { version = "4", features = ["derive"] }
+clap = { version = "=4.5.41", features = ["derive"] }
 ctrlc = "3"
 arc-swap = "1"
 libc = "0.2"

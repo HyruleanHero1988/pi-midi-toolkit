@@ -1,4 +1,4 @@
-//! Insert FX: drive → delay → short multi-tap tank.
+//! Insert FX: drive → flanger → delay → short multi-tap tank.
 //!
 //! One [`FxUnit`] per wavetable voice, per drum model, per drum group, and one on
 //! the master bus (see `PLAN.md` "Effects (insert + kit group + bus)"). Buffers are
@@ -6,6 +6,8 @@
 
 const DELAY_MAX_SEC: f32 = 1.0;
 const REVERB_MAX_SEC: f32 = 0.55;
+/// Classic analog flanger window (~1–12 ms). Sized once in `new`.
+const FLANGER_MAX_SEC: f32 = 0.020;
 
 /// Plain-old-data FX amounts, all 0..1. Cheap to copy across the command ring.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -16,6 +18,10 @@ pub struct FxParams {
     pub delay_mix: f32,
     pub reverb_size: f32,
     pub reverb_mix: f32,
+    pub flanger_mix: f32,
+    pub flanger_rate: f32,
+    pub flanger_depth: f32,
+    pub flanger_fb: f32,
 }
 
 impl Default for FxParams {
@@ -27,6 +33,10 @@ impl Default for FxParams {
             delay_mix: 0.0,
             reverb_size: 0.45,
             reverb_mix: 0.0,
+            flanger_mix: 0.0,
+            flanger_rate: 0.35,
+            flanger_depth: 0.70,
+            flanger_fb: 0.45,
         }
     }
 }
@@ -38,6 +48,7 @@ impl FxParams {
             && self.delay_mix <= 0.001
             && self.delay_fb <= 0.001
             && self.reverb_mix <= 0.001
+            && self.flanger_mix <= 0.001
     }
 }
 
@@ -50,6 +61,9 @@ pub struct FxUnit {
     reverb: Vec<f32>,
     reverb_pos: usize,
     reverb_prev: f32,
+    flanger: Vec<f32>,
+    flanger_pos: usize,
+    flanger_phase: f32,
 }
 
 impl FxUnit {
@@ -57,6 +71,7 @@ impl FxUnit {
         let sample_rate = sample_rate.max(8000.0);
         let dlen = (sample_rate * DELAY_MAX_SEC) as usize + 64;
         let rlen = (sample_rate * REVERB_MAX_SEC) as usize + 64;
+        let flen = (sample_rate * FLANGER_MAX_SEC) as usize + 8;
         Self {
             params: FxParams::default(),
             sample_rate,
@@ -65,6 +80,9 @@ impl FxUnit {
             reverb: vec![0.0; rlen],
             reverb_pos: 0,
             reverb_prev: 0.0,
+            flanger: vec![0.0; flen.max(32)],
+            flanger_pos: 0,
+            flanger_phase: 0.0,
         }
     }
 
@@ -80,6 +98,10 @@ impl FxUnit {
             delay_mix: params.delay_mix.clamp(0.0, 1.0),
             reverb_size: params.reverb_size.clamp(0.0, 1.0),
             reverb_mix: params.reverb_mix.clamp(0.0, 1.0),
+            flanger_mix: params.flanger_mix.clamp(0.0, 1.0),
+            flanger_rate: params.flanger_rate.clamp(0.0, 1.0),
+            flanger_depth: params.flanger_depth.clamp(0.0, 1.0),
+            flanger_fb: params.flanger_fb.clamp(0.0, 1.0),
         };
     }
 
@@ -87,9 +109,12 @@ impl FxUnit {
     pub fn reset(&mut self) {
         self.delay.iter_mut().for_each(|v| *v = 0.0);
         self.reverb.iter_mut().for_each(|v| *v = 0.0);
+        self.flanger.iter_mut().for_each(|v| *v = 0.0);
         self.delay_pos = 0;
         self.reverb_pos = 0;
         self.reverb_prev = 0.0;
+        self.flanger_pos = 0;
+        self.flanger_phase = 0.0;
     }
 
     /// Process in place. Allocation-free; safe to call from the audio thread.
@@ -104,6 +129,35 @@ impl FxUnit {
             let norm = 1.0 / amount.tanh().max(0.25);
             for s in buf.iter_mut() {
                 *s = (*s * amount).tanh() * norm;
+            }
+        }
+
+        if p.flanger_mix > 0.001 {
+            let flen = self.flanger.len();
+            let rate_hz = 0.08 + p.flanger_rate * 6.0;
+            let depth = p.flanger_depth;
+            let fb = p.flanger_fb.min(0.92);
+            let mix = p.flanger_mix;
+            let dry = 1.0 - mix;
+            let min_delay = 0.0012 * self.sample_rate;
+            let max_extra = 0.0088 * self.sample_rate * depth;
+            let two_pi = std::f32::consts::TAU;
+            let phase_inc = rate_hz / self.sample_rate;
+            for s in buf.iter_mut() {
+                self.flanger_phase += phase_inc;
+                if self.flanger_phase >= 1.0 {
+                    self.flanger_phase -= 1.0;
+                }
+                let lfo = 0.5 + 0.5 * (self.flanger_phase * two_pi).sin();
+                let delay_samp = (min_delay + max_extra * lfo).clamp(1.0, (flen - 2) as f32);
+                let delay_i = delay_samp.floor() as usize;
+                let frac = delay_samp - delay_i as f32;
+                let i0 = (self.flanger_pos + flen - delay_i) % flen;
+                let i1 = (i0 + flen - 1) % flen;
+                let wet = self.flanger[i0] * (1.0 - frac) + self.flanger[i1] * frac;
+                self.flanger[self.flanger_pos] = (*s + wet * fb).clamp(-1.5, 1.5);
+                self.flanger_pos = (self.flanger_pos + 1) % flen;
+                *s = *s * dry + wet * mix;
             }
         }
 
@@ -239,5 +293,39 @@ mod tests {
         });
         assert_eq!(fx.params().drive, 1.0);
         assert_eq!(fx.params().delay_mix, 0.0);
+    }
+
+    #[test]
+    fn flanger_wet_moves_an_impulse() {
+        let mut fx = FxUnit::new(48_000.0);
+        fx.set_params(FxParams {
+            flanger_mix: 1.0,
+            flanger_rate: 0.0,
+            flanger_depth: 0.0,
+            flanger_fb: 0.0,
+            ..FxParams::default()
+        });
+        // Rate 0 still advances a tiny bit; depth 0 parks the delay at ~1.2 ms.
+        let expect = (0.0012 * 48_000.0) as usize;
+        let mut buf = vec![0.0f32; expect + 8];
+        buf[0] = 1.0;
+        fx.process(&mut buf);
+        let peak = buf.iter().copied().fold(0.0f32, |a, b| a.max(b.abs()));
+        assert!(peak > 0.3, "flanger should reprint the impulse, peak={peak}");
+        assert!(buf[0].abs() < 0.15, "full mix should replace the dry hit");
+    }
+
+    #[test]
+    fn flanger_mix_zero_is_silent_in_bypass() {
+        let mut fx = FxUnit::new(48_000.0);
+        fx.set_params(FxParams {
+            flanger_mix: 0.0,
+            flanger_rate: 1.0,
+            flanger_depth: 1.0,
+            ..FxParams::default()
+        });
+        let mut buf = [0.4f32; 64];
+        fx.process(&mut buf);
+        assert!(buf.iter().all(|v| (*v - 0.4).abs() < 1e-5));
     }
 }

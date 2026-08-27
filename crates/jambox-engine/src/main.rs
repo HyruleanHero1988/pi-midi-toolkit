@@ -7,6 +7,7 @@ mod audio;
 mod bus;
 mod headless;
 mod ipc;
+mod mailbox;
 mod midi;
 mod protocol;
 mod rt;
@@ -59,6 +60,10 @@ enum Cmd {
         /// Extra wavetable dir (kiosk `user-wavetables/`). Later dirs add/replace names.
         #[arg(long, default_value = "")]
         user_waves: String,
+        /// Preferred ALSA/cpal callback frames. 0 keeps ALSA default periods
+        /// (reliable on bcm2835 Headphones). N>0 tries Fixed(N), then 512/1024/256.
+        #[arg(long, default_value_t = 0)]
+        buffer_frames: u32,
     },
     /// Offline render benchmark — the PLAN's CPU headroom check, no device needed.
     Bench {
@@ -97,6 +102,7 @@ fn main() {
             null_audio,
             waves,
             user_waves,
+            buffer_frames,
         } => run(
             output,
             midi_in,
@@ -107,6 +113,7 @@ fn main() {
             null_audio,
             waves,
             user_waves,
+            buffer_frames,
         ),
         Cmd::Bench {
             sample_rate,
@@ -144,6 +151,7 @@ fn run(
     null_audio: bool,
     waves: String,
     user_waves: String,
+    buffer_frames: u32,
 ) {
     let running = Arc::new(AtomicBool::new(true));
     {
@@ -176,7 +184,7 @@ fn run(
         std::thread::spawn(move || {
             headless::run(
                 48_000,
-                audio::PREFERRED_BLOCK as usize,
+                buffer_frames.max(64) as usize,
                 audio_side,
                 bank,
                 running,
@@ -191,11 +199,12 @@ fn run(
                 return;
             }
         };
-        match audio::start(&device, audio_side, bank) {
+        match audio::start(&device, audio_side, bank, buffer_frames) {
             Ok(stream) => {
                 info!(
                     sample_rate = stream.sample_rate,
                     channels = stream.channels,
+                    buffer = %stream.buffer_label,
                     "audio: running"
                 );
                 Some(stream)
