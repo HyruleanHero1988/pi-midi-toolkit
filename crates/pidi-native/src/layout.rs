@@ -143,6 +143,7 @@ pub enum Hit {
     SongOut,
     SettingsPanic,
     SettingsAllOff,
+    SettingsAudio,
     SettingsFxTarget,
     SettingsFx(usize),
     SettingsWifi,
@@ -150,6 +151,18 @@ pub enum Hit {
     SettingsFont,
     SettingsLog,
     SettingsMap,
+    UpdateClose,
+    UpdateCheck,
+    UpdateApply,
+    WifiClose,
+    WifiScan,
+    WifiRejoin,
+    WifiScrollUp,
+    WifiScrollDown,
+    WifiRow(usize),
+    WifiKbCancel,
+    WifiKbShow,
+    WifiKbKey { row: usize, col: usize },
     LogClear,
     LogAllOff,
     ChordsButton { col: usize, row: usize },
@@ -160,6 +173,8 @@ pub enum Hit {
     ChordsKey,
     ChordsChanges,
     ChordsArm,
+    ChordsOctDown,
+    ChordsOctUp,
     ChordsKeyPick(u8),
     ChordsChangesPick(usize),
     ChordsOverlayClose,
@@ -285,6 +300,7 @@ pub struct Layout {
     pub song_out: Rect,
     pub settings_panic: Rect,
     pub settings_all_off: Rect,
+    pub settings_audio: Rect,
     pub settings_fx_target: Rect,
     pub settings_fx: Rect,
     pub settings_wifi: Rect,
@@ -300,6 +316,9 @@ pub struct Layout {
     pub power_shutdown: Rect,
     pub power_reboot: Rect,
     pub power_screen_off: Rect,
+    pub update_close: Rect,
+    pub update_check: Rect,
+    pub update_apply: Rect,
 }
 
 impl Default for Layout {
@@ -342,6 +361,30 @@ impl Layout {
         (blank_cycle, shutdown, reboot, screen_off)
     }
 
+    fn update_panel_rects(content: Rect) -> (Rect, Rect, Rect) {
+        let pad = 12;
+        let btn_h = 72;
+        let close = Rect {
+            x: content.x + content.w - 160 - pad,
+            y: content.y + 10,
+            w: 160,
+            h: 48,
+        };
+        let check = Rect {
+            x: content.x + pad,
+            y: content.y + content.h - btn_h - pad,
+            w: (content.w - pad * 3) / 2,
+            h: btn_h,
+        };
+        let apply = Rect {
+            x: check.x + check.w + pad,
+            y: check.y,
+            w: check.w,
+            h: btn_h,
+        };
+        (close, check, apply)
+    }
+
     pub fn new() -> Self {
         let content_h = SCREEN_H - HUD_H - NAV_H;
         let content = Rect {
@@ -352,6 +395,7 @@ impl Layout {
         };
         let (power_blank_cycle, power_shutdown, power_reboot, power_screen_off) =
             Self::power_menu_rects(content);
+        let (update_close, update_check, update_apply) = Self::update_panel_rects(content);
         Self {
             hud: Rect {
                 x: 0,
@@ -913,19 +957,25 @@ impl Layout {
             settings_panic: Rect {
                 x: 24,
                 y: HUD_H + 24,
-                w: 200,
+                w: 168,
                 h: 72,
             },
             settings_all_off: Rect {
-                x: 236,
+                x: 204,
                 y: HUD_H + 24,
-                w: 200,
+                w: 168,
+                h: 72,
+            },
+            settings_audio: Rect {
+                x: 384,
+                y: HUD_H + 24,
+                w: 168,
                 h: 72,
             },
             settings_fx_target: Rect {
-                x: 448,
+                x: 564,
                 y: HUD_H + 24,
-                w: 328,
+                w: 212,
                 h: 72,
             },
             settings_fx: Rect {
@@ -982,11 +1032,12 @@ impl Layout {
                 w: SCREEN_W - 16,
                 h: 44,
             },
+            // Root-name strip above the MAJ/min/7 grid (non-interactive).
             chords_grid: Rect {
                 x: 8,
-                y: HUD_H + 54,
+                y: HUD_H + 74,
                 w: 560,
-                h: 248,
+                h: 228,
             },
             chords_strum: Rect {
                 x: 576,
@@ -1004,7 +1055,181 @@ impl Layout {
             power_shutdown,
             power_reboot,
             power_screen_off,
+            update_close,
+            update_check,
+            update_apply,
         }
+    }
+
+    pub fn hit_update_panel(&self, px: i32, py: i32) -> Hit {
+        if self.update_close.contains(px, py) {
+            return Hit::UpdateClose;
+        }
+        if self.update_check.contains(px, py) {
+            return Hit::UpdateCheck;
+        }
+        if self.update_apply.contains(px, py) {
+            return Hit::UpdateApply;
+        }
+        Hit::None
+    }
+
+    pub fn wifi_close(&self) -> Rect {
+        Rect {
+            x: self.content.x + self.content.w - 160 - 12,
+            y: self.content.y + 10,
+            w: 160,
+            h: 48,
+        }
+    }
+
+    pub fn wifi_status_y(&self) -> i32 {
+        self.content.y + 66
+    }
+
+    pub fn wifi_row(&self, index: usize) -> Rect {
+        let y0 = self.content.y + 96;
+        Rect {
+            x: self.content.x + 12,
+            y: y0 + (index as i32) * 56,
+            w: self.content.w - 100,
+            h: 52,
+        }
+    }
+
+    pub fn wifi_scroll_up(&self) -> Rect {
+        Rect {
+            x: self.content.x + self.content.w - 80,
+            y: self.content.y + 96,
+            w: 68,
+            h: 100,
+        }
+    }
+
+    pub fn wifi_scroll_down(&self) -> Rect {
+        Rect {
+            x: self.content.x + self.content.w - 80,
+            y: self.content.y + 204,
+            w: 68,
+            h: 100,
+        }
+    }
+
+    pub fn wifi_scan_btn(&self) -> Rect {
+        let pad = 12;
+        let btn_h = 64;
+        Rect {
+            x: self.content.x + pad,
+            y: self.content.y + self.content.h - btn_h - pad,
+            w: (self.content.w - pad * 3) / 2,
+            h: btn_h,
+        }
+    }
+
+    pub fn wifi_rejoin_btn(&self) -> Rect {
+        let scan = self.wifi_scan_btn();
+        Rect {
+            x: scan.x + scan.w + 12,
+            y: scan.y,
+            w: scan.w,
+            h: scan.h,
+        }
+    }
+
+    pub fn hit_wifi_panel(&self, px: i32, py: i32) -> Hit {
+        if self.wifi_close().contains(px, py) {
+            return Hit::WifiClose;
+        }
+        if self.wifi_scan_btn().contains(px, py) {
+            return Hit::WifiScan;
+        }
+        if self.wifi_rejoin_btn().contains(px, py) {
+            return Hit::WifiRejoin;
+        }
+        if self.wifi_scroll_up().contains(px, py) {
+            return Hit::WifiScrollUp;
+        }
+        if self.wifi_scroll_down().contains(px, py) {
+            return Hit::WifiScrollDown;
+        }
+        for i in 0..crate::wifi::LIST_VISIBLE {
+            if self.wifi_row(i).contains(px, py) {
+                return Hit::WifiRow(i);
+            }
+        }
+        Hit::None
+    }
+
+    /// Password keyboard geometry over the content area.
+    pub fn wifi_kb_cancel(&self) -> Rect {
+        Rect {
+            x: self.content.x + self.content.w - 140 - 8,
+            y: self.content.y + 8,
+            w: 140,
+            h: 40,
+        }
+    }
+
+    pub fn wifi_kb_show(&self) -> Rect {
+        Rect {
+            x: self.content.x + self.content.w - 300,
+            y: self.content.y + 56,
+            w: 100,
+            h: 40,
+        }
+    }
+
+    pub fn wifi_kb_entry(&self) -> Rect {
+        Rect {
+            x: self.content.x + 12,
+            y: self.content.y + 56,
+            w: self.content.w - 330,
+            h: 40,
+        }
+    }
+
+    pub fn wifi_kb_grid_origin(&self) -> (i32, i32, i32, i32) {
+        // x, y, key_w, key_h
+        let x = self.content.x + 8;
+        let y = self.content.y + 108;
+        let key_w = (self.content.w - 16) / crate::wifi::KB_COLS;
+        let key_h = 52;
+        (x, y, key_w, key_h)
+    }
+
+    pub fn wifi_kb_key(&self, row: usize, col_start: i32, span: u8) -> Rect {
+        let (ox, oy, kw, kh) = self.wifi_kb_grid_origin();
+        Rect {
+            x: ox + col_start * kw,
+            y: oy + (row as i32) * kh,
+            w: kw * i32::from(span) - 2,
+            h: kh - 2,
+        }
+    }
+
+    pub fn hit_wifi_keyboard(&self, px: i32, py: i32, sym: bool, shift: bool) -> Hit {
+        if self.wifi_kb_cancel().contains(px, py) {
+            return Hit::WifiKbCancel;
+        }
+        if self.wifi_kb_show().contains(px, py) {
+            return Hit::WifiKbShow;
+        }
+        let rows = if sym {
+            crate::wifi::keyboard_sym_rows()
+        } else {
+            crate::wifi::keyboard_abc_rows(shift)
+        };
+        for (ri, row) in rows.iter().enumerate() {
+            let mut col = 0i32;
+            for (ci, (_label, action, span)) in row.iter().enumerate() {
+                let cell = self.wifi_kb_key(ri, col, *span);
+                if *action != "pad" && cell.contains(px, py) {
+                    return Hit::WifiKbKey { row: ri, col: ci };
+                }
+                col += i32::from(*span);
+            }
+        }
+        Hit::None
     }
 
     pub fn hit_power_menu(&self, px: i32, py: i32) -> Hit {
@@ -1197,9 +1422,19 @@ impl Layout {
         }
     }
 
+    /// Global SEQ arm/stop — stays available while recording from other modes.
+    pub fn nav_chrome_rec(&self) -> Rect {
+        Rect {
+            x: 302,
+            y: 6,
+            w: 92,
+            h: self.nav.h - 12,
+        }
+    }
+
     pub fn nav_jam(&self, index: usize) -> Rect {
         let n = JAM_MODES.len() as i32;
-        let w = 70;
+        let w = 62;
         let gap = 4;
         let total = n * w + (n - 1) * gap;
         let x0 = self.nav.w - total - 8;
@@ -1442,7 +1677,7 @@ impl Layout {
     }
 
     pub fn synth_slider(&self, index: usize) -> Rect {
-        let n = 5i32;
+        let n = 6i32;
         let w = self.synth_sliders.w / n;
         Rect {
             x: self.synth_sliders.x + (index as i32) * w + 6,
@@ -1569,6 +1804,54 @@ impl Layout {
         }
     }
 
+    /// Non-hit root name above each fifths column.
+    pub fn chords_root_label(&self, col: usize) -> Rect {
+        let gw = self.chords_grid.w / 12;
+        Rect {
+            x: self.chords_grid.x + (col as i32) * gw + 1,
+            y: self.chords_grid.y - 20,
+            w: gw - 2,
+            h: 18,
+        }
+    }
+
+    /// Playable harp region (below STRUM / OCT chrome).
+    pub fn chords_strum_play(&self) -> Rect {
+        Rect {
+            x: self.chords_strum.x,
+            y: self.chords_strum.y + 52,
+            w: self.chords_strum.w,
+            h: (self.chords_strum.h - 52).max(1),
+        }
+    }
+
+    pub fn chords_oct_down(&self) -> Rect {
+        Rect {
+            x: self.chords_strum.x + 8,
+            y: self.chords_strum.y + 8,
+            w: 44,
+            h: 36,
+        }
+    }
+
+    pub fn chords_oct_label(&self) -> Rect {
+        Rect {
+            x: self.chords_strum.x + 56,
+            y: self.chords_strum.y + 8,
+            w: self.chords_strum.w - 112,
+            h: 36,
+        }
+    }
+
+    pub fn chords_oct_up(&self) -> Rect {
+        Rect {
+            x: self.chords_strum.x + self.chords_strum.w - 52,
+            y: self.chords_strum.y + 8,
+            w: 44,
+            h: 36,
+        }
+    }
+
     pub fn chords_palette_slot(&self, slot: usize) -> Rect {
         let n = 8i32;
         let w = self.chords_palette.w / n;
@@ -1614,6 +1897,9 @@ impl Layout {
             }
             if self.nav_power().contains(px, py) {
                 return Hit::Power;
+            }
+            if self.nav_chrome_rec().contains(px, py) {
+                return Hit::SeqRec;
             }
             for (i, m) in JAM_MODES.iter().enumerate() {
                 if self.nav_jam(i).contains(px, py) {
@@ -1803,7 +2089,7 @@ impl Layout {
         if self.synth_oct_up.contains(px, py) {
             return Hit::SynthOctUp;
         }
-        for index in 0..5 {
+        for index in 0..6 {
             if self.synth_slider(index).contains(px, py) {
                 return Hit::SynthSlider(index);
             }
@@ -2114,8 +2400,14 @@ impl Layout {
         if self.chords_tool(4).contains(px, py) {
             return Hit::ChordsArm;
         }
-        if self.chords_strum.contains(px, py) {
-            let (_x, y) = self.chords_strum.pad_xy(px, py);
+        if self.chords_oct_down().contains(px, py) {
+            return Hit::ChordsOctDown;
+        }
+        if self.chords_oct_up().contains(px, py) {
+            return Hit::ChordsOctUp;
+        }
+        if self.chords_strum_play().contains(px, py) {
+            let (_x, y) = self.chords_strum_play().pad_xy(px, py);
             return Hit::ChordsStrum { y };
         }
         for slot in 0..8 {
@@ -2134,7 +2426,8 @@ impl Layout {
     }
 
     pub fn settings_fx_slider(&self, index: usize) -> Rect {
-        let n = 4i32;
+        // Bus / voice / drum inserts: drive + delay + reverb. Flange lives on SYNTH.
+        let n = 3i32;
         let w = self.settings_fx.w / n;
         Rect {
             x: self.settings_fx.x + (index as i32) * w + 8,
@@ -2150,6 +2443,9 @@ impl Layout {
         }
         if self.settings_all_off.contains(px, py) {
             return Hit::SettingsAllOff;
+        }
+        if self.settings_audio.contains(px, py) {
+            return Hit::SettingsAudio;
         }
         if self.settings_fx_target.contains(px, py) {
             return Hit::SettingsFxTarget;
@@ -2169,7 +2465,7 @@ impl Layout {
         if self.settings_update.contains(px, py) {
             return Hit::SettingsUpdate;
         }
-        for index in 0..4 {
+        for index in 0..3 {
             if self.settings_fx_slider(index).contains(px, py) {
                 return Hit::SettingsFx(index);
             }
@@ -2301,6 +2597,20 @@ mod tests {
     }
 
     #[test]
+    fn chrome_rec_is_hit_from_any_mode() {
+        let layout = Layout::new();
+        let rec = layout.nav_chrome_rec();
+        assert_eq!(
+            layout.hit(UiMode::Synth, rec.x + 4, rec.y + 4),
+            Hit::SeqRec
+        );
+        assert_eq!(
+            layout.hit(UiMode::Kaoss, rec.x + 4, rec.y + 4),
+            Hit::SeqRec
+        );
+    }
+
+    #[test]
     fn phrase_pad_a1_is_top_left() {
         let layout = Layout::new();
         let cell = layout.phrase_cell(0);
@@ -2308,5 +2618,29 @@ mod tests {
             layout.hit(UiMode::Pads, cell.x + 4, cell.y + 4),
             Hit::PhrasePad(0)
         );
+    }
+
+    #[test]
+    fn chords_oct_and_strum_hits() {
+        let layout = Layout::new();
+        let down = layout.chords_oct_down();
+        assert_eq!(
+            layout.hit(UiMode::Chords, down.x + 4, down.y + 4),
+            Hit::ChordsOctDown
+        );
+        let up = layout.chords_oct_up();
+        assert_eq!(
+            layout.hit(UiMode::Chords, up.x + 4, up.y + 4),
+            Hit::ChordsOctUp
+        );
+        let play = layout.chords_strum_play();
+        match layout.hit(UiMode::Chords, play.x + 4, play.y + 2) {
+            Hit::ChordsStrum { y } => assert!(y > 0.85, "pad top should be high y, got {y}"),
+            other => panic!("expected strum at top, got {other:?}"),
+        }
+        match layout.hit(UiMode::Chords, play.x + 4, play.y + play.h - 2) {
+            Hit::ChordsStrum { y } => assert!(y < 0.15, "pad bottom should be low y, got {y}"),
+            other => panic!("expected strum at bottom, got {other:?}"),
+        }
     }
 }

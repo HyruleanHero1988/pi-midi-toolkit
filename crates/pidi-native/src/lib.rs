@@ -28,6 +28,7 @@ pub mod session;
 pub mod songs;
 pub mod voice_bake;
 pub mod waves;
+pub mod wifi;
 #[cfg(feature = "sdl")]
 pub mod sdl_backend;
 
