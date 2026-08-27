@@ -5,8 +5,9 @@ low-latency MIDI thru/remap to a hardware synth. **Not** related to play-my-synt
 
 **North star:** power on → kiosk → modes (Synth / Seq / Pads / Kaoss / Log / Map). See [PLAN.md](PLAN.md).
 
-- **Kiosk UI (active):** [`apps/pidi`](apps/pidi) — PiDI Tk surface over `jambox-engine` (Python audio fallback retained)
-- **Thru engine:** Rust `midi-engine` — channel/CC/velocity remap via CLI + JSON presets (Map mode UI next)
+- **Kiosk UI (active):** [`crates/pidi-native`](crates/pidi-native) — SDL/KMSDRM + GLES2 over `jambox-engine`. See [NATIVE_KIOSK.md](NATIVE_KIOSK.md).
+- **Python Tk kiosk (archived):** [`apps/pidi`](apps/pidi) on `cursor/python-kiosk-archive-dfc2`
+- **Thru engine:** Rust `midi-engine` — channel/CC/velocity remap via CLI + JSON presets (Map mode in the native kiosk)
 - **Target hardware:** Pi 2 + MPK mini mk3 (+ USB-MIDI-DIN → synth when available)
 
 ## Crates
@@ -17,6 +18,8 @@ low-latency MIDI thru/remap to a hardware synth. **Not** related to play-my-synt
 | `midi-engine` | `midir` CLI: list / run / learn / test / latency |
 | `jambox-core` | Soft-synth DSP + **sample-accurate** sequencer (no I/O, no alloc in render) |
 | `jambox-engine` | Realtime audio + sequencer daemon; kiosk UI is a thin client over a socket |
+| `jambox-protocol` | JSON control protocol shared by the engine and native UI |
+| `pidi-native` | Native kiosk UI (SDL + GLES2) |
 
 ## Jambox engine (audio + sequencing)
 
@@ -38,22 +41,16 @@ printf '{"cmd":"clip_launch","slot":0,"quantize":"bar"}\n'        | nc -U /tmp/j
 printf '{"cmd":"status"}\n'                                        | nc -U /tmp/jambox.sock
 ```
 
-From the kiosk, use [`tools/midi-tone/jambox_client.py`](tools/midi-tone/jambox_client.py):
-
-```bash
-python3 tools/midi-tone/jambox_client.py --status
-python3 -m unittest test_jambox_client      # from tools/midi-tone
-```
-
-systemd unit: [`deploy/jambox-engine.service`](deploy/jambox-engine.service).
+systemd units: [`deploy/jambox-engine.service`](deploy/jambox-engine.service) and [`deploy/pidi-native.service`](deploy/pidi-native.service).
 
 ## Kiosk tests (no Pi, no audio device)
 
 ```bash
-cd tools/midi-tone
-python3 -m unittest test_sequencer test_kaoss test_phrase_pads test_synth_vibrato test_jambox_client test_screensaver test_updater
-xvfb-run -a python3 -m unittest test_ui_seq test_ui_kaoss test_ui_screensaver test_ui_settings     # builds the real Tk screen with stub audio/MIDI
+cargo test -p pidi-native -p jambox-protocol -p jambox-core
+cargo run -p pidi-native -- --display dummy --frames 30 --dump /tmp/pidi.ppm
 ```
+
+The archived Python Tk tests still live on `cursor/python-kiosk-archive-dfc2` under `apps/pidi/tests/`.
 
 ## Build & test (Windows / host)
 
