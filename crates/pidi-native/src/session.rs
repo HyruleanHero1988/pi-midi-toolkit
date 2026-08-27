@@ -92,7 +92,7 @@ pub struct SessionState {
     pub kaoss_gate: usize,
     pub kaoss_hold: bool,
     pub fx_bus: [f32; 3],
-    /// Flanger wet (4th Settings slider). Split from `fx_bus` so old sessions still parse.
+    /// Per-voice flanger wet (SYNTH FLANGE). Older builds stored bus flange here.
     #[serde(default)]
     pub fx_flanger: f32,
     #[serde(default)]
@@ -119,6 +119,9 @@ pub struct SessionState {
     pub chords_hold: bool,
     #[serde(default)]
     pub chords_key: u8,
+    /// Block + strum octave relative to factory C3 / C2 (−2..+2).
+    #[serde(default)]
+    pub chords_octave: i8,
     #[serde(default)]
     pub font_style: FontStyle,
     #[serde(default = "default_screensaver_sec")]
@@ -190,6 +193,7 @@ impl Default for SessionState {
             chords_out: OutMode::Both,
             chords_hold: true,
             chords_key: 0,
+            chords_octave: 0,
             font_style: FontStyle::Retro,
             screensaver_sec: crate::screensaver::DEFAULT_TIMEOUT_SEC,
             kaoss_viz_style: default_kaoss_viz_style(),
@@ -199,10 +203,7 @@ impl Default for SessionState {
 }
 
 pub fn session_path_from_env() -> PathBuf {
-    if let Ok(p) = std::env::var("PIDI_SETTINGS_PATH") {
-        return PathBuf::from(p);
-    }
-    PathBuf::from("settings.json")
+    crate::paths::settings_path()
 }
 
 pub fn load(path: &Path) -> Option<SessionState> {
