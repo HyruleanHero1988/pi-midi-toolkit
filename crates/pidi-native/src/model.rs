@@ -2092,14 +2092,19 @@ impl NativeModel {
                 for line in lines {
                     self.push_log(line);
                 }
+                self.mark_dirty();
             }
             Hit::SettingsUpdate => {
                 self.tap_ui(slot, id, gesture, px, py);
+                // Sync host check can stall the UI — set a visible busy line first.
+                self.status_line = "UPDATE check…".into();
+                self.mark_dirty();
                 let (status, lines) = host::update_check();
                 self.status_line = status;
                 for line in lines {
                     self.push_log(line);
                 }
+                self.mark_dirty();
             }
             Hit::SettingsFont => {
                 self.tap_ui(slot, id, gesture, px, py);

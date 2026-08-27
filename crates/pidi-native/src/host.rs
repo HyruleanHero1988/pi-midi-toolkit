@@ -280,34 +280,42 @@ pub fn wifi_action() -> (String, Vec<String>) {
     #[cfg(target_os = "linux")]
     {
         let mut lines = Vec::new();
+        // Prefer a fast device query — `device wifi list` rescans and can stall the UI.
         let (code, stdout, stderr) = run_capture(
-            Command::new("nmcli")
-                .args(["-t", "-f", "ACTIVE,SSID,SIGNAL", "device", "wifi", "list"]),
-            12,
+            Command::new("nmcli").args(["-t", "-f", "DEVICE,TYPE,STATE,CONNECTION", "device", "status"]),
+            8,
         );
         if code == 127 {
             lines.push("nmcli not installed".into());
-            return ("WIFI: nmcli missing".into(), lines);
+            return ("WIFI missing".into(), lines);
         }
         if !stdout.is_empty() {
-            for line in stdout.lines().take(16) {
+            for line in stdout.lines().take(8) {
                 lines.push(line.to_string());
             }
         } else if !stderr.is_empty() {
             lines.push(truncate_lines(&stderr, 6, 300));
         }
-        let active = stdout
-            .lines()
-            .find(|l| l.starts_with("yes:") || l.starts_with("*:"))
-            .map(|l| l.to_string());
-        let mut status = active
-            .unwrap_or_else(|| {
-                if code == 0 {
-                    "WIFI: listed (see LOG)".into()
-                } else {
-                    format!("WIFI list exit {code}")
-                }
-            });
+
+        let wifi_dev = stdout.lines().find(|l| {
+            let parts: Vec<_> = l.split(':').collect();
+            parts.len() >= 3 && parts[1] == "wifi"
+        });
+        let (wifi_state, wifi_conn) = wifi_dev
+            .map(|l| {
+                let parts: Vec<_> = l.split(':').collect();
+                (
+                    parts.get(2).copied().unwrap_or(""),
+                    parts.get(3).copied().unwrap_or(""),
+                )
+            })
+            .unwrap_or(("", ""));
+
+        if wifi_state.starts_with("connected") && !wifi_conn.is_empty() {
+            let ssid = wifi_connection_ssid(wifi_conn).unwrap_or_else(|| wifi_conn.to_string());
+            lines.push(format!("already on {ssid}"));
+            return (format!("WIFI OK {ssid}"), lines);
+        }
 
         let (ssid, password) = load_wifi_credentials();
         if let (Some(ssid), Some(password)) = (ssid, password) {
@@ -329,16 +337,45 @@ pub fn wifi_action() -> (String, Vec<String>) {
             if !cerr.is_empty() {
                 lines.push(truncate_lines(&cerr, 4, 200));
             }
-            status = if cc == 0 {
-                format!("WIFI connected: {ssid}")
+            let status = if cc == 0 {
+                format!("WIFI OK {ssid}")
             } else {
-                format!("WIFI connect exit {cc}")
+                format!("WIFI fail {cc}")
             };
-        } else {
-            lines.push("no WIFI_SSID/PASSWORD — status only".into());
+            return (status, lines);
         }
-        (status, lines)
+
+        lines.push("no .wifi-credentials (WIFI_SSID / WIFI_PASSWORD)".into());
+        if wifi_state.is_empty() {
+            ("WIFI offline".into(), lines)
+        } else {
+            (format!("WIFI {wifi_state}"), lines)
+        }
     }
+}
+
+#[cfg(target_os = "linux")]
+fn wifi_connection_ssid(connection: &str) -> Option<String> {
+    if connection.is_empty() {
+        return None;
+    }
+    let (code, stdout, _) = run_capture(
+        Command::new("nmcli").args([
+            "-g",
+            "802-11-wireless.ssid",
+            "connection",
+            "show",
+            connection,
+        ]),
+        5,
+    );
+    if code == 0 {
+        let ssid = stdout.trim();
+        if !ssid.is_empty() {
+            return Some(ssid.to_string());
+        }
+    }
+    None
 }
 
 pub fn update_check() -> (String, Vec<String>) {
