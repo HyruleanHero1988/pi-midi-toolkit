@@ -405,10 +405,19 @@ fn chrome_status(model: &NativeModel) -> String {
             format!("{:.0} BPM {}", model.bpm, kaoss_ui::gate(model.kaoss_gate).label)
         }
         UiMode::Seq => format!("{:.0} BPM", model.bpm),
-        UiMode::Chords => model
-            .chords_current
-            .map(|c| c.name())
-            .unwrap_or_else(|| "CHORDS".into()),
+        UiMode::Chords => {
+            let name = model
+                .chords_current
+                .map(|c| c.name())
+                .unwrap_or_else(|| "CHORDS".into());
+            if model.seq.is_recording() {
+                format!("REC {name}")
+            } else if model.pads_recording.is_some() {
+                format!("PAD {name}")
+            } else {
+                name
+            }
+        }
         UiMode::Presets => format!("SLOT {}", model.preset_selected + 1),
         UiMode::Synth if model.synth_vib_open => "VIB".into(),
         _ => {

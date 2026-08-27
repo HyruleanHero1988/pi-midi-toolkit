@@ -4188,6 +4188,8 @@ impl NativeModel {
         if self.chords_out.includes_usb() {
             outbox.midi_emit("note_on", 0, Some(note), Some(vel), None, None);
         }
+        self.seq.push_note(true, 0, note, vel);
+        self.push_pad_rec(true, 0, note, vel);
     }
 
     fn chords_note_off(&mut self, note: u8, outbox: &mut Outbox) {
@@ -4197,6 +4199,8 @@ impl NativeModel {
         if self.chords_out.includes_usb() {
             outbox.midi_emit("note_off", 0, Some(note), Some(0), None, None);
         }
+        self.seq.push_note(false, 0, note, 0);
+        self.push_pad_rec(false, 0, note, 0);
     }
 
     fn wipe_kaoss_fx(&mut self, outbox: &mut Outbox) {
@@ -4789,6 +4793,67 @@ mod tests {
         let pcs: Vec<u8> = notes.iter().map(|n| n % 12).collect();
         assert!(pcs.contains(&0) && pcs.contains(&4) && pcs.contains(&7));
         assert_eq!(model.chords_current.unwrap().name(), "C");
+    }
+
+    #[test]
+    fn chords_record_into_seq_backbone() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Chords);
+        model.chords_out = OutMode::Local;
+        model.chords_hold = false;
+        assert!(matches!(
+            model.seq.toggle_record(),
+            crate::seq::SeqAction::Stop
+        ));
+        assert!(model.seq.is_recording());
+        let mut out = Outbox::new();
+        let c = crate::chords::col_for_root_pc(0);
+        let cell = model.layout.chords_button(c, 0);
+        model.finger_down(1, cell.x + 4, cell.y + 4, &mut out);
+        let ons = model.seq.recorded_on_notes();
+        assert!(ons.len() >= 3, "seq take should capture the triad, got {ons:?}");
+        let pcs: Vec<u8> = ons.iter().map(|n| n % 12).collect();
+        assert!(pcs.contains(&0) && pcs.contains(&4) && pcs.contains(&7));
+        model.finger_up(1, &mut out);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        match model.seq.toggle_record() {
+            crate::seq::SeqAction::Upload { events, .. } => {
+                assert!(events.iter().any(|e| e.on && e.note % 12 == 0));
+            }
+            _ => panic!("expected seq upload after chord take"),
+        }
+    }
+
+    #[test]
+    fn chords_record_into_pad_rec() {
+        let mut model = NativeModel::new();
+        model.pads_edit = true;
+        model.pads_selected = 0;
+        let mut out = Outbox::new();
+        model.set_mode(UiMode::Pads);
+        let rec = model.layout.pads_rec;
+        model.finger_down(1, rec.x + 4, rec.y + 4, &mut out);
+        model.finger_up(1, &mut out);
+        assert!(model.pads_recording.is_some());
+        model.set_mode(UiMode::Chords);
+        model.chords_hold = false;
+        let c = crate::chords::col_for_root_pc(0);
+        let cell = model.layout.chords_button(c, 0);
+        model.finger_down(2, cell.x + 4, cell.y + 4, &mut out);
+        model.finger_up(2, &mut out);
+        model.set_mode(UiMode::Pads);
+        model.pads_edit = true;
+        model.finger_down(3, rec.x + 4, rec.y + 4, &mut out);
+        model.finger_up(3, &mut out);
+        let ons: Vec<u8> = model.phrases[0]
+            .events
+            .iter()
+            .filter(|e| e.on)
+            .map(|e| e.note)
+            .collect();
+        assert!(ons.len() >= 3, "pad clip should capture the triad, got {ons:?}");
+        let pcs: Vec<u8> = ons.iter().map(|n| n % 12).collect();
+        assert!(pcs.contains(&0) && pcs.contains(&4) && pcs.contains(&7));
     }
 
     #[test]

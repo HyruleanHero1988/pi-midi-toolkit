@@ -273,6 +273,11 @@ impl SeqModel {
         matches!(self.state, SeqState::RecBackbone | SeqState::Overdub)
     }
 
+    #[cfg(test)]
+    pub fn recorded_on_notes(&self) -> Vec<u8> {
+        self.take.iter().filter(|e| e.on).map(|e| e.note).collect()
+    }
+
     pub fn is_playing(&self) -> bool {
         matches!(
             self.state,
