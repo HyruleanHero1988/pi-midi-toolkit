@@ -175,11 +175,13 @@ running commit, **CHECK** looks at `master`, and **UPDATE** deploys the **whole 
 (kiosk, crates, deploy scripts, shipped presets) then restarts — the same tree SSH
 deploy updates. Songs, presets, phrases, `settings.json`, `presets/active.json`,
 and live `bin/` is not overlay-copied. After the tree lands, committed
-`dist/armv7/{midi-engine,jambox-engine}` are copied onto `bin/` (the systemd
-paths) and `midi-engine` / `jambox-engine` restart if those units exist.
+`dist/armv7/{midi-engine,jambox-engine,pidi-native}` are copied onto `bin/`
+(the systemd paths) and those units restart if they exist.
 
 This does **not** cargo-build on the Pi (too slow on a Pi 2). When crates
-change, rebuild on a PC or cloud-agent VM **before commit**:
+land on `master`, CI rebuilds `dist/armv7` and commits the ELFs so the next
+SET→UPDATE copies `midi-engine`, `jambox-engine`, and `pidi-native` onto
+`bin/`. Manual rebuild still works for LAN SSH:
 
 ```bash
 ./deploy/build-pi-bins.sh
@@ -187,10 +189,8 @@ git add dist/armv7
 git commit -m "Rebuild Pi armv7 engines"
 ```
 
-Skipping that step means SET→UPDATE ships new Rust source but the box keeps
-the old engines. `deploy_pi.py` still writes `version.json` so CHECK has a
-local SHA; SSH `deploy/deploy.sh` also stages `dist/armv7` when `TARGET` is
-armv7.
+`deploy_pi.py` still writes `version.json` so CHECK has a local SHA; SSH
+`deploy/deploy.sh` also stages `dist/armv7` when `TARGET` is armv7.
 
 CHECK/UPDATE talk to the public GitHub repo over HTTPS (no token).
 `deploy_pi.py` still writes `version.json` so CHECK has a local SHA to

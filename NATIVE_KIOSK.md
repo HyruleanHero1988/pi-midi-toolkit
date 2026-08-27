@@ -52,7 +52,12 @@ cargo run -p pidi-native -- --tcp --control 127.0.0.1:17890 --display dummy --fr
 
 ## Pi appliance
 
-Cross-build (WSL Ubuntu 22.04 / Debian, or CI):
+OTA: SET → UPDATE overlays `master`, then copies committed
+`dist/armv7/{midi-engine,jambox-engine,pidi-native}` onto `bin/` and
+restarts the units. After crate changes land on `master`, CI rebuilds
+those ELFs and commits them (see `.github/workflows/build-pi-bins.yml`).
+
+Manual cross-build (WSL Ubuntu 22.04 / Debian, or a cloud-agent VM):
 
 ```bash
 PACKAGES=jambox-engine,pidi-native ./deploy/build-pi-bins.sh

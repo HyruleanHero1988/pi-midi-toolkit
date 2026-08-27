@@ -6,7 +6,7 @@ is behind, installs the **whole repo** the same way SSH deploy does:
 
 * kiosk (``apps/pidi``)
 * crates, deploy scripts, shipped presets
-* restart ``midi-engine`` / ``jambox-engine`` when those units exist
+* restart ``midi-engine`` / ``jambox-engine`` / ``pidi-native`` when those units exist
 
 Two layouts are supported:
 
@@ -18,7 +18,7 @@ Two layouts are supported:
 Never touches user data: ``settings.json``, ``songs/``, ``phrases/``,
 ``user-presets/``, ``user-wavetables/``, ``.venv/``, credentials,
 ``presets/active.json``. Live ``bin/`` is not overlay-copied; after the
-tree is in place, committed ``dist/armv7/{midi-engine,jambox-engine}``
+tree is in place, committed ``dist/armv7/{midi-engine,jambox-engine,pidi-native}``
 are installed onto ``bin/`` via stop + atomic rename (same paths
 systemd uses; avoids ETXTBSY on a running engine).
 
@@ -26,9 +26,10 @@ Component digests (``ui``, ``engines``, ``requirements``) are stamped in
 ``version.json``. After the tree is updated, pip / engine install /
 kiosk sync are skipped when that component's digest is unchanged.
 
-Does **not** cargo-build on the Pi (Pi 2 is too slow). Rebuild those
-ELFs on a PC or cloud-agent VM with ``./deploy/build-pi-bins.sh`` and
-commit ``dist/armv7/`` before pushing.
+Does **not** cargo-build on the Pi (Pi 2 is too slow). A green push to
+``master`` that touches crates rebuilds those ELFs in CI and commits
+``dist/armv7/``. Manual rebuild (``./deploy/build-pi-bins.sh``) still
+works for LAN SSH deploys.
 
 Public GitHub CHECK/UPDATE uses anonymous HTTPS (no token).
 """
@@ -85,7 +86,7 @@ KEEP_KIOSK = frozenset(
     }
 )
 KEEP_NAMES = KEEP_KIOSK  # alias used by tests / kiosk-only overlay
-PI_ENGINE_BINS = ("midi-engine", "jambox-engine")
+PI_ENGINE_BINS = ("midi-engine", "jambox-engine", "pidi-native")
 STAGED_BIN_DIR = pathlib.Path("dist") / "armv7"
 # Paths under the kiosk root that count as the ``ui`` component digest.
 # ``requirements.txt`` is hashed separately so pip can be skipped alone.
@@ -898,7 +899,8 @@ def _stop_engines(progress: ProgressCb = _noop_progress) -> None:
     if os.name == "nt":
         return
     stopped = False
-    for unit in PI_ENGINE_BINS:
+    # Kiosk first so it is not talking to an engine we are about to replace.
+    for unit in reversed(PI_ENGINE_BINS):
         if not _engine_unit_enabled(unit):
             continue
         progress(f"Stopping {unit}…")
@@ -1004,9 +1006,9 @@ def _ensure_active_preset(repo_root: pathlib.Path) -> None:
 
 
 def _restart_engines(progress: ProgressCb) -> None:
-    """Restart mapper / jambox daemons if this box already has them.
+    """Restart mapper / jambox / native kiosk units if this box has them.
 
-    Matches SSH deploy's ``systemctl restart``. Fails soft: kiosk sudoers
+    Engines first, then ``pidi-native``. Fails soft: kiosk sudoers
     may only allow poweroff/reboot, and a unit may not be installed yet.
     """
     for unit in PI_ENGINE_BINS:

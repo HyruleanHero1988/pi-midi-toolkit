@@ -206,6 +206,7 @@ class OverlayTest(unittest.TestCase):
             (src / "dist" / "armv7").mkdir(parents=True)
             (src / "dist" / "armv7" / "midi-engine").write_bytes(b"NEWELF")
             (src / "dist" / "armv7" / "jambox-engine").write_bytes(b"NEWJAM")
+            (src / "dist" / "armv7" / "pidi-native").write_bytes(b"NEWNAT")
 
             (dest / "apps" / "pidi").mkdir(parents=True)
             (dest / "presets").mkdir()
@@ -228,6 +229,7 @@ class OverlayTest(unittest.TestCase):
             self.assertIn("deploy/midi-engine.service", written)
             self.assertIn("dist/armv7/midi-engine", written)
             self.assertIn("dist/armv7/jambox-engine", written)
+            self.assertIn("dist/armv7/pidi-native", written)
             self.assertNotIn("presets/active.json", written)
             self.assertNotIn("apps/pidi/settings.json", written)
             self.assertNotIn("apps/pidi/phrases/pad-01.json", written)
@@ -254,12 +256,14 @@ class OverlayTest(unittest.TestCase):
             self.assertTrue((dest / "presets" / "example.json").is_file())
             self.assertEqual((dest / "dist" / "armv7" / "midi-engine").read_bytes(), b"NEWELF")
             self.assertEqual((dest / "dist" / "armv7" / "jambox-engine").read_bytes(), b"NEWJAM")
+            self.assertEqual((dest / "dist" / "armv7" / "pidi-native").read_bytes(), b"NEWNAT")
 
             notes: list[str] = []
             installed = updater.install_pi_binaries(dest, notes.append)
-            self.assertEqual(installed, ["midi-engine", "jambox-engine"])
+            self.assertEqual(installed, ["midi-engine", "jambox-engine", "pidi-native"])
             self.assertEqual((dest / "bin" / "midi-engine").read_bytes(), b"NEWELF")
             self.assertEqual((dest / "bin" / "jambox-engine").read_bytes(), b"NEWJAM")
+            self.assertEqual((dest / "bin" / "pidi-native").read_bytes(), b"NEWNAT")
             if os.name != "nt":
                 self.assertTrue((dest / "bin" / "midi-engine").stat().st_mode & 0o111)
             self.assertTrue(any("midi-engine" in n for n in notes))
