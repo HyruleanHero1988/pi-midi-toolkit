@@ -3242,6 +3242,13 @@ impl NativeModel {
                 if prev.y_param == "pitch_bend" && p.y_param != "pitch_bend" {
                     self.reset_kaoss_pitch_bend(outbox);
                 }
+                if prev.y_param == "tone_lfo" && p.y_param != "tone_lfo" {
+                    self.reset_kaoss_tone_lfo(outbox);
+                }
+                if self.kaoss_hold || self.kaoss_touching {
+                    let (x, y) = self.kaoss_latched_xy;
+                    self.apply_kaoss_xy(p, x, y, outbox);
+                }
                 self.status_line = format!("program {}", p.label);
                 self.mark_dirty();
             }
@@ -3312,9 +3319,14 @@ impl NativeModel {
                 self.release_kaoss_gate(outbox);
             }
             self.kaoss_usb_silence(outbox, true);
-            if !self.kaoss_touching && kaoss_ui::program(self.kaoss_program).y_param == "pitch_bend"
-            {
-                self.reset_kaoss_pitch_bend(outbox);
+            if !self.kaoss_touching {
+                let prog = kaoss_ui::program(self.kaoss_program);
+                if prog.y_param == "pitch_bend" {
+                    self.reset_kaoss_pitch_bend(outbox);
+                }
+                if prog.y_param == "tone_lfo" {
+                    self.reset_kaoss_tone_lfo(outbox);
+                }
             }
             self.status_line = "HOLD off".into();
         } else {
@@ -3459,6 +3471,9 @@ impl NativeModel {
             // Leave bend at center when the pad is idle (HOLD keeps the latched Y).
             if !self.kaoss_hold && prog.y_param == "pitch_bend" {
                 self.reset_kaoss_pitch_bend(outbox);
+            }
+            if !self.kaoss_hold && prog.y_param == "tone_lfo" {
+                self.reset_kaoss_tone_lfo(outbox);
             }
         }
     }
@@ -3833,6 +3848,11 @@ impl NativeModel {
                 outbox.synth("vibrato_depth", y.clamp(0.0, 1.0));
                 outbox.synth("vibrato_always", self.vibrato_always);
                 self.mark_dirty();
+            } else if prog.y_param == "tone_lfo" {
+                // X plays the scale; Y is how fast the tone filter wobbles.
+                outbox.synth("tone_lfo_rate", y.clamp(0.0, 1.0));
+                outbox.synth("tone_lfo_amount", 1.0);
+                self.mark_dirty();
             } else if prog.y_param == "pitch_bend" {
                 self.apply_kaoss_pitch_bend(y, outbox);
             } else {
@@ -3870,6 +3890,9 @@ impl NativeModel {
                 self.vibrato_always = if y > 0.02 { 1.0 } else { 0.0 };
                 outbox.synth("vibrato_depth", y.clamp(0.0, 1.0));
                 outbox.synth("vibrato_always", self.vibrato_always);
+            } else if prog.y_param == "tone_lfo" {
+                outbox.synth("tone_lfo_rate", y.clamp(0.0, 1.0));
+                outbox.synth("tone_lfo_amount", 1.0);
             } else {
                 outbox.synth(prog.y_param, y);
                 if let Some(i) = Self::synth_param_index(prog.y_param) {
@@ -3912,6 +3935,10 @@ impl NativeModel {
                 Some(8192),
             );
         }
+    }
+
+    fn reset_kaoss_tone_lfo(&mut self, outbox: &mut Outbox) {
+        outbox.synth("tone_lfo_amount", 0.0);
     }
 
     fn synth_param_index(name: &str) -> Option<usize> {
@@ -4594,6 +4621,7 @@ impl NativeModel {
         self.synth_params[1] = defaults.tone;
         outbox.synth("morph", defaults.morph);
         outbox.synth("tone", defaults.tone);
+        outbox.synth("tone_lfo_amount", 0.0);
         self.sync_wave_bank();
         if self.kaoss_hold {
             self.kaoss_hold = false;
@@ -4963,6 +4991,79 @@ mod tests {
         );
         assert!((model.synth_params[1] - tone_before).abs() < 1e-6);
         assert!(model.vibrato_always > 0.5);
+    }
+
+    #[test]
+    fn kaoss_wah_y_drives_tone_lfo_rate_not_tone() {
+        let mut model = NativeModel::new();
+        model.kaoss_program = kaoss_ui::KAOSS_PROGRAMS
+            .iter()
+            .position(|p| p.id == "wah")
+            .expect("wah program");
+        assert_eq!(kaoss_ui::program(model.kaoss_program).y_param, "tone_lfo");
+        let tone_before = model.synth_params[1];
+        let mut out = Outbox::new();
+        let cell = model.layout.kaoss_cell(6, 6); // top of pad → fast wah
+        model.finger_down(1, cell.x + 4, cell.y + 4, &mut out);
+        let batch = out.take();
+        assert!(
+            batch.iter().any(|r| matches!(
+                r,
+                Request::Synth { param, value, .. }
+                    if param == "tone_lfo_rate" && *value > 0.5
+            )),
+            "WAH Y should emit tone_lfo_rate: {batch:?}"
+        );
+        assert!(
+            batch.iter().any(|r| matches!(
+                r,
+                Request::Synth { param, value, .. }
+                    if param == "tone_lfo_amount" && *value > 0.5
+            )),
+            "WAH should arm the tone LFO: {batch:?}"
+        );
+        assert!(
+            !batch.iter().any(|r| matches!(
+                r,
+                Request::Synth { param, .. } if param == "tone"
+            )),
+            "WAH must not scrub the sticky tone knob: {batch:?}"
+        );
+        assert!((model.synth_params[1] - tone_before).abs() < 1e-6);
+        model.finger_up(1, &mut out);
+        let lift = out.take();
+        assert!(
+            lift.iter().any(|r| matches!(
+                r,
+                Request::Synth { param, value, .. }
+                    if param == "tone_lfo_amount" && *value < 0.01
+            )),
+            "lifting WAH should stop the tone LFO: {lift:?}"
+        );
+    }
+
+    #[test]
+    fn kaoss_wah_hold_keeps_tone_lfo_after_lift() {
+        let mut model = NativeModel::new();
+        model.kaoss_program = kaoss_ui::KAOSS_PROGRAMS
+            .iter()
+            .position(|p| p.id == "wah")
+            .expect("wah program");
+        let mut out = Outbox::new();
+        model.toggle_kaoss_hold(&mut out);
+        let cell = model.layout.kaoss_cell(4, 1); // low Y → slow wah
+        model.finger_down(1, cell.x + 4, cell.y + 4, &mut out);
+        out.take();
+        model.finger_up(1, &mut out);
+        let lift = out.take();
+        assert!(
+            !lift.iter().any(|r| matches!(
+                r,
+                Request::Synth { param, value, .. }
+                    if param == "tone_lfo_amount" && *value < 0.01
+            )),
+            "HOLD should keep the wah running after lift: {lift:?}"
+        );
     }
 
     #[test]

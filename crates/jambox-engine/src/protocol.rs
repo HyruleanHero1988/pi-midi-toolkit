@@ -422,6 +422,8 @@ fn parse_synth_param(name: &str) -> Option<SynthParam> {
         "vibrato_rate" => SynthParam::VibratoRate,
         "vibrato_mod" => SynthParam::VibratoMod,
         "vibrato_always" => SynthParam::VibratoAlways,
+        "tone_lfo_rate" => SynthParam::ToneLfoRate,
+        "tone_lfo_amount" => SynthParam::ToneLfoAmount,
         "pitch_bend" => SynthParam::PitchBend,
         "drum_pitch" => SynthParam::DrumPitch,
         "drum_decay" => SynthParam::DrumDecay,

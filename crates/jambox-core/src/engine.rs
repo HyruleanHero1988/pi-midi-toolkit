@@ -41,6 +41,17 @@ const ATTACK_SEC_MAX: f32 = 0.400;
 const RELEASE_SEC_MIN: f32 = 0.010;
 const RELEASE_SEC_MAX: f32 = 0.800;
 
+/// Slow filter sweep at the bottom of the WAH pad.
+pub const TONE_LFO_HZ_MIN: f32 = 0.3;
+/// Fast auto-wah at the top of the WAH pad.
+pub const TONE_LFO_HZ_MAX: f32 = 10.0;
+
+/// Pad Y 0..1 → tone-LFO rate. Exponential so the lower half stays a slow sweep.
+pub fn tone_lfo_hz_from_unit(unit: f32) -> f32 {
+    let t = unit.clamp(0.0, 1.0);
+    TONE_LFO_HZ_MIN * (TONE_LFO_HZ_MAX / TONE_LFO_HZ_MIN).powf(t)
+}
+
 /// Exponential knob → seconds, matching Python `set_attack` / `set_release`.
 fn map_exp_time(unit: f32, min: f32, max: f32) -> f32 {
     min * (max / min).powf(unit.clamp(0.0, 1.0))
@@ -66,6 +77,57 @@ fn apply_tone_lowpass(buf: &mut [f32], tone: f32, lp: &mut f32, bp: &mut f32, sa
     let mut l = *lp;
     let mut b = *bp;
     for s in buf.iter_mut() {
+        l += f * b;
+        let hp = *s - l - damp * b;
+        b += f * hp;
+        *s = l;
+    }
+    *lp = l;
+    *bp = b;
+}
+
+/// Same SVF as [`apply_tone_lowpass`], with a per-sample sine on cutoff.
+///
+/// `amount` 0 = the sticky tone knob; 1 = the LFO owns brightness (0..1).
+fn apply_tone_lowpass_lfo(
+    buf: &mut [f32],
+    base_tone: f32,
+    amount: f32,
+    rate_hz: f32,
+    phase: &mut f64,
+    lp: &mut f32,
+    bp: &mut f32,
+    sample_rate: f32,
+) {
+    if buf.is_empty() {
+        return;
+    }
+    let amount = amount.clamp(0.0, 1.0);
+    if amount <= 0.01 {
+        apply_tone_lowpass(buf, base_tone, lp, bp, sample_rate);
+        return;
+    }
+    let sr = sample_rate.max(8000.0);
+    let phase_inc = std::f64::consts::TAU * rate_hz.max(0.01) as f64 / sr as f64;
+    let base = base_tone.clamp(0.0, 1.0);
+    let mut l = *lp;
+    let mut b = *bp;
+    for s in buf.iter_mut() {
+        *phase += phase_inc;
+        if *phase > std::f64::consts::TAU {
+            *phase %= std::f64::consts::TAU;
+        }
+        let lfo = 0.5 + 0.5 * (*phase).sin() as f32;
+        let tone = (base * (1.0 - amount) + lfo * amount).clamp(0.0, 1.0);
+        if tone >= 0.985 {
+            l = *s;
+            b = 0.0;
+            continue;
+        }
+        let fc = 90.0 * (8000.0_f32 / 90.0).powf(tone);
+        let fc = fc.min(sr * 0.14);
+        let f = (2.0 * std::f32::consts::PI * fc / sr).sin();
+        let damp = 0.38 + 0.62 * tone;
         l += f * b;
         let hp = *s - l - damp * b;
         b += f * hp;
@@ -170,6 +232,9 @@ pub struct JamboxEngine {
     vib_mod: f32,
     vib_always: f32,
     vib_phase: f64,
+    tone_lfo_amount: f32,
+    tone_lfo_rate_hz: f32,
+    tone_lfo_phase: f64,
     bend_semis: f32,
     tone_lp: f32,
     tone_bp: f32,
@@ -234,6 +299,9 @@ impl JamboxEngine {
             vib_mod: 0.0,
             vib_always: 0.0,
             vib_phase: 0.0,
+            tone_lfo_amount: 0.0,
+            tone_lfo_rate_hz: tone_lfo_hz_from_unit(0.5),
+            tone_lfo_phase: 0.0,
             bend_semis: 0.0,
             tone_lp: 0.0,
             tone_bp: 0.0,
@@ -486,6 +554,9 @@ impl JamboxEngine {
             vib_mod,
             vib_always,
             vib_phase,
+            tone_lfo_amount,
+            tone_lfo_rate_hz,
+            tone_lfo_phase,
             bend_semis,
             tone_lp,
             tone_bp,
@@ -542,7 +613,21 @@ impl JamboxEngine {
         }
 
         // Tone (brightness) is a keys-only resonant lowpass; drums have their own tone macro.
-        apply_tone_lowpass(&mut key_bus[..n], *tone, tone_lp, tone_bp, sr);
+        // Kaoss WAH overlays a sine on cutoff without rewriting the sticky tone knob.
+        if *tone_lfo_amount > 0.01 {
+            apply_tone_lowpass_lfo(
+                &mut key_bus[..n],
+                *tone,
+                *tone_lfo_amount,
+                *tone_lfo_rate_hz,
+                tone_lfo_phase,
+                tone_lp,
+                tone_bp,
+                sr,
+            );
+        } else {
+            apply_tone_lowpass(&mut key_bus[..n], *tone, tone_lp, tone_bp, sr);
+        }
 
         // Drums: per-model insert, then the shared kit bus.
         let mut models = [0usize; MAX_DRUM_HITS];
@@ -852,6 +937,8 @@ impl JamboxEngine {
             SynthParam::VibratoRate => self.vib_rate_hz = 1.0 + unit * 8.0,
             SynthParam::VibratoMod => self.vib_mod = unit,
             SynthParam::VibratoAlways => self.vib_always = unit,
+            SynthParam::ToneLfoRate => self.tone_lfo_rate_hz = tone_lfo_hz_from_unit(unit),
+            SynthParam::ToneLfoAmount => self.tone_lfo_amount = unit,
             SynthParam::PitchBend => self.bend_semis = value.clamp(-24.0, 24.0),
             SynthParam::DrumPitch => {
                 macros.pitch = unit;
@@ -1385,6 +1472,69 @@ mod tests {
         assert!(
             diff > 0.5,
             "always-on vibrato should detune vs gated-off, diff={diff}"
+        );
+    }
+
+    #[test]
+    fn tone_lfo_hz_is_slow_at_the_bottom_and_fast_at_the_top() {
+        assert!((tone_lfo_hz_from_unit(0.0) - TONE_LFO_HZ_MIN).abs() < 1e-5);
+        assert!((tone_lfo_hz_from_unit(1.0) - TONE_LFO_HZ_MAX).abs() < 1e-5);
+        let mid = tone_lfo_hz_from_unit(0.5);
+        assert!(mid > TONE_LFO_HZ_MIN * 1.5);
+        assert!(mid < (TONE_LFO_HZ_MIN + TONE_LFO_HZ_MAX) * 0.5);
+    }
+
+    #[test]
+    fn tone_lfo_moves_the_filter_vs_sticky_tone() {
+        let mut dry = engine();
+        let mut wet = engine();
+        for e in [&mut dry, &mut wet] {
+            apply_now(
+                e,
+                Command::SetSynth {
+                    param: SynthParam::Tone,
+                    value: 0.5,
+                },
+            );
+            apply_now(
+                e,
+                Command::NoteOn {
+                    channel: 0,
+                    note: 60,
+                    velocity: 127,
+                },
+            );
+        }
+        apply_now(
+            &mut wet,
+            Command::SetSynth {
+                param: SynthParam::ToneLfoRate,
+                value: 1.0,
+            },
+        );
+        apply_now(
+            &mut wet,
+            Command::SetSynth {
+                param: SynthParam::ToneLfoAmount,
+                value: 1.0,
+            },
+        );
+        let mut dry_buf = vec![0.0f32; 2048];
+        let mut wet_buf = vec![0.0f32; 2048];
+        let mut midi = MidiOutSink::new();
+        // Let envelopes match, then compare a block where the LFO has moved.
+        dry.render(&mut dry_buf, &[], &mut midi);
+        wet.render(&mut wet_buf, &[], &mut midi);
+        dry.render(&mut dry_buf, &[], &mut midi);
+        wet.render(&mut wet_buf, &[], &mut midi);
+        let diff: f32 = dry_buf
+            .iter()
+            .zip(wet_buf.iter())
+            .map(|(a, b)| (a - b).abs())
+            .sum();
+        assert!(
+            diff > 0.5,
+            "tone LFO should wah the filter vs sticky tone, diff={diff}"
         );
     }
 

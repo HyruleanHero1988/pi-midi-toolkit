@@ -157,6 +157,7 @@ pub fn program_hue(program_id: &str) -> f32 {
         "lead" => 0.93,
         "morph" => 0.80,
         "vib" => 0.55,
+        "wah" => 0.33,
         "level" => 0.12,
         "decay" => 0.08,
         "attack" => 0.18,
