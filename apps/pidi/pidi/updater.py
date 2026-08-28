@@ -1,37 +1,29 @@
 #!/usr/bin/env python3
-"""Opt-in software update for the Pi MIDI box.
+"""Opt-in software update for the Pi MIDI box (native kiosk).
 
 Checks the repo's default branch (master, then main). If the running copy
 is behind, installs the **whole repo** the same way SSH deploy does:
 
-* kiosk (``apps/pidi``)
+* shared ``apps/pidi`` assets (wavetables, updater, HW scripts)
 * crates, deploy scripts, shipped presets
 * restart ``midi-engine`` / ``jambox-engine`` / ``pidi-native`` when those units exist
 
-Two layouts are supported:
+Layouts:
 
 * Full git clone of pi-midi-toolkit (``git fetch`` + fast-forward).
-* Split install (``~/midi-tone`` kiosk + ``~/pi-midi-toolkit`` engines):
-  download the branch archive, overlay the repo root, then overlay the
-  running kiosk copy.
+* Split install (legacy ``~/midi-tone`` asset copy + ``~/pi-midi-toolkit``):
+  download the branch archive, overlay the repo root, then sync ``apps/pidi``.
 
 Never touches user data: ``settings.json``, ``songs/``, ``phrases/``,
-``user-presets/``, ``user-wavetables/``, ``.venv/``, credentials,
-``presets/active.json``. Live ``bin/`` is not overlay-copied; after the
-tree is in place, committed ``dist/armv7/{midi-engine,jambox-engine,pidi-native}``
-are installed onto ``bin/`` via stop + atomic rename (same paths
-systemd uses; avoids ETXTBSY on a running engine).
+``user-presets/``, ``user-wavetables/``, credentials, ``presets/active.json``.
+Live ``bin/`` is not overlay-copied; after the tree is in place, committed
+``dist/armv7/{midi-engine,jambox-engine,pidi-native}`` are installed onto
+``bin/`` via stop + atomic rename.
 
-Component digests (``ui``, ``engines``, ``requirements``) are stamped in
-``version.json``. After the tree is updated, pip / engine install /
-kiosk sync are skipped when that component's digest is unchanged.
+Component digests (``ui``, ``engines``) are stamped in ``version.json``.
+Does **not** cargo-build on the Pi. CI rebuilds ``dist/armv7`` on master.
 
-Does **not** cargo-build on the Pi (Pi 2 is too slow). A green push to
-``master`` that touches crates rebuilds those ELFs in CI and commits
-``dist/armv7/``. Manual rebuild (``./deploy/build-pi-bins.sh``) still
-works for LAN SSH deploys.
-
-Public GitHub CHECK/UPDATE uses anonymous HTTPS (no token).
+``pidi-native`` shells this module with ``--check`` (and optionally ``--apply``).
 """
 
 from __future__ import annotations
@@ -67,8 +59,7 @@ CHECK_TIMEOUT_SEC = 25
 DOWNLOAD_TIMEOUT_SEC = 180
 PIP_TIMEOUT_SEC = 300
 
-# User content deploy_pi.py never uploads. Overlay is copy-only (like scp) and
-# skips these paths so SET→UPDATE cannot wipe a live box.
+# Overlay is copy-only and skips these paths so SET→UPDATE cannot wipe a live box.
 KEEP_KIOSK = frozenset(
     {
         "settings.json",
@@ -85,30 +76,16 @@ KEEP_KIOSK = frozenset(
         ".gitignore",
     }
 )
-KEEP_NAMES = KEEP_KIOSK  # alias used by tests / kiosk-only overlay
+KEEP_NAMES = KEEP_KIOSK
 PI_ENGINE_BINS = ("midi-engine", "jambox-engine", "pidi-native")
 STAGED_BIN_DIR = pathlib.Path("dist") / "armv7"
-# Paths under the kiosk root that count as the ``ui`` component digest.
-# ``requirements.txt`` is hashed separately so pip can be skipped alone.
+# Shared apps/pidi assets that count as the ``ui`` / appliance-support digest.
 UI_DIGEST_PATHS: Sequence[str] = (
-    "midi_tone.py",
-    "VERSION",
     "pidi",
     "scripts",
-    "kiosk",
-    "branding",
     "wavetables",
-    "demo-songs",
-    "run.sh",
-    "kiosk.sh",
-    "launch-desktop.sh",
-    "setup-venv.sh",
-    "install-kiosk.sh",
-    "disable-kiosk.sh",
-    "midi-tone.desktop",
     "README.md",
-    "KIOSK.md",
-    "ARCHITECTURE.md",
+    ".wifi-credentials.example",
 )
 KEEP_REPO = frozenset(
     {
@@ -521,16 +498,20 @@ def _digest_named_paths(root: pathlib.Path, names: Sequence[str]) -> str:
     return digest.hexdigest() if found else ""
 
 
+def _looks_like_apps_pidi(path: pathlib.Path) -> bool:
+    return (path / "pidi" / "updater.py").is_file() or (path / "wavetables").is_dir()
+
+
 def kiosk_root_for(
     install: pathlib.Path,
     repo_root: Optional[pathlib.Path] = None,
 ) -> pathlib.Path:
-    """Resolve the running kiosk tree (``~/midi-tone`` or ``apps/pidi``)."""
-    if (install / "midi_tone.py").is_file():
+    """Resolve the shared ``apps/pidi`` tree (or a legacy split copy)."""
+    if _looks_like_apps_pidi(install):
         return install
     if repo_root is not None:
         candidate = repo_root / MIDI_TONE_REL
-        if (candidate / "midi_tone.py").is_file():
+        if _looks_like_apps_pidi(candidate):
             return candidate
     return install
 
@@ -573,15 +554,14 @@ def compute_component_digests(
 ) -> ComponentDigests:
     """Content digests for ui / engines / requirements under this layout.
 
-    By default prefers ``repo_root/apps/pidi`` (what the commit ships) so
-    post-pull digests see new UI/requirements before the live kiosk is
-    synced. Pass ``from_live_kiosk=True`` when capturing the running box
-    before an update (fallback when ``version.json`` has no stamp yet).
+    By default prefers ``repo_root/apps/pidi`` (what the commit ships).
+    Pass ``from_live_kiosk=True`` when capturing the running box before an
+    update (fallback when ``version.json`` has no stamp yet).
     """
     repo_kiosk = repo_root / MIDI_TONE_REL
     if from_live_kiosk:
         kiosk = kiosk_root_for(install or repo_root, repo_root)
-    elif (repo_kiosk / "midi_tone.py").is_file():
+    elif _looks_like_apps_pidi(repo_kiosk):
         kiosk = repo_kiosk
     else:
         kiosk = kiosk_root_for(install or repo_root, repo_root)
@@ -814,7 +794,7 @@ def overlay_tree(
 
 
 def looks_like_repo_root(path: pathlib.Path) -> bool:
-    return (path / "Cargo.toml").is_file() and (path / MIDI_TONE_REL / "midi_tone.py").is_file()
+    return (path / "Cargo.toml").is_file() and _looks_like_apps_pidi(path / MIDI_TONE_REL)
 
 
 def repo_root_for(install: pathlib.Path = HERE) -> pathlib.Path:
@@ -853,14 +833,14 @@ def _sync_kiosk_from_repo(
     progress: ProgressCb,
 ) -> None:
     src = repo_root / MIDI_TONE_REL
-    if not (src / "midi_tone.py").is_file():
+    if not _looks_like_apps_pidi(src):
         return
     try:
         if src.resolve() == install.resolve():
             return
     except OSError:
         pass
-    progress("Updating kiosk copy…")
+    progress("Updating apps/pidi asset copy…")
     overlay_tree(src, install, keep=KEEP_KIOSK)
 
 
@@ -1092,20 +1072,17 @@ def _git_fast_forward(
 
 
 def _find_midi_tone_dir(extracted: pathlib.Path) -> pathlib.Path:
+    """Locate ``apps/pidi`` inside a GitHub source archive (name is historical)."""
     direct = extracted / MIDI_TONE_REL
-    if (direct / "midi_tone.py").is_file():
+    if _looks_like_apps_pidi(direct):
         return direct
-    matches = list(extracted.glob("*/apps/pidi/midi_tone.py"))
+    matches = list(extracted.glob("*/apps/pidi/pidi/updater.py"))
+    if matches:
+        return matches[0].parent.parent
+    matches = list(extracted.glob("*/apps/pidi/wavetables"))
     if matches:
         return matches[0].parent
-    matches = list(extracted.glob("*/tools/midi-tone/midi_tone.py"))
-    if matches:
-        return matches[0].parent
-    matches = list(extracted.rglob("midi_tone.py"))
-    for hit in matches:
-        if hit.parent.name in {"pidi", "midi-tone"}:
-            return hit.parent
-    raise UpdateError("downloaded archive did not contain apps/pidi (or legacy tools/midi-tone)")
+    raise UpdateError("downloaded archive did not contain apps/pidi")
 
 
 def _download_archive(
@@ -1330,44 +1307,24 @@ def apply_update(
     return remote
 
 
-def restart_current_process(argv: Optional[Iterable[str]] = None) -> None:
-    """Replace this process with a fresh midi_tone.py (same PID / kiosk loop)."""
-    python = sys.executable or "python3"
-    script = str(HERE / "midi_tone.py")
-    args = [python, "-u", script]
-    if argv is None:
-        args.extend(sys.argv[1:])
-    else:
-        args.extend(list(argv))
-    os.chdir(str(HERE))
-    os.execv(python, args)
-
-
 def format_running_version_line(install: pathlib.Path = HERE) -> str:
-    """Product semver + short git/deploy stamp for the Settings hub.
-
-    Prefers version.json so the UI never blocks on git subprocesses.
-    """
-    from pidi.constants import APP_VERSION
-
+    """Short git/deploy stamp for status UIs."""
     stamped = read_version_file(install)
     local = stamped if stamped.sha else local_version(install)
-    line = f"PiDI {APP_VERSION}"
+    line = "PiDI"
     if local.short and local.short not in ("unknown", ""):
         line += f"  ·  {local.short}"
     return line
 
 
 def format_status_lines(check: Optional[UpdateCheck] = None, install: pathlib.Path = HERE) -> str:
-    from pidi.constants import APP_VERSION
-
     if check is not None:
         local = check.local
     else:
         stamped = read_version_file(install)
         local = stamped if stamped.sha else local_version(install)
     lines = [
-        f"PiDI {APP_VERSION}",
+        "PiDI",
         f"Running: {local.short}"
         + (f"  ({local.branch})" if local.branch else "")
         + (f"  via {local.source}" if local.source and local.source != "unknown" else ""),
@@ -1388,7 +1345,7 @@ def format_status_lines(check: Optional[UpdateCheck] = None, install: pathlib.Pa
 def main(argv: Optional[Sequence[str]] = None) -> int:
     import argparse
 
-    parser = argparse.ArgumentParser(description="midi-tone kiosk updater")
+    parser = argparse.ArgumentParser(description="PiDI / pidi-native updater")
     parser.add_argument("--status", action="store_true", help="print local version")
     parser.add_argument("--check", action="store_true", help="compare to remote branch")
     parser.add_argument("--apply", action="store_true", help="install remote if behind")

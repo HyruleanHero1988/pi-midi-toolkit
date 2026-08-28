@@ -1,5 +1,3 @@
-"""PiDI kiosk package."""
+"""Shared Pi appliance helpers (OTA updater). UI is crates/pidi-native."""
 
-from pidi.constants import APP_VERSION
-
-__version__ = APP_VERSION
+__version__ = "0.0.0"

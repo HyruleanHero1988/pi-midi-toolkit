@@ -569,7 +569,7 @@ pub fn update_check() -> (String, Vec<String>) {
     (status, lines)
 }
 
-/// Soft reboot/poweroff via midi-tone `pi-power.sh` when present (Tk POWER menu).
+/// Soft reboot/poweroff via `pi-power.sh` when present (SET → POWER).
 pub fn pi_power(action: &str) -> (String, Vec<String>) {
     let action = if action == "reboot" { "reboot" } else { "poweroff" };
     #[cfg(not(target_os = "linux"))]

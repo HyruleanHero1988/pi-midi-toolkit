@@ -1,6 +1,6 @@
 # Native jambox kiosk
 
-Status: **active kiosk** (Python / Tk frozen on `cursor/python-kiosk-archive-dfc2`)
+Status: **active kiosk** (SDL/KMSDRM + GLES2)
 
 Rust-only appliance UI for the Pi TFT70. `jambox-engine` + `pidi-native` are the
 runtime.
