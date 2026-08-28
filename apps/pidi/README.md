@@ -1,4 +1,9 @@
-# PiDI (kiosk UI)
+# PiDI (kiosk UI) — Python / Tk, archived
+
+**The live appliance UI is [`pidi-native`](../../crates/pidi-native)** (SDL/KMSDRM + GLES2).
+See [NATIVE_KIOSK.md](../../NATIVE_KIOSK.md) and the [native screen reference](../../docs/index.html).
+This tree stays for updater hooks, wavetables, and historical Tk layout. Freeze
+checkout: `cursor/python-kiosk-archive-dfc2`.
 
 Raspberry Pi TFT kiosk for the MIDI box — soft-synth, drums, sequencer, phrase
 pads, Kaoss XY, songs, and presets. Talks to **`jambox-engine`** over a socket
@@ -429,13 +434,16 @@ Files:
 
 ## Screen reference
 
-Open [docs/index.html](docs/index.html) in a browser for labeled 800×480 captures of every mode (HOME, SYNTH, SEQ, PADS, KAOSS, SONGS, PRESETS, LOG, SET) and the VOICES / MORPH / KIT / POWER / SAVE AS / KAOSS scales / FULL PAD overlays.
-
-Re-capture after UI changes (needs Tk + an 800×480 X display, or the script starts Xvfb itself):
+The live catalog is the **native** renderer: [docs/index.html](../../docs/index.html)
+(800×480 captures of HOME, SYNTH, SEQ, PADS, KAOSS, CHORDS, …). Recapture:
 
 ```bash
-python capture_ui_docs.py
+./scripts/capture-pidi-docs.sh
 ```
+
+A copy of that tree is kept here under `docs/` so raygarrison.us can keep
+bundling `apps/pidi/docs`. The Python Tk capture script
+(`pidi/capture_ui_docs.py`) is historical.
 
 ## On Windows (optional host test)
 

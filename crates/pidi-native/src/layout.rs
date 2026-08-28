@@ -82,6 +82,9 @@ pub enum Hit {
     ScrollArea(crate::scroll::ScrollKind),
     DrumMacro(usize),
     KitAllDrums,
+    KitWave,
+    KitPlay,
+    KitSlider(usize),
     MapThruOn,
     MapThruOff,
     MapRefresh,
@@ -222,6 +225,7 @@ pub struct Layout {
     pub kit_macros: Rect,
     pub kit_divisions: Rect,
     pub kit_all: Rect,
+    pub kit_wave: Rect,
     pub synth_wave_a: Rect,
     pub synth_wave_b: Rect,
     pub synth_swap: Rect,
@@ -607,30 +611,36 @@ impl Layout {
                 x: 24,
                 y: HUD_H + 36,
                 w: 752,
-                h: 96,
+                h: 88,
             },
             kit_grid: Rect {
                 x: 24,
-                y: HUD_H + 140,
+                y: HUD_H + 132,
+                w: 752,
+                h: 208,
+            },
+            kit_macros: Rect {
+                x: 24,
+                y: HUD_H + 172,
                 w: 752,
                 h: 200,
             },
-            kit_macros: Rect {
+            kit_divisions: Rect {
                 x: 24,
                 y: HUD_H + 348,
                 w: 752,
                 h: 44,
             },
-            kit_divisions: Rect {
+            kit_wave: Rect {
                 x: 24,
                 y: HUD_H + 400,
-                w: 320,
-                h: 36,
+                w: 376,
+                h: 44,
             },
             kit_all: Rect {
-                x: 360,
-                y: HUD_H + 396,
-                w: 416,
+                x: 408,
+                y: HUD_H + 400,
+                w: 368,
                 h: 44,
             },
             synth_keys: Rect {
@@ -1593,7 +1603,36 @@ impl Layout {
     }
 
     pub fn kit_macro_cell(&self, index: usize) -> Rect {
-        self.synth_macro_cell(index)
+        self.kit_edit_slider(index)
+    }
+
+    pub fn kit_edit_scope(&self) -> Rect {
+        Rect {
+            x: 24,
+            y: HUD_H + 36,
+            w: 752,
+            h: 128,
+        }
+    }
+
+    pub fn kit_edit_slider(&self, index: usize) -> Rect {
+        let n = 4i32;
+        let w = self.kit_macros.w / n;
+        Rect {
+            x: self.kit_macros.x + (index as i32) * w + 8,
+            y: self.kit_macros.y + 22,
+            w: w - 16,
+            h: self.kit_macros.h - 28,
+        }
+    }
+
+    pub fn kit_edit_play(&self) -> Rect {
+        Rect {
+            x: 24,
+            y: HUD_H + 384,
+            w: 240,
+            h: 56,
+        }
     }
 
     pub fn kit_division_cell(&self, index: usize) -> Rect {
@@ -1974,16 +2013,14 @@ impl Layout {
     }
 
     fn hit_drums(&self, px: i32, py: i32) -> Hit {
+        if self.kit_scope.contains(px, py) {
+            return Hit::KitWave;
+        }
         for index in 0..16 {
             if self.kit_pad_cell(index).contains(px, py) {
                 let cell = crate::phrases::PHRASE_GRID_CELLS[index];
                 let note = crate::phrases::mpk_note_for_phrase_cell(cell);
                 return Hit::Drum { index, note };
-            }
-        }
-        for index in 0..4 {
-            if self.kit_macro_cell(index).contains(px, py) {
-                return Hit::DrumMacro(index);
             }
         }
         if self.kit_divisions.contains(px, py) {
@@ -1993,8 +2030,26 @@ impl Layout {
                 }
             }
         }
+        if self.kit_wave.contains(px, py) {
+            return Hit::KitWave;
+        }
         if self.kit_all.contains(px, py) {
             return Hit::KitAllDrums;
+        }
+        Hit::None
+    }
+
+    pub fn hit_kit_edit(&self, px: i32, py: i32) -> Hit {
+        if self.kit_edit_play().contains(px, py) {
+            return Hit::KitPlay;
+        }
+        for index in 0..4 {
+            if self.kit_edit_slider(index).contains(px, py) {
+                return Hit::KitSlider(index);
+            }
+        }
+        if self.kit_edit_scope().contains(px, py) {
+            return Hit::KitPlay;
         }
         Hit::None
     }
@@ -2409,6 +2464,9 @@ pub enum Surface {
     },
     FmGraph {
         from: usize,
+    },
+    KitSlider {
+        index: usize,
     },
     SettingsFx {
         index: usize,

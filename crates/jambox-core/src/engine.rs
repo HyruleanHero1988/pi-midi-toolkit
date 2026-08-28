@@ -638,6 +638,11 @@ impl JamboxEngine {
                 self.bus_fx.reset();
             }
             Command::SetSynth { param, value } => self.set_synth(param, value),
+            Command::SetDrumMacro {
+                model,
+                param,
+                value,
+            } => self.set_drum_macro(model, param, value),
             Command::SetFx {
                 target,
                 param,
@@ -896,6 +901,20 @@ impl JamboxEngine {
         }
     }
 
+    fn set_drum_macro(&mut self, model: u8, param: SynthParam, value: f32) {
+        let unit = value.clamp(0.0, 1.0);
+        let model = DrumModel::from_index(model as usize);
+        let mut macros = self.drums.macros_for(model);
+        match param {
+            SynthParam::DrumPitch => macros.pitch = unit,
+            SynthParam::DrumDecay => macros.decay = unit,
+            SynthParam::DrumNoise => macros.noise = unit,
+            SynthParam::DrumTone => macros.tone = unit,
+            _ => return,
+        }
+        self.drums.set_model_macros(model, macros);
+    }
+
     fn set_fx(&mut self, target: FxTarget, param: FxParam, value: f32) {
         let unit = value.clamp(0.0, 1.0);
         let slot = match target {
@@ -924,6 +943,10 @@ impl JamboxEngine {
     /// Drum macros, for status / UI mirroring.
     pub fn drum_macros(&self) -> DrumMacros {
         self.drums.macros()
+    }
+
+    pub fn drum_macros_for(&self, model: DrumModel) -> DrumMacros {
+        self.drums.macros_for(model)
     }
 
     /// Clip slot mode, for status / UI mirroring.
@@ -1525,5 +1548,31 @@ mod tests {
             &mut midi,
         );
         assert_eq!(e.status().active_repeats, 0);
+    }
+
+    #[test]
+    fn drum_macro_command_is_per_model() {
+        let mut e = engine();
+        apply_now(
+            &mut e,
+            Command::SetDrumMacro {
+                model: DrumModel::Kick.index() as u8,
+                param: SynthParam::DrumPitch,
+                value: 1.0,
+            },
+        );
+        assert!((e.drum_macros_for(DrumModel::Kick).pitch - 1.0).abs() < 1e-6);
+        assert!(
+            (e.drum_macros_for(DrumModel::Snare).pitch - DrumMacros::default().pitch).abs() < 1e-6
+        );
+        apply_now(
+            &mut e,
+            Command::SetSynth {
+                param: SynthParam::DrumPitch,
+                value: 0.1,
+            },
+        );
+        assert!((e.drum_macros_for(DrumModel::Kick).pitch - 0.1).abs() < 1e-6);
+        assert!((e.drum_macros_for(DrumModel::Snare).pitch - 0.1).abs() < 1e-6);
     }
 }

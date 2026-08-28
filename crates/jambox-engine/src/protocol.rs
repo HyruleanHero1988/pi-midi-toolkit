@@ -35,6 +35,9 @@ pub enum Request {
     Synth {
         param: String,
         value: f32,
+        /// When set, drum_* params apply to that kit model index (0..15).
+        #[serde(default)]
+        drum: Option<u8>,
     },
     Fx {
         target: FxTargetSpec,
@@ -538,10 +541,28 @@ pub fn decode(request: Request) -> Result<Decoded, String> {
         },
         Request::AllNotesOff => Decoded::Command(Command::AllNotesOff),
         Request::Panic => Decoded::Command(Command::Panic),
-        Request::Synth { param, value } => {
+        Request::Synth { param, value, drum } => {
             let param =
                 parse_synth_param(&param).ok_or_else(|| format!("unknown param {param}"))?;
-            Decoded::Command(Command::SetSynth { param, value })
+            if let Some(index) = drum {
+                if matches!(
+                    param,
+                    SynthParam::DrumPitch
+                        | SynthParam::DrumDecay
+                        | SynthParam::DrumNoise
+                        | SynthParam::DrumTone
+                ) {
+                    Decoded::Command(Command::SetDrumMacro {
+                        model: index,
+                        param,
+                        value,
+                    })
+                } else {
+                    Decoded::Command(Command::SetSynth { param, value })
+                }
+            } else {
+                Decoded::Command(Command::SetSynth { param, value })
+            }
         }
         Request::Fx {
             target,
@@ -839,6 +860,27 @@ mod tests {
                 assert_eq!(division, RepeatDivision::Quarter);
             }
             _ => panic!("wrong decode"),
+        }
+    }
+
+    #[test]
+    fn drum_synth_param_targets_one_model() {
+        let d = decode_line(r#"{"cmd":"synth","param":"drum_pitch","value":0.8,"drum":0}"#);
+        match d {
+            Decoded::Command(Command::SetDrumMacro {
+                model: 0,
+                param: SynthParam::DrumPitch,
+                value,
+            }) => assert!((value - 0.8).abs() < 1e-6),
+            _ => panic!("expected SetDrumMacro"),
+        }
+        let d = decode_line(r#"{"cmd":"synth","param":"drum_pitch","value":0.8}"#);
+        match d {
+            Decoded::Command(Command::SetSynth {
+                param: SynthParam::DrumPitch,
+                value,
+            }) => assert!((value - 0.8).abs() < 1e-6),
+            _ => panic!("expected global SetSynth drum_pitch"),
         }
     }
 }

@@ -457,6 +457,7 @@ fn chrome_status(model: &NativeModel) -> String {
             jambox_core::OP_NAMES[model.fm_selected]
         ),
         UiMode::Synth if model.synth_vib_open => "VIB".into(),
+        UiMode::Drums if model.kit_edit_open => "WAVE".into(),
         UiMode::Settings => {
             if model.status_line.is_empty() {
                 "SETTINGS".into()
@@ -1801,19 +1802,30 @@ fn draw_fm_scope(scene: &mut Scene, model: &NativeModel) {
 
 fn draw_drums(scene: &mut Scene, model: &NativeModel) {
     let layout = model.layout;
+    if model.kit_edit_open {
+        draw_kit_edit(scene, model);
+        return;
+    }
+
     scene.text(24, HUD_H + 8, "DRUM KIT", 0xfbf1c7);
 
     let sel_cell = phrases::PHRASE_GRID_CELLS[model.kit_selected];
     let sel_note = phrases::mpk_note_for_phrase_cell(sel_cell);
     let model_name = drum_model_for_note(sel_note).name().replace('_', " ");
+    let macros = model.edit_drum_macros();
+    let target = if model.kit_all_drums {
+        "ALL DRUMS".to_string()
+    } else {
+        format!("{} {}", phrases::pad_label(sel_cell), model_name)
+    };
     let status = format!(
-        "{} {}  T{:.0} S{:.0} P{:.0} D{:.0}",
-        phrases::pad_label(sel_cell),
-        model_name,
-        model.drum_macros[0] * 100.0,
-        model.drum_macros[1] * 100.0,
-        model.drum_macros[2] * 100.0,
-        model.drum_macros[3] * 100.0,
+        "{}  hold {}  T{:.0} S{:.0} P{:.0} D{:.0}",
+        target,
+        model.division.label(),
+        macros[0] * 100.0,
+        macros[1] * 100.0,
+        macros[2] * 100.0,
+        macros[3] * 100.0,
     );
     scene.text_centered(
         Rect {
@@ -1827,18 +1839,7 @@ fn draw_drums(scene: &mut Scene, model: &NativeModel) {
         2,
     );
 
-    let scope = layout.kit_scope;
-    scene.fill_rect(scope, 0x1a1a12);
-    for i in 1..4 {
-        let y = scope.y + (scope.h * i) / 4;
-        scene.fill(scope.x as f32, y as f32, scope.w as f32, 1.0, 0x2a2a18);
-    }
-    scene.text(
-        scope.x + 24,
-        scope.y + scope.h / 2 - 4,
-        &format!("{} waveform", model_name),
-        0x504945,
-    );
+    draw_scope_wave(scene, layout.kit_scope, &model.kit_wave);
 
     for screen_index in 0..16 {
         let cell = layout.kit_pad_cell(screen_index);
@@ -1872,18 +1873,6 @@ fn draw_drums(scene: &mut Scene, model: &NativeModel) {
         );
     }
 
-    const MACROS: [&str; 4] = ["TONE", "SNAP", "PITCH", "DECAY"];
-    for index in 0..4 {
-        let cell = layout.kit_macro_cell(index);
-        scene.fill_rect(cell, 0x3c3836);
-        scene.text_centered(
-            cell,
-            &format!("{} {:.0}", MACROS[index], model.drum_macros[index] * 100.0),
-            0xfbf1c7,
-            2,
-        );
-    }
-
     const DIV_LABELS: [&str; 4] = ["1/4", "1/8", "1/8T", "1/16"];
     for index in 0..4 {
         let cell = layout.kit_division_cell(index);
@@ -1893,6 +1882,9 @@ fn draw_drums(scene: &mut Scene, model: &NativeModel) {
         scene.text_centered(cell, DIV_LABELS[index], 0xffffff, 2);
     }
 
+    scene.fill_rect(layout.kit_wave, 0x689d6a);
+    scene.text_centered(layout.kit_wave, "WAVE", 0xfbf1c7, 2);
+
     let all_bg = if model.kit_all_drums {
         0xb16286
     } else {
@@ -1900,6 +1892,85 @@ fn draw_drums(scene: &mut Scene, model: &NativeModel) {
     };
     scene.fill_rect(layout.kit_all, all_bg);
     scene.text_centered(layout.kit_all, "ALL DRUMS", 0xfbf1c7, 2);
+}
+
+fn draw_kit_edit(scene: &mut Scene, model: &NativeModel) {
+    let layout = model.layout;
+    let macros = model.edit_drum_macros();
+    let title = if model.kit_all_drums {
+        "ALL DRUMS".to_string()
+    } else {
+        let cell = phrases::PHRASE_GRID_CELLS[model.kit_selected];
+        format!(
+            "{} {}",
+            phrases::pad_label(cell),
+            model.selected_drum_model().name().replace('_', " ")
+        )
+    };
+    scene.text(24, HUD_H + 8, "DRUM WAVE", 0xfbf1c7);
+    scene.text_centered(
+        Rect {
+            x: 160,
+            y: HUD_H + 6,
+            w: 480,
+            h: 24,
+        },
+        &title,
+        0xfabd2f,
+        2,
+    );
+
+    draw_scope_wave(scene, layout.kit_edit_scope(), &model.kit_wave);
+
+    const LABELS: [&str; 4] = ["TONE", "SNAP", "PITCH", "DECAY"];
+    for index in 0..4 {
+        let track = layout.kit_edit_slider(index);
+        scene.fill_rect(track, 0x20202c);
+        scene.text(track.x + 8, track.y - 18, LABELS[index], 0xc0c0d0);
+        let fill_h = (track.h as f32 * macros[index]) as i32;
+        let fill = Rect {
+            x: track.x + 4,
+            y: track.y + track.h - fill_h,
+            w: track.w - 8,
+            h: fill_h.max(2),
+        };
+        scene.fill_rect(fill, 0x689d6a);
+    }
+
+    scene.fill_rect(layout.kit_edit_play(), 0x458588);
+    scene.text_centered(layout.kit_edit_play(), "PLAY", 0xffffff, 2);
+    scene.text(
+        layout.kit_edit_play().x + 256,
+        layout.kit_edit_play().y + 18,
+        "BACK returns to pads",
+        0xa89984,
+    );
+}
+
+fn draw_scope_wave(scene: &mut Scene, rect: Rect, samples: &[f32]) {
+    scene.fill_rect(rect, 0x1a1a12);
+    for i in 1..4 {
+        let y = rect.y + (rect.h * i) / 4;
+        scene.fill(rect.x as f32, y as f32, rect.w as f32, 1.0, 0x2a2a18);
+    }
+    if samples.iter().all(|s| *s == 0.0) {
+        scene.text(rect.x + 24, rect.y + rect.h / 2 - 4, "NO WAVE", 0x504945);
+        return;
+    }
+    let n = samples.len().max(2);
+    let mid_y = rect.y as f32 + rect.h as f32 * 0.5;
+    let amp = (rect.h as f32 * 0.42).max(4.0);
+    let mut prev_x = rect.x as f32 + 2.0;
+    let mut prev_y = mid_y;
+    for (i, s) in samples.iter().enumerate() {
+        let x = rect.x as f32 + 2.0 + (i as f32) * ((rect.w - 4) as f32) / (n - 1) as f32;
+        let y = mid_y - *s * amp;
+        if i > 0 {
+            stroke_scope_seg(scene, prev_x, prev_y, x, y, 0xb8bb26);
+        }
+        prev_x = x;
+        prev_y = y;
+    }
 }
 
 fn draw_seq(scene: &mut Scene, model: &NativeModel) {
@@ -2140,21 +2211,33 @@ fn draw_map(scene: &mut Scene, model: &NativeModel) {
     scene.text(
         layout.map_thru_on.x + 56,
         layout.map_thru_on.y + 28,
-        "THRU ON",
+        if model.host_busy() == Some(crate::host::HostTask::MapThruOn) {
+            "WAIT"
+        } else {
+            "THRU ON"
+        },
         0xffffff,
     );
     scene.fill_rect(layout.map_thru_off, 0x9d0006);
     scene.text(
         layout.map_thru_off.x + 48,
         layout.map_thru_off.y + 28,
-        "THRU OFF",
+        if model.host_busy() == Some(crate::host::HostTask::MapThruOff) {
+            "WAIT"
+        } else {
+            "THRU OFF"
+        },
         0xffffff,
     );
     scene.fill_rect(layout.map_refresh, 0x458588);
     scene.text(
         layout.map_refresh.x + 28,
         layout.map_refresh.y + 28,
-        "REFRESH PORTS",
+        if model.host_busy() == Some(crate::host::HostTask::MapList) {
+            "WAIT"
+        } else {
+            "REFRESH PORTS"
+        },
         0xffffff,
     );
     // Recent log peek for list output
@@ -2220,8 +2303,17 @@ fn draw_settings(scene: &mut Scene, model: &NativeModel) {
     scene.text_centered(layout.settings_log, "LOG", 0xffffff, 2);
     scene.fill_rect(layout.settings_map, 0x83a598);
     scene.text_centered(layout.settings_map, "MAP", 0xffffff, 2);
-    scene.fill_rect(layout.settings_wifi, 0xd79921);
-    scene.text_centered(layout.settings_wifi, "WIFI", 0xffffff, 2);
+    let wifi_busy = model.host_busy() == Some(crate::host::HostTask::Wifi);
+    scene.fill_rect(
+        layout.settings_wifi,
+        if wifi_busy { 0x504945 } else { 0xd79921 },
+    );
+    scene.text_centered(
+        layout.settings_wifi,
+        if wifi_busy { "WAIT" } else { "WIFI" },
+        0xffffff,
+        2,
+    );
     scene.fill_rect(
         layout.settings_font,
         model.font_style.resolved().settings_color(),
@@ -2232,8 +2324,17 @@ fn draw_settings(scene: &mut Scene, model: &NativeModel) {
         0xffffff,
         2,
     );
-    scene.fill_rect(layout.settings_update, 0x689d6a);
-    scene.text_centered(layout.settings_update, "UPDATE", 0xffffff, 2);
+    let upd_busy = model.host_busy() == Some(crate::host::HostTask::UpdateCheck);
+    scene.fill_rect(
+        layout.settings_update,
+        if upd_busy { 0x504945 } else { 0x689d6a },
+    );
+    scene.text_centered(
+        layout.settings_update,
+        if upd_busy { "WAIT" } else { "UPDATE" },
+        0xffffff,
+        2,
+    );
     // WIFI / UPDATE / MAP write status_line — show it here (chrome truncates >12 chars).
     if !model.status_line.is_empty() {
         let c = layout.content;

@@ -1,4 +1,6 @@
-//! Dump one PPM per mode for host UI review:
+//! Dump one PPM per mode for host UI review.
+//! Official docs captures: `./scripts/capture-pidi-docs.sh` (example dump_docs).
+//!
 //! `cargo run -p pidi-native --example dump_ui --no-default-features`
 
 use std::path::PathBuf;
@@ -105,6 +107,17 @@ fn main() {
         model.tick(1.0 / 60.0, &mut ob);
         dump(&model, out.join("fm_draw.ppm"));
         model.finger_up(2, &mut ob);
+    }
+    {
+        let mut model = NativeModel::new();
+        let mut ob = Outbox::new();
+        model.set_mode(UiMode::Drums);
+        model.tick(1.0 / 60.0, &mut ob);
+        let b = model.layout.kit_wave;
+        model.finger_down(1, b.x + 4, b.y + 4, &mut ob);
+        model.finger_up(1, &mut ob);
+        model.tick(1.0 / 60.0, &mut ob);
+        dump(&model, out.join("drums_wave.ppm"));
     }
     {
         let mut model = NativeModel::new();
