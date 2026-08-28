@@ -83,11 +83,7 @@ fn pose_kaoss_finger(model: &mut NativeModel, ob: &mut Outbox) {
 
 fn main() {
     isolate_session();
-    let out = PathBuf::from(
-        env::args()
-            .nth(1)
-            .unwrap_or_else(|| "docs/screens".into()),
-    );
+    let out = PathBuf::from(env::args().nth(1).unwrap_or_else(|| "docs/screens".into()));
     std::fs::create_dir_all(&out).expect("create docs/screens");
 
     {
@@ -157,8 +153,32 @@ fn main() {
     {
         let (mut model, mut ob) = fresh();
         model.set_mode(UiMode::Drums);
+        let kick = model.layout.kit_pad_cell(4);
+        tap(&mut model, 1, kick, &mut ob);
+        let repeat = model.layout.kit_note_repeat;
+        tap(&mut model, 1, repeat, &mut ob);
+        let quarter = model.layout.kit_repeat_choice_cell(1);
+        tap(&mut model, 1, quarter, &mut ob);
         tick_n(&mut model, &mut ob, 2);
         dump(&model, &out, "09-drums");
+    }
+    {
+        let (mut model, mut ob) = fresh();
+        model.set_mode(UiMode::Drums);
+        let kick = model.layout.kit_pad_cell(4);
+        tap(&mut model, 1, kick, &mut ob);
+        let repeat = model.layout.kit_note_repeat;
+        tap(&mut model, 1, repeat, &mut ob);
+        tick_n(&mut model, &mut ob, 2);
+        dump(&model, &out, "09-drums-repeat");
+    }
+    {
+        let (mut model, mut ob) = fresh();
+        model.set_mode(UiMode::Drums);
+        let wave = model.layout.kit_wave;
+        tap(&mut model, 1, wave, &mut ob);
+        tick_n(&mut model, &mut ob, 2);
+        dump(&model, &out, "09-drums-wave");
     }
     {
         let (mut model, mut ob) = fresh();

@@ -49,37 +49,61 @@ const KIT_WAVE_POINTS: usize = 160;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RepeatDivisionChoice {
+    Off,
     Quarter,
     Eighth,
     EighthTriplet,
     Sixteenth,
+    Triple,
 }
 
 impl RepeatDivisionChoice {
+    pub const ALL: [Self; 6] = [
+        Self::Off,
+        Self::Quarter,
+        Self::Eighth,
+        Self::EighthTriplet,
+        Self::Sixteenth,
+        Self::Triple,
+    ];
+
     pub fn from_index(index: usize) -> Self {
-        match index % 4 {
-            1 => Self::Eighth,
-            2 => Self::EighthTriplet,
-            3 => Self::Sixteenth,
-            _ => Self::Quarter,
-        }
+        Self::ALL[index % Self::ALL.len()]
+    }
+
+    pub fn is_on(self) -> bool {
+        !matches!(self, Self::Off)
     }
 
     pub fn as_wire(self) -> RepeatDivision {
         match self {
-            Self::Quarter => RepeatDivision::Quarter,
+            Self::Off | Self::Quarter => RepeatDivision::Quarter,
             Self::Eighth => RepeatDivision::Eighth,
             Self::EighthTriplet => RepeatDivision::EighthTriplet,
             Self::Sixteenth => RepeatDivision::Sixteenth,
+            Self::Triple => RepeatDivision::QuarterTriplet,
         }
     }
 
     pub fn label(self) -> &'static str {
         match self {
+            Self::Off => "OFF",
             Self::Quarter => "1/4",
             Self::Eighth => "1/8",
             Self::EighthTriplet => "1/8T",
             Self::Sixteenth => "1/16",
+            Self::Triple => "TRIPLE",
+        }
+    }
+
+    pub fn pad_label(self) -> Option<&'static str> {
+        match self {
+            Self::Off => None,
+            Self::Quarter => Some("1/4"),
+            Self::Eighth => Some("1/8"),
+            Self::EighthTriplet => Some("1/8T"),
+            Self::Sixteenth => Some("1/16"),
+            Self::Triple => Some("TRIP"),
         }
     }
 }
@@ -133,7 +157,8 @@ pub struct PadRecEvent {
 pub struct NativeModel {
     pub layout: Layout,
     pub mode: UiMode,
-    pub division: RepeatDivisionChoice,
+    /// Per-kit-voice note repeat. Off is a single tap; other values hold-to-repeat.
+    pub drum_repeat: [RepeatDivisionChoice; DRUM_MODEL_COUNT],
     pub status: StatusReply,
     pub fps: f32,
     pub connected: bool,
@@ -184,6 +209,8 @@ pub struct NativeModel {
     pub kit_all_drums: bool,
     /// WAVE drill-down: sliders + CRT one-shot for the current edit target.
     pub kit_edit_open: bool,
+    /// NOTE REPEAT drill-down: none / 1/4 / 1/8 / 1/8T / 1/16 / triple.
+    pub kit_repeat_open: bool,
     pub kit_wave: [f32; KIT_WAVE_POINTS],
     kit_wave_dirty: bool,
     pub kaoss_scale_index: u8,
@@ -295,7 +322,7 @@ impl NativeModel {
         Self {
             layout: Layout::new(),
             mode: UiMode::Kaoss,
-            division: RepeatDivisionChoice::Quarter,
+            drum_repeat: [RepeatDivisionChoice::Off; DRUM_MODEL_COUNT],
             status: StatusReply::default(),
             fps: 0.0,
             connected: false,
@@ -341,6 +368,7 @@ impl NativeModel {
             kit_selected: 4,
             kit_all_drums: false,
             kit_edit_open: false,
+            kit_repeat_open: false,
             kit_wave: [0.0; KIT_WAVE_POINTS],
             kit_wave_dirty: true,
             kaoss_scale_index: jambox_core::DEFAULT_KAOSS_SCALE_INDEX,
@@ -525,6 +553,7 @@ impl NativeModel {
         self.synth_vib_open = false;
         self.synth_pick_scroll = 0;
         self.kit_edit_open = false;
+        self.kit_repeat_open = false;
         self.chords_overlay = None;
         self.chords_arm = false;
         if mode != UiMode::Kaoss && self.kaoss_full {
@@ -624,6 +653,9 @@ impl NativeModel {
         if self.kit_edit_open {
             return Some("kit_edit");
         }
+        if self.kit_repeat_open {
+            return Some("kit_repeat");
+        }
         None
     }
 
@@ -702,6 +734,10 @@ impl NativeModel {
             }
             Some("kit_edit") => {
                 self.kit_edit_open = false;
+                self.status_line.clear();
+            }
+            Some("kit_repeat") => {
+                self.kit_repeat_open = false;
                 self.status_line.clear();
             }
             _ => {
@@ -826,7 +862,7 @@ impl NativeModel {
         self.tick_kaoss_gate(outbox);
         self.tick_screensaver(dt);
         self.poll_host_job();
-        if self.mode == UiMode::Drums && self.kit_wave_dirty {
+        if self.mode == UiMode::Drums && self.kit_edit_open && self.kit_wave_dirty {
             self.rebuild_kit_wave();
         }
     }
@@ -1226,6 +1262,16 @@ impl NativeModel {
             } else {
                 self.layout.hit_kit_edit(px, py)
             }
+        } else if self.mode == UiMode::Drums && self.kit_repeat_open {
+            let base = self.layout.hit(self.mode, px, py);
+            if matches!(
+                base,
+                Hit::Nav(_) | Hit::NavBack | Hit::Power | Hit::HomeTile(_)
+            ) {
+                base
+            } else {
+                self.layout.hit_kit_repeat(px, py)
+            }
         } else if self.mode == UiMode::Songs && self.layout.song_list.contains(px, py) {
             Hit::ScrollArea(ScrollKind::SongList)
         } else if self.mode == UiMode::Log {
@@ -1327,11 +1373,13 @@ impl NativeModel {
                 self.begin_kaoss_touch(gesture, x, y, outbox);
             }
             Hit::Drum { index, note } => {
-                let repeat = self.mode == UiMode::Drums;
+                let repeat = self.drum_repeat_for_note(note);
                 if self.mode == UiMode::Drums {
                     self.kit_selected = index;
                     self.kit_all_drums = false;
-                    self.kit_wave_dirty = true;
+                    if self.kit_edit_open {
+                        self.kit_wave_dirty = true;
+                    }
                 }
                 self.fingers[slot] = Finger {
                     active: true,
@@ -1341,17 +1389,20 @@ impl NativeModel {
                     y: 0.0,
                     px,
                     py,
-                    surface: Surface::Drum { note, repeat },
+                    surface: Surface::Drum {
+                        note,
+                        repeat: repeat.is_on(),
+                    },
                     gate_on: false,
                 };
-                if repeat {
+                if repeat.is_on() {
                     outbox.repeat(
                         gesture,
                         RepeatPhase::Down,
                         note,
                         DRUM_CHANNEL,
                         110,
-                        self.division.as_wire(),
+                        repeat.as_wire(),
                     );
                 } else {
                     outbox.note_on(DRUM_CHANNEL, note, 110);
@@ -1359,8 +1410,12 @@ impl NativeModel {
                 self.seq.push_note(true, DRUM_CHANNEL, note, 110);
                 self.push_pad_rec(true, DRUM_CHANNEL, note, 110);
             }
+            Hit::KitNoteRepeat => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.open_kit_repeat();
+            }
             Hit::Division(index) => {
-                self.division = RepeatDivisionChoice::from_index(index);
+                self.apply_drum_repeat(RepeatDivisionChoice::from_index(index));
                 self.fingers[slot] = Finger {
                     active: true,
                     id,
@@ -1572,6 +1627,7 @@ impl NativeModel {
             }
             Hit::KitWave => {
                 self.tap_ui(slot, id, gesture, px, py);
+                self.kit_repeat_open = false;
                 self.open_kit_edit();
             }
             Hit::KitPlay => {
@@ -1583,7 +1639,9 @@ impl NativeModel {
                 self.kit_all_drums = true;
                 self.drum_group_macros = self.edit_source_macros();
                 self.fx_target = FxEditTarget::DrumGroup;
-                self.kit_wave_dirty = true;
+                if self.kit_edit_open {
+                    self.kit_wave_dirty = true;
+                }
                 self.status_line = "ALL DRUMS — sliders reshape the whole kit".into();
                 self.mark_dirty();
             }
@@ -2503,7 +2561,7 @@ impl NativeModel {
                         note,
                         DRUM_CHANNEL,
                         110,
-                        self.division.as_wire(),
+                        self.drum_repeat_for_note(note).as_wire(),
                     );
                 } else {
                     outbox.note_off(DRUM_CHANNEL, note);
@@ -3051,7 +3109,32 @@ impl NativeModel {
         }
     }
 
+    pub fn drum_repeat_for_note(&self, note: u8) -> RepeatDivisionChoice {
+        self.drum_repeat[drum_model_for_note(note).index()]
+    }
+
+    pub fn edit_drum_repeat(&self) -> RepeatDivisionChoice {
+        if self.kit_all_drums {
+            self.drum_repeat[0]
+        } else {
+            self.drum_repeat[self.selected_drum_model().index()]
+        }
+    }
+
+    pub fn edit_drum_repeat_mixed(&self) -> bool {
+        self.kit_all_drums && self.drum_repeat.iter().any(|d| *d != self.drum_repeat[0])
+    }
+
+    pub fn note_repeat_button_label(&self) -> String {
+        if self.edit_drum_repeat_mixed() {
+            "NOTE REPEAT: MIXED".into()
+        } else {
+            format!("NOTE REPEAT: {}", self.edit_drum_repeat().label())
+        }
+    }
+
     fn open_kit_edit(&mut self) {
+        self.kit_repeat_open = false;
         self.kit_edit_open = true;
         self.kit_wave_dirty = true;
         let name = if self.kit_all_drums {
@@ -3060,6 +3143,35 @@ impl NativeModel {
             self.selected_drum_model().name().replace('_', " ")
         };
         self.status_line = format!("{name} — sliders reshape this voice");
+        self.mark_dirty();
+    }
+
+    fn open_kit_repeat(&mut self) {
+        self.kit_edit_open = false;
+        self.kit_repeat_open = true;
+        let name = if self.kit_all_drums {
+            "ALL DRUMS".to_string()
+        } else {
+            self.selected_drum_model().name().replace('_', " ")
+        };
+        self.status_line = format!("{name} — note repeat");
+        self.mark_dirty();
+    }
+
+    fn apply_drum_repeat(&mut self, choice: RepeatDivisionChoice) {
+        if self.kit_all_drums {
+            self.drum_repeat = [choice; DRUM_MODEL_COUNT];
+            self.status_line = format!("ALL DRUMS note repeat {}", choice.label());
+        } else {
+            let model = self.selected_drum_model().index();
+            self.drum_repeat[model] = choice;
+            self.status_line = format!(
+                "{} note repeat {}",
+                self.selected_drum_model().name().replace('_', " "),
+                choice.label()
+            );
+        }
+        self.kit_repeat_open = false;
         self.mark_dirty();
     }
 
@@ -5144,6 +5256,7 @@ mod tests {
     fn a_snare_can_fire_while_kick_repeats() {
         let mut model = NativeModel::new();
         model.set_mode(UiMode::Drums);
+        model.drum_repeat[jambox_core::DrumModel::Kick.index()] = RepeatDivisionChoice::Quarter;
         let mut out = Outbox::new();
         let kick = model.layout.kit_pad_cell(4);
         let snare = model.layout.kit_pad_cell(5);
@@ -5159,14 +5272,12 @@ mod tests {
                 ..
             }
         )));
-        assert!(batch.iter().any(|r| matches!(
-            r,
-            Request::Repeat {
-                note: 37,
-                phase: RepeatPhase::Down,
-                ..
-            }
-        )));
+        assert!(batch
+            .iter()
+            .any(|r| matches!(r, Request::NoteOn { note: 37, .. })));
+        assert!(!batch
+            .iter()
+            .any(|r| matches!(r, Request::Repeat { note: 37, .. })));
     }
 
     #[test]
@@ -5353,11 +5464,19 @@ mod tests {
         let mut model = NativeModel::new();
         model.set_mode(UiMode::Drums);
         let mut out = Outbox::new();
-        let eighth = model.layout.kit_division_cell(1);
+        let hat = model.layout.kit_pad_cell(0);
+        model.finger_down(1, hat.x + 4, hat.y + 4, &mut out);
+        model.finger_up(1, &mut out);
+        out.take();
+        let repeat_btn = model.layout.kit_note_repeat;
+        model.finger_down(1, repeat_btn.x + 4, repeat_btn.y + 4, &mut out);
+        model.finger_up(1, &mut out);
+        assert!(model.kit_repeat_open);
+        out.take();
+        let eighth = model.layout.kit_repeat_choice_cell(2);
         model.finger_down(1, eighth.x + 4, eighth.y + 4, &mut out);
         model.finger_up(1, &mut out);
         out.take();
-        let hat = model.layout.kit_pad_cell(0);
         model.finger_down(2, hat.x + 4, hat.y + 4, &mut out);
         let batch = out.take();
         assert!(batch.iter().any(|r| matches!(
@@ -5371,14 +5490,155 @@ mod tests {
     }
 
     #[test]
+    fn note_repeat_off_sends_a_single_hit() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Drums);
+        let mut out = Outbox::new();
+        let kick = model.layout.kit_pad_cell(4);
+        model.finger_down(1, kick.x + 4, kick.y + 4, &mut out);
+        model.finger_up(1, &mut out);
+        let batch = out.take();
+        assert!(batch
+            .iter()
+            .any(|r| matches!(r, Request::NoteOn { note: 36, .. })));
+        assert!(batch
+            .iter()
+            .any(|r| matches!(r, Request::NoteOff { note: 36, .. })));
+        assert!(!batch.iter().any(|r| matches!(r, Request::Repeat { .. })));
+    }
+
+    #[test]
+    fn note_repeat_is_per_drum() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Drums);
+        let mut out = Outbox::new();
+        let kick = model.layout.kit_pad_cell(4);
+        let snare = model.layout.kit_pad_cell(5);
+        model.finger_down(1, kick.x + 4, kick.y + 4, &mut out);
+        model.finger_up(1, &mut out);
+        out.take();
+        let repeat_btn = model.layout.kit_note_repeat;
+        model.finger_down(2, repeat_btn.x + 4, repeat_btn.y + 4, &mut out);
+        model.finger_up(2, &mut out);
+        let quarter = model.layout.kit_repeat_choice_cell(1);
+        model.finger_down(2, quarter.x + 4, quarter.y + 4, &mut out);
+        model.finger_up(2, &mut out);
+        out.take();
+        model.finger_down(3, snare.x + 4, snare.y + 4, &mut out);
+        model.finger_up(3, &mut out);
+        out.take();
+        model.finger_down(3, repeat_btn.x + 4, repeat_btn.y + 4, &mut out);
+        model.finger_up(3, &mut out);
+        let none = model.layout.kit_repeat_choice_cell(0);
+        model.finger_down(3, none.x + 4, none.y + 4, &mut out);
+        model.finger_up(3, &mut out);
+        out.take();
+        model.finger_down(4, kick.x + 4, kick.y + 4, &mut out);
+        model.finger_down(5, snare.x + 4, snare.y + 4, &mut out);
+        let batch = out.take();
+        assert!(batch.iter().any(|r| matches!(
+            r,
+            Request::Repeat {
+                note: 36,
+                division: RepeatDivision::Quarter,
+                ..
+            }
+        )));
+        assert!(batch
+            .iter()
+            .any(|r| matches!(r, Request::NoteOn { note: 37, .. })));
+    }
+
+    #[test]
+    fn note_repeat_none_and_triple_are_in_the_picker() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Drums);
+        let mut out = Outbox::new();
+        let kick = model.layout.kit_pad_cell(4);
+        model.finger_down(1, kick.x + 4, kick.y + 4, &mut out);
+        model.finger_up(1, &mut out);
+        let repeat_btn = model.layout.kit_note_repeat;
+        model.finger_down(2, repeat_btn.x + 4, repeat_btn.y + 4, &mut out);
+        model.finger_up(2, &mut out);
+        let triple = model.layout.kit_repeat_choice_cell(5);
+        model.finger_down(2, triple.x + 4, triple.y + 4, &mut out);
+        model.finger_up(2, &mut out);
+        assert_eq!(
+            model.drum_repeat[jambox_core::DrumModel::Kick.index()],
+            RepeatDivisionChoice::Triple
+        );
+        out.take();
+        model.finger_down(3, kick.x + 4, kick.y + 4, &mut out);
+        let batch = out.take();
+        assert!(batch.iter().any(|r| matches!(
+            r,
+            Request::Repeat {
+                note: 36,
+                division: RepeatDivision::QuarterTriplet,
+                ..
+            }
+        )));
+        assert_eq!(model.note_repeat_button_label(), "NOTE REPEAT: TRIPLE");
+        model.finger_down(4, repeat_btn.x + 4, repeat_btn.y + 4, &mut out);
+        model.finger_up(4, &mut out);
+        let none = model.layout.kit_repeat_choice_cell(0);
+        model.finger_down(4, none.x + 4, none.y + 4, &mut out);
+        model.finger_up(4, &mut out);
+        assert_eq!(
+            model.drum_repeat[jambox_core::DrumModel::Kick.index()],
+            RepeatDivisionChoice::Off
+        );
+        assert_eq!(model.note_repeat_button_label(), "NOTE REPEAT: OFF");
+    }
+
+    #[test]
+    fn all_drums_note_repeat_writes_every_voice() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Drums);
+        let mut out = Outbox::new();
+        let all = model.layout.kit_all;
+        model.finger_down(1, all.x + 4, all.y + 4, &mut out);
+        model.finger_up(1, &mut out);
+        let repeat_btn = model.layout.kit_note_repeat;
+        model.finger_down(2, repeat_btn.x + 4, repeat_btn.y + 4, &mut out);
+        model.finger_up(2, &mut out);
+        let sixteenth = model.layout.kit_repeat_choice_cell(4);
+        model.finger_down(2, sixteenth.x + 4, sixteenth.y + 4, &mut out);
+        model.finger_up(2, &mut out);
+        assert!(model
+            .drum_repeat
+            .iter()
+            .all(|d| *d == RepeatDivisionChoice::Sixteenth));
+        assert_eq!(model.note_repeat_button_label(), "NOTE REPEAT: 1/16");
+    }
+
+    #[test]
     fn kit_scope_renders_a_one_shot() {
         let mut model = NativeModel::new();
         model.set_mode(UiMode::Drums);
+        model.open_kit_edit();
         let mut out = Outbox::new();
         model.tick(1.0 / 60.0, &mut out);
         assert!(
             model.kit_wave.iter().any(|s| s.abs() > 0.01),
             "selected drum waveform should be non-silent"
+        );
+    }
+
+    #[test]
+    fn main_kit_view_does_not_rebuild_the_waveform_on_a_pad_tap() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Drums);
+        model.kit_wave = [0.0; 160];
+        model.kit_wave_dirty = false;
+        let mut out = Outbox::new();
+        let kick = model.layout.kit_pad_cell(4);
+        model.finger_down(1, kick.x + 4, kick.y + 4, &mut out);
+        model.finger_up(1, &mut out);
+        model.tick(1.0 / 60.0, &mut out);
+        assert!(
+            model.kit_wave.iter().all(|s| *s == 0.0),
+            "pad trigger must not rebuild the kit waveform"
         );
     }
 
