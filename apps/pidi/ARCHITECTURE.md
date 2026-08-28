@@ -1,7 +1,7 @@
 # PiDI architecture
 
-PiDI is the **kiosk UI** for the Raspberry Pi MIDI box. Audio is owned by
-`jambox-engine` (Rust) when available; this tree is the Tk surface plus a
+PiDI is the **archived Tk kiosk UI**. Audio is owned by `jambox-engine`; the
+live surface is `crates/pidi-native`. This tree is the Tk surface plus a
 Python PortAudio fallback.
 
 ## Layout
@@ -31,7 +31,8 @@ apps/pidi/                 deploy root (also copied to ~/midi-tone on the Pi)
       session_io.py        settings / session JSON
       chrome.py / scope.py
       screens/             home 4×2; settings hub (Update/Wi‑Fi nested); …
-  docs/                    screen reference (bundled to raygarrison.us)
+  docs/                    copy of the native screen reference (bundled to raygarrison.us)
+                           canonical source: repo-root docs/
   archive/debug/           obsolete bring-up helpers
 ```
 

@@ -5,7 +5,7 @@ low-latency MIDI thru/remap to a hardware synth. **Not** related to play-my-synt
 
 **North star:** power on → kiosk → modes (Synth / Seq / Pads / Kaoss / Chords / Log / Map). See [PLAN.md](PLAN.md).
 
-- **Kiosk UI (active):** [`crates/pidi-native`](crates/pidi-native) — SDL/KMSDRM + GLES2 over `jambox-engine`. See [NATIVE_KIOSK.md](NATIVE_KIOSK.md).
+- **Kiosk UI (active):** [`crates/pidi-native`](crates/pidi-native) — SDL/KMSDRM + GLES2 over `jambox-engine`. See [NATIVE_KIOSK.md](NATIVE_KIOSK.md) and the [native screen reference](docs/index.html).
 - **Python Tk kiosk (archived):** [`apps/pidi`](apps/pidi) on `cursor/python-kiosk-archive-dfc2`
 - **Thru engine:** Rust `midi-engine` — channel/CC/velocity remap via CLI + JSON presets (Map mode in the native kiosk)
 - **Target hardware:** Pi 2 + MPK mini mk3 (+ USB-MIDI-DIN → synth when available)
@@ -111,13 +111,16 @@ sudo bash deploy/setup-pi.sh
 
 ### From the PC (daily)
 
-Cross-compile is preferred for Pi 2. **Standard procedure:** build the Pi
-ELFs on the PC (or a Cursor cloud-agent VM) *before* committing crate
-changes, so SET→UPDATE can install them:
+Cross-compile is preferred for Pi 2. **SET→UPDATE** installs committed
+`dist/armv7/{midi-engine,jambox-engine,pidi-native}` onto `bin/`. A green
+push to `master` that touches crates runs
+[`.github/workflows/build-pi-bins.yml`](.github/workflows/build-pi-bins.yml),
+which rebuilds those ELFs and commits them back so cloud-agent merges are
+OTA-ready. Manual rebuild is still useful for LAN SSH deploys:
 
 ```bash
-./deploy/build-pi-bins.sh          # stages dist/armv7/{midi-engine,jambox-engine}
-git add dist/armv7 && git commit   # required for SET→UPDATE
+./deploy/build-pi-bins.sh          # stages dist/armv7/{midi-engine,jambox-engine,pidi-native}
+git add dist/armv7 && git commit   # optional when CI commit-back will run
 ```
 
 SSH deploy still works the same way. Easiest linker path is often Debian/WSL

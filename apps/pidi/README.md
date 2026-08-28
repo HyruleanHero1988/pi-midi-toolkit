@@ -1,4 +1,9 @@
-# PiDI (kiosk UI)
+# PiDI (kiosk UI) — Python / Tk, archived
+
+**The live appliance UI is [`pidi-native`](../../crates/pidi-native)** (SDL/KMSDRM + GLES2).
+See [NATIVE_KIOSK.md](../../NATIVE_KIOSK.md) and the [native screen reference](../../docs/index.html).
+This tree stays for updater hooks, wavetables, and historical Tk layout. Freeze
+checkout: `cursor/python-kiosk-archive-dfc2`.
 
 Raspberry Pi TFT kiosk for the MIDI box — soft-synth, drums, sequencer, phrase
 pads, Kaoss XY, songs, and presets. Talks to **`jambox-engine`** over a socket
@@ -175,11 +180,13 @@ running commit, **CHECK** looks at `master`, and **UPDATE** deploys the **whole 
 (kiosk, crates, deploy scripts, shipped presets) then restarts — the same tree SSH
 deploy updates. Songs, presets, phrases, `settings.json`, `presets/active.json`,
 and live `bin/` is not overlay-copied. After the tree lands, committed
-`dist/armv7/{midi-engine,jambox-engine}` are copied onto `bin/` (the systemd
-paths) and `midi-engine` / `jambox-engine` restart if those units exist.
+`dist/armv7/{midi-engine,jambox-engine,pidi-native}` are copied onto `bin/`
+(the systemd paths) and those units restart if they exist.
 
 This does **not** cargo-build on the Pi (too slow on a Pi 2). When crates
-change, rebuild on a PC or cloud-agent VM **before commit**:
+land on `master`, CI rebuilds `dist/armv7` and commits the ELFs so the next
+SET→UPDATE copies `midi-engine`, `jambox-engine`, and `pidi-native` onto
+`bin/`. Manual rebuild still works for LAN SSH:
 
 ```bash
 ./deploy/build-pi-bins.sh
@@ -187,10 +194,8 @@ git add dist/armv7
 git commit -m "Rebuild Pi armv7 engines"
 ```
 
-Skipping that step means SET→UPDATE ships new Rust source but the box keeps
-the old engines. `deploy_pi.py` still writes `version.json` so CHECK has a
-local SHA; SSH `deploy/deploy.sh` also stages `dist/armv7` when `TARGET` is
-armv7.
+`deploy_pi.py` still writes `version.json` so CHECK has a local SHA; SSH
+`deploy/deploy.sh` also stages `dist/armv7` when `TARGET` is armv7.
 
 CHECK/UPDATE talk to the public GitHub repo over HTTPS (no token).
 `deploy_pi.py` still writes `version.json` so CHECK has a local SHA to
@@ -429,13 +434,16 @@ Files:
 
 ## Screen reference
 
-Open [docs/index.html](docs/index.html) in a browser for labeled 800×480 captures of every mode (HOME, SYNTH, SEQ, PADS, KAOSS, SONGS, PRESETS, LOG, SET) and the VOICES / MORPH / KIT / POWER / SAVE AS / KAOSS scales / FULL PAD overlays.
-
-Re-capture after UI changes (needs Tk + an 800×480 X display, or the script starts Xvfb itself):
+The live catalog is the **native** renderer: [docs/index.html](../../docs/index.html)
+(800×480 captures of HOME, SYNTH, SEQ, PADS, KAOSS, CHORDS, …). Recapture:
 
 ```bash
-python capture_ui_docs.py
+./scripts/capture-pidi-docs.sh
 ```
+
+A copy of that tree is kept here under `docs/` so raygarrison.us can keep
+bundling `apps/pidi/docs`. The Python Tk capture script
+(`pidi/capture_ui_docs.py`) is historical.
 
 ## On Windows (optional host test)
 

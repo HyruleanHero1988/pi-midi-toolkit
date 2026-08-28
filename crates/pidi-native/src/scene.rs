@@ -421,6 +421,13 @@ fn chrome_status(model: &NativeModel) -> String {
         UiMode::Presets => format!("SLOT {}", model.preset_selected + 1),
         UiMode::Synth if model.synth_vib_open => "VIB".into(),
         UiMode::Drums if model.kit_edit_open => "WAVE".into(),
+        UiMode::Settings => {
+            if model.status_line.is_empty() {
+                "SETTINGS".into()
+            } else {
+                model.status_line.chars().take(18).collect()
+            }
+        }
         _ => {
             if !model.status_line.is_empty() && model.status_line.chars().count() <= 12 {
                 model.status_line.clone()
@@ -2049,8 +2056,10 @@ fn draw_settings(scene: &mut Scene, model: &NativeModel) {
         0xffffff,
         2,
     );
+    // WIFI / UPDATE / MAP write status_line — show it here (chrome truncates >12 chars).
     if !model.status_line.is_empty() {
-        scene.text(24, HUD_H + 316, &model.status_line, 0xfabd2f);
+        let c = layout.content;
+        scene.text(c.x + 16, c.y + c.h - 28, &model.status_line, 0xfabd2f);
     }
 }
 

@@ -8,7 +8,17 @@ The Pi never `cargo build`s. **SET → UPDATE** copies this directory into
 of the repo. Live `bin/` is not overwritten by the generic overlay so a
 half-applied update cannot clobber a running engine with a host-arch file.
 
-## Rebuild before you commit crate changes
+## How these files get onto `master`
+
+A green GitHub Actions run on `master` (crates / lockfile / this build
+script) cross-builds here and **commits the ELFs back** to `master`.
+SET→UPDATE then has matching binaries for that tree. Artifact uploads on
+the workflow run are a backup download, not the OTA path.
+
+If `github-actions[bot]` cannot push (branch protection), either allow that
+bot to update `master` or rebuild by hand as below.
+
+## Manual rebuild
 
 On a Linux PC, WSL, or a Cursor cloud-agent VM:
 

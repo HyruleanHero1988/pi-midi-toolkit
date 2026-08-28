@@ -1,23 +1,24 @@
 #!/usr/bin/env bash
-# Cross-compile midi-engine + jambox-engine for Raspberry Pi 2 (armv7) and
-# stage them in dist/armv7/ so they can be committed.
+# Cross-compile midi-engine + jambox-engine + pidi-native for Raspberry Pi 2
+# (armv7) and stage them in dist/armv7/ so they can be committed.
 #
 # SET→UPDATE never cargo-builds on the Pi. It copies these staged files into
 # ~/pi-midi-toolkit/bin/ and restarts the systemd units.
 #
-# Procedure (PC Linux/WSL, or a Cursor cloud-agent VM):
+# On master, GitHub Actions (.github/workflows/build-pi-bins.yml) runs this
+# script and commits dist/armv7 so cloud-agent merges get OTA bins. Manual
+# rebuild is still useful for LAN SSH deploys without waiting for CI:
 #   ./deploy/build-pi-bins.sh
 #   git add dist/armv7
 #   git commit -m "Rebuild Pi armv7 engines"
 #
-# Run this whenever crates/midi-engine, crates/jambox-engine, crates/pidi-native, or their
-# workspace deps change. Skipping it means SET→UPDATE ships new Rust *source*
-# but the box keeps running the old binaries.
+# Run this whenever crates/midi-engine, crates/jambox-engine, crates/pidi-native,
+# or their workspace deps change and you are not going through master CI.
 #
 # Env:
 #   TARGET       default armv7-unknown-linux-gnueabihf
 #   SKIP_APT=1   do not apt-install the cross toolchain
-#   PACKAGES=midi-engine,jambox-engine
+#   PACKAGES=midi-engine,jambox-engine,pidi-native
 #   ALLOW_PARTIAL=1  still stage whichever crates built if one fails
 set -euo pipefail
 
