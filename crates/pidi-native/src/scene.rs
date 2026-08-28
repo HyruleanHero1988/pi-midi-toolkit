@@ -6,12 +6,12 @@
 use crate::font::{self, FontStyle, GLYPH_H, GLYPH_STRIDE, GLYPH_W};
 use crate::kaoss_ui;
 use crate::kaoss_viz;
-use crate::screensaver;
 use crate::layout::{Layout, Rect, HUD_H, NAV_H};
 use crate::mode::UiMode;
 use crate::model::{NativeModel, RepeatDivisionChoice, LED_COLS, LED_ROWS};
 use crate::phrases;
 use crate::render::{SCREEN_H, SCREEN_W};
+use crate::screensaver;
 use crate::waves;
 use jambox_core::drum_model_for_note;
 
@@ -60,7 +60,13 @@ pub fn unpack_rgb(color: u32) -> [f32; 4] {
 
 impl Scene {
     pub fn fill_rect(&mut self, rect: Rect, color: u32) {
-        self.fill(rect.x as f32, rect.y as f32, rect.w as f32, rect.h as f32, color);
+        self.fill(
+            rect.x as f32,
+            rect.y as f32,
+            rect.w as f32,
+            rect.h as f32,
+            color,
+        );
     }
 
     /// Tk-style touch button: light border around a solid fill.
@@ -272,6 +278,7 @@ pub fn build(model: &NativeModel) -> Scene {
             UiMode::Pads => draw_pads(&mut scene, model),
             UiMode::Home => draw_home(&mut scene, model),
             UiMode::Synth => draw_synth(&mut scene, model),
+            UiMode::Fm => draw_fm(&mut scene, model),
             UiMode::Drums => draw_drums(&mut scene, model),
             UiMode::Seq => draw_seq(&mut scene, model),
             UiMode::Presets => draw_presets(&mut scene, model),
@@ -310,7 +317,13 @@ fn apply_content_shift(scene: &mut Scene, shift: (i32, i32), hud_h: i32) {
 fn draw_power_menu(scene: &mut Scene, model: &NativeModel) {
     let layout = model.layout;
     scene.fill_rect(layout.content, 0x111111);
-    scene.text_scaled(layout.content.x + 12, layout.content.y + 12, "POWER", 0xfbf1c7, 3);
+    scene.text_scaled(
+        layout.content.x + 12,
+        layout.content.y + 12,
+        "POWER",
+        0xfbf1c7,
+        3,
+    );
     let blank_label = screensaver::timeout_label_dynamic(model.screensaver.timeout_sec);
     scene.button(layout.power_blank_cycle, 0x3c3836);
     scene.text_centered(layout.power_blank_cycle, &blank_label, 0xffffff, 2);
@@ -358,18 +371,33 @@ fn draw_chrome(scene: &mut Scene, model: &NativeModel) {
     let back = layout.nav_back();
     scene.button(
         back,
-        if model.can_nav_back() { 0x3c3836 } else { 0x1d2021 },
+        if model.can_nav_back() {
+            0x3c3836
+        } else {
+            0x1d2021
+        },
     );
     scene.text_centered(back, "<", 0xfbf1c7, 2);
 
     let home = layout.nav_home();
-    scene.button(home, if model.mode == UiMode::Home { 0x458588 } else { 0x3c3836 });
+    scene.button(
+        home,
+        if model.mode == UiMode::Home {
+            0x458588
+        } else {
+            0x3c3836
+        },
+    );
     scene.text_centered(home, "HOME", 0xfbf1c7, 2);
 
     let power = layout.nav_power();
     scene.button(
         power,
-        if model.power_menu_open { 0xb16286 } else { 0x9d0006 },
+        if model.power_menu_open {
+            0xb16286
+        } else {
+            0x9d0006
+        },
     );
     scene.text_centered(power, "POWER", 0xfbf1c7, 2);
 
@@ -402,7 +430,11 @@ fn chrome_status(model: &NativeModel) -> String {
             if model.kaoss_settings_open {
                 return "SETTINGS".into();
             }
-            format!("{:.0} BPM {}", model.bpm, kaoss_ui::gate(model.kaoss_gate).label)
+            format!(
+                "{:.0} BPM {}",
+                model.bpm,
+                kaoss_ui::gate(model.kaoss_gate).label
+            )
         }
         UiMode::Seq => format!("{:.0} BPM", model.bpm),
         UiMode::Chords => {
@@ -419,6 +451,11 @@ fn chrome_status(model: &NativeModel) -> String {
             }
         }
         UiMode::Presets => format!("SLOT {}", model.preset_selected + 1),
+        UiMode::Fm => format!(
+            "{} · {}",
+            jambox_core::fm_recipe(model.fm_recipe).label,
+            jambox_core::OP_NAMES[model.fm_selected]
+        ),
         UiMode::Synth if model.synth_vib_open => "VIB".into(),
         UiMode::Drums if model.kit_edit_open => "WAVE".into(),
         UiMode::Settings => {
@@ -486,13 +523,11 @@ fn draw_kaoss(scene: &mut Scene, model: &NativeModel) {
             0xa89984,
         );
         let oct_start = kaoss_ui::root_octave_index(model.kaoss_root_midi);
-        let oct_wide = kaoss_ui::ROOT_OCTAVE_MIDI.len()
-            + (model.kaoss_octaves as usize).saturating_sub(1);
+        let oct_wide =
+            kaoss_ui::ROOT_OCTAVE_MIDI.len() + (model.kaoss_octaves as usize).saturating_sub(1);
         for index in grid.visible_range(model.kaoss_picker_scroll) {
             let cell = grid.cell_rect(index, model.kaoss_picker_scroll);
-            if cell.y + cell.h < grid.viewport.y
-                || cell.y > grid.viewport.y + grid.viewport.h
-            {
+            if cell.y + cell.h < grid.viewport.y || cell.y > grid.viewport.y + grid.viewport.h {
                 continue;
             }
             let on = if matches!(kind, kaoss_ui::KaossPicker::Octave) {
@@ -610,7 +645,11 @@ fn draw_kaoss_settings(scene: &mut Scene, model: &NativeModel) {
     let show_all = layout.kaoss_settings_row(108, scroll, 48);
     scene.button(
         show_all,
-        if model.kaoss_show_all { 0xd79921 } else { 0x3c3836 },
+        if model.kaoss_show_all {
+            0xd79921
+        } else {
+            0x3c3836
+        },
     );
     scene.text_centered(
         show_all,
@@ -626,7 +665,11 @@ fn draw_kaoss_settings(scene: &mut Scene, model: &NativeModel) {
     let axes = layout.kaoss_settings_half_row(164, scroll, true, 48);
     scene.button(
         axes,
-        if model.kaoss_show_axis_labels { 0x458588 } else { 0x3c3836 },
+        if model.kaoss_show_axis_labels {
+            0x458588
+        } else {
+            0x3c3836
+        },
     );
     scene.text_centered(
         axes,
@@ -642,7 +685,11 @@ fn draw_kaoss_settings(scene: &mut Scene, model: &NativeModel) {
     let grid = layout.kaoss_settings_half_row(164, scroll, false, 48);
     scene.button(
         grid,
-        if model.kaoss_show_grid_lines { 0x458588 } else { 0x3c3836 },
+        if model.kaoss_show_grid_lines {
+            0x458588
+        } else {
+            0x3c3836
+        },
     );
     scene.text_centered(
         grid,
@@ -686,12 +733,7 @@ fn draw_kaoss_settings(scene: &mut Scene, model: &NativeModel) {
         kaoss_viz::hsv_color(mh, ms.max(0.35), 0.85)
     };
     scene.button(color_btn, swatch);
-    scene.text_centered(
-        color_btn,
-        &format!("COLOR · {color_label}"),
-        0xffffff,
-        2,
-    );
+    scene.text_centered(color_btn, &format!("COLOR · {color_label}"), 0xffffff, 2);
 
     scene.text(c.x + 8, c.y + 340 - scroll, "GRID LINES", 0xa89984);
     let grid_row = layout.kaoss_settings_row(356, scroll, 48);
@@ -761,17 +803,16 @@ fn draw_kaoss_color_picker(scene: &mut Scene, model: &NativeModel) {
     let c = layout.content;
     scene.fill_rect(c, 0x111111);
     scene.text(c.x + 8, c.y + 12, "PAD COLOR", 0xfbf1c7);
-    scene.text(
-        c.x + 8,
-        c.y + 32,
-        "applies to CELLS and GLOW",
-        0xa89984,
-    );
+    scene.text(c.x + 8, c.y + 32, "applies to CELLS and GLOW", 0xa89984);
     for i in 0..kaoss_viz::pad_color_count() {
         let cell = layout.kaoss_color_pick_cell(i);
         let on = i == model.kaoss_mono_color;
         let fill = if kaoss_viz::pad_color_is_rainbow(i) {
-            if on { 0xb16286 } else { 0x504945 }
+            if on {
+                0xb16286
+            } else {
+                0x504945
+            }
         } else {
             let (h, s) = kaoss_viz::pad_color_hs(i).unwrap_or((0.93, 0.88));
             let v = if on { 0.92 } else { 0.55 };
@@ -877,13 +918,7 @@ fn draw_kaoss_axes(scene: &mut Scene, pad: crate::layout::Rect, model: &NativeMo
         } else {
             pad.y + pad.h - 36
         };
-        scene.text_scaled(
-            pad.x + pad.w / 2 - 40,
-            x_label_y,
-            x_label,
-            0xd3869b,
-            2,
-        );
+        scene.text_scaled(pad.x + pad.w / 2 - 40, x_label_y, x_label, 0xd3869b, 2);
     }
 }
 
@@ -898,24 +933,14 @@ fn draw_kaoss_grid(
     let octave_w = regular + 1.0;
 
     // Horizontal guides at 25 / 50 / 75% of pad Y (brighter midline).
-    for &(frac, color) in &[
-        (0.25_f32, 0x3a1528_u32),
-        (0.50, 0x5b203c),
-        (0.75, 0x3a1528),
-    ] {
+    for &(frac, color) in &[(0.25_f32, 0x3a1528_u32), (0.50, 0x5b203c), (0.75, 0x3a1528)] {
         let stroke = if (frac - 0.5).abs() < 0.001 {
             octave_w
         } else {
             regular
         };
         let y = pad.y as f32 + pad.h as f32 * (1.0 - frac);
-        scene.fill(
-            pad.x as f32,
-            y - stroke * 0.5,
-            pad.w as f32,
-            stroke,
-            color,
-        );
+        scene.fill(pad.x as f32, y - stroke * 0.5, pad.w as f32, stroke, color);
     }
 
     if note_program {
@@ -947,13 +972,7 @@ fn draw_kaoss_grid(
             } else {
                 (0x4a2040_u32, regular)
             };
-            scene.fill(
-                x - stroke * 0.5,
-                pad.y as f32,
-                stroke,
-                pad.h as f32,
-                color,
-            );
+            scene.fill(x - stroke * 0.5, pad.y as f32, stroke, pad.h as f32, color);
         }
     } else {
         // FX programs: same 25/50/75% vertical guides as the Y axis.
@@ -1159,7 +1178,13 @@ fn draw_home(scene: &mut Scene, model: &NativeModel) {
     use crate::layout::HOME_TILES;
 
     let layout = model.layout;
-    scene.text_scaled(layout.content.x + 12, layout.content.y + 10, "Home", 0xfbf1c7, 3);
+    scene.text_scaled(
+        layout.content.x + 12,
+        layout.content.y + 10,
+        "Home",
+        0xfbf1c7,
+        3,
+    );
     scene.text_scaled(
         layout.content.x + layout.content.w - 160,
         layout.content.y + 14,
@@ -1183,7 +1208,13 @@ fn draw_chords(scene: &mut Scene, model: &NativeModel) {
             Overlay::Key => "KEY",
             Overlay::Changes => "CHANGES",
         };
-        scene.text_scaled(layout.content.x + 12, layout.content.y + 14, title, 0xfbf1c7, 3);
+        scene.text_scaled(
+            layout.content.x + 12,
+            layout.content.y + 14,
+            title,
+            0xfbf1c7,
+            3,
+        );
         scene.button(layout.chords_overlay_close(), 0x9d0006);
         scene.text_centered(layout.chords_overlay_close(), "CLOSE", 0xfbf1c7, 2);
         match overlay {
@@ -1217,7 +1248,11 @@ fn draw_chords(scene: &mut Scene, model: &NativeModel) {
     ];
     let tool_colors = [
         model.chords_out.color(),
-        if model.chords_hold { 0xb16286 } else { 0x3c3836 },
+        if model.chords_hold {
+            0xb16286
+        } else {
+            0x3c3836
+        },
         0x458588,
         0xd79921,
         if model.chords_arm { 0xcc241d } else { 0x3c3836 },
@@ -1228,7 +1263,9 @@ fn draw_chords(scene: &mut Scene, model: &NativeModel) {
         scene.text_centered(cell, tools[i], 0xfbf1c7, 2);
     }
 
-    let current_col = model.chords_current.map(|c| chords::col_for_root_pc(c.root));
+    let current_col = model
+        .chords_current
+        .map(|c| chords::col_for_root_pc(c.root));
     for row in 0..3 {
         let qrow = QualityRow::from_index(row).unwrap();
         for col in 0..12 {
@@ -1445,7 +1482,12 @@ fn draw_synth(scene: &mut Scene, model: &NativeModel) {
         0xffffff,
     );
     scene.fill_rect(layout.synth_swap, 0x504945);
-    scene.text(layout.synth_swap.x + 16, layout.synth_swap.y + 16, "SWAP", 0xffffff);
+    scene.text(
+        layout.synth_swap.x + 16,
+        layout.synth_swap.y + 16,
+        "SWAP",
+        0xffffff,
+    );
     let vib_on = model.vibrato_always > 0.01;
     scene.fill_rect(layout.synth_vib, if vib_on { 0xb16286 } else { 0x458588 });
     scene.text_centered(layout.synth_vib, "VIB", 0xffffff, 2);
@@ -1517,13 +1559,7 @@ fn draw_synth_scope(scene: &mut Scene, model: &NativeModel) {
     // Grid
     for i in 1..4 {
         let y = rect.y + (rect.h * i) / 4;
-        scene.fill(
-            rect.x as f32,
-            y as f32,
-            rect.w as f32,
-            1.0,
-            0x2a2a18,
-        );
+        scene.fill(rect.x as f32, y as f32, rect.w as f32, 1.0, 0x2a2a18);
     }
     let Some(bank) = model.wave_bank.as_ref() else {
         scene.text(rect.x + 24, rect.y + rect.h / 2 - 4, "NO WAVE", 0x504945);
@@ -1555,6 +1591,212 @@ fn stroke_scope_seg(scene: &mut Scene, x0: f32, y0: f32, x1: f32, y1: f32, color
         let x = x0 + dx * t;
         let y = y0 + dy * t;
         scene.fill(x, y, 2.0, 2.0, color);
+    }
+}
+
+fn draw_fm(scene: &mut Scene, model: &NativeModel) {
+    let layout = model.layout;
+    for index in 0..jambox_core::FM_RECIPE_COUNT {
+        let rec = jambox_core::fm_recipe(index);
+        let cell = layout.fm_recipe_cell(index);
+        let on = index == model.fm_recipe;
+        scene.fill_rect(cell, if on { 0x8ec07c } else { 0x3c3836 });
+        scene.text_centered(cell, rec.label, if on { 0x1d2021 } else { 0xfbf1c7 }, 1);
+    }
+
+    let hint = layout.fm_hint();
+    scene.text(
+        hint.x,
+        hint.y + 4,
+        jambox_core::fm_recipe(model.fm_recipe).hint,
+        0xa89984,
+    );
+    scene.fill_rect(layout.fm_clear(), 0x9d0006);
+    scene.text_centered(layout.fm_clear(), "CLEAR", 0xfbf1c7, 1);
+    scene.fill_rect(layout.fm_oct_down(), 0x504945);
+    scene.text_centered(layout.fm_oct_down(), "OCT-", 0xfbf1c7, 1);
+    scene.fill_rect(layout.fm_oct_up(), 0x504945);
+    scene.text_centered(layout.fm_oct_up(), "OCT+", 0xfbf1c7, 1);
+
+    draw_fm_graph(scene, model);
+    draw_fm_scope(scene, model);
+
+    const LABELS: [&str; 4] = ["RATIO", "OUT", "FOLD", "ENV"];
+    for index in 0..4 {
+        let track = layout.fm_slider(index);
+        scene.fill_rect(track, 0x20202c);
+        scene.text(track.x, track.y - 16, LABELS[index], 0xc0c0d0);
+        let fill_h = (track.h as f32 * model.fm_params[index]) as i32;
+        let fill = Rect {
+            x: track.x + 3,
+            y: track.y + track.h - fill_h,
+            w: track.w - 6,
+            h: fill_h.max(2),
+        };
+        scene.fill_rect(fill, if index == 2 { 0xfe8019 } else { 0x8ec07c });
+    }
+    scene.text(
+        layout.fm_slider(0).x,
+        layout.fm_slider(0).y + layout.fm_slider(0).h + 4,
+        jambox_core::clang_label(model.fm_params[0]),
+        0xa89984,
+    );
+
+    for index in 0..Layout::SYNTH_WHITE_COUNT {
+        let key = layout.synth_keyboard_white_rect(index);
+        scene.fill_rect(key, 0xf2f2ea);
+        scene.fill_rect(
+            Rect {
+                x: key.x,
+                y: key.y + key.h - 2,
+                w: key.w,
+                h: 2,
+            },
+            0xc0c0b8,
+        );
+    }
+    const BLACK_LABELS: [&str; 5] = ["C#", "D#", "F#", "G#", "A#"];
+    for index in 0..5 {
+        let key = layout.synth_keyboard_black_rect(index);
+        scene.fill_rect(key, 0x1a1a22);
+        scene.text(key.x + 6, key.y + key.h - 14, BLACK_LABELS[index], 0xd0d0d8);
+    }
+}
+
+fn draw_fm_graph(scene: &mut Scene, model: &NativeModel) {
+    let rect = model.layout.fm_graph();
+    scene.fill_rect(rect, 0x1a1a12);
+    scene.text(rect.x + 8, rect.y + 6, "draw one into another", 0xa89984);
+
+    let r = Layout::FM_OP_RADIUS as f32;
+    for src in 0..jambox_core::FM_OP_COUNT {
+        for dst in 0..jambox_core::FM_OP_COUNT {
+            let amount = model.fm_matrix[src][dst];
+            if amount < 0.04 {
+                continue;
+            }
+            let color = jambox_core::OP_COLORS[src];
+            if src == dst {
+                let (cx, cy) = model.layout.fm_op_center(src);
+                scene.stroke_disc(
+                    cx as f32,
+                    cy as f32,
+                    r + 6.0 + amount * 10.0,
+                    3.0,
+                    color,
+                    0x1a1a12,
+                );
+            } else {
+                let (x0, y0) = model.layout.fm_op_center(src);
+                let (x1, y1) = model.layout.fm_op_center(dst);
+                stroke_fm_link(
+                    scene, x0 as f32, y0 as f32, x1 as f32, y1 as f32, r, amount, color,
+                );
+            }
+        }
+    }
+
+    if let Some((from, px, py)) = model.fm_drag() {
+        let (x0, y0) = model.layout.fm_op_center(from);
+        stroke_scope_seg(
+            scene,
+            x0 as f32,
+            y0 as f32,
+            px as f32,
+            py as f32,
+            jambox_core::OP_COLORS[from],
+        );
+        scene.fill_disc(px as f32, py as f32, 5.0, jambox_core::OP_COLORS[from]);
+    }
+
+    for index in 0..jambox_core::FM_OP_COUNT {
+        let (cx, cy) = model.layout.fm_op_center(index);
+        let op = model.fm_ops[index];
+        let heard = op.audio > 0.05;
+        let selected = index == model.fm_selected;
+        let radius = r + if selected { 4.0 } else { 0.0 } + op.fold * 4.0;
+        let color = jambox_core::OP_COLORS[index];
+        if selected {
+            scene.fill_disc(cx as f32, cy as f32, radius + 5.0, 0xfbf1c7);
+        }
+        scene.fill_disc(cx as f32, cy as f32, radius, color);
+        if heard {
+            scene.fill_disc(cx as f32, cy as f32, radius * 0.42, 0x1d2021);
+        }
+        let label = Rect {
+            x: cx - 10,
+            y: cy - 8,
+            w: 20,
+            h: 16,
+        };
+        scene.text_centered(
+            label,
+            jambox_core::OP_NAMES[index],
+            if heard { 0xfbf1c7 } else { 0x1d2021 },
+            1,
+        );
+    }
+}
+
+fn stroke_fm_link(
+    scene: &mut Scene,
+    x0: f32,
+    y0: f32,
+    x1: f32,
+    y1: f32,
+    radius: f32,
+    amount: f32,
+    color: u32,
+) {
+    let dx = x1 - x0;
+    let dy = y1 - y0;
+    let len = dx.hypot(dy).max(1.0);
+    let ux = dx / len;
+    let uy = dy / len;
+    let sx = x0 + ux * (radius + 2.0);
+    let sy = y0 + uy * (radius + 2.0);
+    let ex = x1 - ux * (radius + 4.0);
+    let ey = y1 - uy * (radius + 4.0);
+    let mx = (sx + ex) * 0.5 - uy * 28.0;
+    let my = (sy + ey) * 0.5 + ux * 28.0;
+    let steps = ((len * 0.7) as i32).clamp(12, 48);
+    let mut prev_x = sx;
+    let mut prev_y = sy;
+    for i in 1..=steps {
+        let t = i as f32 / steps as f32;
+        let u = 1.0 - t;
+        let x = u * u * sx + 2.0 * u * t * mx + t * t * ex;
+        let y = u * u * sy + 2.0 * u * t * my + t * t * ey;
+        let w = 2.0 + amount * 3.0;
+        scene.fill(x - w * 0.5, y - w * 0.5, w, w, color);
+        stroke_scope_seg(scene, prev_x, prev_y, x, y, color);
+        prev_x = x;
+        prev_y = y;
+    }
+    scene.fill(ex - 3.0, ey - 3.0, 7.0, 7.0, color);
+}
+
+fn draw_fm_scope(scene: &mut Scene, model: &NativeModel) {
+    let rect = model.layout.fm_scope();
+    scene.fill_rect(rect, 0x1a1a12);
+    for i in 1..4 {
+        let y = rect.y + (rect.h * i) / 4;
+        scene.fill(rect.x as f32, y as f32, rect.w as f32, 1.0, 0x2a2a18);
+    }
+    let patch = model.fm_patch();
+    let n = (rect.w / 2).max(48) as usize;
+    let mut cycle = vec![0.0f32; n];
+    jambox_core::FmSynth::preview_cycle(patch, &mut cycle);
+    let mid_y = rect.y as f32 + rect.h as f32 * 0.5;
+    let amp = (rect.h as f32 * 0.42).max(4.0);
+    let mut prev_x = rect.x as f32 + 2.0;
+    let mut prev_y = mid_y;
+    for (i, sample) in cycle.iter().enumerate() {
+        let x = rect.x as f32 + 2.0 + (i as f32) * ((rect.w - 4) as f32) / n as f32;
+        let y = mid_y - sample * amp;
+        stroke_scope_seg(scene, prev_x, prev_y, x, y, 0x8ec07c);
+        prev_x = x;
+        prev_y = y;
     }
 }
 
@@ -1643,7 +1885,11 @@ fn draw_drums(scene: &mut Scene, model: &NativeModel) {
     scene.fill_rect(layout.kit_wave, 0x689d6a);
     scene.text_centered(layout.kit_wave, "WAVE", 0xfbf1c7, 2);
 
-    let all_bg = if model.kit_all_drums { 0xb16286 } else { 0x504945 };
+    let all_bg = if model.kit_all_drums {
+        0xb16286
+    } else {
+        0x504945
+    };
     scene.fill_rect(layout.kit_all, all_bg);
     scene.text_centered(layout.kit_all, "ALL DRUMS", 0xfbf1c7, 2);
 }
@@ -1732,12 +1978,7 @@ fn draw_seq(scene: &mut Scene, model: &NativeModel) {
     let seq = &model.seq;
 
     scene.text(16, HUD_H + 10, "Sequencer", 0xfbf1c7);
-    scene.text(
-        160,
-        HUD_H + 12,
-        &format!("{:.0} BPM", seq.bpm),
-        0xa89984,
-    );
+    scene.text(160, HUD_H + 12, &format!("{:.0} BPM", seq.bpm), 0xa89984);
     scene.text(16, HUD_H + 30, &seq.status, 0xfabd2f);
     scene.text(16, HUD_H + 44, &seq.layer_line, 0x83a598);
 
@@ -1768,11 +2009,7 @@ fn draw_seq(scene: &mut Scene, model: &NativeModel) {
     scene.fill_rect(layout.seq_len_halve, 0x504945);
     scene.text_centered(layout.seq_len_halve, "LEN /2", 0xffffff, 2);
     let extend_bg = if seq.extend_mode { 0x689d6a } else { 0x3c3836 };
-    let extend_label = if seq.extend_mode {
-        "EXTEND"
-    } else {
-        "WRAP"
-    };
+    let extend_label = if seq.extend_mode { "EXTEND" } else { "WRAP" };
     scene.fill_rect(layout.seq_extend, extend_bg);
     scene.text_centered(layout.seq_extend, extend_label, 0xffffff, 2);
 
@@ -1879,18 +2116,42 @@ fn draw_songs(scene: &mut Scene, model: &NativeModel) {
     }
     scene.fill_rect(
         layout.song_play,
-        if model.song_playing { 0x689d6a } else { 0x3a5040 },
+        if model.song_playing {
+            0x689d6a
+        } else {
+            0x3a5040
+        },
     );
-    scene.text(layout.song_play.x + 60, layout.song_play.y + 20, "PLAY", 0xffffff);
+    scene.text(
+        layout.song_play.x + 60,
+        layout.song_play.y + 20,
+        "PLAY",
+        0xffffff,
+    );
     scene.fill_rect(layout.song_stop, 0x3c3836);
-    scene.text(layout.song_stop.x + 60, layout.song_stop.y + 20, "STOP", 0xffffff);
+    scene.text(
+        layout.song_stop.x + 60,
+        layout.song_stop.y + 20,
+        "STOP",
+        0xffffff,
+    );
     scene.fill_rect(
         layout.song_loop,
         if model.song_loop { 0x458588 } else { 0x282838 },
     );
-    scene.text(layout.song_loop.x + 20, layout.song_loop.y + 16, "LOOP", 0xffffff);
+    scene.text(
+        layout.song_loop.x + 20,
+        layout.song_loop.y + 16,
+        "LOOP",
+        0xffffff,
+    );
     scene.fill_rect(layout.song_delete, 0x9d0006);
-    scene.text(layout.song_delete.x + 24, layout.song_delete.y + 16, "DEL", 0xffffff);
+    scene.text(
+        layout.song_delete.x + 24,
+        layout.song_delete.y + 16,
+        "DEL",
+        0xffffff,
+    );
     scene.fill_rect(layout.song_bpm_down, 0x282838);
     scene.text(
         layout.song_bpm_down.x + 16,
@@ -1899,11 +2160,26 @@ fn draw_songs(scene: &mut Scene, model: &NativeModel) {
         0xffffff,
     );
     scene.fill_rect(layout.song_bpm_up, 0x282838);
-    scene.text(layout.song_bpm_up.x + 16, layout.song_bpm_up.y + 16, "BPM+", 0xffffff);
+    scene.text(
+        layout.song_bpm_up.x + 16,
+        layout.song_bpm_up.y + 16,
+        "BPM+",
+        0xffffff,
+    );
     scene.fill_rect(layout.song_prev, 0x282838);
-    scene.text(layout.song_prev.x + 28, layout.song_prev.y + 20, "UP", 0xffffff);
+    scene.text(
+        layout.song_prev.x + 28,
+        layout.song_prev.y + 20,
+        "UP",
+        0xffffff,
+    );
     scene.fill_rect(layout.song_next, 0x282838);
-    scene.text(layout.song_next.x + 16, layout.song_next.y + 20, "DOWN", 0xffffff);
+    scene.text(
+        layout.song_next.x + 16,
+        layout.song_next.y + 20,
+        "DOWN",
+        0xffffff,
+    );
     scene.fill_rect(layout.song_save_seq, 0x458588);
     scene.text(
         layout.song_save_seq.x + 48,
@@ -2028,7 +2304,10 @@ fn draw_settings(scene: &mut Scene, model: &NativeModel) {
     scene.fill_rect(layout.settings_map, 0x83a598);
     scene.text_centered(layout.settings_map, "MAP", 0xffffff, 2);
     let wifi_busy = model.host_busy() == Some(crate::host::HostTask::Wifi);
-    scene.fill_rect(layout.settings_wifi, if wifi_busy { 0x504945 } else { 0xd79921 });
+    scene.fill_rect(
+        layout.settings_wifi,
+        if wifi_busy { 0x504945 } else { 0xd79921 },
+    );
     scene.text_centered(
         layout.settings_wifi,
         if wifi_busy { "WAIT" } else { "WIFI" },
@@ -2105,8 +2384,6 @@ fn draw_log(scene: &mut Scene, model: &NativeModel) {
         0xffffff,
     );
 }
-
-
 
 #[cfg(test)]
 mod tests {
@@ -2202,10 +2479,7 @@ mod tests {
                     && q.x >= pad.x as f32 - 2.0
             })
             .count();
-        assert!(
-            vert >= 8,
-            "expected scale-note vertical lines, got {vert}"
-        );
+        assert!(vert >= 8, "expected scale-note vertical lines, got {vert}");
         assert_eq!(horiz, 3, "expected Y guides at 25/50/75%, got {horiz}");
     }
 
@@ -2225,5 +2499,41 @@ mod tests {
             })
             .count();
         assert!(tiles >= 16);
+    }
+
+    #[test]
+    fn fm_mode_draws_recipe_chips_and_keyboard() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Fm);
+        let scene = build(&model);
+        let chips = scene
+            .color
+            .iter()
+            .filter(|q| {
+                let cell = model.layout.fm_recipe_cell(0);
+                q.w > 40.0 && q.h > 20.0 && q.y >= cell.y as f32 - 2.0 && q.y <= cell.y as f32 + 8.0
+            })
+            .count();
+        assert!(
+            chips >= jambox_core::FM_RECIPE_COUNT,
+            "expected 8 recipe chips, got {chips}"
+        );
+        let whites = scene
+            .color
+            .iter()
+            .filter(|q| q.color == 0xf2f2ea && q.h > 40.0)
+            .count();
+        assert!(whites >= Layout::SYNTH_WHITE_COUNT);
+        let clear = model.layout.fm_clear();
+        let clear_btn = scene
+            .color
+            .iter()
+            .filter(|q| {
+                q.color == 0x9d0006
+                    && (q.x - clear.x as f32).abs() < 2.0
+                    && (q.y - clear.y as f32).abs() < 2.0
+            })
+            .count();
+        assert!(clear_btn >= 1, "CLEAR button missing");
     }
 }

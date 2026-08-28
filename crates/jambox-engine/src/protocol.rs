@@ -8,9 +8,7 @@ use jambox_core::{
     Clip, ClipEvent, ClipEventKind, Command, FxParam, FxTarget, LaunchMode, Quantize,
     RepeatDivision, SynthParam,
 };
-use jambox_protocol::{
-    HelloReply, RepeatDivision as WireRepeatDivision, RepeatPhase, TouchPhase,
-};
+use jambox_protocol::{HelloReply, RepeatDivision as WireRepeatDivision, RepeatPhase, TouchPhase};
 use serde::{Deserialize, Serialize};
 
 /// One request from the UI.
@@ -233,7 +231,9 @@ impl From<WireClipEvent> for ClipEvent {
 pub enum Response {
     Ok,
     Hello(HelloReply),
-    Error { message: String },
+    Error {
+        message: String,
+    },
     Status(StatusReply),
     /// Unsolicited: a MIDI event the engine heard (notes already went to DSP).
     Midi(MidiNotice),
@@ -428,6 +428,15 @@ fn parse_synth_param(name: &str) -> Option<SynthParam> {
         "drum_noise" => SynthParam::DrumNoise,
         "drum_tone" => SynthParam::DrumTone,
         "drum_level" => SynthParam::DrumLevel,
+        "fm_enable" => SynthParam::FmEnable,
+        "fm_recipe" => SynthParam::FmRecipe,
+        "fm_op" => SynthParam::FmOp,
+        "fm_connect" => SynthParam::FmConnect,
+        "fm_clear" => SynthParam::FmClear,
+        "fm_bright" => SynthParam::FmBright,
+        "fm_clang" => SynthParam::FmClang,
+        "fm_hit" => SynthParam::FmHit,
+        "fm_tail" => SynthParam::FmTail,
         _ => return None,
     })
 }
@@ -622,9 +631,7 @@ pub fn decode(request: Request) -> Result<Decoded, String> {
             control,
             value,
         } => {
-            let ev = midi_event_from_parts(
-                &kind, channel, note, velocity, control, value,
-            )?;
+            let ev = midi_event_from_parts(&kind, channel, note, velocity, control, value)?;
             let mut buf = [0u8; 3];
             let n = ev.encode(&mut buf);
             Decoded::Command(Command::MidiEmit {
@@ -768,6 +775,20 @@ mod tests {
     }
 
     #[test]
+    fn fm_connect_decodes_as_a_raw_synth_value() {
+        let d = decode_line(r#"{"cmd":"synth","param":"fm_connect","value":3.7}"#);
+        match d {
+            Decoded::Command(Command::SetSynth {
+                param: SynthParam::FmConnect,
+                value,
+            }) => {
+                assert!((value - 3.7).abs() < 1e-5);
+            }
+            _ => panic!("wrong decode"),
+        }
+    }
+
+    #[test]
     fn unknown_param_is_reported_not_panicked() {
         let request: Request =
             serde_json::from_str(r#"{"cmd":"synth","param":"nope","value":1.0}"#).unwrap();
@@ -824,9 +845,7 @@ mod tests {
 
     #[test]
     fn touch_and_repeat_decode_from_json() {
-        let d = decode_line(
-            r#"{"cmd":"touch","gesture":41,"phase":"down","x":0.1,"y":0.9}"#,
-        );
+        let d = decode_line(r#"{"cmd":"touch","gesture":41,"phase":"down","x":0.1,"y":0.9}"#);
         assert!(matches!(d, Decoded::Touch { gesture: 41, .. }));
         let d = decode_line(r#"{"cmd":"repeat","gesture":7,"phase":"down","note":36}"#);
         match d {

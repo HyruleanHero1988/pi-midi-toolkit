@@ -32,6 +32,7 @@ fn main() {
         ("chords", UiMode::Chords),
         ("songs", UiMode::Songs),
         ("presets", UiMode::Presets),
+        ("fm", UiMode::Fm),
         ("settings", UiMode::Settings),
         ("log", UiMode::Log),
         ("map", UiMode::Map),
@@ -45,8 +46,11 @@ fn main() {
     }
 
     // Smooth font smoke dumps (home + settings are densest labels).
-    for (name, mode) in [("home", UiMode::Home), ("settings", UiMode::Settings), ("synth", UiMode::Synth)]
-    {
+    for (name, mode) in [
+        ("home", UiMode::Home),
+        ("settings", UiMode::Settings),
+        ("synth", UiMode::Synth),
+    ] {
         let mut model = NativeModel::new();
         model.font_style = FontStyle::Smooth;
         let mut ob = Outbox::new();
@@ -84,6 +88,25 @@ fn main() {
         model.finger_up(1, &mut ob);
         model.tick(1.0 / 60.0, &mut ob);
         dump(&model, out.join("power_menu.ppm"));
+    }
+    {
+        let mut model = NativeModel::new();
+        let mut ob = Outbox::new();
+        model.set_mode(UiMode::Fm);
+        model.tick(1.0 / 60.0, &mut ob);
+        let growl = model.layout.fm_recipe_cell(7);
+        model.finger_down(1, growl.x + 4, growl.y + 4, &mut ob);
+        model.finger_up(1, &mut ob);
+        model.tick(1.0 / 60.0, &mut ob);
+        dump(&model, out.join("fm_growl.ppm"));
+
+        let (ax, ay) = model.layout.fm_op_center(1);
+        let (dx, dy) = model.layout.fm_op_center(3);
+        model.finger_down(2, ax, ay, &mut ob);
+        model.finger_move(2, (ax + dx) / 2, (ay + dy) / 2, &mut ob);
+        model.tick(1.0 / 60.0, &mut ob);
+        dump(&model, out.join("fm_draw.ppm"));
+        model.finger_up(2, &mut ob);
     }
     {
         let mut model = NativeModel::new();
