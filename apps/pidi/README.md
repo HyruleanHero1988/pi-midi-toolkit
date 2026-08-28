@@ -16,7 +16,8 @@ This directory holds what the native stack still needs next to the crates:
 | `.wifi-credentials.example` | Optional Wi‑Fi creds format for native |
 
 User data (`songs/`, `phrases/`, `user-presets/`, `settings.json`) lives on the
-device under the data root / repo cwd — not in this tree for the native boot.
+device under `PIDI_DATA_ROOT` (default `~/.local/share/pidi` on the appliance)
+— not in this tree for the native boot.
 
 Historical Python/Tk sources (if you need them) are on the archive branch
 `cursor/python-kiosk-archive-dfc2`.

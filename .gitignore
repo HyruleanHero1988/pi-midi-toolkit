@@ -17,6 +17,14 @@ Thumbs.db
 !/presets/mpk-mini-ch3.json
 /takes/
 
+# Appliance user data (native kiosk also honors PIDI_DATA_ROOT)
+/songs/
+/phrases/
+/settings.json
+/user-presets/
+/user-wavetables/
+crates/pidi-native/phrases/
+
 # Deploy scratch. Committed Pi engines live in dist/armv7/ (see deploy/build-pi-bins.sh).
 /dist/*
 !/dist/armv7/

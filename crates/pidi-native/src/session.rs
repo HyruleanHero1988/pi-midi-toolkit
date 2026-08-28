@@ -202,10 +202,7 @@ impl Default for SessionState {
 }
 
 pub fn session_path_from_env() -> PathBuf {
-    if let Ok(p) = std::env::var("PIDI_SETTINGS_PATH") {
-        return PathBuf::from(p);
-    }
-    PathBuf::from("settings.json")
+    crate::paths::resolve_file("PIDI_SETTINGS_PATH", "settings.json")
 }
 
 pub fn load(path: &Path) -> Option<SessionState> {

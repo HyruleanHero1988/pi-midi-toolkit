@@ -95,6 +95,12 @@ KEEP_REPO = frozenset(
         "bin",  # live engines; installed from dist/armv7 after overlay
         "takes",
         "presets/active.json",
+        # Native kiosk cwd-relative leftovers (before PIDI_DATA_ROOT).
+        "settings.json",
+        "songs",
+        "phrases",
+        "user-presets",
+        "user-wavetables",
         *(f"apps/pidi/{name}" for name in KEEP_KIOSK if name not in {".git", ".gitignore"}),
     }
 )

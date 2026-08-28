@@ -41,10 +41,7 @@ impl Default for PresetSnapshot {
 }
 
 pub fn presets_dir_from_env() -> PathBuf {
-    if let Ok(p) = std::env::var("PIDI_PRESETS_DIR") {
-        return PathBuf::from(p);
-    }
-    PathBuf::from("user-presets")
+    crate::paths::resolve_dir("PIDI_PRESETS_DIR", "user-presets")
 }
 
 pub fn slot_path(dir: &Path, slot: usize) -> PathBuf {

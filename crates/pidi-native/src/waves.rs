@@ -15,8 +15,10 @@ pub fn waves_dirs_from_env() -> Vec<PathBuf> {
     if let Ok(p) = std::env::var("JAMBOX_WAVETABLES") {
         dirs.push(PathBuf::from(p));
     }
-    if let Ok(p) = std::env::var("JAMBOX_USER_WAVETABLES") {
-        dirs.push(PathBuf::from(p));
+    if let Some(p) = crate::paths::env_path("JAMBOX_USER_WAVETABLES") {
+        dirs.push(p);
+    } else if let Some(root) = crate::paths::data_root() {
+        dirs.push(root.join("user-wavetables"));
     }
     // Lab / appliance defaults (same layout as the Tk kiosk tree).
     for candidate in [

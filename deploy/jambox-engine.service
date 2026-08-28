@@ -15,7 +15,7 @@ ExecStart=/home/pi/pi-midi-toolkit/bin/jambox-engine run \
   --output headphone \
   --control /tmp/jambox.sock \
   --waves /home/pi/pi-midi-toolkit/apps/pidi/wavetables \
-  --user-waves /home/pi/pi-midi-toolkit/apps/pidi/user-wavetables \
+  --user-waves %h/.local/share/pidi/user-wavetables \
   --buffer-frames 0 \
   --rt
 Restart=on-failure
