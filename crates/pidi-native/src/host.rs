@@ -1,22 +1,134 @@
 //! Appliance host hooks: Map/Thru (`midi-engine`), WIFI (`nmcli`), UPDATE (git/updater).
+//!
+//! Subprocesses must never run on the UI/touch thread. Call [`HostTask::spawn`]
+//! and poll the receiver from `tick`.
 
 #[cfg(target_os = "linux")]
 use std::path::Path;
 use std::path::PathBuf;
-#[cfg(target_os = "linux")]
-use std::process::Stdio;
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::sync::mpsc::{self, Receiver};
+use std::time::{Duration, Instant};
 
-fn run_capture(cmd: &mut Command, timeout_hint_secs: u64) -> (i32, String, String) {
-    let _ = timeout_hint_secs;
-    match cmd.output() {
-        Ok(out) => {
+#[cfg(test)]
+use std::cell::Cell;
+
+#[cfg(test)]
+thread_local! {
+    static DRY_RUN: Cell<bool> = const { Cell::new(false) };
+}
+
+#[cfg(test)]
+pub fn set_dry_run(on: bool) {
+    DRY_RUN.with(|c| c.set(on));
+}
+
+fn dry_run() -> bool {
+    #[cfg(test)]
+    {
+        if DRY_RUN.with(|c| c.get()) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Kill a hung helper so UPDATE/WIFI/MAP cannot freeze the kiosk.
+fn kill_pid(pid: u32) {
+    #[cfg(target_os = "linux")]
+    unsafe {
+        libc::kill(pid as i32, libc::SIGKILL);
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = Command::new("kill")
+            .args(["-9", &pid.to_string()])
+            .status();
+    }
+}
+
+fn run_capture(cmd: &mut Command, timeout_secs: u64) -> (i32, String, String) {
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+    let child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => return (127, String::new(), e.to_string()),
+    };
+    let pid = child.id();
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(child.wait_with_output());
+    });
+    let timeout = Duration::from_secs(timeout_secs.max(1));
+    match rx.recv_timeout(timeout) {
+        Ok(Ok(out)) => {
             let code = out.status.code().unwrap_or(-1);
             let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
             let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
             (code, stdout, stderr)
         }
-        Err(e) => (127, String::new(), e.to_string()),
+        Ok(Err(e)) => (127, String::new(), e.to_string()),
+        Err(_) => {
+            kill_pid(pid);
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while Instant::now() < deadline {
+                if rx.try_recv().is_ok() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            (
+                124,
+                String::new(),
+                format!("timed out after {timeout_secs}s"),
+            )
+        }
+    }
+}
+
+/// Appliance work that must not block the 60 Hz loop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostTask {
+    UpdateCheck,
+    Wifi,
+    MapList,
+    MapThruOn,
+    MapThruOff,
+}
+
+impl HostTask {
+    pub fn busy_status(self) -> &'static str {
+        match self {
+            Self::UpdateCheck => "UPDATE checking",
+            Self::Wifi => "WIFI working",
+            Self::MapList => "MAP listing",
+            Self::MapThruOn => "THRU starting",
+            Self::MapThruOff => "THRU stopping",
+        }
+    }
+
+    pub fn run(self) -> (String, Vec<String>) {
+        if dry_run() {
+            return (format!("{} dry-run", self.busy_status()), vec![]);
+        }
+        match self {
+            Self::UpdateCheck => update_check(),
+            Self::Wifi => wifi_action(),
+            Self::MapList => map_list_ports(),
+            Self::MapThruOn => map_thru_on(),
+            Self::MapThruOff => map_thru_off(),
+        }
+    }
+
+    /// Start the task on a worker thread. The UI polls [`Receiver::try_recv`].
+    pub fn spawn(self) -> Receiver<(String, Vec<String>)> {
+        let (tx, rx) = mpsc::channel();
+        let _ = std::thread::Builder::new()
+            .name("pidi-host".into())
+            .spawn(move || {
+                let _ = tx.send(self.run());
+            });
+        rx
     }
 }
 
@@ -520,7 +632,28 @@ pub fn pi_power(action: &str) -> (String, Vec<String>) {
     }
 }
 
-/// Legacy direct poweroff (tests / callers that skip the menu).
-pub fn power_action() -> (String, Vec<String>) {
-    pi_power("poweroff")
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn run_capture_kills_a_hung_command() {
+        let start = Instant::now();
+        let (code, _, err) = run_capture(Command::new("sleep").arg("20"), 1);
+        assert_eq!(code, 124, "err={err}");
+        assert!(err.contains("timed out"));
+        assert!(
+            start.elapsed() < Duration::from_secs(4),
+            "timeout took {:?}",
+            start.elapsed()
+        );
+    }
+
+    #[test]
+    fn dry_run_skips_subprocesses() {
+        set_dry_run(true);
+        let (status, _) = HostTask::UpdateCheck.run();
+        set_dry_run(false);
+        assert!(status.contains("dry-run"), "{status}");
+    }
 }

@@ -5,7 +5,8 @@
 
 use crate::chords::{self, ChordSpec, Overlay as ChordsOverlay, QualityRow, PALETTE_SLOTS};
 use crate::client::Outbox;
-use crate::host;
+use crate::host::{self, HostTask};
+use std::sync::mpsc::{Receiver, TryRecvError};
 use crate::kaoss_ui::{self, KaossPicker, KAOSS_PROGRAMS};
 use crate::layout::{Hit, Layout, Rect, Surface, NAV_H, SCREEN_H};
 use crate::mode::UiMode;
@@ -19,13 +20,17 @@ use crate::scroll::{self, ScrollKind, TOUCH_SCROLL_THRESH_PX};
 use crate::screensaver;
 use crate::voice_bake;
 use crate::waves;
-use jambox_core::{kaoss_scale, note_at_x, scale_notes, velocity_at_y};
+use jambox_core::{
+    drum_model_for_note, kaoss_scale, note_at_x, scale_notes, velocity_at_y, DrumKit, DrumMacros,
+    DrumModel, DRUM_MODEL_COUNT, DRUM_PREVIEW_SAMPLES, DRUM_PREVIEW_SR,
+};
 use jambox_protocol::{MidiNotice, RepeatDivision, RepeatPhase, StatusReply, TouchPhase, WireClipEvent};
 use std::path::PathBuf;
 use std::time::Instant;
 
 pub const LED_COLS: usize = 12;
 pub const LED_ROWS: usize = 7;
+#[allow(dead_code)]
 pub const KICK_NOTE: u8 = 36;
 pub const DRUM_CHANNEL: u8 = 9;
 pub const MAX_FINGERS: usize = 5;
@@ -36,6 +41,9 @@ pub const KAOSS_FULL_EXIT_EDGE_PX: i32 = 24;
 const KAOSS_CC_X: u8 = 12;
 const KAOSS_CC_Y: u8 = 13;
 const KAOSS_CC_TOUCH: u8 = 92;
+/// KIT sliders: tone / snap(noise) / pitch / decay.
+const DEFAULT_DRUM_MACROS: [f32; 4] = [0.60, 0.45, 0.50, 0.55];
+const KIT_WAVE_POINTS: usize = 160;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RepeatDivisionChoice {
@@ -159,11 +167,17 @@ pub struct NativeModel {
     pub synth_octave: i8,
     pub kaoss_picker_scroll: i32,
     pub log_scroll: usize,
-    /// Kit macros: tone, noise/snap, pitch, decay.
-    pub drum_macros: [f32; 4],
+    /// Kit macros per model: tone, noise/snap, pitch, decay.
+    pub drum_macros: [[f32; 4]; DRUM_MODEL_COUNT],
+    /// Snapshot shown while ALL DRUMS is the edit target.
+    pub drum_group_macros: [f32; 4],
     /// Selected kit pad (screen index 0..15 into `PHRASE_GRID_CELLS`).
     pub kit_selected: usize,
     pub kit_all_drums: bool,
+    /// WAVE drill-down: sliders + CRT one-shot for the current edit target.
+    pub kit_edit_open: bool,
+    pub kit_wave: [f32; KIT_WAVE_POINTS],
+    kit_wave_dirty: bool,
     pub kaoss_scale_index: u8,
     pub kaoss_key: u8,
     /// Left-edge MIDI of the pad window (C1..C5 typically).
@@ -255,6 +269,9 @@ pub struct NativeModel {
     cells: [[u32; LED_COLS]; LED_ROWS],
     phrases_loaded: bool,
     session_loaded: bool,
+    /// In-flight SET/MAP host subprocess (UPDATE/WIFI/THRU). Polled from tick.
+    host_rx: Option<Receiver<(String, Vec<String>)>>,
+    host_busy: Option<HostTask>,
 }
 
 impl Default for NativeModel {
@@ -299,9 +316,13 @@ impl NativeModel {
             synth_octave: 0,
             kaoss_picker_scroll: 0,
             log_scroll: 0,
-            drum_macros: [0.60, 0.45, 0.50, 0.55],
+            drum_macros: [DEFAULT_DRUM_MACROS; DRUM_MODEL_COUNT],
+            drum_group_macros: DEFAULT_DRUM_MACROS,
             kit_selected: 4,
             kit_all_drums: false,
+            kit_edit_open: false,
+            kit_wave: [0.0; KIT_WAVE_POINTS],
+            kit_wave_dirty: true,
             kaoss_scale_index: jambox_core::DEFAULT_KAOSS_SCALE_INDEX,
             kaoss_key: 0,
             kaoss_root_midi: jambox_core::DEFAULT_ROOT_MIDI,
@@ -381,6 +402,8 @@ impl NativeModel {
             cells: [[0; LED_COLS]; LED_ROWS],
             phrases_loaded: false,
             session_loaded: false,
+            host_rx: None,
+            host_busy: None,
         }
     }
 
@@ -480,6 +503,7 @@ impl NativeModel {
         self.synth_pick_a = None;
         self.synth_vib_open = false;
         self.synth_pick_scroll = 0;
+        self.kit_edit_open = false;
         self.chords_overlay = None;
         self.chords_arm = false;
         if mode != UiMode::Kaoss && self.kaoss_full {
@@ -544,6 +568,9 @@ impl NativeModel {
         }
         if self.synth_vib_open {
             return Some("vib");
+        }
+        if self.kit_edit_open {
+            return Some("kit_edit");
         }
         None
     }
@@ -619,6 +646,10 @@ impl NativeModel {
             }
             Some("vib") => {
                 self.synth_vib_open = false;
+                self.status_line.clear();
+            }
+            Some("kit_edit") => {
+                self.kit_edit_open = false;
                 self.status_line.clear();
             }
             _ => {
@@ -744,6 +775,53 @@ impl NativeModel {
         }
         self.tick_kaoss_gate(outbox);
         self.tick_screensaver(dt);
+        self.poll_host_job();
+        if self.mode == UiMode::Drums && self.kit_wave_dirty {
+            self.rebuild_kit_wave();
+        }
+    }
+
+    pub fn host_busy(&self) -> Option<HostTask> {
+        self.host_busy
+    }
+
+    fn start_host_job(&mut self, task: HostTask) {
+        if self.host_busy.is_some() {
+            self.status_line = "busy — wait".into();
+            self.push_log("host job already running");
+            self.mark_dirty();
+            return;
+        }
+        self.status_line = task.busy_status().into();
+        self.push_log(task.busy_status());
+        self.host_rx = Some(task.spawn());
+        self.host_busy = Some(task);
+        self.mark_dirty();
+    }
+
+    fn poll_host_job(&mut self) {
+        let Some(rx) = self.host_rx.as_ref() else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok((status, lines)) => {
+                self.host_rx = None;
+                self.host_busy = None;
+                self.status_line = status;
+                for line in lines {
+                    self.push_log(line);
+                }
+                self.mark_dirty();
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {
+                self.host_rx = None;
+                self.host_busy = None;
+                self.status_line = "host job failed".into();
+                self.push_log("host worker exited without a result");
+                self.mark_dirty();
+            }
+        }
     }
 
     pub fn screensaver_active(&self) -> bool {
@@ -888,6 +966,11 @@ impl NativeModel {
             "vibrato_rate",
             ((self.vibrato_rate - 1.0) / 8.0).clamp(0.0, 1.0),
         );
+        for (model, macros) in self.drum_macros.iter().enumerate() {
+            for (i, name) in Self::DRUM_MACRO_NAMES.iter().enumerate() {
+                outbox.synth_drum(name, macros[i], Some(model as u8));
+            }
+        }
         for (i, name) in ["drive", "delay_mix", "reverb_mix", "flanger_mix"]
             .iter()
             .enumerate()
@@ -1083,6 +1166,16 @@ impl NativeModel {
                 self.synth_vib_open,
                 self.synth_pick_a.is_some(),
             )
+        } else if self.mode == UiMode::Drums && self.kit_edit_open {
+            let base = self.layout.hit(self.mode, px, py);
+            if matches!(
+                base,
+                Hit::Nav(_) | Hit::NavBack | Hit::Power | Hit::HomeTile(_)
+            ) {
+                base
+            } else {
+                self.layout.hit_kit_edit(px, py)
+            }
         } else if self.mode == UiMode::Songs && self.layout.song_list.contains(px, py) {
             Hit::ScrollArea(ScrollKind::SongList)
         } else if self.mode == UiMode::Log {
@@ -1198,10 +1291,11 @@ impl NativeModel {
                 self.begin_kaoss_touch(gesture, x, y, outbox);
             }
             Hit::Drum { index, note } => {
-                let repeat = note == KICK_NOTE && self.mode == UiMode::Drums;
+                let repeat = self.mode == UiMode::Drums;
                 if self.mode == UiMode::Drums {
                     self.kit_selected = index;
                     self.kit_all_drums = false;
+                    self.kit_wave_dirty = true;
                 }
                 self.fingers[slot] = Finger {
                     active: true,
@@ -1225,9 +1319,9 @@ impl NativeModel {
                     );
                 } else {
                     outbox.note_on(DRUM_CHANNEL, note, 110);
-                    self.seq.push_note(true, DRUM_CHANNEL, note, 110);
-                    self.push_pad_rec(true, DRUM_CHANNEL, note, 110);
                 }
+                self.seq.push_note(true, DRUM_CHANNEL, note, 110);
+                self.push_pad_rec(true, DRUM_CHANNEL, note, 110);
             }
             Hit::Division(index) => {
                 self.division = RepeatDivisionChoice::from_index(index);
@@ -1427,15 +1521,35 @@ impl NativeModel {
                 self.tap_ui(slot, id, gesture, px, py);
                 self.nudge_vibrato_rate(-0.5, outbox);
             }
-            Hit::DrumMacro(index) => {
+            Hit::DrumMacro(index) | Hit::KitSlider(index) => {
+                self.fingers[slot] = Finger {
+                    active: true,
+                    id,
+                    gesture,
+                    x: 0.0,
+                    y: 0.0,
+                    px,
+                    py,
+                    surface: Surface::KitSlider { index },
+                    gate_on: false,
+                };
+                self.apply_kit_slider(index, py, outbox);
+            }
+            Hit::KitWave => {
                 self.tap_ui(slot, id, gesture, px, py);
-                self.nudge_drum_macro(index, outbox);
+                self.open_kit_edit();
+            }
+            Hit::KitPlay => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.audition_selected_drum(outbox);
             }
             Hit::KitAllDrums => {
                 self.tap_ui(slot, id, gesture, px, py);
                 self.kit_all_drums = true;
+                self.drum_group_macros = self.edit_source_macros();
                 self.fx_target = FxEditTarget::DrumGroup;
-                self.status_line = "ALL DRUMS FX (shared kit bus)".into();
+                self.kit_wave_dirty = true;
+                self.status_line = "ALL DRUMS — sliders reshape the whole kit".into();
                 self.mark_dirty();
             }
             Hit::ScrollArea(kind) => {
@@ -2087,24 +2201,11 @@ impl NativeModel {
             }
             Hit::SettingsWifi => {
                 self.tap_ui(slot, id, gesture, px, py);
-                let (status, lines) = host::wifi_action();
-                self.status_line = status;
-                for line in lines {
-                    self.push_log(line);
-                }
-                self.mark_dirty();
+                self.start_host_job(HostTask::Wifi);
             }
             Hit::SettingsUpdate => {
                 self.tap_ui(slot, id, gesture, px, py);
-                // Sync host check can stall the UI — set a visible busy line first.
-                self.status_line = "UPDATE check…".into();
-                self.mark_dirty();
-                let (status, lines) = host::update_check();
-                self.status_line = status;
-                for line in lines {
-                    self.push_log(line);
-                }
-                self.mark_dirty();
+                self.start_host_job(HostTask::UpdateCheck);
             }
             Hit::SettingsFont => {
                 self.tap_ui(slot, id, gesture, px, py);
@@ -2124,27 +2225,15 @@ impl NativeModel {
             }
             Hit::MapThruOn => {
                 self.tap_ui(slot, id, gesture, px, py);
-                let (status, lines) = host::map_thru_on();
-                self.status_line = status;
-                for line in lines {
-                    self.push_log(line);
-                }
+                self.start_host_job(HostTask::MapThruOn);
             }
             Hit::MapThruOff => {
                 self.tap_ui(slot, id, gesture, px, py);
-                let (status, lines) = host::map_thru_off();
-                self.status_line = status;
-                for line in lines {
-                    self.push_log(line);
-                }
+                self.start_host_job(HostTask::MapThruOff);
             }
             Hit::MapRefresh => {
                 self.tap_ui(slot, id, gesture, px, py);
-                let (status, lines) = host::map_list_ports();
-                self.status_line = status;
-                for line in lines {
-                    self.push_log(line);
-                }
+                self.start_host_job(HostTask::MapList);
             }
             Hit::ChordsOut => {
                 self.tap_ui(slot, id, gesture, px, py);
@@ -2265,6 +2354,9 @@ impl NativeModel {
             Surface::SynthSlider { index } => {
                 self.apply_synth_slider(index, px, py, outbox);
             }
+            Surface::KitSlider { index } => {
+                self.apply_kit_slider(index, py, outbox);
+            }
             Surface::SettingsFx { index } => {
                 self.apply_fx_slider(index, py, outbox);
             }
@@ -2339,9 +2431,9 @@ impl NativeModel {
                     );
                 } else {
                     outbox.note_off(DRUM_CHANNEL, note);
-                    self.seq.push_note(false, DRUM_CHANNEL, note, 0);
-                    self.push_pad_rec(false, DRUM_CHANNEL, note, 0);
                 }
+                self.seq.push_note(false, DRUM_CHANNEL, note, 0);
+                self.push_pad_rec(false, DRUM_CHANNEL, note, 0);
             }
             Surface::SynthKey { note } => {
                 outbox.note_off(0, note);
@@ -2370,6 +2462,7 @@ impl NativeModel {
             }
             Surface::Phrase { .. }
             | Surface::SynthSlider { .. }
+            | Surface::KitSlider { .. }
             | Surface::SettingsFx { .. }
             | Surface::ChordsPalette { .. }
             | Surface::UiTap => {}
@@ -2716,6 +2809,105 @@ impl NativeModel {
         ["drum_tone", "drum_noise", "drum_pitch", "drum_decay"];
     const DRUM_MACRO_LABELS: [&'static str; 4] = ["TONE", "SNAP", "PITCH", "DECAY"];
 
+    fn selected_kit_note(&self) -> u8 {
+        let cell = phrases::PHRASE_GRID_CELLS[self.kit_selected.min(15)];
+        phrases::mpk_note_for_phrase_cell(cell)
+    }
+
+    pub fn selected_drum_model(&self) -> DrumModel {
+        drum_model_for_note(self.selected_kit_note())
+    }
+
+    fn edit_source_macros(&self) -> [f32; 4] {
+        self.drum_macros[self.selected_drum_model().index()]
+    }
+
+    pub fn edit_drum_macros(&self) -> [f32; 4] {
+        if self.kit_all_drums {
+            self.drum_group_macros
+        } else {
+            self.edit_source_macros()
+        }
+    }
+
+    fn open_kit_edit(&mut self) {
+        self.kit_edit_open = true;
+        self.kit_wave_dirty = true;
+        let name = if self.kit_all_drums {
+            "ALL DRUMS".to_string()
+        } else {
+            self.selected_drum_model().name().replace('_', " ")
+        };
+        self.status_line = format!("{name} — sliders reshape this voice");
+        self.mark_dirty();
+    }
+
+    fn audition_selected_drum(&mut self, outbox: &mut Outbox) {
+        let note = self.selected_kit_note();
+        outbox.note_on(DRUM_CHANNEL, note, 110);
+        outbox.note_off(DRUM_CHANNEL, note);
+        self.status_line = format!(
+            "play {}",
+            self.selected_drum_model().name().replace('_', " ")
+        );
+        self.mark_dirty();
+    }
+
+    fn apply_kit_slider(&mut self, index: usize, py: i32, outbox: &mut Outbox) {
+        if index >= 4 {
+            return;
+        }
+        let track = self.layout.kit_edit_slider(index);
+        let y = 1.0 - ((py - track.y) as f32 / track.h.max(1) as f32);
+        let value = y.clamp(0.0, 1.0);
+        let name = Self::DRUM_MACRO_NAMES[index];
+        if self.kit_all_drums {
+            self.drum_group_macros[index] = value;
+            for pad in self.drum_macros.iter_mut() {
+                pad[index] = value;
+            }
+            outbox.synth(name, value);
+            self.status_line = format!(
+                "ALL DRUMS {} {:.2}",
+                Self::DRUM_MACRO_LABELS[index],
+                value
+            );
+        } else {
+            let model = self.selected_drum_model().index();
+            self.drum_macros[model][index] = value;
+            outbox.synth_drum(name, value, Some(model as u8));
+            self.status_line = format!(
+                "{} {} {:.2}",
+                self.selected_drum_model().name().replace('_', " "),
+                Self::DRUM_MACRO_LABELS[index],
+                value
+            );
+        }
+        self.kit_wave_dirty = true;
+        self.mark_dirty();
+    }
+
+    fn rebuild_kit_wave(&mut self) {
+        let m = self.edit_drum_macros();
+        let macros = DrumMacros {
+            tone: m[0],
+            noise: m[1],
+            pitch: m[2],
+            decay: m[3],
+        };
+        let mut buf = [0.0f32; DRUM_PREVIEW_SAMPLES];
+        DrumKit::preview(
+            self.selected_drum_model(),
+            macros,
+            DRUM_PREVIEW_SR,
+            7,
+            &mut buf,
+        );
+        downsample_wave(&buf, &mut self.kit_wave);
+        self.kit_wave_dirty = false;
+        self.mark_dirty();
+    }
+
     fn apply_fx_slider(&mut self, index: usize, py: i32, outbox: &mut Outbox) {
         if index >= 4 {
             return;
@@ -2755,21 +2947,6 @@ impl NativeModel {
             FxEditTarget::DrumGroup => "FX target: DRUM GROUP".into(),
         };
         self.mark_dirty();
-    }
-
-    fn nudge_drum_macro(&mut self, index: usize, outbox: &mut Outbox) {
-        if index >= 4 {
-            return;
-        }
-        let next = (self.drum_macros[index] + 0.15) % 1.05;
-        let value = if next > 1.0 { 0.0 } else { next };
-        self.drum_macros[index] = value;
-        outbox.synth(Self::DRUM_MACRO_NAMES[index], value);
-        self.status_line = format!(
-            "{} {:.2}",
-            Self::DRUM_MACRO_LABELS[index],
-            value
-        );
     }
 
     fn nudge_vibrato_depth(&mut self, delta_semis: f32, outbox: &mut Outbox) {
@@ -4456,6 +4633,29 @@ impl NativeModel {
     }
 }
 
+fn downsample_wave(src: &[f32], dst: &mut [f32]) {
+    let points = dst.len();
+    if points == 0 || src.is_empty() {
+        return;
+    }
+    let bucket = src.len() as f32 / points as f32;
+    for i in 0..points {
+        let a = ((i as f32) * bucket) as usize;
+        let mut b = (((i + 1) as f32) * bucket) as usize;
+        if b <= a {
+            b = a + 1;
+        }
+        let b = b.min(src.len());
+        let chunk = &src[a..b];
+        let v = if (i & 1) == 0 {
+            chunk.iter().copied().fold(f32::NEG_INFINITY, f32::max)
+        } else {
+            chunk.iter().copied().fold(f32::INFINITY, f32::min)
+        };
+        dst[i] = if v.is_finite() { v.clamp(-1.0, 1.0) } else { 0.0 };
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4624,9 +4824,9 @@ mod tests {
         )));
         assert!(batch.iter().any(|r| matches!(
             r,
-            Request::NoteOn {
+            Request::Repeat {
                 note: 37,
-                channel: 9,
+                phase: RepeatPhase::Down,
                 ..
             }
         )));
@@ -4734,13 +4934,133 @@ mod tests {
         model.set_mode(UiMode::Drums);
         model.ensure_library_loaded();
         let mut out = Outbox::new();
-        let cell = model.layout.kit_macro_cell(0);
-        model.finger_down(1, cell.x + 4, cell.y + 4, &mut out);
+        let wave = model.layout.kit_wave;
+        model.finger_down(1, wave.x + 4, wave.y + 4, &mut out);
+        model.finger_up(1, &mut out);
+        assert!(model.kit_edit_open);
+        out.take();
+        let track = model.layout.kit_edit_slider(0);
+        model.finger_down(2, track.x + 4, track.y + track.h / 2, &mut out);
         let batch = out.take();
         assert!(batch.iter().any(|r| matches!(
             r,
-            Request::Synth { param, .. } if param == "drum_tone"
+            Request::Synth {
+                param,
+                drum: Some(0),
+                ..
+            } if param == "drum_tone"
         )));
+    }
+
+    #[test]
+    fn kit_slider_on_one_drum_does_not_target_the_group() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Drums);
+        let mut out = Outbox::new();
+        let snare = model.layout.kit_pad_cell(5);
+        model.finger_down(1, snare.x + 4, snare.y + 4, &mut out);
+        model.finger_up(1, &mut out);
+        out.take();
+        model.open_kit_edit();
+        let track = model.layout.kit_edit_slider(2);
+        model.finger_down(2, track.x + 4, track.y + 8, &mut out);
+        let batch = out.take();
+        let snare_model = jambox_core::drum_model_for_note(37).index() as u8;
+        assert!(batch.iter().any(|r| matches!(
+            r,
+            Request::Synth {
+                param,
+                drum: Some(idx),
+                ..
+            } if param == "drum_pitch" && *idx == snare_model
+        )));
+        assert!(!batch.iter().any(|r| matches!(
+            r,
+            Request::Synth { param, drum: None, .. } if param == "drum_pitch"
+        )));
+    }
+
+    #[test]
+    fn all_drums_slider_writes_the_shared_kit_macros() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Drums);
+        let mut out = Outbox::new();
+        let all = model.layout.kit_all;
+        model.finger_down(1, all.x + 4, all.y + 4, &mut out);
+        model.finger_up(1, &mut out);
+        assert!(model.kit_all_drums);
+        out.take();
+        model.open_kit_edit();
+        let track = model.layout.kit_edit_slider(0);
+        model.finger_down(2, track.x + 4, track.y + 8, &mut out);
+        let batch = out.take();
+        assert!(batch.iter().any(|r| matches!(
+            r,
+            Request::Synth {
+                param,
+                drum: None,
+                ..
+            } if param == "drum_tone"
+        )));
+        let tone = model.drum_macros[0][0];
+        assert!(model.drum_macros.iter().all(|m| (m[0] - tone).abs() < 1e-6));
+    }
+
+    #[test]
+    fn holding_any_pad_starts_a_repeat_lane() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Drums);
+        let mut out = Outbox::new();
+        let eighth = model.layout.kit_division_cell(1);
+        model.finger_down(1, eighth.x + 4, eighth.y + 4, &mut out);
+        model.finger_up(1, &mut out);
+        out.take();
+        let hat = model.layout.kit_pad_cell(0);
+        model.finger_down(2, hat.x + 4, hat.y + 4, &mut out);
+        let batch = out.take();
+        assert!(batch.iter().any(|r| matches!(
+            r,
+            Request::Repeat {
+                phase: RepeatPhase::Down,
+                division: RepeatDivision::Eighth,
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn kit_scope_renders_a_one_shot() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Drums);
+        let mut out = Outbox::new();
+        model.tick(1.0 / 60.0, &mut out);
+        assert!(
+            model.kit_wave.iter().any(|s| s.abs() > 0.01),
+            "selected drum waveform should be non-silent"
+        );
+    }
+
+    #[test]
+    fn settings_update_does_not_block_the_ui() {
+        host::set_dry_run(true);
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Settings);
+        let mut out = Outbox::new();
+        let btn = model.layout.settings_update;
+        let start = Instant::now();
+        model.finger_down(1, btn.x + 4, btn.y + 4, &mut out);
+        model.finger_up(1, &mut out);
+        assert!(
+            start.elapsed() < std::time::Duration::from_millis(200),
+            "UPDATE tap blocked for {:?}",
+            start.elapsed()
+        );
+        assert_eq!(model.host_busy(), Some(HostTask::UpdateCheck));
+        assert!(model.status_line.to_ascii_lowercase().contains("check"));
+        let home = model.layout.nav_home();
+        model.finger_down(2, home.x + 4, home.y + 4, &mut out);
+        assert_eq!(model.mode, UiMode::Home);
+        host::set_dry_run(false);
     }
 
     #[test]
