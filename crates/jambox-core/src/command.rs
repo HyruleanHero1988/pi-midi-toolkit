@@ -59,13 +59,23 @@ pub enum SynthParam {
     DrumNoise,
     DrumTone,
     DrumLevel,
-    /// 0 = wavetable melody, 1 = two-operator FM playground.
+    /// 0 = wavetable melody, 1 = four-operator FM playground.
     FmEnable,
     /// Recipe index as a raw number (not 0..1). See `fm::FM_RECIPES`.
     FmRecipe,
+    /// Selected operator 0..3 as a raw number (not 0..1).
+    FmOp,
+    /// Packed draw: integer `from + to*4`, fraction is amount. See `fm::pack_fm_link`.
+    FmConnect,
+    /// Wipe the 4×4 draw matrix. Value ignored.
+    FmClear,
+    /// Selected-op fold (sine → square).
     FmBright,
+    /// Selected-op ratio into `CLANG_RATIOS`.
     FmClang,
+    /// Selected-op envelope morph.
     FmHit,
+    /// Selected-op audio mix (how much you hear it).
     FmTail,
 }
 

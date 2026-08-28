@@ -1,8 +1,9 @@
-//! Two-operator FM playground.
+//! Four-operator FM playground, patched by drawing.
 //!
-//! This is a teaching instrument, not a DX7 clone. One oscillator (the
-//! *modulator*) wiggles the pitch of another (the *carrier*). Named recipes
-//! pick a starting character; four knobs keep the rest in musical English.
+//! Inspired by LOVE Synthesizers FIRST LOVE: you swipe one operator into
+//! another instead of filling in a DX7 matrix. Each operator is a sine that
+//! can fold toward a square, and a 4×4 amount matrix (including self = feedback)
+//! is the algorithm.
 //!
 //! Bounded for the Pi 2: 8 voices, sine table lookup, no allocation after
 //! [`FmSynth::new`].
@@ -13,13 +14,17 @@ const SINE_SIZE: usize = 2048;
 const SINE_MASK: usize = SINE_SIZE - 1;
 pub const MAX_FM_VOICES: usize = 8;
 pub const FM_RECIPE_COUNT: usize = 8;
-const VOICE_AMP: f32 = 0.42;
+pub const FM_OP_COUNT: usize = 4;
+const VOICE_AMP: f32 = 0.38;
+const INDEX_SCALE: f32 = SINE_SIZE as f32 / std::f32::consts::TAU * 5.5;
 
-/// Discrete modulator/carrier frequency ratios, in order of "clang".
+/// Discrete operator frequency ratios, in order of "clang".
 pub const CLANG_RATIOS: [f32; 10] = [0.5, 1.0, 1.414, 2.0, 3.0, 3.5, 5.0, 7.0, 11.0, 14.0];
 pub const CLANG_LABELS: [&str; 10] = [
     "1/2", "1:1", "√2", "2:1", "3:1", "3.5", "5:1", "7:1", "11", "14",
 ];
+pub const OP_NAMES: [&str; FM_OP_COUNT] = ["A", "B", "C", "D"];
+pub const OP_COLORS: [u32; FM_OP_COUNT] = [0xfb4934, 0xfe8019, 0xb8bb26, 0x458588];
 
 #[derive(Debug, Clone, Copy)]
 pub struct FmRecipe {
@@ -27,16 +32,6 @@ pub struct FmRecipe {
     pub label: &'static str,
     pub title: &'static str,
     pub hint: &'static str,
-    /// Knob defaults 0..1: bright, clang, hit, tail.
-    pub bright: f32,
-    pub clang: f32,
-    pub hit: f32,
-    pub tail: f32,
-    pub feedback: f32,
-    /// 0 = modulator decays with the carrier; 1 = tine-like (mod dies first).
-    pub mod_decay_bias: f32,
-    /// 0 = same attack; 1 = brass-like (modulator opens slowly).
-    pub mod_attack_bias: f32,
 }
 
 pub const FM_RECIPES: [FmRecipe; FM_RECIPE_COUNT] = [
@@ -44,105 +39,49 @@ pub const FM_RECIPES: [FmRecipe; FM_RECIPE_COUNT] = [
         id: "bell",
         label: "BELL",
         title: "Bell",
-        hint: "Metal clang. Bright = more overtones. Clang picks the strike pitch.",
-        bright: 0.72,
-        clang: 0.55,
-        hit: 0.04,
-        tail: 0.48,
-        feedback: 0.0,
-        mod_decay_bias: 0.65,
-        mod_attack_bias: 0.0,
+        hint: "Draw A into D. Metallic strike.",
     },
     FmRecipe {
         id: "ep",
         label: "E.PIANO",
         title: "E. piano",
-        hint: "Tine piano. The wiggle dies fast; the tone rings. Classic 80s keys.",
-        bright: 0.52,
-        clang: 0.95,
-        hit: 0.02,
-        tail: 0.58,
-        feedback: 0.0,
-        mod_decay_bias: 0.88,
-        mod_attack_bias: 0.0,
+        hint: "A dies fast, D rings. Classic tine.",
     },
     FmRecipe {
         id: "bass",
         label: "BASS",
+        hint: "A wiggles D. Fold A for growl.",
         title: "Bass",
-        hint: "Low and round. A little Bright adds growl; keep Clang near 1:1 or 2:1.",
-        bright: 0.42,
-        clang: 0.15,
-        hit: 0.10,
-        tail: 0.38,
-        feedback: 0.18,
-        mod_decay_bias: 0.25,
-        mod_attack_bias: 0.0,
     },
     FmRecipe {
         id: "brass",
         label: "BRASS",
         title: "Brass",
-        hint: "The wiggle opens slowly, so the note gets brighter after you press.",
-        bright: 0.50,
-        clang: 0.15,
-        hit: 0.58,
-        tail: 0.42,
-        feedback: 0.08,
-        mod_decay_bias: 0.10,
-        mod_attack_bias: 0.85,
+        hint: "A opens slowly into D — brightness after the press.",
     },
     FmRecipe {
         id: "flute",
         label: "FLUTE",
         title: "Flute",
-        hint: "Almost a pure tone. Bright near zero. Hit is breath.",
-        bright: 0.12,
-        clang: 0.15,
-        hit: 0.42,
-        tail: 0.50,
-        feedback: 0.04,
-        mod_decay_bias: 0.15,
-        mod_attack_bias: 0.20,
+        hint: "Almost just D. A tiny A→D is breath.",
     },
     FmRecipe {
         id: "organ",
         label: "ORGAN",
         title: "Organ",
-        hint: "Holds while you hold. Clang at 2:1 or 3:1 stacks harmonics.",
-        bright: 0.34,
-        clang: 0.45,
-        hit: 0.04,
-        tail: 0.88,
-        feedback: 0.28,
-        mod_decay_bias: 0.05,
-        mod_attack_bias: 0.0,
+        hint: "A and B are heard together. Draw either into D.",
     },
     FmRecipe {
         id: "pluck",
         label: "PLUCK",
         title: "Pluck",
-        hint: "Instant attack, short tail. A guitar-ish twang.",
-        bright: 0.40,
-        clang: 0.33,
-        hit: 0.0,
-        tail: 0.18,
-        feedback: 0.10,
-        mod_decay_bias: 0.45,
-        mod_attack_bias: 0.0,
+        hint: "Short A→D. Instant, then gone.",
     },
     FmRecipe {
         id: "growl",
         label: "GROWL",
         title: "Growl",
-        hint: "The wiggle feeds back into itself. Messy on purpose.",
-        bright: 0.58,
-        clang: 0.15,
-        hit: 0.16,
-        tail: 0.50,
-        feedback: 0.82,
-        mod_decay_bias: 0.20,
-        mod_attack_bias: 0.10,
+        hint: "Draw A onto itself, then into D. Messy on purpose.",
     },
 ];
 
@@ -163,40 +102,170 @@ pub fn clang_label(unit: f32) -> &'static str {
     CLANG_LABELS[clang_index(unit)]
 }
 
-/// Live patch derived from a recipe plus the four playground knobs.
-#[derive(Debug, Clone, Copy)]
-pub struct FmPatch {
-    pub car_ratio: f32,
-    pub mod_ratio: f32,
-    pub index: f32,
-    pub feedback: f32,
-    pub car_attack: f32,
-    pub car_release: f32,
-    pub mod_attack: f32,
-    pub mod_release: f32,
+/// Pack a drawn connection: integer 0..15 is from + to*4, fraction is amount.
+pub fn pack_fm_link(from: usize, to: usize, amount: f32) -> f32 {
+    let from = from % FM_OP_COUNT;
+    let to = to % FM_OP_COUNT;
+    (from + to * FM_OP_COUNT) as f32 + amount.clamp(0.02, 0.99)
 }
 
-impl FmPatch {
-    pub fn from_controls(recipe: usize, bright: f32, clang: f32, hit: f32, tail: f32) -> Self {
-        let rec = fm_recipe(recipe);
-        let bright = bright.clamp(0.0, 1.0);
-        let hit = hit.clamp(0.0, 1.0);
-        let tail = tail.clamp(0.0, 1.0);
-        let car_attack = 0.002 * (0.45 / 0.002_f32).powf(hit);
-        let car_release = 0.04 * (1.60 / 0.04_f32).powf(tail);
-        let mod_attack = car_attack * (1.0 + rec.mod_attack_bias * 6.0);
-        let mod_release = car_release * (1.0 - rec.mod_decay_bias * 0.85).max(0.08);
+pub fn unpack_fm_link(value: f32) -> (usize, usize, f32) {
+    let v = value.max(0.0);
+    let idx = v.floor() as usize;
+    let amount = v.fract().clamp(0.02, 1.0);
+    (idx % FM_OP_COUNT, (idx / FM_OP_COUNT) % FM_OP_COUNT, amount)
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct FmOpParams {
+    /// 0..1 into [`CLANG_RATIOS`].
+    pub ratio: f32,
+    /// Mix into the heard output.
+    pub audio: f32,
+    /// 0 = sine, 1 = folded / pushed toward square.
+    pub fold: f32,
+    /// 0 = snappy, 1 = slow open (morphing envelope lite).
+    pub env: f32,
+}
+
+impl Default for FmOpParams {
+    fn default() -> Self {
         Self {
-            car_ratio: 1.0,
-            mod_ratio: clang_ratio(clang),
-            index: 0.12 + bright.powf(1.35) * 7.4,
-            feedback: rec.feedback,
-            car_attack,
-            car_release,
-            mod_attack,
-            mod_release,
+            ratio: 0.15,
+            audio: 0.0,
+            fold: 0.0,
+            env: 0.35,
         }
     }
+}
+
+impl FmOpParams {
+    fn attack_sec(self) -> f32 {
+        0.002 * (0.50 / 0.002_f32).powf(self.env.clamp(0.0, 1.0))
+    }
+
+    fn release_sec(self) -> f32 {
+        0.045 * (1.50 / 0.045_f32).powf(self.env.clamp(0.0, 1.0))
+    }
+}
+
+/// Four operators plus who wiggles whom. `matrix[src][dst]` is the draw amount.
+#[derive(Debug, Clone, Copy)]
+pub struct FmPatch {
+    pub ops: [FmOpParams; FM_OP_COUNT],
+    pub matrix: [[f32; FM_OP_COUNT]; FM_OP_COUNT],
+}
+
+impl Default for FmPatch {
+    fn default() -> Self {
+        fm_recipe_patch(0)
+    }
+}
+
+fn op(ratio: f32, audio: f32, fold: f32, env: f32) -> FmOpParams {
+    FmOpParams {
+        ratio,
+        audio,
+        fold,
+        env,
+    }
+}
+
+fn quiet(ratio: f32) -> FmOpParams {
+    op(ratio, 0.0, 0.0, 0.3)
+}
+
+/// Starting graphs. D is usually the tone you hear; A/B/C wiggle it if linked.
+pub fn fm_recipe_patch(index: usize) -> FmPatch {
+    let mut p = FmPatch {
+        ops: [FmOpParams::default(); FM_OP_COUNT],
+        matrix: [[0.0; FM_OP_COUNT]; FM_OP_COUNT],
+    };
+    match index % FM_RECIPE_COUNT {
+        0 => {
+            // Bell: A (3.5) → D
+            p.ops = [
+                op(0.55, 0.0, 0.10, 0.18),
+                quiet(0.15),
+                quiet(0.15),
+                op(0.15, 1.0, 0.0, 0.48),
+            ];
+            p.matrix[0][3] = 0.72;
+        }
+        1 => {
+            // E.piano: A (14) dies faster than D
+            p.ops = [
+                op(0.95, 0.0, 0.04, 0.08),
+                quiet(0.15),
+                quiet(0.15),
+                op(0.15, 1.0, 0.0, 0.58),
+            ];
+            p.matrix[0][3] = 0.55;
+        }
+        2 => {
+            // Bass: A → D, a little fold
+            p.ops = [
+                op(0.15, 0.0, 0.22, 0.28),
+                quiet(0.15),
+                quiet(0.15),
+                op(0.15, 1.0, 0.08, 0.38),
+            ];
+            p.matrix[0][3] = 0.48;
+        }
+        3 => {
+            // Brass: slow A into D
+            p.ops = [
+                op(0.15, 0.0, 0.12, 0.72),
+                quiet(0.15),
+                quiet(0.15),
+                op(0.15, 1.0, 0.0, 0.42),
+            ];
+            p.matrix[0][3] = 0.52;
+        }
+        4 => {
+            // Flute: mostly D
+            p.ops = [
+                op(0.15, 0.0, 0.0, 0.40),
+                quiet(0.15),
+                quiet(0.15),
+                op(0.15, 1.0, 0.0, 0.50),
+            ];
+            p.matrix[0][3] = 0.12;
+        }
+        5 => {
+            // Organ: A+B heard, light into D
+            p.ops = [
+                op(0.35, 0.55, 0.0, 0.08),
+                op(0.45, 0.40, 0.0, 0.08),
+                quiet(0.15),
+                op(0.15, 0.70, 0.0, 0.88),
+            ];
+            p.matrix[0][3] = 0.22;
+            p.matrix[1][3] = 0.18;
+        }
+        6 => {
+            // Pluck
+            p.ops = [
+                op(0.35, 0.0, 0.16, 0.0),
+                quiet(0.15),
+                quiet(0.15),
+                op(0.15, 1.0, 0.0, 0.16),
+            ];
+            p.matrix[0][3] = 0.44;
+        }
+        _ => {
+            // Growl: A feedback + A→D + fold
+            p.ops = [
+                op(0.15, 0.15, 0.62, 0.30),
+                quiet(0.15),
+                quiet(0.15),
+                op(0.15, 1.0, 0.18, 0.48),
+            ];
+            p.matrix[0][0] = 0.70;
+            p.matrix[0][3] = 0.58;
+        }
+    }
+    p
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -204,13 +273,10 @@ struct FmVoice {
     active: bool,
     channel: u8,
     note: u8,
-    car_phase: f32,
-    mod_phase: f32,
-    car_amp: f32,
-    mod_amp: f32,
-    car_target: f32,
-    mod_target: f32,
-    last_mod: f32,
+    phase: [f32; FM_OP_COUNT],
+    amp: [f32; FM_OP_COUNT],
+    target: f32,
+    last: [f32; FM_OP_COUNT],
     releasing: bool,
     age: u64,
 }
@@ -221,13 +287,10 @@ impl FmVoice {
             active: false,
             channel: 0,
             note: 0,
-            car_phase: 0.0,
-            mod_phase: 0.0,
-            car_amp: 0.0,
-            mod_amp: 0.0,
-            car_target: 0.0,
-            mod_target: 0.0,
-            last_mod: 0.0,
+            phase: [0.0; FM_OP_COUNT],
+            amp: [0.0; FM_OP_COUNT],
+            target: 0.0,
+            last: [0.0; FM_OP_COUNT],
             releasing: false,
             age: 0,
         }
@@ -239,10 +302,7 @@ pub struct FmSynth {
     voices: [FmVoice; MAX_FM_VOICES],
     serial: u64,
     recipe: usize,
-    bright: f32,
-    clang: f32,
-    hit: f32,
-    tail: f32,
+    selected: usize,
     patch: FmPatch,
 }
 
@@ -259,19 +319,13 @@ impl FmSynth {
         for (i, sample) in sine.iter_mut().enumerate() {
             *sample = (i as f32 * tau / SINE_SIZE as f32).sin();
         }
-        let recipe = 0;
-        let rec = fm_recipe(recipe);
-        let patch = FmPatch::from_controls(recipe, rec.bright, rec.clang, rec.hit, rec.tail);
         Self {
             sine,
             voices: [FmVoice::silent(); MAX_FM_VOICES],
             serial: 0,
-            recipe,
-            bright: rec.bright,
-            clang: rec.clang,
-            hit: rec.hit,
-            tail: rec.tail,
-            patch,
+            recipe: 0,
+            selected: 3,
+            patch: fm_recipe_patch(0),
         }
     }
 
@@ -287,40 +341,59 @@ impl FmSynth {
         self.patch
     }
 
+    pub fn selected(&self) -> usize {
+        self.selected
+    }
+
     pub fn set_recipe(&mut self, index: usize) {
         let index = index % FM_RECIPE_COUNT;
-        let rec = fm_recipe(index);
         self.recipe = index;
-        self.bright = rec.bright;
-        self.clang = rec.clang;
-        self.hit = rec.hit;
-        self.tail = rec.tail;
-        self.rebuild_patch();
+        self.patch = fm_recipe_patch(index);
+        self.selected = 3;
     }
 
+    pub fn set_selected(&mut self, op: usize) {
+        self.selected = op % FM_OP_COUNT;
+    }
+
+    pub fn set_op_ratio(&mut self, unit: f32) {
+        self.patch.ops[self.selected].ratio = unit.clamp(0.0, 1.0);
+    }
+
+    pub fn set_op_audio(&mut self, unit: f32) {
+        self.patch.ops[self.selected].audio = unit.clamp(0.0, 1.0);
+    }
+
+    pub fn set_op_fold(&mut self, unit: f32) {
+        self.patch.ops[self.selected].fold = unit.clamp(0.0, 1.0);
+    }
+
+    pub fn set_op_env(&mut self, unit: f32) {
+        self.patch.ops[self.selected].env = unit.clamp(0.0, 1.0);
+    }
+
+    /// MIDI knobs: bright=fold, clang=ratio, hit=env, tail=audio of the selected op.
     pub fn set_bright(&mut self, unit: f32) {
-        self.bright = unit.clamp(0.0, 1.0);
-        self.rebuild_patch();
+        self.set_op_fold(unit);
     }
-
     pub fn set_clang(&mut self, unit: f32) {
-        self.clang = unit.clamp(0.0, 1.0);
-        self.rebuild_patch();
+        self.set_op_ratio(unit);
     }
-
     pub fn set_hit(&mut self, unit: f32) {
-        self.hit = unit.clamp(0.0, 1.0);
-        self.rebuild_patch();
+        self.set_op_env(unit);
     }
-
     pub fn set_tail(&mut self, unit: f32) {
-        self.tail = unit.clamp(0.0, 1.0);
-        self.rebuild_patch();
+        self.set_op_audio(unit);
     }
 
-    fn rebuild_patch(&mut self) {
-        self.patch =
-            FmPatch::from_controls(self.recipe, self.bright, self.clang, self.hit, self.tail);
+    pub fn set_link(&mut self, from: usize, to: usize, amount: f32) {
+        let from = from % FM_OP_COUNT;
+        let to = to % FM_OP_COUNT;
+        self.patch.matrix[from][to] = amount.clamp(0.0, 1.0);
+    }
+
+    pub fn clear_links(&mut self) {
+        self.patch.matrix = [[0.0; FM_OP_COUNT]; FM_OP_COUNT];
     }
 
     pub fn note_on(&mut self, channel: u8, note: u8, velocity: u8) {
@@ -330,19 +403,14 @@ impl FmSynth {
         }
         self.serial = self.serial.wrapping_add(1);
         let vel = (velocity as f32 / 127.0).clamp(0.05, 1.0);
-        let car_target = vel * VOICE_AMP;
-        // Modulator sits a bit quieter than the carrier; recipes shape the rest.
-        let mod_target = vel * VOICE_AMP;
+        let target = vel * VOICE_AMP;
 
         if let Some(slot) = self.find_playing(channel, note) {
             let v = &mut self.voices[slot];
-            v.car_phase = 0.0;
-            v.mod_phase = 0.0;
-            v.car_amp = 0.0;
-            v.mod_amp = 0.0;
-            v.car_target = car_target;
-            v.mod_target = mod_target;
-            v.last_mod = 0.0;
+            v.phase = [0.0; FM_OP_COUNT];
+            v.amp = [0.0; FM_OP_COUNT];
+            v.last = [0.0; FM_OP_COUNT];
+            v.target = target;
             v.releasing = false;
             v.age = self.serial;
             return;
@@ -353,13 +421,10 @@ impl FmSynth {
             active: true,
             channel,
             note,
-            car_phase: 0.0,
-            mod_phase: 0.0,
-            car_amp: 0.0,
-            mod_amp: 0.0,
-            car_target,
-            mod_target,
-            last_mod: 0.0,
+            phase: [0.0; FM_OP_COUNT],
+            amp: [0.0; FM_OP_COUNT],
+            target,
+            last: [0.0; FM_OP_COUNT],
             releasing: false,
             age: self.serial,
         };
@@ -369,8 +434,7 @@ impl FmSynth {
         if let Some(slot) = self.find_playing(channel, note) {
             let v = &mut self.voices[slot];
             v.releasing = true;
-            v.car_target = 0.0;
-            v.mod_target = 0.0;
+            v.target = 0.0;
         }
     }
 
@@ -378,8 +442,7 @@ impl FmSynth {
         for v in self.voices.iter_mut() {
             if v.active {
                 v.releasing = true;
-                v.car_target = 0.0;
-                v.mod_target = 0.0;
+                v.target = 0.0;
             }
         }
     }
@@ -388,16 +451,17 @@ impl FmSynth {
         self.voices = [FmVoice::silent(); MAX_FM_VOICES];
     }
 
-    /// Mix every active voice into `out` (additive).
     pub fn render(&mut self, out: &mut [f32], sample_rate: f32, pitch_mul: f32) {
         let sr = sample_rate.max(8000.0);
         let patch = self.patch;
-        let car_atk = env_step(patch.car_attack, sr);
-        let car_rel = env_step(patch.car_release, sr);
-        let mod_atk = env_step(patch.mod_attack, sr);
-        let mod_rel = env_step(patch.mod_release, sr);
-        let index_scale = patch.index * (SINE_SIZE as f32 / std::f32::consts::TAU);
-        let fb_scale = patch.feedback * (SINE_SIZE as f32 * 0.42);
+        let mut atk = [0.0f32; FM_OP_COUNT];
+        let mut rel = [0.0f32; FM_OP_COUNT];
+        let mut inc_ratio = [0.0f32; FM_OP_COUNT];
+        for i in 0..FM_OP_COUNT {
+            atk[i] = env_step(patch.ops[i].attack_sec(), sr);
+            rel[i] = env_step(patch.ops[i].release_sec(), sr);
+            inc_ratio[i] = clang_ratio(patch.ops[i].ratio);
+        }
         let size = SINE_SIZE as f32;
 
         for v in self.voices.iter_mut() {
@@ -405,30 +469,36 @@ impl FmSynth {
                 continue;
             }
             let hz = midi_to_hz(v.note) * pitch_mul.max(0.01) as f64;
-            let car_inc = (hz * patch.car_ratio as f64 * SINE_SIZE as f64 / sr as f64) as f32;
-            let mod_inc = (hz * patch.mod_ratio as f64 * SINE_SIZE as f64 / sr as f64) as f32;
-
-            for sample in out.iter_mut() {
-                v.car_amp = step_env(v.car_amp, v.car_target, v.releasing, car_atk, car_rel);
-                v.mod_amp = step_env(v.mod_amp, v.mod_target, v.releasing, mod_atk, mod_rel);
-
-                let mod_lookup = v.mod_phase + v.last_mod * fb_scale;
-                let m = sine_at(&self.sine, mod_lookup) * v.mod_amp;
-                v.last_mod = m;
-                let c = sine_at(&self.sine, v.car_phase + m * index_scale) * v.car_amp;
-                *sample += c;
-
-                v.car_phase += car_inc;
-                v.mod_phase += mod_inc;
-                if v.car_phase >= size {
-                    v.car_phase -= size * (v.car_phase / size).floor();
-                }
-                if v.mod_phase >= size {
-                    v.mod_phase -= size * (v.mod_phase / size).floor();
-                }
+            let mut inc = [0.0f32; FM_OP_COUNT];
+            for i in 0..FM_OP_COUNT {
+                inc[i] = (hz * inc_ratio[i] as f64 * SINE_SIZE as f64 / sr as f64) as f32;
             }
 
-            if v.releasing && v.car_amp < 0.0008 && v.mod_amp < 0.0008 {
+            for sample in out.iter_mut() {
+                let mut mix = 0.0f32;
+                let prev = v.last;
+                for i in 0..FM_OP_COUNT {
+                    v.amp[i] = step_env(v.amp[i], v.target, v.releasing, atk[i], rel[i]);
+                    let mut mod_phase = 0.0f32;
+                    for src in 0..FM_OP_COUNT {
+                        let amt = patch.matrix[src][i];
+                        if amt > 0.001 {
+                            mod_phase += prev[src] * amt * INDEX_SCALE;
+                        }
+                    }
+                    let s = sine_at(&self.sine, v.phase[i] + mod_phase);
+                    let shaped = waveshape(s, patch.ops[i].fold) * v.amp[i];
+                    v.last[i] = shaped;
+                    mix += shaped * patch.ops[i].audio;
+                    v.phase[i] += inc[i];
+                    if v.phase[i] >= size {
+                        v.phase[i] -= size * (v.phase[i] / size).floor();
+                    }
+                }
+                *sample += mix * 0.72;
+            }
+
+            if v.releasing && v.amp.iter().all(|a| *a < 0.0008) {
                 *v = FmVoice::silent();
             }
         }
@@ -440,31 +510,36 @@ impl FmSynth {
             return;
         }
         let n = out.len() as f32;
-        let car_inc = SINE_SIZE as f32 / n;
-        let mod_inc = car_inc * patch.mod_ratio / patch.car_ratio.max(0.01);
-        let index_scale = patch.index * (SINE_SIZE as f32 / std::f32::consts::TAU);
-        let fb_scale = patch.feedback * (SINE_SIZE as f32 * 0.42);
         let mut sine = [0.0f32; SINE_SIZE];
         let tau = std::f32::consts::TAU;
         for (i, sample) in sine.iter_mut().enumerate() {
             *sample = (i as f32 * tau / SINE_SIZE as f32).sin();
         }
-        let mut car_phase = 0.0f32;
-        let mut mod_phase = 0.0f32;
-        let mut last = 0.0f32;
+        let mut phase = [0.0f32; FM_OP_COUNT];
+        let mut last = [0.0f32; FM_OP_COUNT];
         let size = SINE_SIZE as f32;
         for sample in out.iter_mut() {
-            let m = sine_at(&sine, mod_phase + last * fb_scale);
-            last = m;
-            *sample = sine_at(&sine, car_phase + m * index_scale);
-            car_phase += car_inc;
-            mod_phase += mod_inc;
-            if car_phase >= size {
-                car_phase -= size * (car_phase / size).floor();
+            let mut mix = 0.0f32;
+            let prev = last;
+            for i in 0..FM_OP_COUNT {
+                let inc = clang_ratio(patch.ops[i].ratio) * SINE_SIZE as f32 / n;
+                let mut mod_phase = 0.0f32;
+                for src in 0..FM_OP_COUNT {
+                    let amt = patch.matrix[src][i];
+                    if amt > 0.001 {
+                        mod_phase += prev[src] * amt * INDEX_SCALE;
+                    }
+                }
+                let s = sine_at(&sine, phase[i] + mod_phase);
+                let shaped = waveshape(s, patch.ops[i].fold);
+                last[i] = shaped;
+                mix += shaped * patch.ops[i].audio;
+                phase[i] += inc;
+                if phase[i] >= size {
+                    phase[i] -= size * (phase[i] / size).floor();
+                }
             }
-            if mod_phase >= size {
-                mod_phase -= size * (mod_phase / size).floor();
-            }
+            *sample = mix * 0.72;
         }
     }
 
@@ -482,7 +557,7 @@ impl FmSynth {
         let mut best = 0usize;
         let mut best_key = (false, f32::MAX, u64::MAX);
         for (i, v) in self.voices.iter().enumerate() {
-            let key = (!v.releasing, v.car_amp, v.age);
+            let key = (!v.releasing, v.amp[3], v.age);
             if key < best_key {
                 best_key = key;
                 best = i;
@@ -500,6 +575,18 @@ fn sine_at(table: &[f32; SINE_SIZE], phase: f32) -> f32 {
     let a = table[i & SINE_MASK];
     let b = table[(i + 1) & SINE_MASK];
     a + (b - a) * frac
+}
+
+/// Sine → wavefold → pushed square. FIRST LOVE's operator shaper, cheaply.
+#[inline]
+fn waveshape(s: f32, fold: f32) -> f32 {
+    let fold = fold.clamp(0.0, 1.0);
+    if fold < 0.01 {
+        return s;
+    }
+    let folded = (s * (1.0 + fold * 3.4)).sin();
+    let driven = (s * (1.0 + fold * 7.0)).tanh();
+    folded * (1.0 - 0.5 * fold) + driven * (0.5 * fold)
 }
 
 #[inline]
@@ -566,11 +653,11 @@ mod tests {
 
     #[test]
     fn preview_cycle_is_nonzero_for_bright_patch() {
-        let patch = FmPatch::from_controls(0, 0.8, 0.55, 0.0, 0.5);
+        let patch = fm_recipe_patch(0);
         let mut cycle = [0.0f32; 128];
         FmSynth::preview_cycle(patch, &mut cycle);
         let peak = cycle.iter().fold(0.0f32, |m, v| m.max(v.abs()));
-        assert!(peak > 0.2);
+        assert!(peak > 0.15, "preview peak={peak}");
     }
 
     #[test]
@@ -580,5 +667,27 @@ mod tests {
             fm.note_on(0, 48 + n as u8, 100);
         }
         assert_eq!(fm.active_count(), MAX_FM_VOICES);
+    }
+
+    #[test]
+    fn drawing_a_link_packs_and_changes_the_graph() {
+        let (from, to, amt) = unpack_fm_link(pack_fm_link(0, 3, 0.7));
+        assert_eq!(from, 0);
+        assert_eq!(to, 3);
+        assert!((amt - 0.7).abs() < 0.02);
+
+        let mut fm = FmSynth::new();
+        fm.clear_links();
+        fm.set_link(0, 3, 0.8);
+        assert!((fm.patch().matrix[0][3] - 0.8).abs() < 1e-5);
+        fm.clear_links();
+        assert_eq!(fm.patch().matrix[0][3], 0.0);
+    }
+
+    #[test]
+    fn growl_self_link_is_feedback() {
+        let p = fm_recipe_patch(7);
+        assert!(p.matrix[0][0] > 0.5);
+        assert!(p.ops[0].fold > 0.4);
     }
 }

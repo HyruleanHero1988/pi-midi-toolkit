@@ -427,6 +427,9 @@ fn parse_synth_param(name: &str) -> Option<SynthParam> {
         "drum_level" => SynthParam::DrumLevel,
         "fm_enable" => SynthParam::FmEnable,
         "fm_recipe" => SynthParam::FmRecipe,
+        "fm_op" => SynthParam::FmOp,
+        "fm_connect" => SynthParam::FmConnect,
+        "fm_clear" => SynthParam::FmClear,
         "fm_bright" => SynthParam::FmBright,
         "fm_clang" => SynthParam::FmClang,
         "fm_hit" => SynthParam::FmHit,
@@ -745,6 +748,20 @@ mod tests {
                 let clip = clip.expect("clip");
                 assert_eq!(clip.events().len(), 1);
                 assert_eq!(clip.length_ticks(), 3840);
+            }
+            _ => panic!("wrong decode"),
+        }
+    }
+
+    #[test]
+    fn fm_connect_decodes_as_a_raw_synth_value() {
+        let d = decode_line(r#"{"cmd":"synth","param":"fm_connect","value":3.7}"#);
+        match d {
+            Decoded::Command(Command::SetSynth {
+                param: SynthParam::FmConnect,
+                value,
+            }) => {
+                assert!((value - 3.7).abs() < 1e-5);
             }
             _ => panic!("wrong decode"),
         }

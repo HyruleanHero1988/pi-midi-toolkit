@@ -90,6 +90,25 @@ fn main() {
     {
         let mut model = NativeModel::new();
         let mut ob = Outbox::new();
+        model.set_mode(UiMode::Fm);
+        model.tick(1.0 / 60.0, &mut ob);
+        let growl = model.layout.fm_recipe_cell(7);
+        model.finger_down(1, growl.x + 4, growl.y + 4, &mut ob);
+        model.finger_up(1, &mut ob);
+        model.tick(1.0 / 60.0, &mut ob);
+        dump(&model, out.join("fm_growl.ppm"));
+
+        let (ax, ay) = model.layout.fm_op_center(1);
+        let (dx, dy) = model.layout.fm_op_center(3);
+        model.finger_down(2, ax, ay, &mut ob);
+        model.finger_move(2, (ax + dx) / 2, (ay + dy) / 2, &mut ob);
+        model.tick(1.0 / 60.0, &mut ob);
+        dump(&model, out.join("fm_draw.ppm"));
+        model.finger_up(2, &mut ob);
+    }
+    {
+        let mut model = NativeModel::new();
+        let mut ob = Outbox::new();
         model.set_mode(UiMode::Kaoss);
         let b = model.layout.kaoss_scale;
         model.finger_down(1, b.x + 4, b.y + 4, &mut ob);

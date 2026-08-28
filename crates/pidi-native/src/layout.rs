@@ -76,7 +76,9 @@ pub enum Hit {
     SynthOctUp,
     SynthOctDown,
     FmRecipe(usize),
+    FmOp(usize),
     FmSlider(usize),
+    FmClear,
     ScrollArea(crate::scroll::ScrollKind),
     DrumMacro(usize),
     KitAllDrums,
@@ -1476,25 +1478,34 @@ impl Layout {
         let w = (w_total - (n - 1) * gap) / n;
         Rect {
             x: x0 + (index as i32) * (w + gap),
-            y: self.content.y + 8,
+            y: self.content.y + 6,
             w,
-            h: 44,
+            h: 36,
         }
     }
 
     pub fn fm_hint(&self) -> Rect {
         Rect {
             x: self.content.x + 16,
-            y: self.content.y + 56,
-            w: 520,
-            h: 22,
+            y: self.content.y + 46,
+            w: 440,
+            h: 20,
+        }
+    }
+
+    pub fn fm_clear(&self) -> Rect {
+        Rect {
+            x: self.content.x + self.content.w - 180,
+            y: self.content.y + 44,
+            w: 52,
+            h: 26,
         }
     }
 
     pub fn fm_oct_down(&self) -> Rect {
         Rect {
             x: self.content.x + self.content.w - 120,
-            y: self.content.y + 54,
+            y: self.content.y + 44,
             w: 52,
             h: 26,
         }
@@ -1503,40 +1514,70 @@ impl Layout {
     pub fn fm_oct_up(&self) -> Rect {
         Rect {
             x: self.content.x + self.content.w - 64,
-            y: self.content.y + 54,
+            y: self.content.y + 44,
             w: 52,
             h: 26,
         }
     }
 
-    pub fn fm_diagram(&self) -> Rect {
+    /// 2×2 operator graph. Swipe one circle into another to patch.
+    pub fn fm_graph(&self) -> Rect {
         Rect {
-            x: 16,
-            y: self.content.y + 84,
-            w: 200,
-            h: 128,
+            x: 12,
+            y: self.content.y + 74,
+            w: 400,
+            h: 158,
         }
+    }
+
+    pub const FM_OP_RADIUS: i32 = 32;
+
+    pub fn fm_op_center(&self, index: usize) -> (i32, i32) {
+        let g = self.fm_graph();
+        let col = (index % 2) as i32;
+        let row = (index / 2) as i32;
+        let x = g.x + g.w * (1 + col * 2) / 4;
+        let y = g.y + g.h * (1 + row * 2) / 4;
+        (x, y)
+    }
+
+    pub fn fm_op_hit(&self, px: i32, py: i32) -> Option<usize> {
+        let reach = (Self::FM_OP_RADIUS + 12) as f32;
+        let reach2 = reach * reach;
+        let mut best = None;
+        let mut best_d = reach2;
+        for index in 0..jambox_core::FM_OP_COUNT {
+            let (cx, cy) = self.fm_op_center(index);
+            let dx = (px - cx) as f32;
+            let dy = (py - cy) as f32;
+            let d = dx * dx + dy * dy;
+            if d <= best_d {
+                best_d = d;
+                best = Some(index);
+            }
+        }
+        best
     }
 
     pub fn fm_scope(&self) -> Rect {
         Rect {
-            x: 580,
-            y: self.content.y + 84,
-            w: 204,
-            h: 128,
+            x: 420,
+            y: self.content.y + 74,
+            w: 168,
+            h: 158,
         }
     }
 
     pub fn fm_slider(&self, index: usize) -> Rect {
         let n = 4i32;
-        let area_x = 228;
-        let area_w = 340;
+        let area_x = 600;
+        let area_w = 188;
         let w = area_w / n;
         Rect {
-            x: area_x + (index as i32) * w + 8,
-            y: self.content.y + 108,
-            w: w - 16,
-            h: 104,
+            x: area_x + (index as i32) * w + 6,
+            y: self.content.y + 92,
+            w: w - 12,
+            h: 132,
         }
     }
 
@@ -1909,16 +1950,22 @@ impl Layout {
                 return Hit::FmRecipe(index);
             }
         }
-        for index in 0..4 {
-            if self.fm_slider(index).contains(px, py) {
-                return Hit::FmSlider(index);
-            }
+        if self.fm_clear().contains(px, py) {
+            return Hit::FmClear;
         }
         if self.fm_oct_down().contains(px, py) {
             return Hit::SynthOctDown;
         }
         if self.fm_oct_up().contains(px, py) {
             return Hit::SynthOctUp;
+        }
+        if let Some(index) = self.fm_op_hit(px, py) {
+            return Hit::FmOp(index);
+        }
+        for index in 0..4 {
+            if self.fm_slider(index).contains(px, py) {
+                return Hit::FmSlider(index);
+            }
         }
         if let Some(note) = self.synth_keyboard_note_at(px, py) {
             return Hit::SynthKey { note };
@@ -2360,6 +2407,9 @@ pub enum Surface {
     FmSlider {
         index: usize,
     },
+    FmGraph {
+        from: usize,
+    },
     SettingsFx {
         index: usize,
     },
@@ -2449,6 +2499,15 @@ mod tests {
         assert_eq!(
             layout.hit(UiMode::Fm, slider.x + 4, slider.y + slider.h / 2),
             Hit::FmSlider(0)
+        );
+        let (ax, ay) = layout.fm_op_center(0);
+        assert_eq!(layout.hit(UiMode::Fm, ax, ay), Hit::FmOp(0));
+        let (dx, dy) = layout.fm_op_center(3);
+        assert_eq!(layout.hit(UiMode::Fm, dx, dy), Hit::FmOp(3));
+        let clear = layout.fm_clear();
+        assert_eq!(
+            layout.hit(UiMode::Fm, clear.x + 4, clear.y + 4),
+            Hit::FmClear
         );
         let key = layout.synth_keyboard_white_rect(0);
         match layout.hit(UiMode::Fm, key.x + 4, key.y + 4) {

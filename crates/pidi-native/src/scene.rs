@@ -451,7 +451,11 @@ fn chrome_status(model: &NativeModel) -> String {
             }
         }
         UiMode::Presets => format!("SLOT {}", model.preset_selected + 1),
-        UiMode::Fm => jambox_core::fm_recipe(model.fm_recipe).label.into(),
+        UiMode::Fm => format!(
+            "{} · {}",
+            jambox_core::fm_recipe(model.fm_recipe).label,
+            jambox_core::OP_NAMES[model.fm_selected]
+        ),
         UiMode::Synth if model.synth_vib_open => "VIB".into(),
         UiMode::Settings => {
             if model.status_line.is_empty() {
@@ -1606,32 +1610,34 @@ fn draw_fm(scene: &mut Scene, model: &NativeModel) {
         jambox_core::fm_recipe(model.fm_recipe).hint,
         0xa89984,
     );
+    scene.fill_rect(layout.fm_clear(), 0x9d0006);
+    scene.text_centered(layout.fm_clear(), "CLEAR", 0xfbf1c7, 1);
     scene.fill_rect(layout.fm_oct_down(), 0x504945);
     scene.text_centered(layout.fm_oct_down(), "OCT-", 0xfbf1c7, 1);
     scene.fill_rect(layout.fm_oct_up(), 0x504945);
     scene.text_centered(layout.fm_oct_up(), "OCT+", 0xfbf1c7, 1);
 
-    draw_fm_diagram(scene, model);
+    draw_fm_graph(scene, model);
     draw_fm_scope(scene, model);
 
-    const LABELS: [&str; 4] = ["BRIGHT", "CLANG", "HIT", "TAIL"];
+    const LABELS: [&str; 4] = ["RATIO", "OUT", "FOLD", "ENV"];
     for index in 0..4 {
         let track = layout.fm_slider(index);
         scene.fill_rect(track, 0x20202c);
-        scene.text(track.x, track.y - 18, LABELS[index], 0xc0c0d0);
+        scene.text(track.x, track.y - 16, LABELS[index], 0xc0c0d0);
         let fill_h = (track.h as f32 * model.fm_params[index]) as i32;
         let fill = Rect {
-            x: track.x + 4,
+            x: track.x + 3,
             y: track.y + track.h - fill_h,
-            w: track.w - 8,
+            w: track.w - 6,
             h: fill_h.max(2),
         };
-        scene.fill_rect(fill, if index == 0 { 0xfe8019 } else { 0x8ec07c });
+        scene.fill_rect(fill, if index == 2 { 0xfe8019 } else { 0x8ec07c });
     }
     scene.text(
-        layout.fm_slider(1).x,
-        layout.fm_slider(1).y + layout.fm_slider(1).h + 4,
-        jambox_core::clang_label(model.fm_params[1]),
+        layout.fm_slider(0).x,
+        layout.fm_slider(0).y + layout.fm_slider(0).h + 4,
+        jambox_core::clang_label(model.fm_params[0]),
         0xa89984,
     );
 
@@ -1656,57 +1662,117 @@ fn draw_fm(scene: &mut Scene, model: &NativeModel) {
     }
 }
 
-fn draw_fm_diagram(scene: &mut Scene, model: &NativeModel) {
-    let rect = model.layout.fm_diagram();
+fn draw_fm_graph(scene: &mut Scene, model: &NativeModel) {
+    let rect = model.layout.fm_graph();
     scene.fill_rect(rect, 0x1a1a12);
-    scene.text(rect.x + 10, rect.y + 8, "wiggle -> tone", 0xa89984);
+    scene.text(rect.x + 8, rect.y + 6, "draw one into another", 0xa89984);
 
-    let bright = model.fm_params[0];
-    let mod_r = 18.0 + bright * 16.0;
-    let car_r = 28.0;
-    let mid_y = rect.y as f32 + rect.h as f32 * 0.58;
-    let mod_x = rect.x as f32 + 48.0;
-    let car_x = rect.x as f32 + rect.w as f32 - 52.0;
-
-    fill_circle(scene, mod_x, mid_y, mod_r, 0xfe8019);
-    fill_circle(scene, car_x, mid_y, car_r, 0x458588);
-
-    let ax0 = mod_x + mod_r + 4.0;
-    let ax1 = car_x - car_r - 8.0;
-    scene.fill(ax0, mid_y - 2.0, (ax1 - ax0).max(4.0), 4.0, 0xfbf1c7);
-    scene.fill(ax1 - 2.0, mid_y - 8.0, 4.0, 16.0, 0xfbf1c7);
-    scene.fill(ax1 + 2.0, mid_y - 5.0, 6.0, 10.0, 0xfbf1c7);
-
-    scene.text(
-        (mod_x - 18.0) as i32,
-        (mid_y + mod_r + 8.0) as i32,
-        "WIGGLE",
-        0xfe8019,
-    );
-    scene.text(
-        (car_x - 14.0) as i32,
-        (mid_y + car_r + 8.0) as i32,
-        "TONE",
-        0x83a598,
-    );
-}
-
-fn fill_circle(scene: &mut Scene, cx: f32, cy: f32, radius: f32, color: u32) {
-    let r = radius.max(4.0);
-    let r2 = r * r;
-    let x0 = (cx - r).floor() as i32;
-    let y0 = (cy - r).floor() as i32;
-    let x1 = (cx + r).ceil() as i32;
-    let y1 = (cy + r).ceil() as i32;
-    for y in y0..=y1 {
-        for x in x0..=x1 {
-            let dx = x as f32 + 0.5 - cx;
-            let dy = y as f32 + 0.5 - cy;
-            if dx * dx + dy * dy <= r2 {
-                scene.fill(x as f32, y as f32, 1.0, 1.0, color);
+    let r = Layout::FM_OP_RADIUS as f32;
+    for src in 0..jambox_core::FM_OP_COUNT {
+        for dst in 0..jambox_core::FM_OP_COUNT {
+            let amount = model.fm_matrix[src][dst];
+            if amount < 0.04 {
+                continue;
+            }
+            let color = jambox_core::OP_COLORS[src];
+            if src == dst {
+                let (cx, cy) = model.layout.fm_op_center(src);
+                scene.stroke_disc(
+                    cx as f32,
+                    cy as f32,
+                    r + 6.0 + amount * 10.0,
+                    3.0,
+                    color,
+                    0x1a1a12,
+                );
+            } else {
+                let (x0, y0) = model.layout.fm_op_center(src);
+                let (x1, y1) = model.layout.fm_op_center(dst);
+                stroke_fm_link(
+                    scene, x0 as f32, y0 as f32, x1 as f32, y1 as f32, r, amount, color,
+                );
             }
         }
     }
+
+    if let Some((from, px, py)) = model.fm_drag() {
+        let (x0, y0) = model.layout.fm_op_center(from);
+        stroke_scope_seg(
+            scene,
+            x0 as f32,
+            y0 as f32,
+            px as f32,
+            py as f32,
+            jambox_core::OP_COLORS[from],
+        );
+        scene.fill_disc(px as f32, py as f32, 5.0, jambox_core::OP_COLORS[from]);
+    }
+
+    for index in 0..jambox_core::FM_OP_COUNT {
+        let (cx, cy) = model.layout.fm_op_center(index);
+        let op = model.fm_ops[index];
+        let heard = op.audio > 0.05;
+        let selected = index == model.fm_selected;
+        let radius = r + if selected { 4.0 } else { 0.0 } + op.fold * 4.0;
+        let color = jambox_core::OP_COLORS[index];
+        if selected {
+            scene.fill_disc(cx as f32, cy as f32, radius + 5.0, 0xfbf1c7);
+        }
+        scene.fill_disc(cx as f32, cy as f32, radius, color);
+        if heard {
+            scene.fill_disc(cx as f32, cy as f32, radius * 0.42, 0x1d2021);
+        }
+        let label = Rect {
+            x: cx - 10,
+            y: cy - 8,
+            w: 20,
+            h: 16,
+        };
+        scene.text_centered(
+            label,
+            jambox_core::OP_NAMES[index],
+            if heard { 0xfbf1c7 } else { 0x1d2021 },
+            1,
+        );
+    }
+}
+
+fn stroke_fm_link(
+    scene: &mut Scene,
+    x0: f32,
+    y0: f32,
+    x1: f32,
+    y1: f32,
+    radius: f32,
+    amount: f32,
+    color: u32,
+) {
+    let dx = x1 - x0;
+    let dy = y1 - y0;
+    let len = dx.hypot(dy).max(1.0);
+    let ux = dx / len;
+    let uy = dy / len;
+    let sx = x0 + ux * (radius + 2.0);
+    let sy = y0 + uy * (radius + 2.0);
+    let ex = x1 - ux * (radius + 4.0);
+    let ey = y1 - uy * (radius + 4.0);
+    let mx = (sx + ex) * 0.5 - uy * 28.0;
+    let my = (sy + ey) * 0.5 + ux * 28.0;
+    let steps = ((len * 0.7) as i32).clamp(12, 48);
+    let mut prev_x = sx;
+    let mut prev_y = sy;
+    for i in 1..=steps {
+        let t = i as f32 / steps as f32;
+        let u = 1.0 - t;
+        let x = u * u * sx + 2.0 * u * t * mx + t * t * ex;
+        let y = u * u * sy + 2.0 * u * t * my + t * t * ey;
+        let w = 2.0 + amount * 3.0;
+        scene.fill(x - w * 0.5, y - w * 0.5, w, w, color);
+        stroke_scope_seg(scene, prev_x, prev_y, x, y, color);
+        prev_x = x;
+        prev_y = y;
+    }
+    scene.fill(ex - 3.0, ey - 3.0, 7.0, 7.0, color);
 }
 
 fn draw_fm_scope(scene: &mut Scene, model: &NativeModel) {
@@ -1716,13 +1782,7 @@ fn draw_fm_scope(scene: &mut Scene, model: &NativeModel) {
         let y = rect.y + (rect.h * i) / 4;
         scene.fill(rect.x as f32, y as f32, rect.w as f32, 1.0, 0x2a2a18);
     }
-    let patch = jambox_core::FmPatch::from_controls(
-        model.fm_recipe,
-        model.fm_params[0],
-        model.fm_params[1],
-        model.fm_params[2],
-        model.fm_params[3],
-    );
+    let patch = model.fm_patch();
     let n = (rect.w / 2).max(48) as usize;
     let mut cycle = vec![0.0f32; n];
     jambox_core::FmSynth::preview_cycle(patch, &mut cycle);
@@ -2363,5 +2423,16 @@ mod tests {
             .filter(|q| q.color == 0xf2f2ea && q.h > 40.0)
             .count();
         assert!(whites >= Layout::SYNTH_WHITE_COUNT);
+        let clear = model.layout.fm_clear();
+        let clear_btn = scene
+            .color
+            .iter()
+            .filter(|q| {
+                q.color == 0x9d0006
+                    && (q.x - clear.x as f32).abs() < 2.0
+                    && (q.y - clear.y as f32).abs() < 2.0
+            })
+            .count();
+        assert!(clear_btn >= 1, "CLEAR button missing");
     }
 }

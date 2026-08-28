@@ -159,8 +159,11 @@ pub struct NativeModel {
     pub synth_pick_scroll: i32,
     /// On-screen keyboard octave relative to C4 (−3 = C1 … +3 = C7).
     pub synth_octave: i8,
-    /// Two-operator FM playground: selected recipe + Bright/Clang/Hit/Tail.
+    /// Four-operator FM playground: recipe, selected op, per-op knobs, draw matrix.
     pub fm_recipe: usize,
+    pub fm_selected: usize,
+    pub fm_ops: [jambox_core::FmOpParams; jambox_core::FM_OP_COUNT],
+    pub fm_matrix: [[f32; jambox_core::FM_OP_COUNT]; jambox_core::FM_OP_COUNT],
     pub fm_params: [f32; 4],
     pub kaoss_picker_scroll: i32,
     pub log_scroll: usize,
@@ -270,6 +273,7 @@ impl Default for NativeModel {
 
 impl NativeModel {
     pub fn new() -> Self {
+        let fm_patch = jambox_core::fm_recipe_patch(0);
         Self {
             layout: Layout::new(),
             mode: UiMode::Kaoss,
@@ -303,7 +307,15 @@ impl NativeModel {
             synth_pick_scroll: 0,
             synth_octave: 0,
             fm_recipe: 0,
-            fm_params: [0.72, 0.55, 0.04, 0.48],
+            fm_selected: 3,
+            fm_ops: fm_patch.ops,
+            fm_matrix: fm_patch.matrix,
+            fm_params: [
+                fm_patch.ops[3].ratio,
+                fm_patch.ops[3].audio,
+                fm_patch.ops[3].fold,
+                fm_patch.ops[3].env,
+            ],
             kaoss_picker_scroll: 0,
             log_scroll: 0,
             drum_macros: [0.60, 0.45, 0.50, 0.55],
@@ -1499,6 +1511,23 @@ impl NativeModel {
                 self.tap_ui(slot, id, gesture, px, py);
                 self.select_fm_recipe(index, outbox);
             }
+            Hit::FmOp(index) => {
+                self.fingers[slot] = Finger {
+                    active: true,
+                    id,
+                    gesture,
+                    x: 0.0,
+                    y: 0.0,
+                    px,
+                    py,
+                    surface: Surface::FmGraph { from: index },
+                    gate_on: false,
+                };
+            }
+            Hit::FmClear => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.clear_fm_links(outbox);
+            }
             Hit::FmSlider(index) => {
                 self.fingers[slot] = Finger {
                     active: true,
@@ -2305,6 +2334,7 @@ impl NativeModel {
             Surface::FmSlider { index } => {
                 self.apply_fm_slider(index, py, outbox);
             }
+            Surface::FmGraph { .. } => {}
             Surface::SettingsFx { index } => {
                 self.apply_fx_slider(index, py, outbox);
             }
@@ -2381,6 +2411,9 @@ impl NativeModel {
                 outbox.note_off(0, note);
                 self.seq.push_note(false, 0, note, 0);
                 self.push_pad_rec(false, 0, note, 0);
+            }
+            Surface::FmGraph { from } => {
+                self.finish_fm_draw(from, finger.px, finger.py, outbox);
             }
             Surface::ChordsButton { col, row } => {
                 if let Some(qrow) = QualityRow::from_index(row) {
@@ -2748,23 +2781,119 @@ impl NativeModel {
         self.mark_dirty();
     }
 
-    const FM_PARAM_NAMES: [&'static str; 4] = ["fm_bright", "fm_clang", "fm_hit", "fm_tail"];
-    const FM_PARAM_LABELS: [&'static str; 4] = ["BRIGHT", "CLANG", "HIT", "TAIL"];
+    const FM_PARAM_NAMES: [&'static str; 4] = ["fm_clang", "fm_tail", "fm_bright", "fm_hit"];
+    const FM_PARAM_LABELS: [&'static str; 4] = ["RATIO", "OUT", "FOLD", "ENV"];
 
-    fn push_fm_params(&self, outbox: &mut Outbox) {
-        outbox.synth("fm_recipe", self.fm_recipe as f32);
-        for (i, name) in Self::FM_PARAM_NAMES.iter().enumerate() {
-            outbox.synth(name, self.fm_params[i]);
+    pub fn fm_patch(&self) -> jambox_core::FmPatch {
+        jambox_core::FmPatch {
+            ops: self.fm_ops,
+            matrix: self.fm_matrix,
         }
     }
 
-    fn select_fm_recipe(&mut self, index: usize, outbox: &mut Outbox) {
-        let rec = jambox_core::fm_recipe(index);
+    pub fn fm_drag(&self) -> Option<(usize, i32, i32)> {
+        self.fingers.iter().find_map(|f| {
+            if !f.active {
+                return None;
+            }
+            match f.surface {
+                Surface::FmGraph { from } => Some((from, f.px, f.py)),
+                _ => None,
+            }
+        })
+    }
+
+    fn sync_fm_sliders_from_op(&mut self) {
+        let op = self.fm_ops[self.fm_selected];
+        self.fm_params = [op.ratio, op.audio, op.fold, op.env];
+    }
+
+    fn apply_fm_patch(&mut self, index: usize) {
+        let patch = jambox_core::fm_recipe_patch(index);
         self.fm_recipe = index % jambox_core::FM_RECIPE_COUNT;
-        self.fm_params = [rec.bright, rec.clang, rec.hit, rec.tail];
+        self.fm_ops = patch.ops;
+        self.fm_matrix = patch.matrix;
+        self.fm_selected = 3;
+        self.sync_fm_sliders_from_op();
+    }
+
+    fn push_fm_params(&self, outbox: &mut Outbox) {
+        outbox.synth("fm_recipe", self.fm_recipe as f32);
+        outbox.synth("fm_clear", 1.0);
+        for src in 0..jambox_core::FM_OP_COUNT {
+            for dst in 0..jambox_core::FM_OP_COUNT {
+                let amount = self.fm_matrix[src][dst];
+                if amount > 0.02 {
+                    outbox.synth("fm_connect", jambox_core::pack_fm_link(src, dst, amount));
+                }
+            }
+        }
+        for i in 0..jambox_core::FM_OP_COUNT {
+            outbox.synth("fm_op", i as f32);
+            let op = self.fm_ops[i];
+            outbox.synth("fm_clang", op.ratio);
+            outbox.synth("fm_tail", op.audio);
+            outbox.synth("fm_bright", op.fold);
+            outbox.synth("fm_hit", op.env);
+        }
+        outbox.synth("fm_op", self.fm_selected as f32);
+    }
+
+    fn select_fm_recipe(&mut self, index: usize, outbox: &mut Outbox) {
+        self.apply_fm_patch(index);
         self.push_fm_params(outbox);
+        let rec = jambox_core::fm_recipe(self.fm_recipe);
         self.status_line = format!("FM · {}", rec.title);
         self.mark_dirty();
+    }
+
+    fn select_fm_op(&mut self, index: usize, outbox: &mut Outbox) {
+        self.fm_selected = index % jambox_core::FM_OP_COUNT;
+        self.sync_fm_sliders_from_op();
+        outbox.synth("fm_op", self.fm_selected as f32);
+        self.status_line = format!("op {}", jambox_core::OP_NAMES[self.fm_selected]);
+        self.mark_dirty();
+    }
+
+    fn connect_fm(&mut self, from: usize, to: usize, amount: f32, outbox: &mut Outbox) {
+        let from = from % jambox_core::FM_OP_COUNT;
+        let to = to % jambox_core::FM_OP_COUNT;
+        let amount = amount.clamp(0.25, 0.95);
+        self.fm_matrix[from][to] = amount;
+        outbox.synth("fm_connect", jambox_core::pack_fm_link(from, to, amount));
+        self.status_line = if from == to {
+            format!("{} feedback", jambox_core::OP_NAMES[from])
+        } else {
+            format!(
+                "{} → {}",
+                jambox_core::OP_NAMES[from],
+                jambox_core::OP_NAMES[to]
+            )
+        };
+        self.mark_dirty();
+    }
+
+    fn clear_fm_links(&mut self, outbox: &mut Outbox) {
+        self.fm_matrix = [[0.0; jambox_core::FM_OP_COUNT]; jambox_core::FM_OP_COUNT];
+        outbox.synth("fm_clear", 1.0);
+        self.status_line = "links cleared".into();
+        self.mark_dirty();
+    }
+
+    fn finish_fm_draw(&mut self, from: usize, px: i32, py: i32, outbox: &mut Outbox) {
+        const TAP_PX: f32 = 24.0;
+        let (sx, sy) = self.layout.fm_op_center(from);
+        let dist = ((px - sx) as f32).hypot((py - sy) as f32);
+        if let Some(to) = self.layout.fm_op_hit(px, py) {
+            if dist >= TAP_PX {
+                if self.fm_selected != from {
+                    self.select_fm_op(from, outbox);
+                }
+                self.connect_fm(from, to, 0.7, outbox);
+                return;
+            }
+        }
+        self.select_fm_op(from, outbox);
     }
 
     fn apply_fm_slider(&mut self, index: usize, py: i32, outbox: &mut Outbox) {
@@ -2775,9 +2904,16 @@ impl NativeModel {
         let y = 1.0 - ((py - track.y) as f32 / track.h.max(1) as f32);
         let value = y.clamp(0.0, 1.0);
         self.fm_params[index] = value;
+        let op = &mut self.fm_ops[self.fm_selected];
+        match index {
+            0 => op.ratio = value,
+            1 => op.audio = value,
+            2 => op.fold = value,
+            _ => op.env = value,
+        }
         outbox.synth(Self::FM_PARAM_NAMES[index], value);
-        self.status_line = if index == 1 {
-            format!("CLANG {}", jambox_core::clang_label(value))
+        self.status_line = if index == 0 {
+            format!("RATIO {}", jambox_core::clang_label(value))
         } else {
             format!("{} {:.2}", Self::FM_PARAM_LABELS[index], value)
         };
@@ -4997,6 +5133,58 @@ mod tests {
         model.finger_up(3, &mut out);
         let batch = out.take();
         assert!(batch.iter().any(|r| matches!(r, Request::NoteOff { .. })));
+    }
+
+    #[test]
+    fn drawing_one_operator_into_another_sends_a_link() {
+        let mut model = NativeModel::new();
+        let mut out = Outbox::new();
+        model.switch_mode(UiMode::Fm, &mut out);
+        out.take();
+        let (ax, ay) = model.layout.fm_op_center(0);
+        let (dx, dy) = model.layout.fm_op_center(3);
+        model.finger_down(1, ax, ay, &mut out);
+        model.finger_move(1, dx, dy, &mut out);
+        model.finger_up(1, &mut out);
+        let batch = out.take();
+        let packed = jambox_core::pack_fm_link(0, 3, 0.7);
+        assert!(
+            batch.iter().any(|r| matches!(
+                r,
+                Request::Synth { param, value, .. }
+                    if param == "fm_connect" && (*value - packed).abs() < 0.05
+            )),
+            "{batch:?}"
+        );
+        assert!((model.fm_matrix[0][3] - 0.7).abs() < 0.05);
+        assert_eq!(model.fm_selected, 0);
+
+        let clear = model.layout.fm_clear();
+        model.finger_down(2, clear.x + 4, clear.y + 4, &mut out);
+        model.finger_up(2, &mut out);
+        let batch = out.take();
+        assert!(batch.iter().any(|r| matches!(
+            r,
+            Request::Synth { param, .. } if param == "fm_clear"
+        )));
+        assert_eq!(model.fm_matrix[0][3], 0.0);
+    }
+
+    #[test]
+    fn tapping_an_operator_selects_it() {
+        let mut model = NativeModel::new();
+        let mut out = Outbox::new();
+        model.switch_mode(UiMode::Fm, &mut out);
+        out.take();
+        let (bx, by) = model.layout.fm_op_center(1);
+        model.finger_down(1, bx, by, &mut out);
+        model.finger_up(1, &mut out);
+        assert_eq!(model.fm_selected, 1);
+        let batch = out.take();
+        assert!(batch.iter().any(|r| matches!(
+            r,
+            Request::Synth { param, value, .. } if param == "fm_op" && (*value - 1.0).abs() < 0.1
+        )));
     }
 
     #[test]

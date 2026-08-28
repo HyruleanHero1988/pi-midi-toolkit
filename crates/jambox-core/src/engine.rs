@@ -879,6 +879,16 @@ impl JamboxEngine {
             SynthParam::FmRecipe => {
                 self.fm.set_recipe(value.round().clamp(0.0, 7.0) as usize);
             }
+            SynthParam::FmOp => {
+                self.fm.set_selected(value.round() as usize);
+            }
+            SynthParam::FmConnect => {
+                let (from, to, amount) = crate::fm::unpack_fm_link(value);
+                self.fm.set_link(from, to, amount);
+            }
+            SynthParam::FmClear => {
+                self.fm.clear_links();
+            }
             SynthParam::FmBright => self.fm.set_bright(unit),
             SynthParam::FmClang => self.fm.set_clang(unit),
             SynthParam::FmHit => self.fm.set_hit(unit),
@@ -1002,6 +1012,46 @@ mod tests {
         assert_eq!(e.voices.active_count(), 0, "wavetable should stay quiet");
         assert_eq!(e.fm.active_count(), 1);
         assert_eq!(e.status().active_voices, 1);
+    }
+
+    #[test]
+    fn fm_connect_keeps_the_packed_draw_value() {
+        let mut e = engine();
+        apply_now(
+            &mut e,
+            Command::SetSynth {
+                param: SynthParam::FmEnable,
+                value: 1.0,
+            },
+        );
+        apply_now(
+            &mut e,
+            Command::SetSynth {
+                param: SynthParam::FmClear,
+                value: 1.0,
+            },
+        );
+        let packed = crate::fm::pack_fm_link(0, 3, 0.8);
+        assert!(
+            packed > 1.0,
+            "packed draw must survive the 0..1 unit clamp, got {packed}"
+        );
+        apply_now(
+            &mut e,
+            Command::SetSynth {
+                param: SynthParam::FmConnect,
+                value: packed,
+            },
+        );
+        apply_now(
+            &mut e,
+            Command::SetSynth {
+                param: SynthParam::FmOp,
+                value: 1.0,
+            },
+        );
+        assert!((e.fm.patch().matrix[0][3] - 0.8).abs() < 0.02);
+        assert_eq!(e.fm.selected(), 1);
     }
 
     #[test]
