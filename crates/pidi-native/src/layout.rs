@@ -83,6 +83,7 @@ pub enum Hit {
     DrumMacro(usize),
     KitAllDrums,
     KitWave,
+    KitNoteRepeat,
     KitPlay,
     KitSlider(usize),
     MapThruOn,
@@ -226,6 +227,7 @@ pub struct Layout {
     pub kit_divisions: Rect,
     pub kit_all: Rect,
     pub kit_wave: Rect,
+    pub kit_note_repeat: Rect,
     pub synth_wave_a: Rect,
     pub synth_wave_b: Rect,
     pub synth_swap: Rect,
@@ -611,13 +613,13 @@ impl Layout {
                 x: 24,
                 y: HUD_H + 36,
                 w: 752,
-                h: 88,
+                h: 128,
             },
             kit_grid: Rect {
                 x: 24,
-                y: HUD_H + 132,
+                y: HUD_H + 36,
                 w: 752,
-                h: 208,
+                h: 332,
             },
             kit_macros: Rect {
                 x: 24,
@@ -627,20 +629,26 @@ impl Layout {
             },
             kit_divisions: Rect {
                 x: 24,
-                y: HUD_H + 348,
+                y: HUD_H + 56,
                 w: 752,
+                h: 300,
+            },
+            kit_note_repeat: Rect {
+                x: 24,
+                y: HUD_H + 376,
+                w: 320,
                 h: 44,
             },
             kit_wave: Rect {
-                x: 24,
-                y: HUD_H + 400,
-                w: 376,
+                x: 352,
+                y: HUD_H + 376,
+                w: 196,
                 h: 44,
             },
             kit_all: Rect {
-                x: 408,
-                y: HUD_H + 400,
-                w: 368,
+                x: 556,
+                y: HUD_H + 376,
+                w: 220,
                 h: 44,
             },
             synth_keys: Rect {
@@ -1639,6 +1647,22 @@ impl Layout {
         self.division_cell(index)
     }
 
+    pub fn kit_repeat_choice_cell(&self, index: usize) -> Rect {
+        let cols = 3i32;
+        let rows = 2i32;
+        let i = (index % 6) as i32;
+        let col = i % cols;
+        let row = i / cols;
+        let gw = self.kit_divisions.w / cols;
+        let gh = self.kit_divisions.h / rows;
+        Rect {
+            x: self.kit_divisions.x + col * gw + 8,
+            y: self.kit_divisions.y + row * gh + 8,
+            w: gw - 16,
+            h: gh - 16,
+        }
+    }
+
     /// One-octave piano keyboard inside `synth_keys`.
     /// Notes are returned relative to C4 (MIDI 60); the model applies `synth_octave`.
     pub const SYNTH_KEY_BASE: u8 = 60;
@@ -2013,9 +2037,6 @@ impl Layout {
     }
 
     fn hit_drums(&self, px: i32, py: i32) -> Hit {
-        if self.kit_scope.contains(px, py) {
-            return Hit::KitWave;
-        }
         for index in 0..16 {
             if self.kit_pad_cell(index).contains(px, py) {
                 let cell = crate::phrases::PHRASE_GRID_CELLS[index];
@@ -2023,12 +2044,8 @@ impl Layout {
                 return Hit::Drum { index, note };
             }
         }
-        if self.kit_divisions.contains(px, py) {
-            for index in 0..4 {
-                if self.kit_division_cell(index).contains(px, py) {
-                    return Hit::Division(index);
-                }
-            }
+        if self.kit_note_repeat.contains(px, py) {
+            return Hit::KitNoteRepeat;
         }
         if self.kit_wave.contains(px, py) {
             return Hit::KitWave;
@@ -2050,6 +2067,15 @@ impl Layout {
         }
         if self.kit_edit_scope().contains(px, py) {
             return Hit::KitPlay;
+        }
+        Hit::None
+    }
+
+    pub fn hit_kit_repeat(&self, px: i32, py: i32) -> Hit {
+        for index in 0..6 {
+            if self.kit_repeat_choice_cell(index).contains(px, py) {
+                return Hit::Division(index);
+            }
         }
         Hit::None
     }
@@ -2504,6 +2530,26 @@ mod tests {
             Hit::Drum { note: 36, .. } => {}
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn kit_note_repeat_button_is_hit() {
+        let layout = Layout::new();
+        let btn = layout.kit_note_repeat;
+        assert_eq!(
+            layout.hit(UiMode::Drums, btn.x + 4, btn.y + 4),
+            Hit::KitNoteRepeat
+        );
+        let none = layout.kit_repeat_choice_cell(0);
+        assert_eq!(
+            layout.hit_kit_repeat(none.x + 4, none.y + 4),
+            Hit::Division(0)
+        );
+        let triple = layout.kit_repeat_choice_cell(5);
+        assert_eq!(
+            layout.hit_kit_repeat(triple.x + 4, triple.y + 4),
+            Hit::Division(5)
+        );
     }
 
     #[test]

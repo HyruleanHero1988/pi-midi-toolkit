@@ -458,6 +458,7 @@ fn chrome_status(model: &NativeModel) -> String {
         ),
         UiMode::Synth if model.synth_vib_open => "VIB".into(),
         UiMode::Drums if model.kit_edit_open => "WAVE".into(),
+        UiMode::Drums if model.kit_repeat_open => "REPEAT".into(),
         UiMode::Settings => {
             if model.status_line.is_empty() {
                 "SETTINGS".into()
@@ -1806,6 +1807,10 @@ fn draw_drums(scene: &mut Scene, model: &NativeModel) {
         draw_kit_edit(scene, model);
         return;
     }
+    if model.kit_repeat_open {
+        draw_kit_repeat(scene, model);
+        return;
+    }
 
     scene.text(24, HUD_H + 8, "DRUM KIT", 0xfbf1c7);
 
@@ -1819,9 +1824,8 @@ fn draw_drums(scene: &mut Scene, model: &NativeModel) {
         format!("{} {}", phrases::pad_label(sel_cell), model_name)
     };
     let status = format!(
-        "{}  hold {}  T{:.0} S{:.0} P{:.0} D{:.0}",
+        "{}  T{:.0} S{:.0} P{:.0} D{:.0}",
         target,
-        model.division.label(),
         macros[0] * 100.0,
         macros[1] * 100.0,
         macros[2] * 100.0,
@@ -1839,15 +1843,20 @@ fn draw_drums(scene: &mut Scene, model: &NativeModel) {
         2,
     );
 
-    draw_scope_wave(scene, layout.kit_scope, &model.kit_wave);
-
     for screen_index in 0..16 {
         let cell = layout.kit_pad_cell(screen_index);
         let phrase_cell = phrases::PHRASE_GRID_CELLS[screen_index];
         let note = phrases::mpk_note_for_phrase_cell(phrase_cell);
         let voice = drum_model_for_note(note).name().replace('_', " ");
+        let repeat = model.drum_repeat_for_note(note);
         let selected = !model.kit_all_drums && screen_index == model.kit_selected;
-        let bg = if selected { 0xd79921 } else { 0x3c3836 };
+        let bg = if selected {
+            0xd79921
+        } else if repeat.is_on() {
+            0x365a5c
+        } else {
+            0x3c3836
+        };
         scene.fill_rect(cell, bg);
         scene.text_centered(
             Rect {
@@ -1871,16 +1880,35 @@ fn draw_drums(scene: &mut Scene, model: &NativeModel) {
             0xa89984,
             1,
         );
+        if let Some(label) = repeat.pad_label() {
+            scene.text_centered(
+                Rect {
+                    x: cell.x + 2,
+                    y: cell.y + cell.h - 20,
+                    w: cell.w - 4,
+                    h: 16,
+                },
+                label,
+                if selected { 0xfbf1c7 } else { 0x83c07c },
+                1,
+            );
+        }
     }
 
-    const DIV_LABELS: [&str; 4] = ["1/4", "1/8", "1/8T", "1/16"];
-    for index in 0..4 {
-        let cell = layout.kit_division_cell(index);
-        let choice = RepeatDivisionChoice::from_index(index);
-        let active = model.division == choice;
-        scene.fill_rect(cell, if active { 0x458588 } else { 0x282828 });
-        scene.text_centered(cell, DIV_LABELS[index], 0xffffff, 2);
-    }
+    let repeat_bg = if model.edit_drum_repeat().is_on() && !model.edit_drum_repeat_mixed() {
+        0x458588
+    } else if model.edit_drum_repeat_mixed() {
+        0xb16286
+    } else {
+        0x504945
+    };
+    scene.fill_rect(layout.kit_note_repeat, repeat_bg);
+    scene.text_centered(
+        layout.kit_note_repeat,
+        &model.note_repeat_button_label(),
+        0xfbf1c7,
+        2,
+    );
 
     scene.fill_rect(layout.kit_wave, 0x689d6a);
     scene.text_centered(layout.kit_wave, "WAVE", 0xfbf1c7, 2);
@@ -1945,6 +1973,49 @@ fn draw_kit_edit(scene: &mut Scene, model: &NativeModel) {
         "BACK returns to pads",
         0xa89984,
     );
+}
+
+fn draw_kit_repeat(scene: &mut Scene, model: &NativeModel) {
+    let layout = model.layout;
+    let title = if model.kit_all_drums {
+        "ALL DRUMS".to_string()
+    } else {
+        let cell = phrases::PHRASE_GRID_CELLS[model.kit_selected];
+        format!(
+            "{} {}",
+            phrases::pad_label(cell),
+            model.selected_drum_model().name().replace('_', " ")
+        )
+    };
+    scene.text(24, HUD_H + 8, "NOTE REPEAT", 0xfbf1c7);
+    scene.text_centered(
+        Rect {
+            x: 200,
+            y: HUD_H + 6,
+            w: 440,
+            h: 24,
+        },
+        &title,
+        0xfabd2f,
+        2,
+    );
+
+    let current = model.edit_drum_repeat();
+    let mixed = model.edit_drum_repeat_mixed();
+    for (index, choice) in RepeatDivisionChoice::ALL.iter().enumerate() {
+        let cell = layout.kit_repeat_choice_cell(index);
+        let active = !mixed && *choice == current;
+        scene.fill_rect(cell, if active { 0x458588 } else { 0x3c3836 });
+        scene.text_centered(cell, choice.label(), 0xffffff, 2);
+    }
+
+    scene.text(
+        24,
+        HUD_H + 368,
+        "OFF is one-shot · hold a pad to repeat",
+        0xa89984,
+    );
+    scene.text(24, HUD_H + 392, "BACK returns to pads", 0xa89984);
 }
 
 fn draw_scope_wave(scene: &mut Scene, rect: Rect, samples: &[f32]) {

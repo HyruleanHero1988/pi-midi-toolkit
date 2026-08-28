@@ -122,6 +122,17 @@ fn main() {
     {
         let mut model = NativeModel::new();
         let mut ob = Outbox::new();
+        model.set_mode(UiMode::Drums);
+        model.tick(1.0 / 60.0, &mut ob);
+        let b = model.layout.kit_note_repeat;
+        model.finger_down(1, b.x + 4, b.y + 4, &mut ob);
+        model.finger_up(1, &mut ob);
+        model.tick(1.0 / 60.0, &mut ob);
+        dump(&model, out.join("drums_repeat.ppm"));
+    }
+    {
+        let mut model = NativeModel::new();
+        let mut ob = Outbox::new();
         model.set_mode(UiMode::Kaoss);
         let b = model.layout.kaoss_scale;
         model.finger_down(1, b.x + 4, b.y + 4, &mut ob);
