@@ -39,49 +39,49 @@ pub const FM_RECIPES: [FmRecipe; FM_RECIPE_COUNT] = [
         id: "bell",
         label: "BELL",
         title: "Bell",
-        hint: "Draw A into D. Metallic strike.",
+        hint: "A and B strike D, then die. The ring is D.",
     },
     FmRecipe {
         id: "ep",
         label: "E.PIANO",
         title: "E. piano",
-        hint: "A dies fast, D rings. Classic tine.",
+        hint: "A is the tine tick. B is the warm body.",
     },
     FmRecipe {
         id: "bass",
         label: "BASS",
-        hint: "A wiggles D. Fold A for growl.",
+        hint: "A bites itself and D. Fold A for more growl.",
         title: "Bass",
     },
     FmRecipe {
         id: "brass",
         label: "BRASS",
         title: "Brass",
-        hint: "A opens slowly into D — brightness after the press.",
+        hint: "A into B into D. Brightness fades in.",
     },
     FmRecipe {
         id: "flute",
         label: "FLUTE",
         title: "Flute",
-        hint: "Almost just D. A tiny A→D is breath.",
+        hint: "Mostly D. A little self-wobble is breath.",
     },
     FmRecipe {
         id: "organ",
         label: "ORGAN",
         title: "Organ",
-        hint: "A and B are heard together. Draw either into D.",
+        hint: "A B C D all sound. Stacked sines, almost no FM.",
     },
     FmRecipe {
         id: "pluck",
         label: "PLUCK",
         title: "Pluck",
-        hint: "Short A→D. Instant, then gone.",
+        hint: "A into B into D, all die. Guitar snap.",
     },
     FmRecipe {
         id: "growl",
         label: "GROWL",
         title: "Growl",
-        hint: "Draw A onto itself, then into D. Messy on purpose.",
+        hint: "A onto itself and D, B into D. Messy.",
     },
 ];
 
@@ -124,8 +124,10 @@ pub struct FmOpParams {
     pub audio: f32,
     /// 0 = sine, 1 = folded / pushed toward square.
     pub fold: f32,
-    /// 0 = snappy, 1 = slow open (morphing envelope lite).
+    /// 0 = snappy times, 1 = slow open.
     pub env: f32,
+    /// Level held after the strike, while the key is down. 0 = dies even if held.
+    pub sustain: f32,
 }
 
 impl Default for FmOpParams {
@@ -135,6 +137,7 @@ impl Default for FmOpParams {
             audio: 0.0,
             fold: 0.0,
             env: 0.35,
+            sustain: 1.0,
         }
     }
 }
@@ -142,6 +145,10 @@ impl Default for FmOpParams {
 impl FmOpParams {
     fn attack_sec(self) -> f32 {
         0.002 * (0.50 / 0.002_f32).powf(self.env.clamp(0.0, 1.0))
+    }
+
+    fn decay_sec(self) -> f32 {
+        0.022 * (0.40 / 0.022_f32).powf(self.env.clamp(0.0, 1.0))
     }
 
     fn release_sec(self) -> f32 {
@@ -162,20 +169,21 @@ impl Default for FmPatch {
     }
 }
 
-fn op(ratio: f32, audio: f32, fold: f32, env: f32) -> FmOpParams {
+fn op(ratio: f32, audio: f32, fold: f32, env: f32, sustain: f32) -> FmOpParams {
     FmOpParams {
         ratio,
         audio,
         fold,
         env,
+        sustain: sustain.clamp(0.0, 1.0),
     }
 }
 
 fn quiet(ratio: f32) -> FmOpParams {
-    op(ratio, 0.0, 0.0, 0.3)
+    op(ratio, 0.0, 0.0, 0.3, 0.0)
 }
 
-/// Starting graphs. D is usually the tone you hear; A/B/C wiggle it if linked.
+/// Starting graphs. Each recipe is a different wiring, not a rerun of A→D.
 pub fn fm_recipe_patch(index: usize) -> FmPatch {
     let mut p = FmPatch {
         ops: [FmOpParams::default(); FM_OP_COUNT],
@@ -183,86 +191,90 @@ pub fn fm_recipe_patch(index: usize) -> FmPatch {
     };
     match index % FM_RECIPE_COUNT {
         0 => {
-            // Bell: A (3.5) → D
+            // Bell: two inharmonic strikes into a ringing D.
             p.ops = [
-                op(0.55, 0.0, 0.10, 0.18),
+                op(0.52, 0.0, 0.06, 0.10, 0.0),
+                op(0.82, 0.0, 0.0, 0.06, 0.0),
                 quiet(0.15),
-                quiet(0.15),
-                op(0.15, 1.0, 0.0, 0.48),
+                op(0.12, 1.0, 0.0, 0.50, 0.48),
             ];
-            p.matrix[0][3] = 0.72;
+            p.matrix[0][3] = 0.70;
+            p.matrix[1][3] = 0.38;
         }
         1 => {
-            // E.piano: A (14) dies faster than D
+            // E.piano: 14:1 tine dies while held; B is a parallel warm sine.
             p.ops = [
-                op(0.95, 0.0, 0.04, 0.08),
+                op(0.92, 0.0, 0.0, 0.03, 0.0),
+                op(0.12, 0.48, 0.0, 0.32, 0.90),
                 quiet(0.15),
-                quiet(0.15),
-                op(0.15, 1.0, 0.0, 0.58),
+                op(0.12, 0.72, 0.0, 0.42, 0.78),
             ];
-            p.matrix[0][3] = 0.55;
+            p.matrix[0][3] = 0.40;
         }
         2 => {
-            // Bass: A → D, a little fold
+            // Bass: folded A with feedback, 2:1 into D.
             p.ops = [
-                op(0.15, 0.0, 0.22, 0.28),
+                op(0.32, 0.0, 0.40, 0.22, 0.92),
                 quiet(0.15),
                 quiet(0.15),
-                op(0.15, 1.0, 0.08, 0.38),
+                op(0.12, 1.0, 0.14, 0.30, 1.0),
             ];
-            p.matrix[0][3] = 0.48;
-        }
-        3 => {
-            // Brass: slow A into D
-            p.ops = [
-                op(0.15, 0.0, 0.12, 0.72),
-                quiet(0.15),
-                quiet(0.15),
-                op(0.15, 1.0, 0.0, 0.42),
-            ];
+            p.matrix[0][0] = 0.48;
             p.matrix[0][3] = 0.52;
         }
-        4 => {
-            // Flute: mostly D
+        3 => {
+            // Brass: slow stack A→B→D, no fold — brightness after the press.
             p.ops = [
-                op(0.15, 0.0, 0.0, 0.40),
+                op(0.12, 0.0, 0.0, 0.78, 1.0),
+                op(0.12, 0.0, 0.0, 0.55, 1.0),
                 quiet(0.15),
-                quiet(0.15),
-                op(0.15, 1.0, 0.0, 0.50),
+                op(0.12, 1.0, 0.0, 0.36, 1.0),
             ];
-            p.matrix[0][3] = 0.12;
+            p.matrix[0][1] = 0.62;
+            p.matrix[1][3] = 0.50;
+        }
+        4 => {
+            // Flute: almost just D, tiny A puff + D feedback for air.
+            p.ops = [
+                op(0.12, 0.0, 0.0, 0.42, 0.25),
+                quiet(0.15),
+                quiet(0.15),
+                op(0.12, 1.0, 0.0, 0.48, 1.0),
+            ];
+            p.matrix[0][3] = 0.10;
+            p.matrix[3][3] = 0.16;
         }
         5 => {
-            // Organ: A+B heard, light into D
+            // Organ: additive drawbars. Instant, holds, almost no FM.
             p.ops = [
-                op(0.35, 0.55, 0.0, 0.08),
-                op(0.45, 0.40, 0.0, 0.08),
-                quiet(0.15),
-                op(0.15, 0.70, 0.0, 0.88),
+                op(0.32, 0.52, 0.0, 0.02, 1.0),
+                op(0.42, 0.36, 0.0, 0.02, 1.0),
+                op(0.62, 0.20, 0.0, 0.02, 1.0),
+                op(0.12, 0.62, 0.0, 0.02, 1.0),
             ];
-            p.matrix[0][3] = 0.22;
-            p.matrix[1][3] = 0.18;
         }
         6 => {
-            // Pluck
+            // Pluck: A→B→D, all percussive.
             p.ops = [
-                op(0.35, 0.0, 0.16, 0.0),
+                op(0.42, 0.0, 0.18, 0.0, 0.0),
+                op(0.32, 0.0, 0.0, 0.04, 0.0),
                 quiet(0.15),
-                quiet(0.15),
-                op(0.15, 1.0, 0.0, 0.16),
+                op(0.12, 1.0, 0.0, 0.10, 0.0),
             ];
-            p.matrix[0][3] = 0.44;
+            p.matrix[0][1] = 0.50;
+            p.matrix[1][3] = 0.56;
         }
         _ => {
-            // Growl: A feedback + A→D + fold
+            // Growl: A feedback + A→D + B→D, lots of fold.
             p.ops = [
-                op(0.15, 0.15, 0.62, 0.30),
+                op(0.12, 0.12, 0.66, 0.28, 0.85),
+                op(0.32, 0.0, 0.28, 0.24, 0.80),
                 quiet(0.15),
-                quiet(0.15),
-                op(0.15, 1.0, 0.18, 0.48),
+                op(0.12, 1.0, 0.20, 0.40, 0.90),
             ];
-            p.matrix[0][0] = 0.70;
-            p.matrix[0][3] = 0.58;
+            p.matrix[0][0] = 0.72;
+            p.matrix[0][3] = 0.50;
+            p.matrix[1][3] = 0.34;
         }
     }
     p
@@ -275,6 +287,7 @@ struct FmVoice {
     note: u8,
     phase: [f32; FM_OP_COUNT],
     amp: [f32; FM_OP_COUNT],
+    peaked: [bool; FM_OP_COUNT],
     target: f32,
     last: [f32; FM_OP_COUNT],
     releasing: bool,
@@ -289,6 +302,7 @@ impl FmVoice {
             note: 0,
             phase: [0.0; FM_OP_COUNT],
             amp: [0.0; FM_OP_COUNT],
+            peaked: [false; FM_OP_COUNT],
             target: 0.0,
             last: [0.0; FM_OP_COUNT],
             releasing: false,
@@ -409,6 +423,7 @@ impl FmSynth {
             let v = &mut self.voices[slot];
             v.phase = [0.0; FM_OP_COUNT];
             v.amp = [0.0; FM_OP_COUNT];
+            v.peaked = [false; FM_OP_COUNT];
             v.last = [0.0; FM_OP_COUNT];
             v.target = target;
             v.releasing = false;
@@ -423,6 +438,7 @@ impl FmSynth {
             note,
             phase: [0.0; FM_OP_COUNT],
             amp: [0.0; FM_OP_COUNT],
+            peaked: [false; FM_OP_COUNT],
             target,
             last: [0.0; FM_OP_COUNT],
             releasing: false,
@@ -455,11 +471,15 @@ impl FmSynth {
         let sr = sample_rate.max(8000.0);
         let patch = self.patch;
         let mut atk = [0.0f32; FM_OP_COUNT];
+        let mut dec = [0.0f32; FM_OP_COUNT];
         let mut rel = [0.0f32; FM_OP_COUNT];
+        let mut sus = [0.0f32; FM_OP_COUNT];
         let mut inc_ratio = [0.0f32; FM_OP_COUNT];
         for i in 0..FM_OP_COUNT {
             atk[i] = env_step(patch.ops[i].attack_sec(), sr);
+            dec[i] = env_step(patch.ops[i].decay_sec(), sr);
             rel[i] = env_step(patch.ops[i].release_sec(), sr);
+            sus[i] = patch.ops[i].sustain.clamp(0.0, 1.0);
             inc_ratio[i] = clang_ratio(patch.ops[i].ratio);
         }
         let size = SINE_SIZE as f32;
@@ -478,7 +498,16 @@ impl FmSynth {
                 let mut mix = 0.0f32;
                 let prev = v.last;
                 for i in 0..FM_OP_COUNT {
-                    v.amp[i] = step_env(v.amp[i], v.target, v.releasing, atk[i], rel[i]);
+                    v.amp[i] = step_env(
+                        v.amp[i],
+                        v.target,
+                        sus[i],
+                        v.releasing,
+                        &mut v.peaked[i],
+                        atk[i],
+                        dec[i],
+                        rel[i],
+                    );
                     let mut mod_phase = 0.0f32;
                     for src in 0..FM_OP_COUNT {
                         let amt = patch.matrix[src][i];
@@ -557,13 +586,19 @@ impl FmSynth {
         let mut best = 0usize;
         let mut best_key = (false, f32::MAX, u64::MAX);
         for (i, v) in self.voices.iter().enumerate() {
-            let key = (!v.releasing, v.amp[3], v.age);
+            let loud = v.amp.iter().copied().fold(0.0f32, f32::max);
+            let key = (!v.releasing, loud, v.age);
             if key < best_key {
                 best_key = key;
                 best = i;
             }
         }
         best
+    }
+
+    #[cfg(test)]
+    fn test_op_amps(&self) -> Option<[f32; FM_OP_COUNT]> {
+        self.voices.iter().find(|v| v.active).map(|v| v.amp)
     }
 }
 
@@ -595,17 +630,34 @@ fn env_step(seconds: f32, sample_rate: f32) -> f32 {
 }
 
 #[inline]
-fn step_env(amp: f32, target: f32, releasing: bool, attack: f32, release: f32) -> f32 {
-    if target > amp {
-        (amp + attack * target.max(0.05)).min(target)
-    } else {
-        let step = if releasing { release } else { attack };
-        let next = amp - step * amp.max(0.02);
-        if next <= target {
-            target
-        } else {
-            next
+fn step_env(
+    amp: f32,
+    peak: f32,
+    sustain: f32,
+    releasing: bool,
+    peaked: &mut bool,
+    attack: f32,
+    decay: f32,
+    release: f32,
+) -> f32 {
+    if releasing {
+        *peaked = false;
+        return (amp - release * amp.max(0.02)).max(0.0);
+    }
+    if !*peaked {
+        let next = (amp + attack * peak.max(0.05)).min(peak);
+        if next >= peak * 0.98 {
+            *peaked = true;
         }
+        return next;
+    }
+    let sus = peak * sustain.clamp(0.0, 1.0);
+    if amp > sus {
+        (amp - decay * amp.max(0.02)).max(sus)
+    } else if amp < sus {
+        (amp + attack * sus.max(0.05)).min(sus)
+    } else {
+        amp
     }
 }
 
@@ -689,5 +741,63 @@ mod tests {
         let p = fm_recipe_patch(7);
         assert!(p.matrix[0][0] > 0.5);
         assert!(p.ops[0].fold > 0.4);
+        assert!(p.matrix[1][3] > 0.2);
+    }
+
+    #[test]
+    fn recipes_are_not_the_same_graph() {
+        let mut seen = std::collections::BTreeSet::new();
+        for i in 0..FM_RECIPE_COUNT {
+            let p = fm_recipe_patch(i);
+            let mut key = [0u8; 16];
+            for src in 0..FM_OP_COUNT {
+                for dst in 0..FM_OP_COUNT {
+                    key[src * FM_OP_COUNT + dst] = (p.matrix[src][dst] * 25.0).round() as u8;
+                }
+            }
+            assert!(
+                seen.insert(key),
+                "recipe {} reuses another program's wiring",
+                fm_recipe(i).id
+            );
+        }
+        assert_eq!(seen.len(), FM_RECIPE_COUNT);
+        let brass = fm_recipe_patch(3);
+        let bass = fm_recipe_patch(2);
+        assert!(
+            bass.matrix[0][0] > 0.3 && brass.matrix[0][1] > 0.3,
+            "bass is A feedback, brass is A→B→D"
+        );
+        assert!(fm_recipe_patch(5).ops.iter().all(|o| o.audio > 0.1));
+        assert_eq!(fm_recipe_patch(5).matrix, [[0.0; FM_OP_COUNT]; FM_OP_COUNT]);
+    }
+
+    #[test]
+    fn electric_piano_tine_dies_while_the_key_is_held() {
+        let mut fm = FmSynth::new();
+        fm.set_recipe(1);
+        fm.note_on(0, 60, 120);
+        let mut buf = vec![0.0f32; 256];
+        fm.render(&mut buf, 48_000.0, 1.0);
+        let early = fm.test_op_amps().unwrap();
+        assert!(
+            early[0] > 0.05,
+            "tine should speak on the attack, amp={}",
+            early[0]
+        );
+
+        for _ in 0..40 {
+            buf.iter_mut().for_each(|s| *s = 0.0);
+            fm.render(&mut buf, 48_000.0, 1.0);
+        }
+        let late = fm.test_op_amps().unwrap();
+        assert!(
+            late[0] < 0.02,
+            "14:1 tine must die while held, amp={}",
+            late[0]
+        );
+        assert!(late[1] > 0.08, "warm body B should still be held");
+        assert!(late[3] > 0.08, "D body should still be held");
+        assert_eq!(fm.active_count(), 1);
     }
 }
