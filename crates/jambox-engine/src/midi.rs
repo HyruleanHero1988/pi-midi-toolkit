@@ -4,7 +4,7 @@
 //! MIDI on the control socket) are parsed once, turned into [`Command`]s, and
 //! fanned out to the kiosk. Knob meaning lives here — Tk only displays.
 
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU16, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -33,6 +33,7 @@ pub const CC_LEVEL: u8 = 77;
 pub const MODE_KEYS: u8 = 0;
 pub const MODE_DRUMS: u8 = 1;
 pub const MODE_FX: u8 = 2;
+pub const MODE_FM: u8 = 3;
 
 pub const FX_VOICE: u8 = 0;
 pub const FX_DRUM: u8 = 1;
@@ -72,9 +73,14 @@ impl MidiMap {
         self.fx_index.store(index, Ordering::Relaxed);
     }
 
+    pub fn set_fm(&self) {
+        self.mode.store(MODE_FM, Ordering::Relaxed);
+    }
+
     pub fn apply_knob_map(&self, mode: &str, fx_kind: Option<&str>, fx_index: u16) {
         match mode {
             "drums" => self.set_drums(),
+            "fm" => self.set_fm(),
             "fx" => {
                 let kind = match fx_kind.unwrap_or("voice") {
                     "drum" => FX_DRUM,
@@ -168,7 +174,23 @@ impl MidiMap {
                         param: SynthParam::DrumLevel,
                         value: unit.powf(1.15),
                     });
-                },
+                }
+                _ => return None,
+            };
+            return Some(Command::SetSynth { param, value: unit });
+        }
+        if mode == MODE_FM {
+            let param = match controller {
+                CC_MORPH => SynthParam::FmBright,
+                CC_TONE => SynthParam::FmClang,
+                CC_ATTACK => SynthParam::FmHit,
+                CC_RELEASE => SynthParam::FmTail,
+                CC_LEVEL => {
+                    return Some(Command::SetSynth {
+                        param: SynthParam::Level,
+                        value: unit.powf(1.15),
+                    });
+                }
                 _ => return None,
             };
             return Some(Command::SetSynth { param, value: unit });
@@ -261,8 +283,8 @@ pub fn spawn_input(
         }
         while running.load(Ordering::Relaxed) {
             let wanted = pick_input_name(&filter);
-            let still = wanted.as_ref().map(|n| n == &current).unwrap_or(false)
-                && connection.is_some();
+            let still =
+                wanted.as_ref().map(|n| n == &current).unwrap_or(false) && connection.is_some();
             if connection.is_some() && !still {
                 info!(port = %current, "midi: input gone; waiting for reconnect");
                 connection = None;
@@ -271,8 +293,12 @@ pub fn spawn_input(
             if connection.is_none() {
                 if let Some(name) = wanted {
                     announced_wait = false;
-                    match try_connect(&name, Arc::clone(&shared_side), Arc::clone(&hub), Arc::clone(&map))
-                    {
+                    match try_connect(
+                        &name,
+                        Arc::clone(&shared_side),
+                        Arc::clone(&hub),
+                        Arc::clone(&map),
+                    ) {
                         Ok(conn) => {
                             info!(port = %name, "midi: input open");
                             current = name;
@@ -467,6 +493,41 @@ mod tests {
             } => assert!((value - 64.0 / 127.0).abs() < 0.001),
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn fm_mode_rebinds_knobs_to_the_playground() {
+        let map = MidiMap::default();
+        map.set_fm();
+        let command = map
+            .interpret(MidiEvent::ControlChange {
+                channel: 0,
+                controller: CC_MORPH,
+                value: 127,
+            })
+            .unwrap();
+        assert_eq!(
+            command,
+            Command::SetSynth {
+                param: SynthParam::FmBright,
+                value: 1.0
+            }
+        );
+        map.apply_knob_map("fm", None, 0);
+        let clang = map
+            .interpret(MidiEvent::ControlChange {
+                channel: 0,
+                controller: CC_TONE,
+                value: 0,
+            })
+            .unwrap();
+        assert_eq!(
+            clang,
+            Command::SetSynth {
+                param: SynthParam::FmClang,
+                value: 0.0
+            }
+        );
     }
 
     #[test]

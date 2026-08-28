@@ -59,6 +59,14 @@ pub enum SynthParam {
     DrumNoise,
     DrumTone,
     DrumLevel,
+    /// 0 = wavetable melody, 1 = two-operator FM playground.
+    FmEnable,
+    /// Recipe index as a raw number (not 0..1). See `fm::FM_RECIPES`.
+    FmRecipe,
+    FmBright,
+    FmClang,
+    FmHit,
+    FmTail,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

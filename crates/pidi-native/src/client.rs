@@ -127,6 +127,14 @@ impl Outbox {
         });
     }
 
+    pub fn knob_map(&mut self, mode: &str) {
+        self.reliable.push_back(Request::KnobMap {
+            mode: mode.to_string(),
+            fx_kind: None,
+            fx_index: 0,
+        });
+    }
+
     pub fn morph_pair(&mut self, a: u16, b: u16) {
         self.reliable.push_back(Request::MorphPair { a, b });
     }
@@ -308,13 +316,11 @@ impl NativeClient {
         self.stream = None;
         self.reader = None;
         let opened = if self.tcp {
-            TcpStream::connect(&self.address)
-                .ok()
-                .map(|s| {
-                    let _ = s.set_nodelay(true);
-                    let _ = s.set_read_timeout(Some(Duration::from_millis(1)));
-                    Stream::Tcp(s)
-                })
+            TcpStream::connect(&self.address).ok().map(|s| {
+                let _ = s.set_nodelay(true);
+                let _ = s.set_read_timeout(Some(Duration::from_millis(1)));
+                Stream::Tcp(s)
+            })
         } else {
             #[cfg(unix)]
             {
@@ -393,8 +399,9 @@ impl NativeClient {
                         }
                     }
                 }
-                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock
-                    || err.kind() == std::io::ErrorKind::TimedOut =>
+                Err(err)
+                    if err.kind() == std::io::ErrorKind::WouldBlock
+                        || err.kind() == std::io::ErrorKind::TimedOut =>
                 {
                     break;
                 }
@@ -423,8 +430,20 @@ mod tests {
         box_.touch(1, TouchPhase::Up, 0.9, 0.8, 0);
         let batch = box_.take();
         assert_eq!(batch.len(), 2);
-        assert!(matches!(batch[0], Request::Touch { phase: TouchPhase::Down, .. }));
-        assert!(matches!(batch[1], Request::Touch { phase: TouchPhase::Up, .. }));
+        assert!(matches!(
+            batch[0],
+            Request::Touch {
+                phase: TouchPhase::Down,
+                ..
+            }
+        ));
+        assert!(matches!(
+            batch[1],
+            Request::Touch {
+                phase: TouchPhase::Up,
+                ..
+            }
+        ));
     }
 
     #[test]

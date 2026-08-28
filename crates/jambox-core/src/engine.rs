@@ -13,11 +13,10 @@ use crate::command::{
 use crate::drums::{
     drum_model_for_note, DrumKit, DrumMacros, DrumModel, DRUM_MODEL_COUNT, MAX_DRUM_HITS,
 };
+use crate::fm::FmSynth;
 use crate::fx::{FxParams, FxUnit};
 use crate::kaoss::{unpack_xy, KaossMapper, LatestTouch, TouchDelta};
-use crate::repeat::{
-    RepeatEvent, RepeatRack, MAX_REPEAT_EVENTS_PER_BLOCK,
-};
+use crate::repeat::{RepeatEvent, RepeatRack, MAX_REPEAT_EVENTS_PER_BLOCK};
 use crate::transport::Transport;
 use crate::voice::{VoiceContext, VoicePool, MAX_VOICES};
 use crate::wavetable::WaveBank;
@@ -142,6 +141,8 @@ pub struct JamboxEngine {
     transport: Transport,
     bank: WaveBank,
     voices: VoicePool,
+    fm: FmSynth,
+    fm_enabled: bool,
     drums: DrumKit,
     sequencer: Sequencer,
     repeats: RepeatRack,
@@ -191,6 +192,8 @@ impl JamboxEngine {
             transport: Transport::new(sample_rate),
             bank,
             voices: VoicePool::new(),
+            fm: FmSynth::new(),
+            fm_enabled: false,
             drums: DrumKit::new(sr),
             sequencer: Sequencer::new(),
             repeats: RepeatRack::new(),
@@ -300,6 +303,7 @@ impl JamboxEngine {
         self.bus_fx = FxUnit::new(sr);
         self.bus_fx.set_params(bus);
         self.voices.silence();
+        self.fm.silence();
         self.drums.silence();
     }
 
@@ -444,7 +448,7 @@ impl JamboxEngine {
         self.status = EngineStatus {
             position: self.transport.position(),
             bpm: self.transport.bpm() as f32,
-            active_voices: self.voices.active_count() as u16,
+            active_voices: (self.voices.active_count() + self.fm.active_count()) as u16,
             active_drums: self.drums.active_count() as u16,
             active_repeats: self.repeats.active_count() as u16,
             playing_clips: self.sequencer.playing_count() as u16,
@@ -462,6 +466,8 @@ impl JamboxEngine {
             transport,
             bank,
             voices,
+            fm,
+            fm_enabled,
             drums,
             voice_fx,
             drum_fx,
@@ -501,10 +507,11 @@ impl JamboxEngine {
             vib = (*vib_phase).sin() as f32 * *vib_depth_semis * vib_amt;
         }
 
+        let pitch_mul = 2f32.powf((*bend_semis + vib) / 12.0);
         bank.rebuild_morph();
         let ctx = VoiceContext {
             sample_rate: sr,
-            pitch_mul: 2f32.powf((*bend_semis + vib) / 12.0),
+            pitch_mul,
             attack_sec: *attack_sec,
             release_sec: *release_sec,
         };
@@ -521,6 +528,14 @@ impl JamboxEngine {
                     fx.process(&mut group_buf[..n]);
                 }
             }
+            for i in 0..n {
+                key_bus[i] += group_buf[i];
+            }
+        }
+
+        if *fm_enabled || fm.active_count() > 0 {
+            group_buf[..n].iter_mut().for_each(|s| *s = 0.0);
+            fm.render(&mut group_buf[..n], sr, pitch_mul);
             for i in 0..n {
                 key_bus[i] += group_buf[i];
             }
@@ -579,8 +594,11 @@ impl JamboxEngine {
             } => {
                 if velocity == 0 {
                     self.voices.note_off(channel, note);
+                    self.fm.note_off(channel, note);
                 } else if channel == DRUM_CHANNEL {
                     self.drums.trigger(drum_model_for_note(note), velocity);
+                } else if self.fm_enabled {
+                    self.fm.note_on(channel, note, velocity);
                 } else {
                     let group = self.bank.nearer_index();
                     self.voices.note_on(channel, note, velocity, group);
@@ -589,15 +607,18 @@ impl JamboxEngine {
             Command::NoteOff { channel, note } => {
                 if channel != DRUM_CHANNEL {
                     self.voices.note_off(channel, note);
+                    self.fm.note_off(channel, note);
                 }
             }
             Command::AllNotesOff => {
                 self.voices.all_notes_off();
+                self.fm.all_notes_off();
                 self.repeats.stop_all();
                 self.release_kaoss();
             }
             Command::Panic => {
                 self.voices.silence();
+                self.fm.silence();
                 self.drums.silence();
                 self.repeats.stop_all();
                 self.release_kaoss();
@@ -734,8 +755,7 @@ impl JamboxEngine {
                 root_midi,
                 octaves,
             } => {
-                self.kaoss
-                    .configure(scale_index, key, root_midi, octaves);
+                self.kaoss.configure(scale_index, key, root_midi, octaves);
             }
             Command::SetEmitMode { target, mode } => {
                 let mode = EmitMode::from_u8(mode);
@@ -845,6 +865,24 @@ impl JamboxEngine {
                 self.drums.set_macros(macros);
             }
             SynthParam::DrumLevel => self.drum_level = unit,
+            SynthParam::FmEnable => {
+                let enable = value > 0.5;
+                if enable != self.fm_enabled {
+                    if enable {
+                        self.voices.all_notes_off();
+                    } else {
+                        self.fm.all_notes_off();
+                    }
+                    self.fm_enabled = enable;
+                }
+            }
+            SynthParam::FmRecipe => {
+                self.fm.set_recipe(value.round().clamp(0.0, 7.0) as usize);
+            }
+            SynthParam::FmBright => self.fm.set_bright(unit),
+            SynthParam::FmClang => self.fm.set_clang(unit),
+            SynthParam::FmHit => self.fm.set_hit(unit),
+            SynthParam::FmTail => self.fm.set_tail(unit),
         }
     }
 
@@ -928,6 +966,41 @@ mod tests {
         })];
         e.render(&mut out, &cmds, &mut midi);
         assert!(peak(&out) > 0.01);
+        assert_eq!(e.status().active_voices, 1);
+    }
+
+    #[test]
+    fn fm_enable_routes_keys_to_the_fm_playground() {
+        let mut e = engine();
+        apply_now(
+            &mut e,
+            Command::SetSynth {
+                param: SynthParam::FmEnable,
+                value: 1.0,
+            },
+        );
+        apply_now(
+            &mut e,
+            Command::SetSynth {
+                param: SynthParam::FmRecipe,
+                value: 0.0,
+            },
+        );
+        let mut out = vec![0.0f32; 1024];
+        let mut midi = MidiOutSink::new();
+        let cmds = [ScheduledCommand::now(Command::NoteOn {
+            channel: 0,
+            note: 72,
+            velocity: 120,
+        })];
+        e.render(&mut out, &cmds, &mut midi);
+        assert!(
+            peak(&out) > 0.01,
+            "FM playground should be audible, peak={}",
+            peak(&out)
+        );
+        assert_eq!(e.voices.active_count(), 0, "wavetable should stay quiet");
+        assert_eq!(e.fm.active_count(), 1);
         assert_eq!(e.status().active_voices, 1);
     }
 
@@ -1174,7 +1247,9 @@ mod tests {
     #[test]
     fn tone_lowpass_mid_is_brighter_than_dark() {
         let sr = 44100.0_f32;
-        let src: Vec<f32> = (0..512).map(|i| if i % 2 == 0 { 1.0 } else { -1.0 }).collect();
+        let src: Vec<f32> = (0..512)
+            .map(|i| if i % 2 == 0 { 1.0 } else { -1.0 })
+            .collect();
         let mut dark = src.clone();
         let mut mid = src.clone();
         let mut lp_d = 0.0_f32;
@@ -1234,7 +1309,10 @@ mod tests {
             .zip(wet_buf.iter())
             .map(|(a, b)| (a - b).abs())
             .sum();
-        assert!(diff > 0.5, "always-on vibrato should detune vs gated-off, diff={diff}");
+        assert!(
+            diff > 0.5,
+            "always-on vibrato should detune vs gated-off, diff={diff}"
+        );
     }
 
     #[test]

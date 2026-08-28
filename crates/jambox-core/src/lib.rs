@@ -1,5 +1,5 @@
-//! Jambox engine core: wavetable synth, drum voices, FX, and a **sample-accurate**
-//! sequencer clock.
+//! Jambox engine core: wavetable synth, two-operator FM playground, drum voices,
+//! FX, and a **sample-accurate** sequencer clock.
 //!
 //! Architecture law (see `PLAN.md`): the UI is never on the audio or sequencer hot
 //! path. This crate has no I/O and no threads. The host binary feeds it timestamped
@@ -18,6 +18,7 @@ mod clip;
 mod command;
 mod drums;
 mod engine;
+mod fm;
 mod fx;
 mod kaoss;
 mod repeat;
@@ -31,6 +32,10 @@ pub use command::{
 };
 pub use drums::{drum_model_for_note, DrumKit, DrumModel, DRUM_MODEL_COUNT};
 pub use engine::{EngineStatus, JamboxEngine, MidiOutSink, MAX_MIDI_OUT, MAX_RENDER_BLOCK};
+pub use fm::{
+    clang_index, clang_label, clang_ratio, fm_recipe, FmPatch, FmRecipe, FmSynth, CLANG_LABELS,
+    CLANG_RATIOS, FM_RECIPES, FM_RECIPE_COUNT, MAX_FM_VOICES,
+};
 pub use fx::{FxParams, FxUnit};
 pub use kaoss::{
     kaoss_scale, kaoss_scale_index_by_id, migrate_legacy_scale_index, note_at_x, note_index_at_x,

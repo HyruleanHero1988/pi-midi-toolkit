@@ -30,6 +30,7 @@ fn main() {
         ("chords", UiMode::Chords),
         ("songs", UiMode::Songs),
         ("presets", UiMode::Presets),
+        ("fm", UiMode::Fm),
         ("settings", UiMode::Settings),
         ("log", UiMode::Log),
         ("map", UiMode::Map),
@@ -43,8 +44,11 @@ fn main() {
     }
 
     // Smooth font smoke dumps (home + settings are densest labels).
-    for (name, mode) in [("home", UiMode::Home), ("settings", UiMode::Settings), ("synth", UiMode::Synth)]
-    {
+    for (name, mode) in [
+        ("home", UiMode::Home),
+        ("settings", UiMode::Settings),
+        ("synth", UiMode::Synth),
+    ] {
         let mut model = NativeModel::new();
         model.font_style = FontStyle::Smooth;
         let mut ob = Outbox::new();
