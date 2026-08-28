@@ -234,6 +234,7 @@ pub struct NativeModel {
     pub chords_out: OutMode,
     pub chords_hold: bool,
     pub chords_key: u8,
+    pub chords_octave: i8,
     pub chords_arm: bool,
     pub chords_current: Option<ChordSpec>,
     pub chords_palette: [Option<ChordSpec>; PALETTE_SLOTS],
@@ -387,6 +388,7 @@ impl NativeModel {
             chords_out: OutMode::Both,
             chords_hold: true,
             chords_key: 0,
+            chords_octave: 0,
             chords_arm: false,
             chords_current: Some(ChordSpec::new(0, chords::ChordQuality::Maj)),
             chords_palette: [None; PALETTE_SLOTS],
@@ -990,6 +992,7 @@ impl NativeModel {
         self.chords_out = s.chords_out;
         self.chords_hold = s.chords_hold;
         self.chords_key = s.chords_key.min(11);
+        self.chords_octave = s.chords_octave.clamp(chords::OCTAVE_MIN, chords::OCTAVE_MAX);
         self.font_style = s.font_style;
         let (style, color) =
             crate::kaoss_viz::load_viz_from_session(&s.kaoss_viz_style, s.kaoss_mono_color);
@@ -1067,6 +1070,7 @@ impl NativeModel {
             chords_out: self.chords_out,
             chords_hold: self.chords_hold,
             chords_key: self.chords_key,
+            chords_octave: self.chords_octave,
             font_style: self.font_style,
             screensaver_sec: self.screensaver.timeout_sec,
             kaoss_viz_style: self.kaoss_viz_style.wire().into(),
@@ -2336,6 +2340,14 @@ impl NativeModel {
                     "ARM off".into()
                 };
             }
+            Hit::ChordsOctDown => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.nudge_chords_octave(-1, outbox);
+            }
+            Hit::ChordsOctUp => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.nudge_chords_octave(1, outbox);
+            }
             Hit::ChordsKeyPick(pc) => {
                 self.tap_ui(slot, id, gesture, px, py);
                 self.chords_key = pc.min(11);
@@ -2431,7 +2443,7 @@ impl NativeModel {
                 self.apply_fx_slider(index, py, outbox);
             }
             Surface::ChordsStrum => {
-                let (_x, y) = self.layout.chords_strum.pad_xy(px, py);
+                let (_x, y) = self.layout.chords_strum_play().pad_xy(px, py);
                 self.fingers[slot].y = y;
                 self.chords_strum_to(y, outbox);
             }
@@ -4474,6 +4486,10 @@ impl NativeModel {
             .collect()
     }
 
+    pub fn chords_held_buttons(&self) -> Vec<(usize, QualityRow)> {
+        self.chords_held_list()
+    }
+
     fn chords_sync_from_held(&mut self, outbox: &mut Outbox) {
         let held = self.chords_held_list();
         if let Some(spec) = chords::resolve_held(&held) {
@@ -4491,7 +4507,8 @@ impl NativeModel {
 
     fn chords_block_on(&mut self, spec: ChordSpec, outbox: &mut Outbox) {
         self.chords_block_off(outbox);
-        let notes = spec.block_notes();
+        let base = chords::block_base_for_octave(self.chords_octave);
+        let notes = spec.block_notes_at(base);
         self.chords_block = notes;
         for note in notes.into_iter().flatten() {
             self.chords_note_on(note, 110, outbox);
@@ -4505,11 +4522,36 @@ impl NativeModel {
         self.chords_block = [None; 4];
     }
 
+    fn nudge_chords_octave(&mut self, delta: i8, outbox: &mut Outbox) {
+        let next = (self.chords_octave + delta).clamp(chords::OCTAVE_MIN, chords::OCTAVE_MAX);
+        if next == self.chords_octave {
+            return;
+        }
+        self.chords_octave = next;
+        self.status_line = format!("chords {}", Self::c_note_label(chords::block_base_for_octave(next)));
+        self.mark_dirty();
+        if self.chords_block.iter().any(|n| n.is_some()) {
+            if let Some(spec) = self.chords_current {
+                self.chords_block_on(spec, outbox);
+            }
+        }
+        if let Some(slot) = self
+            .fingers
+            .iter()
+            .position(|f| f.active && matches!(f.surface, Surface::ChordsStrum))
+        {
+            let y = self.fingers[slot].y;
+            self.chords_strum_note = None;
+            self.chords_strum_to(y, outbox);
+        }
+    }
+
     fn chords_strum_to(&mut self, y: f32, outbox: &mut Outbox) {
         let Some(spec) = self.chords_current else {
             return;
         };
-        let strings = spec.strum_strings();
+        let base = chords::strum_base_for_octave(self.chords_octave);
+        let strings = spec.strum_strings_at(base);
         let note = chords::string_at(y, &strings);
         if self.chords_strum_note == Some(note) {
             return;

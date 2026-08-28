@@ -4,7 +4,7 @@
 //! - 12 roots in **circle-of-fifths** order (F C G D A E B F# Db Ab Eb Bb)
 //! - three rows: MAJOR / minor / 7th
 //! - same-root and neighbour combos for M7, m7, dim, aug, sus4, add9
-//! - a vertical **strumplate** of four octaves of the selected chord
+//! - a vertical **strumplate** of about two octaves of the selected chord
 //!
 //! The 8-slot **palette** is a harmonic palette: tap to play a stored chord as a
 //! block, or load a named set of **changes** (common progressions) in the
@@ -29,11 +29,25 @@ pub const KEY_NAMES: [&str; 12] = [
 
 pub const QUALITY_ROWS: usize = 3;
 pub const PALETTE_SLOTS: usize = 8;
-pub const STRUM_STRINGS: usize = 16;
-/// Lowest strum string ≈ C2 (MIDI 36) for a C chord; others wrap around.
-pub const STRUM_BASE: u8 = 36;
+/// Harp strings on the strum plate (matches the drawn lines).
+pub const STRUM_STRINGS: usize = 8;
+/// Lowest strum string ≈ C3 (MIDI 48) for a C chord — midrange, not sub-bass.
+pub const STRUM_BASE: u8 = 48;
 /// Close-position block voicing around C3 (MIDI 48).
 pub const BLOCK_BASE: u8 = 48;
+/// Octave shift range for block chords + strumplate (0 = factory C3).
+pub const OCTAVE_MIN: i8 = -2;
+pub const OCTAVE_MAX: i8 = 2;
+
+pub fn block_base_for_octave(octave: i8) -> u8 {
+    let o = octave.clamp(OCTAVE_MIN, OCTAVE_MAX) as i16;
+    (i16::from(BLOCK_BASE) + o * 12).clamp(24, 84) as u8
+}
+
+pub fn strum_base_for_octave(octave: i8) -> u8 {
+    let o = octave.clamp(OCTAVE_MIN, OCTAVE_MAX) as i16;
+    (i16::from(STRUM_BASE) + o * 12).clamp(24, 84) as u8
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QualityRow {
@@ -122,12 +136,20 @@ impl ChordSpec {
 
     /// Close-position MIDI notes for a block-chord hit (palette / hold).
     pub fn block_notes(self) -> [Option<u8>; 4] {
-        voicing_midi(self, BLOCK_BASE)
+        self.block_notes_at(BLOCK_BASE)
     }
 
-    /// 16 harp strings spanning four octaves, low → high.
+    pub fn block_notes_at(self, base: u8) -> [Option<u8>; 4] {
+        voicing_midi(self, base)
+    }
+
+    /// 8 harp strings spanning about two octaves, low → high.
     pub fn strum_strings(self) -> [u8; STRUM_STRINGS] {
-        strum_strings(self)
+        self.strum_strings_at(STRUM_BASE)
+    }
+
+    pub fn strum_strings_at(self, base: u8) -> [u8; STRUM_STRINGS] {
+        strum_strings_at(self, base)
     }
 }
 
@@ -146,6 +168,28 @@ pub fn col_for_root_pc(pc: u8) -> usize {
         .iter()
         .position(|&r| r == pc % 12)
         .unwrap_or(1)
+}
+
+/// Which quality-row buttons should light for a resolved chord on its root column
+/// (and neighbour columns for sus4 / add9).
+pub fn lit_buttons_for_chord(spec: ChordSpec) -> Vec<(usize, QualityRow)> {
+    let col = col_for_root_pc(spec.root);
+    let neighbour = col_for_root_pc(fourth_above(spec.root));
+    match spec.quality {
+        ChordQuality::Maj => vec![(col, QualityRow::Maj)],
+        ChordQuality::Min => vec![(col, QualityRow::Min)],
+        ChordQuality::Dom7 => vec![(col, QualityRow::Seven)],
+        ChordQuality::Maj7 => vec![(col, QualityRow::Maj), (col, QualityRow::Seven)],
+        ChordQuality::Min7 => vec![(col, QualityRow::Min), (col, QualityRow::Seven)],
+        ChordQuality::Dim => vec![(col, QualityRow::Maj), (col, QualityRow::Min)],
+        ChordQuality::Aug => vec![
+            (col, QualityRow::Maj),
+            (col, QualityRow::Min),
+            (col, QualityRow::Seven),
+        ],
+        ChordQuality::Sus4 => vec![(col, QualityRow::Maj), (neighbour, QualityRow::Seven)],
+        ChordQuality::Add9 => vec![(col, QualityRow::Maj), (neighbour, QualityRow::Min)],
+    }
 }
 
 /// Fourth above `pc` — the column to the left on the Omnichord fifths row.
@@ -244,6 +288,10 @@ pub fn voicing_midi(spec: ChordSpec, base: u8) -> [Option<u8>; 4] {
 }
 
 pub fn strum_strings(spec: ChordSpec) -> [u8; STRUM_STRINGS] {
+    strum_strings_at(spec, STRUM_BASE)
+}
+
+pub fn strum_strings_at(spec: ChordSpec, base: u8) -> [u8; STRUM_STRINGS] {
     let mut pcs = [0u8; 4];
     let mut n = 0usize;
     for pc in pitch_classes(spec).into_iter().flatten() {
@@ -274,9 +322,9 @@ pub fn strum_strings(spec: ChordSpec) -> [u8; STRUM_STRINGS] {
             on += 1;
         }
     }
-    let mut out = [STRUM_BASE; STRUM_STRINGS];
-    let mut midi = STRUM_BASE;
-    // Align so the first string is the chord root at or above STRUM_BASE.
+    let mut out = [base; STRUM_STRINGS];
+    let mut midi = base;
+    // Align so the first string is the chord root at or above `base`.
     while midi % 12 != spec.root {
         midi += 1;
     }
@@ -291,8 +339,10 @@ pub fn strum_strings(spec: ChordSpec) -> [u8; STRUM_STRINGS] {
     out
 }
 
+/// Map pad Y (1 = top of screen, 0 = bottom) onto harp strings.
+/// Top of the plate is the highest note; bottom is the lowest.
 pub fn string_at(y: f32, strings: &[u8; STRUM_STRINGS]) -> u8 {
-    let t = (1.0 - y.clamp(0.0, 1.0)) * (STRUM_STRINGS.saturating_sub(1)) as f32;
+    let t = y.clamp(0.0, 1.0) * (STRUM_STRINGS.saturating_sub(1)) as f32;
     let i = t.round() as usize;
     strings[i.min(STRUM_STRINGS - 1)]
 }
@@ -514,6 +564,13 @@ mod tests {
         for n in strings {
             assert!(allowed.contains(&(n % 12)), "out of chord: {n}");
         }
+        let span = strings[STRUM_STRINGS - 1] as i16 - strings[0] as i16;
+        assert!(
+            span <= 30,
+            "strum should stay ~2 octaves, got {span} semis ({:?})",
+            strings
+        );
+        assert_eq!(strings[0], 48, "default C major starts at C3");
     }
 
     #[test]
@@ -525,10 +582,25 @@ mod tests {
     }
 
     #[test]
-    fn string_at_bottom_is_lowest() {
+    fn string_at_top_is_highest() {
         let c = ChordSpec::new(0, ChordQuality::Maj);
         let s = c.strum_strings();
-        assert_eq!(string_at(0.0, &s), s[STRUM_STRINGS - 1]);
-        assert_eq!(string_at(1.0, &s), s[0]);
+        assert_eq!(string_at(1.0, &s), s[STRUM_STRINGS - 1], "pad top → high");
+        assert_eq!(string_at(0.0, &s), s[0], "pad bottom → low");
+    }
+
+    #[test]
+    fn octave_shift_moves_block_and_strum() {
+        let c = ChordSpec::new(0, ChordQuality::Maj);
+        let low = c.block_notes_at(block_base_for_octave(-1));
+        let mid = c.block_notes_at(block_base_for_octave(0));
+        assert_eq!(
+            mid[0].unwrap() - low[0].unwrap(),
+            12,
+            "−1 octave drops a twelfth"
+        );
+        let s0 = c.strum_strings_at(strum_base_for_octave(0));
+        let s1 = c.strum_strings_at(strum_base_for_octave(1));
+        assert_eq!(s1[0] - s0[0], 12);
     }
 }

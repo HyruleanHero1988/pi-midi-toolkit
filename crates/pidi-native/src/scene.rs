@@ -1263,14 +1263,27 @@ fn draw_chords(scene: &mut Scene, model: &NativeModel) {
         scene.text_centered(cell, tools[i], 0xfbf1c7, 2);
     }
 
-    let current_col = model
-        .chords_current
-        .map(|c| chords::col_for_root_pc(c.root));
+    for col in 0..12 {
+        let label = layout.chords_root_label(col);
+        scene.text_centered(label, ROOT_NAMES[col], 0xa89984, 1);
+    }
+    let held = model.chords_held_buttons();
     for row in 0..3 {
         let qrow = QualityRow::from_index(row).unwrap();
         for col in 0..12 {
             let cell = layout.chords_button(col, row);
-            let lit = current_col == Some(col);
+            let lit = if !held.is_empty() {
+                held.iter().any(|&(c, r)| c == col && r == qrow)
+            } else {
+                model
+                    .chords_current
+                    .map(|spec| {
+                        chords::lit_buttons_for_chord(spec)
+                            .iter()
+                            .any(|&(c, r)| c == col && r == qrow)
+                    })
+                    .unwrap_or(false)
+            };
             let color = match (qrow, lit) {
                 (QualityRow::Maj, true) => 0xcc241d,
                 (QualityRow::Maj, false) => 0x9d0006,
@@ -1280,42 +1293,48 @@ fn draw_chords(scene: &mut Scene, model: &NativeModel) {
                 (QualityRow::Seven, false) => 0xb57614,
             };
             scene.button(cell, color);
-            let label = if row == 0 {
-                ROOT_NAMES[col]
-            } else {
-                qrow.label()
-            };
-            scene.text_centered(cell, label, 0xfbf1c7, 1);
+            scene.text_centered(cell, qrow.label(), 0xfbf1c7, 1);
         }
     }
 
     scene.fill_rect(layout.chords_strum, 0x1d2021);
-    scene.text(
-        layout.chords_strum.x + 8,
-        layout.chords_strum.y + 8,
-        "STRUM",
-        0xfbf1c7,
-    );
+    scene.button(layout.chords_oct_down(), 0x504945);
+    scene.text_centered(layout.chords_oct_down(), "OCT-", 0xffffff, 1);
+    scene.button(layout.chords_oct_up(), 0x504945);
+    scene.text_centered(layout.chords_oct_up(), "OCT+", 0xffffff, 1);
+    let oct_label = {
+        let midi = chords::block_base_for_octave(model.chords_octave);
+        let octave = (midi as i32 / 12) - 1;
+        format!("C{octave}")
+    };
+    scene.text_centered(layout.chords_oct_label(), &oct_label, 0xfbf1c7, 2);
+    let play = layout.chords_strum_play();
     if let Some(spec) = model.chords_current {
-        scene.text(
-            layout.chords_strum.x + 8,
-            layout.chords_strum.y + 28,
-            &spec.name(),
-            0xfe8019,
-        );
+        scene.text(play.x + 8, play.y + 2, &spec.name(), 0xfe8019);
     }
-    let strings = 8;
+    let strings = chords::STRUM_STRINGS;
+    let strum_notes = model.chords_current.map(|spec| {
+        spec.strum_strings_at(chords::strum_base_for_octave(model.chords_octave))
+    });
+    let band_h = (play.h - 22).max(1) / strings as i32;
     for i in 0..strings {
-        let y = layout.chords_strum.y + 48 + i * ((layout.chords_strum.h - 56) / strings);
+        let i = i as i32;
+        let y = play.y + 18 + i * band_h;
         scene.fill_rect(
             Rect {
-                x: layout.chords_strum.x + 12,
+                x: play.x + 12,
                 y,
-                w: layout.chords_strum.w - 24,
+                w: play.w - 24,
                 h: 3,
             },
             if i % 4 == 0 { 0xebdbb2 } else { 0x504945 },
         );
+        if let Some(ref notes) = strum_notes {
+            // Band 0 is top (highest note); band strings-1 is bottom (lowest).
+            let idx = strings - 1 - i as usize;
+            let label = crate::kaoss_ui::midi_note_label(notes[idx]);
+            scene.text(play.x + play.w - 44, y - 2, &label, 0xa89984);
+        }
     }
 
     scene.text(

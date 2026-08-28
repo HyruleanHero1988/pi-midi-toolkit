@@ -120,6 +120,8 @@ pub struct SessionState {
     #[serde(default)]
     pub chords_key: u8,
     #[serde(default)]
+    pub chords_octave: i8,
+    #[serde(default)]
     pub font_style: FontStyle,
     #[serde(default = "default_screensaver_sec")]
     pub screensaver_sec: f32,
@@ -190,6 +192,7 @@ impl Default for SessionState {
             chords_out: OutMode::Both,
             chords_hold: true,
             chords_key: 0,
+            chords_octave: 0,
             font_style: FontStyle::Retro,
             screensaver_sec: crate::screensaver::DEFAULT_TIMEOUT_SEC,
             kaoss_viz_style: default_kaoss_viz_style(),

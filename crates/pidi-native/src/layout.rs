@@ -169,6 +169,8 @@ pub enum Hit {
     ChordsKey,
     ChordsChanges,
     ChordsArm,
+    ChordsOctDown,
+    ChordsOctUp,
     ChordsKeyPick(u8),
     ChordsChangesPick(usize),
     ChordsOverlayClose,
@@ -1737,6 +1739,53 @@ impl Layout {
         }
     }
 
+    pub fn chords_root_label(&self, col: usize) -> Rect {
+        let gw = self.chords_grid.w / 12;
+        Rect {
+            x: self.chords_grid.x + (col as i32) * gw + 1,
+            y: self.chords_grid.y - 20,
+            w: gw - 2,
+            h: 18,
+        }
+    }
+
+    /// Playable harp region (below STRUM / OCT chrome).
+    pub fn chords_strum_play(&self) -> Rect {
+        Rect {
+            x: self.chords_strum.x,
+            y: self.chords_strum.y + 52,
+            w: self.chords_strum.w,
+            h: (self.chords_strum.h - 52).max(1),
+        }
+    }
+
+    pub fn chords_oct_down(&self) -> Rect {
+        Rect {
+            x: self.chords_strum.x + 8,
+            y: self.chords_strum.y + 8,
+            w: 44,
+            h: 36,
+        }
+    }
+
+    pub fn chords_oct_label(&self) -> Rect {
+        Rect {
+            x: self.chords_strum.x + 56,
+            y: self.chords_strum.y + 8,
+            w: self.chords_strum.w - 112,
+            h: 36,
+        }
+    }
+
+    pub fn chords_oct_up(&self) -> Rect {
+        Rect {
+            x: self.chords_strum.x + self.chords_strum.w - 52,
+            y: self.chords_strum.y + 8,
+            w: 44,
+            h: 36,
+        }
+    }
+
     pub fn chords_palette_slot(&self, slot: usize) -> Rect {
         let n = 8i32;
         let w = self.chords_palette.w / n;
@@ -2322,8 +2371,14 @@ impl Layout {
         if self.chords_tool(4).contains(px, py) {
             return Hit::ChordsArm;
         }
-        if self.chords_strum.contains(px, py) {
-            let (_x, y) = self.chords_strum.pad_xy(px, py);
+        if self.chords_oct_down().contains(px, py) {
+            return Hit::ChordsOctDown;
+        }
+        if self.chords_oct_up().contains(px, py) {
+            return Hit::ChordsOctUp;
+        }
+        if self.chords_strum_play().contains(px, py) {
+            let (_x, y) = self.chords_strum_play().pad_xy(px, py);
             return Hit::ChordsStrum { y };
         }
         for slot in 0..8 {
@@ -2577,5 +2632,29 @@ mod tests {
             layout.hit(UiMode::Home, home_fm.x + 4, home_fm.y + 4),
             Hit::HomeTile(UiMode::Fm)
         );
+    }
+
+    #[test]
+    fn chords_oct_and_strum_hits() {
+        let layout = Layout::new();
+        let down = layout.chords_oct_down();
+        assert_eq!(
+            layout.hit(UiMode::Chords, down.x + 4, down.y + 4),
+            Hit::ChordsOctDown
+        );
+        let up = layout.chords_oct_up();
+        assert_eq!(
+            layout.hit(UiMode::Chords, up.x + 4, up.y + 4),
+            Hit::ChordsOctUp
+        );
+        let play = layout.chords_strum_play();
+        match layout.hit(UiMode::Chords, play.x + 4, play.y + 2) {
+            Hit::ChordsStrum { y } => assert!(y > 0.85, "pad top should be high y, got {y}"),
+            other => panic!("expected strum at top, got {other:?}"),
+        }
+        match layout.hit(UiMode::Chords, play.x + 4, play.y + play.h - 2) {
+            Hit::ChordsStrum { y } => assert!(y < 0.15, "pad bottom should be low y, got {y}"),
+            other => panic!("expected strum at bottom, got {other:?}"),
+        }
     }
 }
