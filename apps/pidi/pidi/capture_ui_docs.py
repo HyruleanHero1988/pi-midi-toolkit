@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """Capture midi-tone UI views at the 800×480 panel size for docs.
 
+Historical Tk path. The live catalog is the native renderer:
+
+    ./scripts/capture-pidi-docs.sh
+
 The previous ImageGrab(bbox=window) approach failed on HiDPI desktops: Tk
 reports logical coordinates while the screenshot API uses physical pixels, so
 only the top-left chrome was saved (title bar, POWER, a slice of the body).
