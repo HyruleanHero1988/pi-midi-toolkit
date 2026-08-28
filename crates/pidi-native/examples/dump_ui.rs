@@ -100,6 +100,18 @@ fn main() {
         model.tick(1.0 / 60.0, &mut ob);
         dump(&model, out.join("fm_growl.ppm"));
 
+        for (name, index) in [("fm_ep", 1), ("fm_brass", 3), ("fm_organ", 5)] {
+            let mut rec = NativeModel::new();
+            let mut ob2 = Outbox::new();
+            rec.set_mode(UiMode::Fm);
+            rec.tick(1.0 / 60.0, &mut ob2);
+            let cell = rec.layout.fm_recipe_cell(index);
+            rec.finger_down(1, cell.x + 4, cell.y + 4, &mut ob2);
+            rec.finger_up(1, &mut ob2);
+            rec.tick(1.0 / 60.0, &mut ob2);
+            dump(&rec, out.join(format!("{name}.ppm")));
+        }
+
         let (ax, ay) = model.layout.fm_op_center(1);
         let (dx, dy) = model.layout.fm_op_center(3);
         model.finger_down(2, ax, ay, &mut ob);
