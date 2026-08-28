@@ -34,7 +34,10 @@ pub use drums::{
     drum_model_for_note, DrumKit, DrumMacros, DrumModel, DRUM_MODEL_COUNT, DRUM_PREVIEW_SAMPLES,
     DRUM_PREVIEW_SEC, DRUM_PREVIEW_SR,
 };
-pub use engine::{EngineStatus, JamboxEngine, MidiOutSink, MAX_MIDI_OUT, MAX_RENDER_BLOCK};
+pub use engine::{
+    tone_lfo_hz_from_unit, EngineStatus, JamboxEngine, MidiOutSink, MAX_MIDI_OUT, MAX_RENDER_BLOCK,
+    TONE_LFO_HZ_MAX, TONE_LFO_HZ_MIN,
+};
 pub use fm::{
     clang_index, clang_label, clang_ratio, fm_recipe, fm_recipe_patch, pack_fm_link,
     unpack_fm_link, FmOpParams, FmPatch, FmRecipe, FmSynth, CLANG_LABELS, CLANG_RATIOS,

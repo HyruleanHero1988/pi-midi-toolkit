@@ -53,6 +53,10 @@ pub enum SynthParam {
     VibratoMod,
     /// 0..1 always-on vibrato amount (Kaoss VIB). Combined with the mod wheel.
     VibratoAlways,
+    /// 0..1 pad Y → exponential tone-LFO rate (Kaoss WAH). See `tone_lfo_hz_from_unit`.
+    ToneLfoRate,
+    /// 0..1 amount. 0 = sticky tone knob; 1 = LFO sweeps the filter 0..1.
+    ToneLfoAmount,
     PitchBend,
     DrumPitch,
     DrumDecay,

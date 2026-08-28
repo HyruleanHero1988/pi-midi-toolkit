@@ -885,6 +885,7 @@ fn draw_kaoss_axes(scene: &mut Scene, pad: crate::layout::Rect, model: &NativeMo
             "tone" => "Y TONE",
             "morph" => "Y MORPH",
             "vib" | "vibrato_always" => "Y VIB",
+            "tone_lfo" => "Y RATE",
             "level" => "Y LEVEL",
             "release" => "Y DECAY",
             "attack" => "Y ATTACK",

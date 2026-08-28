@@ -182,6 +182,15 @@ pub const KAOSS_PROGRAMS: &[KaossProgram] = &[
         x_param: None,
         curated: true,
     },
+    // X = scale pitch; Y = how fast the tone filter oscillates (auto-wah).
+    KaossProgram {
+        id: "wah",
+        label: "WAH",
+        note: true,
+        y_param: "tone_lfo",
+        x_param: None,
+        curated: true,
+    },
 ];
 
 /// Full-pad Y travel maps to ± this many semitones (center Y = 0).
@@ -439,5 +448,8 @@ mod tests {
         assert!((y_to_pitch_bend_semis(0.0) + PITCH_BEND_RANGE_SEMIS).abs() < 1e-4);
         assert_eq!(y_to_pitch_bend_midi(0.5), 8192);
         assert!(KAOSS_PROGRAMS.iter().any(|p| p.id == "bend" && p.curated));
+        assert!(KAOSS_PROGRAMS.iter().any(|p| {
+            p.id == "wah" && p.curated && p.note && p.y_param == "tone_lfo"
+        }));
     }
 }
