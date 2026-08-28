@@ -7,6 +7,7 @@ use std::path::PathBuf;
 
 use pidi_native::client::Outbox;
 use pidi_native::font::FontStyle;
+use pidi_native::kaoss_ui::{self, KaossPicker};
 use pidi_native::mode::UiMode;
 use pidi_native::model::NativeModel;
 use pidi_native::render::{self, Frame};
@@ -128,5 +129,33 @@ fn main() {
         model.finger_up(1, &mut ob);
         model.tick(1.0 / 60.0, &mut ob);
         dump(&model, out.join("kaoss_scale_picker.ppm"));
+    }
+    {
+        let mut model = NativeModel::new();
+        let mut ob = Outbox::new();
+        model.set_mode(UiMode::Kaoss);
+        model.kaoss_program = kaoss_ui::KAOSS_PROGRAMS
+            .iter()
+            .position(|p| p.id == "wah")
+            .expect("wah");
+        model.tick(1.0 / 60.0, &mut ob);
+        let pad = model.layout.kaoss;
+        model.finger_down(1, pad.x + pad.w / 2, pad.y + pad.h / 4, &mut ob);
+        model.tick(1.0 / 60.0, &mut ob);
+        dump(&model, out.join("kaoss_wah.ppm"));
+        model.finger_up(1, &mut ob);
+    }
+    {
+        let mut model = NativeModel::new();
+        let mut ob = Outbox::new();
+        model.set_mode(UiMode::Kaoss);
+        model.kaoss_program = kaoss_ui::KAOSS_PROGRAMS
+            .iter()
+            .position(|p| p.id == "wah")
+            .expect("wah");
+        model.kaoss_picker = Some(KaossPicker::Program);
+        model.kaoss_show_all = false;
+        model.tick(1.0 / 60.0, &mut ob);
+        dump(&model, out.join("kaoss_programs.ppm"));
     }
 }
