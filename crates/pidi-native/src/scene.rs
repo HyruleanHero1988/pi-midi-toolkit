@@ -837,41 +837,37 @@ fn draw_kaoss_glow(scene: &mut Scene, pad: crate::layout::Rect, model: &NativeMo
     let wash_hue = kaoss_viz::glow_ring_hue(color_idx, 0.35, t);
     let wash_sat = kaoss_viz::glow_ring_sat(color_idx) * 0.6;
 
-    let wash_v = (0.04 + 0.06 * pulse + if hold { 0.03 } else { 0.0 }) * (0.30 + 0.70 * amp);
-    scene.fill_rect(pad, kaoss_viz::hsv_color(wash_hue, wash_sat, wash_v));
+    // Mostly dark membrane with a faint under-wash (idle or held).
+    let wash_v = 0.025 + 0.04 * pulse + if hold { 0.02 } else { 0.0 };
+    scene.fill_rect(pad, kaoss_viz::hsv_color(wash_hue, wash_sat * 0.55, wash_v));
 
-    let span = (pad.w.min(pad.h)) as f32;
-    let clip = Some(pad);
+    if amp < 0.02 {
+        return;
+    }
 
-    if amp >= 0.02 {
-        let outer = kaoss_viz::glow_outer_radius(span, amp);
-        // Concentric discs outer→inner; each shell is centered on its own lagged
-        // XY so the halo has to catch up when the finger moves.
-        let rings = (18 + (14.0 * amp).round() as i32).clamp(18, 32);
-        for i in (0..rings).rev() {
-            let u = (i as f32 + 1.0) / rings as f32;
-            let radius = (outer * u).max(1.0);
-            let fall = 1.0 - u;
-            let (sx, sy) = kaoss_viz::glow_lag_xy(&model.kaoss_glow_shells, fall);
-            let px = pad.x as f32 + sx.clamp(0.0, 1.0) * pad.w as f32;
-            let py = pad.y as f32 + (1.0 - sy.clamp(0.0, 1.0)) * pad.h as f32;
-            let hue = kaoss_viz::glow_ring_hue(color_idx, fall, t);
-            let color = kaoss_viz::glow_sample(hue, amp, fall, pulse);
-            scene.fill_disc_clipped(px, py, radius, color, clip);
+    let pad_w = pad.w as f32;
+    let pad_h = pad.h as f32;
+    let cols = kaoss_viz::GLOW_FIELD_COLS;
+    let rows = kaoss_viz::GLOW_FIELD_ROWS;
+    let cell_w = pad_w / cols as f32;
+    let cell_h = pad_h / rows as f32;
+    let touches = &model.kaoss_glow;
+
+    for row in 0..rows {
+        // row 0 at bottom of pad (matches CELLS / finger Y = 0 at bottom).
+        let ny = (row as f32 + 0.5) / rows as f32;
+        let py = pad.y as f32 + pad_h - (row as f32 + 1.0) * cell_h;
+        for col in 0..cols {
+            let nx = (col as f32 + 0.5) / cols as f32;
+            let field = kaoss_viz::glow_field_at(nx, ny, pad_w, pad_h, touches);
+            if field < 0.04 {
+                continue;
+            }
+            let hue = kaoss_viz::glow_ring_hue(color_idx, field, t);
+            let color = kaoss_viz::glow_sample(hue, 1.0, field, pulse);
+            let px = pad.x as f32 + col as f32 * cell_w;
+            scene.fill(px, py, cell_w.max(1.0), cell_h.max(1.0), color);
         }
-        // Hot core rides the fastest (innermost) shell.
-        let (cx, cy) = model.kaoss_glow_shells[kaoss_viz::GLOW_LAG_COUNT - 1];
-        let px = pad.x as f32 + cx.clamp(0.0, 1.0) * pad.w as f32;
-        let py = pad.y as f32 + (1.0 - cy.clamp(0.0, 1.0)) * pad.h as f32;
-        let core_r = (outer * 0.08).max(2.0);
-        let core_hue = kaoss_viz::glow_ring_hue(color_idx, 1.0, t);
-        scene.fill_disc_clipped(
-            px,
-            py,
-            core_r,
-            kaoss_viz::hsv_color(core_hue, 0.12, (0.55 + 0.45 * amp).min(1.0)),
-            clip,
-        );
     }
 }
 
@@ -2538,6 +2534,22 @@ mod tests {
         assert!(
             model.kaoss_glow_amp > 0.1,
             "touch should ramp the glow envelope"
+        );
+        let field_cells = scene
+            .color
+            .iter()
+            .filter(|q| {
+                q.x >= model.layout.kaoss.x as f32
+                    && q.y >= model.layout.kaoss.y as f32
+                    && q.w > 0.0
+                    && q.h > 0.0
+                    && q.w < 40.0
+                    && q.h < 40.0
+            })
+            .count();
+        assert!(
+            field_cells > 20,
+            "GLOW should paint a soft light-field, got {field_cells}"
         );
     }
 

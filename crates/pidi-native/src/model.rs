@@ -288,12 +288,10 @@ pub struct NativeModel {
     pub kaoss_viz_style: crate::kaoss_viz::KaossVizStyle,
     /// Index into [`crate::kaoss_viz::PAD_COLORS`] (0 = RAINBOW).
     pub kaoss_mono_color: usize,
-    /// GLOW envelope 0..1 (Tk `_glow_amp`).
+    /// Peak GLOW envelope across fingers (for HUD / tests).
     pub kaoss_glow_amp: f32,
-    /// Last finger XY for GLOW blooms (Tk `_glow_xy`).
-    pub kaoss_glow_xy: (f32, f32),
-    /// Lagging concentric shells for GLOW (outer → core). Pad-normalized XY.
-    pub kaoss_glow_shells: [(f32, f32); crate::kaoss_viz::GLOW_LAG_COUNT],
+    /// Per-finger membrane glow (amp + lag shells). Soft-unioned when drawn.
+    pub kaoss_glow: [crate::kaoss_viz::GlowTouch; MAX_FINGERS],
     /// Accumulated viz time for wave / pulse animation.
     kaoss_viz_time: f32,
     /// Trail points `(x, y, age)` with age 1 = fresh.
@@ -441,8 +439,7 @@ impl NativeModel {
             kaoss_viz_style: crate::kaoss_viz::KaossVizStyle::Cells,
             kaoss_mono_color: 0,
             kaoss_glow_amp: 0.0,
-            kaoss_glow_xy: (0.5, 0.5),
-            kaoss_glow_shells: [(0.5, 0.5); crate::kaoss_viz::GLOW_LAG_COUNT],
+            kaoss_glow: [crate::kaoss_viz::GlowTouch::idle(); MAX_FINGERS],
             kaoss_viz_time: 0.0,
             kaoss_trail: Vec::new(),
             kaoss_ripples: Vec::new(),
@@ -4958,42 +4955,50 @@ impl NativeModel {
         // Expanding touch rings removed — they punched a black hole into the pad.
         self.kaoss_ripples.clear();
         if self.kaoss_viz_style.is_glow() {
-            let finger = self.kaoss_finger();
-            let target = if finger.is_some() { 1.0 } else { 0.0 };
-            let was_idle = self.kaoss_glow_amp < 0.05;
-            let mut glow_dt = dt;
-            if target > self.kaoss_glow_amp && glow_dt <= 0.0 {
-                glow_dt = 0.02;
-            }
-            self.kaoss_glow_amp = crate::kaoss_viz::glow_step(self.kaoss_glow_amp, target, glow_dt);
-            if let Some((x, y)) = finger {
-                self.kaoss_glow_xy = (x, y);
-                // On fresh touch, park every shell under the finger so we don't
-                // smear leftover lag from the last gesture.
-                if was_idle {
-                    self.kaoss_glow_shells = [(x, y); crate::kaoss_viz::GLOW_LAG_COUNT];
-                } else {
-                    for (i, shell) in self.kaoss_glow_shells.iter_mut().enumerate() {
+            let mut peak = 0.0_f32;
+            for slot in 0..MAX_FINGERS {
+                let touching = self.fingers[slot].active
+                    && self.fingers[slot].surface == Surface::Kaoss;
+                let target = if touching { 1.0 } else { 0.0 };
+                let glow = &mut self.kaoss_glow[slot];
+                let was_idle = glow.amp < 0.05;
+                let mut glow_dt = dt;
+                if target > glow.amp && glow_dt <= 0.0 {
+                    glow_dt = 0.02;
+                }
+                glow.amp = crate::kaoss_viz::glow_step(glow.amp, target, glow_dt);
+                if touching {
+                    let x = self.fingers[slot].x;
+                    let y = self.fingers[slot].y;
+                    glow.xy = (x, y);
+                    // Fresh contact: park shells under the fingertip (no leftover smear).
+                    if was_idle {
+                        glow.shells = [(x, y); crate::kaoss_viz::GLOW_LAG_COUNT];
+                    } else {
+                        for (i, shell) in glow.shells.iter_mut().enumerate() {
+                            *shell = crate::kaoss_viz::glow_lag_step(
+                                *shell,
+                                (x, y),
+                                glow_dt.max(dt),
+                                crate::kaoss_viz::glow_lag_tau(i),
+                            );
+                        }
+                    }
+                } else if glow.amp > 0.01 {
+                    // Release: shells ease toward last XY while amp fades.
+                    let target_xy = glow.xy;
+                    for (i, shell) in glow.shells.iter_mut().enumerate() {
                         *shell = crate::kaoss_viz::glow_lag_step(
                             *shell,
-                            (x, y),
+                            target_xy,
                             glow_dt.max(dt),
                             crate::kaoss_viz::glow_lag_tau(i),
                         );
                     }
                 }
-            } else {
-                // Finger up — shells keep easing toward the last point while amp fades.
-                let target_xy = self.kaoss_glow_xy;
-                for (i, shell) in self.kaoss_glow_shells.iter_mut().enumerate() {
-                    *shell = crate::kaoss_viz::glow_lag_step(
-                        *shell,
-                        target_xy,
-                        glow_dt.max(dt),
-                        crate::kaoss_viz::glow_lag_tau(i),
-                    );
-                }
+                peak = peak.max(glow.amp);
             }
+            self.kaoss_glow_amp = peak;
         }
     }
 }
