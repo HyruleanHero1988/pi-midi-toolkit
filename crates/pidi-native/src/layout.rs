@@ -427,11 +427,13 @@ impl Layout {
                 h: HUD_H,
             },
             // Full-width Kaoss pad like Tk (drums live on SEQ / kit, not here).
+            // Leave ~16px above the footer chrome so axis/cursor glyphs (drawn
+            // after button fills) never sit on PROG/KEY/GATE controls.
             kaoss: Rect {
                 x: 8,
                 y: HUD_H + 8,
                 w: SCREEN_W - 16,
-                h: content_h - 112,
+                h: content_h - 124,
             },
             drums: Rect {
                 x: 0,
@@ -2031,6 +2033,12 @@ impl Layout {
         }
     }
 
+    /// Normalized strum Y for a touch pixel: 1 = highest string band.
+    pub fn chords_strum_touch_y(&self, py: i32) -> f32 {
+        let play = self.chords_strum_play();
+        crate::chords::strum_y_from_play_py(play.y, play.h, py)
+    }
+
     pub fn chords_oct_down(&self) -> Rect {
         Rect {
             x: self.chords_strum.x + 8,
@@ -2660,7 +2668,7 @@ impl Layout {
             return Hit::ChordsOctUp;
         }
         if self.chords_strum_play().contains(px, py) {
-            let (_x, y) = self.chords_strum_play().pad_xy(px, py);
+            let y = self.chords_strum_touch_y(py);
             return Hit::ChordsStrum { y };
         }
         for slot in 0..8 {
@@ -2836,6 +2844,7 @@ pub enum Surface {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::chords;
 
     #[test]
     fn kick_is_a5_screen_cell() {
@@ -2976,6 +2985,18 @@ mod tests {
     }
 
     #[test]
+    fn kaoss_pad_clears_footer() {
+        let layout = Layout::new();
+        let pad_bottom = layout.kaoss.y + layout.kaoss.h;
+        let footer_top = layout.kaoss_prog.y;
+        let gap = footer_top - pad_bottom;
+        assert!(
+            gap >= 12,
+            "kaoss pad should sit above footer chrome, gap={gap}"
+        );
+    }
+
+    #[test]
     fn chords_root_strip_clears_toolbar() {
         let layout = Layout::new();
         let toolbar_bottom = layout.chords_toolbar.y + layout.chords_toolbar.h;
@@ -3005,12 +3026,13 @@ mod tests {
             Hit::ChordsOctUp
         );
         let play = layout.chords_strum_play();
-        match layout.hit(UiMode::Chords, play.x + 4, play.y + 2) {
-            Hit::ChordsStrum { y } => assert!(y > 0.85, "pad top should be high y, got {y}"),
+        match layout.hit(UiMode::Chords, play.x + 4, play.y + chords::STRUM_BAND_TOP_INSET + 2) {
+            Hit::ChordsStrum { y } => assert!(y > 0.85, "top band should be high y, got {y}"),
             other => panic!("expected strum at top, got {other:?}"),
         }
-        match layout.hit(UiMode::Chords, play.x + 4, play.y + play.h - 2) {
-            Hit::ChordsStrum { y } => assert!(y < 0.15, "pad bottom should be low y, got {y}"),
+        let bottom_py = play.y + play.h - chords::STRUM_BAND_BOTTOM_INSET - 2;
+        match layout.hit(UiMode::Chords, play.x + 4, bottom_py) {
+            Hit::ChordsStrum { y } => assert!(y < 0.15, "bottom band should be low y, got {y}"),
             other => panic!("expected strum at bottom, got {other:?}"),
         }
     }
