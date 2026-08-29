@@ -13,7 +13,7 @@ WorkingDirectory=/home/pi/pi-midi-toolkit
 ExecStart=/home/pi/pi-midi-toolkit/bin/pidi-native \
   --control /tmp/jambox.sock \
   --display sdl \
-  --touch evdev
+  --touch auto
 Restart=on-failure
 RestartSec=2
 Environment=RUST_LOG=info

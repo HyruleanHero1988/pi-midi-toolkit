@@ -4,7 +4,6 @@
 //! never own a note release.
 
 pub mod client;
-pub mod evdev_touch;
 pub mod font;
 pub mod smooth_font;
 #[cfg(feature = "sdl")]
