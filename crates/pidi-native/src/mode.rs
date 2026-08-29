@@ -4,6 +4,7 @@
 pub enum UiMode {
     Home,
     Synth,
+    Fm,
     Drums,
     Seq,
     Pads,
@@ -18,9 +19,10 @@ pub enum UiMode {
 }
 
 impl UiMode {
-    pub const ALL: [UiMode; 13] = [
+    pub const ALL: [UiMode; 14] = [
         UiMode::Home,
         UiMode::Synth,
+        UiMode::Fm,
         UiMode::Drums,
         UiMode::Seq,
         UiMode::Pads,
@@ -38,6 +40,7 @@ impl UiMode {
         match self {
             Self::Home => "HOME",
             Self::Synth => "SYN",
+            Self::Fm => "FM",
             Self::Drums => "KIT",
             Self::Seq => "SEQ",
             Self::Pads => "PAD",
@@ -56,6 +59,7 @@ impl UiMode {
         match self {
             Self::Home => "HOME",
             Self::Synth => "SYNTH",
+            Self::Fm => "FM",
             Self::Drums => "DRUMS",
             Self::Seq => "SEQ",
             Self::Pads => "PADS",

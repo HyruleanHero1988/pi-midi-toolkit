@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
 use jambox_core::{Clip, ClipEvent, ClipEventKind, Command, JamboxEngine, Quantize, WaveBank, PPQ};
-use tracing::{error, info};
+use tracing::info;
 
 #[derive(Parser)]
 #[command(name = "jambox-engine", about = "Realtime jambox audio + sequencer")]
@@ -180,10 +180,9 @@ fn run(
 
     let audio_health = Arc::new(audio::AudioHealth::new());
 
-    // Supervised audio (or headless) runs for the life of `run`.
-    let _audio_thread = if null_audio {
+    if null_audio {
         let running = running.clone();
-        Some(std::thread::spawn(move || {
+        std::thread::spawn(move || {
             headless::run(
                 48_000,
                 buffer_frames.max(64) as usize,
@@ -191,22 +190,19 @@ fn run(
                 bank,
                 running,
             );
-        }))
+        });
     } else {
-        // Probe once so a missing card fails fast for the operator.
-        if let Err(err) = audio::pick_output(&output) {
-            error!(%err, "audio: no usable output (try --null-audio for host testing)");
-            return;
-        }
-        Some(audio::spawn_supervised(
+        // Reopens after cable unplug / ALSA death / IPC audio_reopen; does not
+        // kill the control socket.
+        audio::spawn_output(
             output,
-            buffer_frames,
             audio_side,
             bank,
+            buffer_frames,
             Arc::clone(&audio_health),
-            Arc::clone(&running),
-        ))
-    };
+            running.clone(),
+        );
+    }
 
     midi::spawn_input(
         midi_in,

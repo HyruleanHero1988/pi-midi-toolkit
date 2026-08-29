@@ -38,6 +38,7 @@ if command -v aplay >/dev/null 2>&1; then
   echo
   echo "Try explicit periods after jambox-engine is running:"
   echo "  journalctl -u jambox-engine -n 40 --no-pager | grep audio"
+  echo "Speaker cable swap should log 'output died; reopening' and unmute Headphone."
 fi
 echo
 echo "== MIDI =="

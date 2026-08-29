@@ -565,6 +565,8 @@ class KaossScreenMixin:
             # set_vib_depth expects 0..1 (or MIDI). Stored value is semitones 0..2.
             self.engine.set_vib_depth(depth / 2.0)
             self.engine.set_vib_always(float(snap.get("vib_always", 0.0)))
+        if "tone_lfo" in names:
+            self.engine.set_tone_lfo_amount(0.0)
         if names.intersection(("level", "attack", "release")):
             with self.engine._lock:
                 if "level" in names:

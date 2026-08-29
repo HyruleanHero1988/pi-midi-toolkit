@@ -9,9 +9,10 @@ pub const NAV_H: i32 = 0;
 /// Top chrome: PiDI brand + HOME/POWER + jam tabs (matches Tk nav height).
 pub const HUD_H: i32 = 52;
 
-/// Jam-mode tabs on the right of the top chrome (Tk order + chords).
-pub const JAM_MODES: [UiMode; 5] = [
+/// Jam-mode tabs on the right of the top chrome (Tk order + chords + FM).
+pub const JAM_MODES: [UiMode; 6] = [
     UiMode::Synth,
+    UiMode::Fm,
     UiMode::Seq,
     UiMode::Pads,
     UiMode::Kaoss,
@@ -19,8 +20,9 @@ pub const JAM_MODES: [UiMode; 5] = [
 ];
 
 /// Home grid entries (5×2). LOG / MAP live under Settings.
-pub const HOME_TILES: [(UiMode, &'static str, u32); 10] = [
+pub const HOME_TILES: [(UiMode, &'static str, u32); 11] = [
     (UiMode::Synth, "SYNTH", 0x458588),
+    (UiMode::Fm, "FM", 0x8ec07c),
     (UiMode::Drums, "DRUMS", 0x98971a),
     (UiMode::Seq, "SEQ", 0xb16286),
     (UiMode::Pads, "PADS", 0xd79921),
@@ -74,10 +76,17 @@ pub enum Hit {
     SynthSaveAs,
     SynthOctUp,
     SynthOctDown,
+    FmRecipe(usize),
+    FmOp(usize),
+    FmSlider(usize),
+    FmClear,
     ScrollArea(crate::scroll::ScrollKind),
-    DrumMacroSlider(usize),
-    KitEdit,
-    KitEditBack,
+    DrumMacro(usize),
+    KitAllDrums,
+    KitWave,
+    KitNoteRepeat,
+    KitPlay,
+    KitSlider(usize),
     MapThruOn,
     MapThruOff,
     MapRefresh,
@@ -233,6 +242,8 @@ pub struct Layout {
     pub kit_macros: Rect,
     pub kit_divisions: Rect,
     pub kit_all: Rect,
+    pub kit_wave: Rect,
+    pub kit_note_repeat: Rect,
     pub synth_wave_a: Rect,
     pub synth_wave_b: Rect,
     pub synth_swap: Rect,
@@ -647,30 +658,42 @@ impl Layout {
                 x: 24,
                 y: HUD_H + 36,
                 w: 752,
-                h: 96,
+                h: 128,
             },
             kit_grid: Rect {
                 x: 24,
-                y: HUD_H + 140,
+                y: HUD_H + 36,
                 w: 752,
-                h: 200,
+                h: 332,
             },
             kit_macros: Rect {
                 x: 24,
-                y: HUD_H + 348,
+                y: HUD_H + 172,
                 w: 752,
-                h: 44,
+                h: 200,
             },
             kit_divisions: Rect {
                 x: 24,
-                y: HUD_H + 400,
+                y: HUD_H + 56,
+                w: 752,
+                h: 300,
+            },
+            kit_note_repeat: Rect {
+                x: 24,
+                y: HUD_H + 376,
                 w: 320,
-                h: 36,
+                h: 44,
+            },
+            kit_wave: Rect {
+                x: 352,
+                y: HUD_H + 376,
+                w: 196,
+                h: 44,
             },
             kit_all: Rect {
-                x: 360,
-                y: HUD_H + 396,
-                w: 416,
+                x: 556,
+                y: HUD_H + 376,
+                w: 220,
                 h: 44,
             },
             synth_keys: Rect {
@@ -1437,7 +1460,7 @@ impl Layout {
 
     pub fn nav_jam(&self, index: usize) -> Rect {
         let n = JAM_MODES.len() as i32;
-        let w = 62;
+        let w = if n > 5 { 62 } else { 70 };
         let gap = 4;
         let total = n * w + (n - 1) * gap;
         let x0 = self.nav.w - total - 8;
@@ -1486,10 +1509,7 @@ impl Layout {
         let full = self.kaoss_settings_row(y_off, scroll, h);
         let half_w = (full.w - 8) / 2;
         if left {
-            Rect {
-                w: half_w,
-                ..full
-            }
+            Rect { w: half_w, ..full }
         } else {
             Rect {
                 x: full.x + half_w + 8,
@@ -1570,16 +1590,28 @@ impl Layout {
         if self.kaoss_settings_row(108, scroll, 48).contains(px, py) {
             return Hit::KaossShowAll;
         }
-        if self.kaoss_settings_half_row(164, scroll, true, 48).contains(px, py) {
+        if self
+            .kaoss_settings_half_row(164, scroll, true, 48)
+            .contains(px, py)
+        {
             return Hit::KaossAxes;
         }
-        if self.kaoss_settings_half_row(164, scroll, false, 48).contains(px, py) {
+        if self
+            .kaoss_settings_half_row(164, scroll, false, 48)
+            .contains(px, py)
+        {
             return Hit::KaossGridLines;
         }
-        if self.kaoss_settings_half_row(232, scroll, true, 48).contains(px, py) {
+        if self
+            .kaoss_settings_half_row(232, scroll, true, 48)
+            .contains(px, py)
+        {
             return Hit::KaossVizCells;
         }
-        if self.kaoss_settings_half_row(232, scroll, false, 48).contains(px, py) {
+        if self
+            .kaoss_settings_half_row(232, scroll, false, 48)
+            .contains(px, py)
+        {
             return Hit::KaossVizGlow;
         }
         if self.kaoss_settings_row(288, scroll, 48).contains(px, py) {
@@ -1619,7 +1651,10 @@ impl Layout {
             }
         }
         for ch in 0..16 {
-            if self.kaoss_settings_channel(ch, 496, scroll).contains(px, py) {
+            if self
+                .kaoss_settings_channel(ch, 496, scroll)
+                .contains(px, py)
+            {
                 return Hit::KaossChannelPick(ch as u8);
             }
         }
@@ -1690,6 +1725,117 @@ impl Layout {
         }
     }
 
+    pub fn fm_recipe_cell(&self, index: usize) -> Rect {
+        let n = jambox_core::FM_RECIPE_COUNT as i32;
+        let gap = 6;
+        let x0 = self.content.x + 12;
+        let w_total = self.content.w - 24;
+        let w = (w_total - (n - 1) * gap) / n;
+        Rect {
+            x: x0 + (index as i32) * (w + gap),
+            y: self.content.y + 6,
+            w,
+            h: 36,
+        }
+    }
+
+    pub fn fm_hint(&self) -> Rect {
+        Rect {
+            x: self.content.x + 16,
+            y: self.content.y + 46,
+            w: 440,
+            h: 20,
+        }
+    }
+
+    pub fn fm_clear(&self) -> Rect {
+        Rect {
+            x: self.content.x + self.content.w - 180,
+            y: self.content.y + 44,
+            w: 52,
+            h: 26,
+        }
+    }
+
+    pub fn fm_oct_down(&self) -> Rect {
+        Rect {
+            x: self.content.x + self.content.w - 120,
+            y: self.content.y + 44,
+            w: 52,
+            h: 26,
+        }
+    }
+
+    pub fn fm_oct_up(&self) -> Rect {
+        Rect {
+            x: self.content.x + self.content.w - 64,
+            y: self.content.y + 44,
+            w: 52,
+            h: 26,
+        }
+    }
+
+    /// 2×2 operator graph. Swipe one circle into another to patch.
+    pub fn fm_graph(&self) -> Rect {
+        Rect {
+            x: 12,
+            y: self.content.y + 74,
+            w: 400,
+            h: 158,
+        }
+    }
+
+    pub const FM_OP_RADIUS: i32 = 32;
+
+    pub fn fm_op_center(&self, index: usize) -> (i32, i32) {
+        let g = self.fm_graph();
+        let col = (index % 2) as i32;
+        let row = (index / 2) as i32;
+        let x = g.x + g.w * (1 + col * 2) / 4;
+        let y = g.y + g.h * (1 + row * 2) / 4;
+        (x, y)
+    }
+
+    pub fn fm_op_hit(&self, px: i32, py: i32) -> Option<usize> {
+        let reach = (Self::FM_OP_RADIUS + 12) as f32;
+        let reach2 = reach * reach;
+        let mut best = None;
+        let mut best_d = reach2;
+        for index in 0..jambox_core::FM_OP_COUNT {
+            let (cx, cy) = self.fm_op_center(index);
+            let dx = (px - cx) as f32;
+            let dy = (py - cy) as f32;
+            let d = dx * dx + dy * dy;
+            if d <= best_d {
+                best_d = d;
+                best = Some(index);
+            }
+        }
+        best
+    }
+
+    pub fn fm_scope(&self) -> Rect {
+        Rect {
+            x: 420,
+            y: self.content.y + 74,
+            w: 168,
+            h: 158,
+        }
+    }
+
+    pub fn fm_slider(&self, index: usize) -> Rect {
+        let n = 4i32;
+        let area_x = 600;
+        let area_w = 188;
+        let w = area_w / n;
+        Rect {
+            x: area_x + (index as i32) * w + 6,
+            y: self.content.y + 92,
+            w: w - 12,
+            h: 132,
+        }
+    }
+
     pub fn synth_macro_cell(&self, index: usize) -> Rect {
         let n = 4i32;
         let w = self.kit_macros.w / n;
@@ -1702,48 +1848,56 @@ impl Layout {
     }
 
     pub fn kit_macro_cell(&self, index: usize) -> Rect {
-        self.synth_macro_cell(index)
-    }
-
-    /// Vertical macro slider in the kit EDIT drilldown.
-    pub fn kit_edit_slider(&self, index: usize) -> Rect {
-        let n = 4i32;
-        let i = (index as i32).clamp(0, n - 1);
-        let area = Rect {
-            x: 24,
-            y: HUD_H + 250,
-            w: 752,
-            h: 170,
-        };
-        let w = area.w / n;
-        Rect {
-            x: area.x + i * w + 10,
-            y: area.y,
-            w: w - 20,
-            h: area.h,
-        }
+        self.kit_edit_slider(index)
     }
 
     pub fn kit_edit_scope(&self) -> Rect {
         Rect {
             x: 24,
-            y: HUD_H + 56,
+            y: HUD_H + 36,
             w: 752,
-            h: 180,
+            h: 128,
         }
     }
 
-    pub fn kit_edit_back(&self) -> Rect {
+    pub fn kit_edit_slider(&self, index: usize) -> Rect {
+        let n = 4i32;
+        let w = self.kit_macros.w / n;
+        Rect {
+            x: self.kit_macros.x + (index as i32) * w + 8,
+            y: self.kit_macros.y + 22,
+            w: w - 16,
+            h: self.kit_macros.h - 28,
+        }
+    }
+
+    pub fn kit_edit_play(&self) -> Rect {
         Rect {
             x: 24,
-            y: HUD_H + 8,
-            w: 100,
-            h: 40,
+            y: HUD_H + 384,
+            w: 240,
+            h: 56,
         }
     }
 
     pub fn kit_division_cell(&self, index: usize) -> Rect {
         self.division_cell(index)
+    }
+
+    pub fn kit_repeat_choice_cell(&self, index: usize) -> Rect {
+        let cols = 3i32;
+        let rows = 2i32;
+        let i = (index % 6) as i32;
+        let col = i % cols;
+        let row = i / cols;
+        let gw = self.kit_divisions.w / cols;
+        let gh = self.kit_divisions.h / rows;
+        Rect {
+            x: self.kit_divisions.x + col * gw + 8,
+            y: self.kit_divisions.y + row * gh + 8,
+            w: gw - 16,
+            h: gh - 16,
+        }
     }
 
     /// One-octave piano keyboard inside `synth_keys`.
@@ -1953,6 +2107,7 @@ impl Layout {
             UiMode::Pads => self.hit_pads(px, py),
             UiMode::Home => self.hit_home(px, py),
             UiMode::Synth => self.hit_synth(px, py),
+            UiMode::Fm => self.hit_fm(px, py),
             UiMode::Drums => self.hit_drums(px, py),
             UiMode::Seq => self.hit_seq(px, py),
             UiMode::Presets => self.hit_presets(px, py),
@@ -2141,6 +2296,35 @@ impl Layout {
         Hit::None
     }
 
+    fn hit_fm(&self, px: i32, py: i32) -> Hit {
+        for index in 0..jambox_core::FM_RECIPE_COUNT {
+            if self.fm_recipe_cell(index).contains(px, py) {
+                return Hit::FmRecipe(index);
+            }
+        }
+        if self.fm_clear().contains(px, py) {
+            return Hit::FmClear;
+        }
+        if self.fm_oct_down().contains(px, py) {
+            return Hit::SynthOctDown;
+        }
+        if self.fm_oct_up().contains(px, py) {
+            return Hit::SynthOctUp;
+        }
+        if let Some(index) = self.fm_op_hit(px, py) {
+            return Hit::FmOp(index);
+        }
+        for index in 0..4 {
+            if self.fm_slider(index).contains(px, py) {
+                return Hit::FmSlider(index);
+            }
+        }
+        if let Some(note) = self.synth_keyboard_note_at(px, py) {
+            return Hit::SynthKey { note };
+        }
+        Hit::None
+    }
+
     fn hit_drums(&self, px: i32, py: i32) -> Hit {
         // Edit drilldown uses a different hit map (callers pass via layout.hit with mode).
         for index in 0..16 {
@@ -2150,45 +2334,43 @@ impl Layout {
                 return Hit::Drum { index, note };
             }
         }
-        if self.kit_scope.contains(px, py) {
-            return Hit::KitEdit;
+        if self.kit_note_repeat.contains(px, py) {
+            return Hit::KitNoteRepeat;
         }
-        if self.kit_divisions.contains(px, py) {
-            for index in 0..4 {
-                if self.kit_division_cell(index).contains(px, py) {
-                    return Hit::Division(index);
-                }
-            }
+        if self.kit_wave.contains(px, py) {
+            return Hit::KitWave;
         }
         if self.kit_all.contains(px, py) {
-            return Hit::KitEdit;
+            return Hit::KitAllDrums;
         }
         Hit::None
     }
 
-    pub fn hit_drums_edit(&self, px: i32, py: i32) -> Hit {
-        if self.kit_edit_back().contains(px, py) {
-            return Hit::KitEditBack;
+    pub fn hit_kit_edit(&self, px: i32, py: i32) -> Hit {
+        if self.kit_edit_play().contains(px, py) {
+            return Hit::KitPlay;
         }
         for index in 0..4 {
             if self.kit_edit_slider(index).contains(px, py) {
-                return Hit::DrumMacroSlider(index);
+                return Hit::KitSlider(index);
             }
         }
-        // Tap waveform to audition selected drum.
         if self.kit_edit_scope().contains(px, py) {
-            return Hit::KitEdit;
+            return Hit::KitPlay;
         }
         Hit::None
     }
 
-    pub fn hit_synth_overlay(
-        &self,
-        px: i32,
-        py: i32,
-        vib_open: bool,
-        morph_open: bool,
-    ) -> Hit {
+    pub fn hit_kit_repeat(&self, px: i32, py: i32) -> Hit {
+        for index in 0..6 {
+            if self.kit_repeat_choice_cell(index).contains(px, py) {
+                return Hit::Division(index);
+            }
+        }
+        Hit::None
+    }
+
+    pub fn hit_synth_overlay(&self, px: i32, py: i32, vib_open: bool, morph_open: bool) -> Hit {
         if vib_open {
             return self.hit_synth_vib(px, py);
         }
@@ -2594,15 +2776,39 @@ impl Layout {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Surface {
     Kaoss,
-    Drum { note: u8, repeat: bool },
-    Phrase { slot: usize },
-    SynthKey { note: u8 },
-    SynthSlider { index: usize },
-    DrumMacroSlider { index: usize },
-    FxSlider { index: usize },
-    ChordsButton { col: usize, row: usize },
+    Drum {
+        note: u8,
+        repeat: bool,
+    },
+    Phrase {
+        slot: usize,
+    },
+    SynthKey {
+        note: u8,
+    },
+    SynthSlider {
+        index: usize,
+    },
+    FmSlider {
+        index: usize,
+    },
+    FmGraph {
+        from: usize,
+    },
+    KitSlider {
+        index: usize,
+    },
+    FxSlider {
+        index: usize,
+    },
+    ChordsButton {
+        col: usize,
+        row: usize,
+    },
     ChordsStrum,
-    ChordsPalette { slot: usize },
+    ChordsPalette {
+        slot: usize,
+    },
     ScrollDrag {
         kind: crate::scroll::ScrollKind,
         start_py: i32,
@@ -2631,11 +2837,33 @@ mod tests {
     }
 
     #[test]
+    fn kit_note_repeat_button_is_hit() {
+        let layout = Layout::new();
+        let btn = layout.kit_note_repeat;
+        assert_eq!(
+            layout.hit(UiMode::Drums, btn.x + 4, btn.y + 4),
+            Hit::KitNoteRepeat
+        );
+        let none = layout.kit_repeat_choice_cell(0);
+        assert_eq!(
+            layout.hit_kit_repeat(none.x + 4, none.y + 4),
+            Hit::Division(0)
+        );
+        let triple = layout.kit_repeat_choice_cell(5);
+        assert_eq!(
+            layout.hit_kit_repeat(triple.x + 4, triple.y + 4),
+            Hit::Division(5)
+        );
+    }
+
+    #[test]
     fn kaoss_bottom_is_y_zero() {
         let layout = Layout::new();
-        let Hit::Kaoss { x, y } =
-            layout.hit(UiMode::Kaoss, layout.kaoss.x + 10, layout.kaoss.y + layout.kaoss.h - 2)
-        else {
+        let Hit::Kaoss { x, y } = layout.hit(
+            UiMode::Kaoss,
+            layout.kaoss.x + 10,
+            layout.kaoss.y + layout.kaoss.h - 2,
+        ) else {
             panic!("expected kaoss");
         };
         assert!(x < 0.1);
@@ -2645,7 +2873,7 @@ mod tests {
     #[test]
     fn nav_switches_modes() {
         let layout = Layout::new();
-        let cell = layout.nav_jam(2); // Pads
+        let cell = layout.nav_jam(3); // Pads
         assert_eq!(
             layout.hit(UiMode::Kaoss, cell.x + 4, cell.y + 4),
             Hit::Nav(UiMode::Pads)
@@ -2678,6 +2906,40 @@ mod tests {
         assert_eq!(
             layout.hit(UiMode::Pads, cell.x + 4, cell.y + 4),
             Hit::PhrasePad(0)
+        );
+    }
+
+    #[test]
+    fn fm_recipe_and_keyboard_hit() {
+        let layout = Layout::new();
+        let bell = layout.fm_recipe_cell(0);
+        assert_eq!(
+            layout.hit(UiMode::Fm, bell.x + 4, bell.y + 4),
+            Hit::FmRecipe(0)
+        );
+        let slider = layout.fm_slider(0);
+        assert_eq!(
+            layout.hit(UiMode::Fm, slider.x + 4, slider.y + slider.h / 2),
+            Hit::FmSlider(0)
+        );
+        let (ax, ay) = layout.fm_op_center(0);
+        assert_eq!(layout.hit(UiMode::Fm, ax, ay), Hit::FmOp(0));
+        let (dx, dy) = layout.fm_op_center(3);
+        assert_eq!(layout.hit(UiMode::Fm, dx, dy), Hit::FmOp(3));
+        let clear = layout.fm_clear();
+        assert_eq!(
+            layout.hit(UiMode::Fm, clear.x + 4, clear.y + 4),
+            Hit::FmClear
+        );
+        let key = layout.synth_keyboard_white_rect(0);
+        match layout.hit(UiMode::Fm, key.x + 4, key.y + 4) {
+            Hit::SynthKey { .. } => {}
+            other => panic!("{other:?}"),
+        }
+        let home_fm = layout.home_tile(1);
+        assert_eq!(
+            layout.hit(UiMode::Home, home_fm.x + 4, home_fm.y + 4),
+            Hit::HomeTile(UiMode::Fm)
         );
     }
 

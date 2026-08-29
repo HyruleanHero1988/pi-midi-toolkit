@@ -157,6 +157,7 @@ pub fn program_hue(program_id: &str) -> f32 {
         "lead" => 0.93,
         "morph" => 0.80,
         "vib" => 0.55,
+        "wah" => 0.33,
         "level" => 0.12,
         "decay" => 0.08,
         "attack" => 0.18,
@@ -245,7 +246,32 @@ pub fn strongest_finger_glow(lx: f32, ly: f32, fingers: &[(f32, f32)]) -> (f32, 
     (best_g, best_fx)
 }
 
-/// Per-finger GLOW bloom state (one slot mirrors one [`Finger`] index).
+/// Soft HSV for a radial sample: `fall` 0 = edge, 1 = core.
+pub fn glow_sample(hue: f32, amp: f32, fall: f32, pulse: f32) -> u32 {
+    let fall = clamp01(fall);
+    let amp = clamp01(amp);
+    // Ease so the bright core is small and the halo fades gently.
+    let soft = fall.powf(1.55);
+    let sat = (0.92 - 0.78 * soft.powf(1.1)).clamp(0.12, 0.95);
+    let val = ((0.08 + 0.90 * soft) * (0.35 + 0.65 * amp) + pulse * 0.06 * soft).min(1.0);
+    hsv_color(hue, sat, val)
+}
+
+/// Outer radius of the soft radial bloom (span = min(pad w,h)).
+pub fn glow_outer_radius(span: f32, amp: f32) -> f32 {
+    let span = span.max(1.0);
+    let amp = clamp01(amp);
+    span * 0.55 * amp.powf(1.15)
+}
+
+/// Coarse membrane light-field resolution (pad-local quads).
+pub const GLOW_FIELD_COLS: usize = 28;
+pub const GLOW_FIELD_ROWS: usize = 16;
+
+/// Lag shells for GLOW: index 0 = outermost (slowest), last = core (fastest).
+pub const GLOW_LAG_COUNT: usize = 10;
+
+/// One finger's GLOW state: envelope + lag shells for drag smear.
 #[derive(Debug, Clone, Copy)]
 pub struct GlowTouch {
     pub amp: f32,
@@ -263,22 +289,63 @@ impl GlowTouch {
     }
 }
 
-/// Outer radius of the soft radial bloom (span = min(pad w,h)).
-pub fn glow_outer_radius(span: f32, amp: f32) -> f32 {
-    let span = span.max(1.0);
-    let amp = clamp01(amp);
-    span * 0.55 * amp.powf(1.15)
+/// Soft-union of two transmission values — overlaps widen without stacking brightness.
+pub fn glow_soft_or(a: f32, b: f32) -> f32 {
+    let a = clamp01(a);
+    let b = clamp01(b);
+    1.0 - (1.0 - a) * (1.0 - b)
 }
 
-/// Soft HSV for a radial sample: `fall` 0 = edge, 1 = core.
-pub fn glow_sample(hue: f32, amp: f32, fall: f32, pulse: f32) -> u32 {
-    let fall = clamp01(fall);
+/// Gaussian sigma in pixels for the membrane blob under one press.
+pub fn glow_sigma_px(span: f32, amp: f32) -> f32 {
+    let span = span.max(1.0);
     let amp = clamp01(amp);
-    // Ease so the bright core is small and the halo fades gently.
-    let soft = fall.powf(1.55);
-    let sat = (0.92 - 0.78 * soft.powf(1.1)).clamp(0.12, 0.95);
-    let val = ((0.08 + 0.90 * soft) * (0.35 + 0.65 * amp) + pulse * 0.06 * soft).min(1.0);
-    hsv_color(hue, sat, val)
+    span * (0.12 + 0.06 * amp)
+}
+
+/// Membrane transmission at pad-normalized `(nx, ny)` from all touches.
+///
+/// Each finger contributes a soft Gaussian under its core plus a weaker, wider
+/// lagged smear shell so drags leave a short light trail. Multiple fingers
+/// soft-union so intersections blob instead of darkening.
+pub fn glow_field_at(nx: f32, ny: f32, pad_w: f32, pad_h: f32, touches: &[GlowTouch]) -> f32 {
+    let pad_w = pad_w.max(1.0);
+    let pad_h = pad_h.max(1.0);
+    let span = pad_w.min(pad_h);
+    let mut field = 0.0_f32;
+    for touch in touches {
+        if touch.amp < 0.02 {
+            continue;
+        }
+        let sigma_core = glow_sigma_px(span, touch.amp);
+        let sigma_smear = sigma_core * 1.35;
+        let core = touch.shells[GLOW_LAG_COUNT - 1];
+        let smear = touch.shells[GLOW_LAG_COUNT / 3];
+        let mut finger = glow_gauss_px(nx, ny, core.0, core.1, pad_w, pad_h, sigma_core)
+            * touch.amp;
+        let trail = glow_gauss_px(nx, ny, smear.0, smear.1, pad_w, pad_h, sigma_smear)
+            * touch.amp
+            * 0.55;
+        finger = glow_soft_or(finger, trail);
+        field = glow_soft_or(field, finger);
+    }
+    field
+}
+
+fn glow_gauss_px(
+    nx: f32,
+    ny: f32,
+    cx: f32,
+    cy: f32,
+    pad_w: f32,
+    pad_h: f32,
+    sigma: f32,
+) -> f32 {
+    let sigma = sigma.max(1.0);
+    let dx = (nx - cx) * pad_w;
+    let dy = (ny - cy) * pad_h;
+    let dist2 = dx * dx + dy * dy;
+    (-dist2 / (2.0 * sigma * sigma)).exp()
 }
 
 /// Hue for one glow ring. Rainbow mode spreads the spectrum across concentric shells.
@@ -314,9 +381,6 @@ pub fn load_viz_from_session(style_name: &str, mono_color: usize) -> (KaossVizSt
     };
     (style, color)
 }
-
-/// Lag shells for GLOW: index 0 = outermost (slowest), last = core (fastest).
-pub const GLOW_LAG_COUNT: usize = 10;
 
 /// Time constant (seconds) for one lag shell — outer rings take longer to catch up.
 pub fn glow_lag_tau(layer: usize) -> f32 {
@@ -454,6 +518,33 @@ mod tests {
         let edge_v = ((edge >> 16) & 0xff).max((edge >> 8) & 0xff).max(edge & 0xff);
         let core_v = ((core >> 16) & 0xff).max((core >> 8) & 0xff).max(core & 0xff);
         assert!(core_v > edge_v + 40, "core should be brighter than the halo edge");
+    }
+
+    #[test]
+    fn glow_soft_or_merges_without_stacking() {
+        let a = 0.7_f32;
+        let b = 0.7_f32;
+        let merged = glow_soft_or(a, b);
+        assert!(merged > a, "overlap should fill in");
+        assert!(merged < a + b, "should not fully add");
+        assert!(merged <= 1.0);
+        // Midpoint between two nearby blobs stays below a single core peak.
+        let mut left = GlowTouch::idle();
+        left.amp = 1.0;
+        left.shells = [(0.35, 0.5); GLOW_LAG_COUNT];
+        left.xy = (0.35, 0.5);
+        let mut right = GlowTouch::idle();
+        right.amp = 1.0;
+        right.shells = [(0.65, 0.5); GLOW_LAG_COUNT];
+        right.xy = (0.65, 0.5);
+        let touches = [left, right];
+        let mid = glow_field_at(0.5, 0.5, 400.0, 300.0, &touches);
+        let peak = glow_field_at(0.35, 0.5, 400.0, 300.0, &touches);
+        assert!(mid > 0.15, "midpoint should light up when blobs meet");
+        assert!(
+            mid <= peak * 1.05,
+            "merged mid should stay near single-blob brightness, got mid={mid} peak={peak}"
+        );
     }
 
     #[test]

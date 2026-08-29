@@ -5,6 +5,11 @@ Status: **active kiosk** (Python / Tk frozen on `cursor/python-kiosk-archive-dfc
 Rust-only appliance UI for the Pi TFT70. `jambox-engine` + `pidi-native` are the
 runtime.
 
+**Screen reference (native captures):** [docs/index.html](docs/index.html)
+
+![HOME](docs/screens/00-home.png)
+
+
 ## Architecture
 
 - `pidi-native` — SDL/KMSDRM + GLES2, mode shell, touch (prefer `--touch evdev`)

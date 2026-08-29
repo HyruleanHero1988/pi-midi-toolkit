@@ -50,7 +50,7 @@ Modes today in `tools/midi-tone`:
 
 ## What’s active now
 
-**Native kiosk port (this branch):** `pidi-native` + `jambox-engine` only — no Tk fallback. See [NATIVE_KIOSK.md](NATIVE_KIOSK.md). Slice notes remain in [NATIVE_SLICE.md](NATIVE_SLICE.md).
+**Native kiosk (master):** `pidi-native` + `jambox-engine`. Screen catalog: [docs/index.html](docs/index.html). Slice notes remain in [NATIVE_SLICE.md](NATIVE_SLICE.md).
 
 `tools/midi-tone` / `apps/pidi` — historical Tk kiosk (not used on this branch).
 

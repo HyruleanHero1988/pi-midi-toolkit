@@ -46,5 +46,5 @@ tools/midi-tone/.venv/
 tools/midi-tone/.pi-credentials
 tools/midi-tone/.update-credentials
 
-# Local Cursor state (plan copy lives in PLAN.md)
-.cursor/
+tmp_ui_shots/
+

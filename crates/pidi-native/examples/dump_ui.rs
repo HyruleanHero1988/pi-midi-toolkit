@@ -1,10 +1,13 @@
-//! Dump one PPM per mode for host UI review:
+//! Dump one PPM per mode for host UI review.
+//! Official docs captures: `./scripts/capture-pidi-docs.sh` (example dump_docs).
+//!
 //! `cargo run -p pidi-native --example dump_ui --no-default-features`
 
 use std::path::PathBuf;
 
 use pidi_native::client::Outbox;
 use pidi_native::font::FontStyle;
+use pidi_native::kaoss_ui::{self, KaossPicker};
 use pidi_native::mode::UiMode;
 use pidi_native::model::NativeModel;
 use pidi_native::render::{self, Frame};
@@ -30,6 +33,7 @@ fn main() {
         ("chords", UiMode::Chords),
         ("songs", UiMode::Songs),
         ("presets", UiMode::Presets),
+        ("fm", UiMode::Fm),
         ("settings", UiMode::Settings),
         ("log", UiMode::Log),
         ("map", UiMode::Map),
@@ -43,8 +47,11 @@ fn main() {
     }
 
     // Smooth font smoke dumps (home + settings are densest labels).
-    for (name, mode) in [("home", UiMode::Home), ("settings", UiMode::Settings), ("synth", UiMode::Synth)]
-    {
+    for (name, mode) in [
+        ("home", UiMode::Home),
+        ("settings", UiMode::Settings),
+        ("synth", UiMode::Synth),
+    ] {
         let mut model = NativeModel::new();
         model.font_style = FontStyle::Smooth;
         let mut ob = Outbox::new();
@@ -86,11 +93,92 @@ fn main() {
     {
         let mut model = NativeModel::new();
         let mut ob = Outbox::new();
+        model.set_mode(UiMode::Fm);
+        model.tick(1.0 / 60.0, &mut ob);
+        let growl = model.layout.fm_recipe_cell(7);
+        model.finger_down(1, growl.x + 4, growl.y + 4, &mut ob);
+        model.finger_up(1, &mut ob);
+        model.tick(1.0 / 60.0, &mut ob);
+        dump(&model, out.join("fm_growl.ppm"));
+
+        for (name, index) in [("fm_ep", 1), ("fm_brass", 3), ("fm_organ", 5)] {
+            let mut rec = NativeModel::new();
+            let mut ob2 = Outbox::new();
+            rec.set_mode(UiMode::Fm);
+            rec.tick(1.0 / 60.0, &mut ob2);
+            let cell = rec.layout.fm_recipe_cell(index);
+            rec.finger_down(1, cell.x + 4, cell.y + 4, &mut ob2);
+            rec.finger_up(1, &mut ob2);
+            rec.tick(1.0 / 60.0, &mut ob2);
+            dump(&rec, out.join(format!("{name}.ppm")));
+        }
+
+        let (ax, ay) = model.layout.fm_op_center(1);
+        let (dx, dy) = model.layout.fm_op_center(3);
+        model.finger_down(2, ax, ay, &mut ob);
+        model.finger_move(2, (ax + dx) / 2, (ay + dy) / 2, &mut ob);
+        model.tick(1.0 / 60.0, &mut ob);
+        dump(&model, out.join("fm_draw.ppm"));
+        model.finger_up(2, &mut ob);
+    }
+    {
+        let mut model = NativeModel::new();
+        let mut ob = Outbox::new();
+        model.set_mode(UiMode::Drums);
+        model.tick(1.0 / 60.0, &mut ob);
+        let b = model.layout.kit_wave;
+        model.finger_down(1, b.x + 4, b.y + 4, &mut ob);
+        model.finger_up(1, &mut ob);
+        model.tick(1.0 / 60.0, &mut ob);
+        dump(&model, out.join("drums_wave.ppm"));
+    }
+    {
+        let mut model = NativeModel::new();
+        let mut ob = Outbox::new();
+        model.set_mode(UiMode::Drums);
+        model.tick(1.0 / 60.0, &mut ob);
+        let b = model.layout.kit_note_repeat;
+        model.finger_down(1, b.x + 4, b.y + 4, &mut ob);
+        model.finger_up(1, &mut ob);
+        model.tick(1.0 / 60.0, &mut ob);
+        dump(&model, out.join("drums_repeat.ppm"));
+    }
+    {
+        let mut model = NativeModel::new();
+        let mut ob = Outbox::new();
         model.set_mode(UiMode::Kaoss);
         let b = model.layout.kaoss_scale;
         model.finger_down(1, b.x + 4, b.y + 4, &mut ob);
         model.finger_up(1, &mut ob);
         model.tick(1.0 / 60.0, &mut ob);
         dump(&model, out.join("kaoss_scale_picker.ppm"));
+    }
+    {
+        let mut model = NativeModel::new();
+        let mut ob = Outbox::new();
+        model.set_mode(UiMode::Kaoss);
+        model.kaoss_program = kaoss_ui::KAOSS_PROGRAMS
+            .iter()
+            .position(|p| p.id == "wah")
+            .expect("wah");
+        model.tick(1.0 / 60.0, &mut ob);
+        let pad = model.layout.kaoss;
+        model.finger_down(1, pad.x + pad.w / 2, pad.y + pad.h / 4, &mut ob);
+        model.tick(1.0 / 60.0, &mut ob);
+        dump(&model, out.join("kaoss_wah.ppm"));
+        model.finger_up(1, &mut ob);
+    }
+    {
+        let mut model = NativeModel::new();
+        let mut ob = Outbox::new();
+        model.set_mode(UiMode::Kaoss);
+        model.kaoss_program = kaoss_ui::KAOSS_PROGRAMS
+            .iter()
+            .position(|p| p.id == "wah")
+            .expect("wah");
+        model.kaoss_picker = Some(KaossPicker::Program);
+        model.kaoss_show_all = false;
+        model.tick(1.0 / 60.0, &mut ob);
+        dump(&model, out.join("kaoss_programs.ppm"));
     }
 }

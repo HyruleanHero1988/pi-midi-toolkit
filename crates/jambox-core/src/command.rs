@@ -53,12 +53,34 @@ pub enum SynthParam {
     VibratoMod,
     /// 0..1 always-on vibrato amount (Kaoss VIB). Combined with the mod wheel.
     VibratoAlways,
+    /// 0..1 pad Y → exponential tone-LFO rate (Kaoss WAH). See `tone_lfo_hz_from_unit`.
+    ToneLfoRate,
+    /// 0..1 amount. 0 = sticky tone knob; 1 = LFO sweeps the filter 0..1.
+    ToneLfoAmount,
     PitchBend,
     DrumPitch,
     DrumDecay,
     DrumNoise,
     DrumTone,
     DrumLevel,
+    /// 0 = wavetable melody, 1 = four-operator FM playground.
+    FmEnable,
+    /// Recipe index as a raw number (not 0..1). See `fm::FM_RECIPES`.
+    FmRecipe,
+    /// Selected operator 0..3 as a raw number (not 0..1).
+    FmOp,
+    /// Packed draw: integer `from + to*4`, fraction is amount. See `fm::pack_fm_link`.
+    FmConnect,
+    /// Wipe the 4×4 draw matrix. Value ignored.
+    FmClear,
+    /// Selected-op fold (sine → square).
+    FmBright,
+    /// Selected-op ratio into `CLANG_RATIOS`.
+    FmClang,
+    /// Selected-op envelope morph.
+    FmHit,
+    /// Selected-op audio mix (how much you hear it).
+    FmTail,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -77,6 +99,12 @@ pub enum Command {
     /// Hard stop: kill voices, clips, and FX tails.
     Panic,
     SetSynth {
+        param: SynthParam,
+        value: f32,
+    },
+    /// One kit voice. `model` is `DrumModel::index()` (0..15).
+    SetDrumMacro {
+        model: u8,
         param: SynthParam,
         value: f32,
     },

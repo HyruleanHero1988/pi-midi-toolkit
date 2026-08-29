@@ -11,6 +11,8 @@ pub enum RepeatDivision {
     Eighth,
     EighthTriplet,
     Sixteenth,
+    /// Three hits in the space of two quarter notes (1/4 triplet).
+    QuarterTriplet,
 }
 
 impl RepeatDivision {
@@ -20,6 +22,7 @@ impl RepeatDivision {
             Self::Eighth => PPQ as u64 / 2,
             Self::EighthTriplet => PPQ as u64 / 3,
             Self::Sixteenth => PPQ as u64 / 4,
+            Self::QuarterTriplet => PPQ as u64 * 2 / 3,
         }
     }
 }
@@ -98,11 +101,7 @@ impl RepeatRack {
         transport: &Transport,
     ) {
         self.stop(owner);
-        let slot = self
-            .lanes
-            .iter()
-            .position(|lane| !lane.active)
-            .unwrap_or(0);
+        let slot = self.lanes.iter().position(|lane| !lane.active).unwrap_or(0);
         let grid = transport.ticks_to_samples(division.ticks()).max(1.0);
         let next_frame = (((at_frame as f64 / grid).floor() + 1.0) * grid).round() as u64;
         self.lanes[slot] = RepeatLane {
@@ -177,15 +176,7 @@ mod tests {
     fn quarter_repeat_is_anchored_to_the_next_beat() {
         let transport = transport();
         let mut rack = RepeatRack::new();
-        rack.start(
-            7,
-            9,
-            36,
-            110,
-            RepeatDivision::Quarter,
-            1_000,
-            &transport,
-        );
+        rack.start(7, 9, 36, 110, RepeatDivision::Quarter, 1_000, &transport);
         let mut events = [RepeatEvent {
             frame: 0,
             owner: 0,
@@ -200,18 +191,30 @@ mod tests {
     }
 
     #[test]
+    fn quarter_triplet_lands_after_two_thirds_of_a_beat() {
+        let transport = transport();
+        let mut rack = RepeatRack::new();
+        rack.start(2, 9, 36, 110, RepeatDivision::QuarterTriplet, 0, &transport);
+        let mut events = [RepeatEvent {
+            frame: 0,
+            owner: 0,
+            channel: 0,
+            note: 0,
+            velocity: 0,
+        }; MAX_REPEAT_EVENTS_PER_BLOCK];
+        let step = transport
+            .ticks_to_samples(RepeatDivision::QuarterTriplet.ticks())
+            .round() as u64;
+        assert_eq!(rack.collect(&transport, 0, step as u32, &mut events), 0);
+        assert_eq!(rack.collect(&transport, step, 256, &mut events), 1);
+        assert_eq!(events[0].owner, 2);
+    }
+
+    #[test]
     fn stop_cancels_future_hits() {
         let transport = transport();
         let mut rack = RepeatRack::new();
-        rack.start(
-            3,
-            9,
-            36,
-            100,
-            RepeatDivision::Eighth,
-            0,
-            &transport,
-        );
+        rack.start(3, 9, 36, 100, RepeatDivision::Eighth, 0, &transport);
         rack.stop(3);
         let mut events = [RepeatEvent {
             frame: 0,

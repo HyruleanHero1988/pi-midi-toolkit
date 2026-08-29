@@ -1241,7 +1241,7 @@ class MidiToneApp(
     def _mk_touch_btn(self, parent: tk.Misc, text: str, command, bg: str = "#3c3836") -> tk.Button:
         """Touch-friendly button: fire on press (resistive panels often miss click)."""
         btn = tk.Button(
-            parent, text=text,
+            parent, text=text.replace("&", "&&"),
             font=("DejaVu Sans", 14, "bold"), fg="#fbf1c7", bg=bg,
             activeforeground="#fbf1c7", activebackground=bg,
             relief=tk.FLAT, bd=0, padx=8, pady=12, cursor="hand2",

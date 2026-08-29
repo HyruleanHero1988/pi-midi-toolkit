@@ -1,17 +1,46 @@
 name: Redeploy raygarrison.us (PiDI docs)
 
+# Pings HyruleanHero1988/raygarrison-us-site so it rebundles apps/pidi/docs
+# onto https://raygarrison.us/midi-tone/.
+#
+# Required secret (repo Settings → Secrets and variables → Actions):
+#   RAYGARRISON_SITE_DEPLOY_TOKEN
+# A classic PAT with `repo`, or a fine-grained PAT on raygarrison-us-site
+# with Contents: Read and Actions: Write. Same secret name as hourly-weather.
+#
+# If the secret is missing, this job skips instead of failing master. Until
+# it is set, publish with Actions → "Deploy static site to GitHub Pages" →
+# Run workflow on HyruleanHero1988/raygarrison-us-site.
+
 on:
   push:
     branches: ["master"]
     paths:
       - "apps/pidi/docs/**"
+      - "docs/**"
+      - ".github/workflows/deploy-raygarrison-site.yml"
   workflow_dispatch:
 
 jobs:
   trigger-site-deploy:
     runs-on: ubuntu-latest
     steps:
+      - name: Check RAYGARRISON_SITE_DEPLOY_TOKEN
+        id: token
+        env:
+          TOKEN: ${{ secrets.RAYGARRISON_SITE_DEPLOY_TOKEN }}
+        run: |
+          if [ -z "${TOKEN}" ]; then
+            echo "present=false" >> "${GITHUB_OUTPUT}"
+            echo "::warning::RAYGARRISON_SITE_DEPLOY_TOKEN is not set; skipping the raygarrison.us ping."
+            echo "Add a PAT with access to HyruleanHero1988/raygarrison-us-site as that Actions secret."
+            echo "Until then, run Deploy static site to GitHub Pages on that repo — it clones apps/pidi/docs from master."
+          else
+            echo "present=true" >> "${GITHUB_OUTPUT}"
+          fi
+
       - name: Trigger raygarrison.us site deploy
+        if: steps.token.outputs.present == 'true'
         uses: peter-evans/repository-dispatch@v3
         with:
           token: ${{ secrets.RAYGARRISON_SITE_DEPLOY_TOKEN }}

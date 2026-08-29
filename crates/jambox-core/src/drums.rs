@@ -93,6 +93,23 @@ impl Default for DrumMacros {
     }
 }
 
+impl DrumMacros {
+    fn clamped(self) -> Self {
+        Self {
+            pitch: self.pitch.clamp(0.0, 1.0),
+            decay: self.decay.clamp(0.0, 1.0),
+            noise: self.noise.clamp(0.0, 1.0),
+            tone: self.tone.clamp(0.0, 1.0),
+        }
+    }
+}
+
+/// Sample rate / window for the KIT CRT one-shot (UI thread, not the audio callback).
+pub const DRUM_PREVIEW_SR: f32 = 8_000.0;
+/// ~280 ms so decay/stretch reads as how much of the scope stays alive.
+pub const DRUM_PREVIEW_SEC: f32 = 0.28;
+pub const DRUM_PREVIEW_SAMPLES: usize = 2_240;
+
 #[derive(Debug, Clone, Copy)]
 struct Hit {
     active: bool,
@@ -143,7 +160,7 @@ impl Hit {
 /// Drum voice allocator + renderer. One instance owns all 16 models.
 pub struct DrumKit {
     hits: [Hit; MAX_DRUM_HITS],
-    macros: DrumMacros,
+    macros: [DrumMacros; DRUM_MODEL_COUNT],
     rng: u32,
     serial: u64,
     sample_rate: f32,
@@ -153,7 +170,7 @@ impl DrumKit {
     pub fn new(sample_rate: f32) -> Self {
         Self {
             hits: [Hit::silent(); MAX_DRUM_HITS],
-            macros: DrumMacros::default(),
+            macros: [DrumMacros::default(); DRUM_MODEL_COUNT],
             rng: 0x1234_5678,
             serial: 0,
             sample_rate: sample_rate.max(8000.0),
@@ -164,17 +181,39 @@ impl DrumKit {
         self.sample_rate = sample_rate.max(8000.0);
     }
 
+    /// Macros for model 0. MIDI knobs / ALL DRUMS still treat the kit as one bus.
     pub fn macros(&self) -> DrumMacros {
-        self.macros
+        self.macros[0]
     }
 
+    pub fn macros_for(&self, model: DrumModel) -> DrumMacros {
+        self.macros[model.index()]
+    }
+
+    /// Write the same macros onto every model (ALL DRUMS / hardware knobs).
     pub fn set_macros(&mut self, macros: DrumMacros) {
-        self.macros = DrumMacros {
-            pitch: macros.pitch.clamp(0.0, 1.0),
-            decay: macros.decay.clamp(0.0, 1.0),
-            noise: macros.noise.clamp(0.0, 1.0),
-            tone: macros.tone.clamp(0.0, 1.0),
-        };
+        let macros = macros.clamped();
+        self.macros = [macros; DRUM_MODEL_COUNT];
+    }
+
+    /// Write macros for one kit voice. Other models keep their own settings.
+    pub fn set_model_macros(&mut self, model: DrumModel, macros: DrumMacros) {
+        self.macros[model.index()] = macros.clamped();
+    }
+
+    /// Offline one-shot for the KIT scope. Seeded noise so redraws stay stable.
+    pub fn preview(
+        model: DrumModel,
+        macros: DrumMacros,
+        sample_rate: f32,
+        seed: u32,
+        out: &mut [f32],
+    ) {
+        let mut kit = Self::new(sample_rate);
+        kit.rng = seed.max(1);
+        kit.set_model_macros(model, macros);
+        kit.trigger(model, 121);
+        kit.render_model(model, out);
     }
 
     pub fn active_count(&self) -> usize {
@@ -194,7 +233,7 @@ impl DrumKit {
             .position(|h| !h.active)
             .unwrap_or_else(|| self.oldest_slot());
 
-        let m = self.macros;
+        let m = self.macros[model.index()];
         let vel = (velocity as f32 / 127.0).clamp(0.05, 1.0);
         let mut hit = Hit {
             active: true,
@@ -352,7 +391,7 @@ impl DrumKit {
     /// Sum every active hit of `model` into `out` (additive). Allocation-free.
     pub fn render_model(&mut self, model: DrumModel, out: &mut [f32]) {
         let sr = self.sample_rate;
-        let m = self.macros;
+        let m = self.macros[model.index()];
         let tone = m.tone;
         let noise_amt = m.noise;
         // Noise low-pass coefficient: darker as tone drops.
@@ -645,5 +684,45 @@ mod tests {
             "pitch sweep jumped to the floor too fast (mid={mid}, end={end})"
         );
         assert!(mid < start, "pitch should fall over time (mid={mid}, start={start})");
+    }
+
+    #[test]
+    fn per_model_macros_do_not_leak_to_other_voices() {
+        let mut kit = DrumKit::new(48_000.0);
+        let mut kick = DrumMacros::default();
+        kick.pitch = 1.0;
+        kit.set_model_macros(DrumModel::Kick, kick);
+        assert!((kit.macros_for(DrumModel::Kick).pitch - 1.0).abs() < 1e-6);
+        assert!((kit.macros_for(DrumModel::Snare).pitch - DrumMacros::default().pitch).abs() < 1e-6);
+
+        kit.set_macros(DrumMacros {
+            pitch: 0.2,
+            ..DrumMacros::default()
+        });
+        assert!((kit.macros_for(DrumModel::Kick).pitch - 0.2).abs() < 1e-6);
+        assert!((kit.macros_for(DrumModel::Snare).pitch - 0.2).abs() < 1e-6);
+    }
+
+    #[test]
+    fn preview_is_stable_and_audible() {
+        let mut a = [0.0f32; DRUM_PREVIEW_SAMPLES];
+        let mut b = [0.0f32; DRUM_PREVIEW_SAMPLES];
+        DrumKit::preview(
+            DrumModel::Kick,
+            DrumMacros::default(),
+            DRUM_PREVIEW_SR,
+            7,
+            &mut a,
+        );
+        DrumKit::preview(
+            DrumModel::Kick,
+            DrumMacros::default(),
+            DRUM_PREVIEW_SR,
+            7,
+            &mut b,
+        );
+        assert_eq!(a, b);
+        let peak = a.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+        assert!(peak > 0.01, "preview kick should be visible, peak={peak}");
     }
 }

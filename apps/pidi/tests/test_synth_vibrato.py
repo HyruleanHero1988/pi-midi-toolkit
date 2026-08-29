@@ -419,6 +419,111 @@ class VibratoTest(unittest.TestCase):
         app._kaoss_apply_program("lead")
         self.assertAlmostEqual(engine.morph(), 0.8, places=3)
 
+    def test_tone_lfo_wobbles_the_filter(self) -> None:
+        dry = self.make_engine()
+        dry.set_tone(0.5)
+        dry.note_on(0, 60, 100)
+        self.render(dry, 256)
+        flat = self.render(dry, 2048)
+
+        wah = self.make_engine()
+        wah.set_tone(0.5)
+        wah.set_tone_lfo_rate(1.0)
+        wah.set_tone_lfo_amount(1.0)
+        wah.note_on(0, 60, 100)
+        self.render(wah, 256)
+        wobble = self.render(wah, 2048)
+
+        self.assertFalse(
+            np.allclose(flat, wobble, atol=1e-4),
+            "tone LFO should wah the filter vs sticky tone",
+        )
+
+    def test_kaoss_wah_param_does_not_rewrite_tone(self) -> None:
+        engine = self.make_engine()
+        engine.set_tone(0.4)
+        engine.set_kaoss_param("tone_lfo", 0.85)
+        hz, amt = engine.tone_lfo_state()
+        self.assertGreater(amt, 0.5)
+        self.assertGreater(hz, 4.0)
+        self.assertAlmostEqual(engine.modulation_state()["tone"], 0.4, places=3)
+        engine.set_tone_lfo_amount(0.0)
+        self.assertEqual(engine.tone_lfo_state()[1], 0.0)
+
+    def test_leaving_wah_clears_tone_lfo(self) -> None:
+        from types import SimpleNamespace
+
+        from pidi.kaoss import KaossPad
+
+        mt = self.midi_tone
+        engine = self.make_engine()
+        engine.set_tone(0.35)
+        pad = KaossPad()
+        pad.program_id = "wah"
+
+        class Harness:
+            def __init__(self) -> None:
+                self.engine = engine
+                self._kaoss = pad
+                self._kaoss_fx_snap = None
+                self._mode = "kaoss"
+                self._seq = SimpleNamespace(record_note=lambda *a, **k: None)
+
+            def _q_put(self, *a, **k):
+                pass
+
+            def _paint_kaoss_status(self):
+                pass
+
+            def _paint_kaoss(self):
+                pass
+
+            def _kaoss_draw_grid(self):
+                pass
+
+            def _mark_settings_dirty(self):
+                pass
+
+            def _kaoss_arm_tick(self):
+                pass
+
+            def _kaoss_refresh_axis_labels(self):
+                pass
+
+            def _kaoss_midi_send(self, msg):
+                pass
+
+            def _kaoss_capture_fx(self):
+                return mt.MidiToneApp._kaoss_capture_fx(self)
+
+            def _kaoss_overlay_names(self, prog):
+                return mt.MidiToneApp._kaoss_overlay_names(self, prog)
+
+            def _kaoss_restore_fx(self):
+                return mt.MidiToneApp._kaoss_restore_fx(self)
+
+            def _kaoss_apply(self, events, *, began=False, ended=False, restore=None):
+                return mt.MidiToneApp._kaoss_apply(
+                    self, events, began=began, ended=ended, restore=restore
+                )
+
+            def _kaoss_apply_program(self, program_id):
+                return mt.MidiToneApp._kaoss_apply_program(self, program_id)
+
+        app = Harness()
+        app._kaoss_apply(pad.touch(0.5, 0.9), began=True)
+        self.assertGreater(engine.tone_lfo_state()[1], 0.5)
+
+        app._kaoss_apply(pad.release(), ended=True)
+        self.assertEqual(engine.tone_lfo_state()[1], 0.0)
+        self.assertAlmostEqual(engine.modulation_state()["tone"], 0.35, places=3)
+
+        app._kaoss_apply(pad.touch(0.4, 0.8), began=True)
+        self.assertGreater(engine.tone_lfo_state()[1], 0.5)
+        pad.hold = True
+        app._kaoss_apply_program("lead")
+        self.assertEqual(engine.tone_lfo_state()[1], 0.0)
+
 
 if __name__ == "__main__":
     sys.exit(unittest.main())

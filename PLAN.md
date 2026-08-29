@@ -77,30 +77,31 @@ isProject: false
 | **Jambox / soft-synth** | **~50%** | A music box that matches *your* intuition: pads, morph, loops, phrase clips, songs — create and perform without learning another tracker/DAW |
 | **MIDI remap appliance** | **~50%** | USB MIDI in → transform → USB/DIN out for hardware synths, when that path matters |
 
-Power on → Openbox kiosk → modes. The soft-synth path started as a Phase 0 hear-test. **That framing is obsolete.** It is already a creative instrument: record a beat, play melody over it, sing, give someone a performance. If the box only did remap and never made a sound, half the reason to build it would be missing. If it only made local sound and never remapped, the other half would be missing.
+Power on → SDL/KMSDRM kiosk (`pidi-native`) → modes. The soft-synth path started as a Phase 0 hear-test. **That framing is obsolete.** It is already a creative instrument: record a beat, play melody over it, sing, give someone a performance. If the box only did remap and never made a sound, half the reason to build it would be missing. If it only made local sound and never remapped, the other half would be missing.
 
 **Design law for the jambox half:** prefer mental models you already use (hit pad → sound; record → loop; morph A→B; lock a voice) over dense menus. Hardware you already own (e.g. picotracker, EP-class grooveboxes) can be capable but costly in *learning time*. This project wins by staying obvious under your hands — not by cloning their feature lists.
 
 | Mode (UI) | Pillar | Job |
 |-----------|--------|-----|
-| **Home** | Both | Tile launcher for every mode (top-bar HOME); jam shortcuts stay SYNTH/SEQ/PADS/KAOSS |
-| **Synth** | Jambox | Wavetable morph synth + drum kit + scopes |
-| **Seq** | Jambox | Free-timing backbone loop + 808-style overdub layers (drums and keys) |
+| **Home** | Both | Tile launcher for every mode (top-bar HOME); jam shortcuts stay SYNTH/SEQ/PADS/KAOSS/CHORDS |
+| **Synth** | Jambox | Wavetable morph synth + scopes |
+| **Drums** | Jambox | Analog-style kit + kick repeats |
+| **Seq** | Jambox | Free-timing backbone loop + 808-style overdub layers (drums, keys, chords) |
 | **Phrases / Pads** | Jambox (+ MIDI out) | 16 clip-launch cells; touch **and** MPK pads |
 | **Kaoss** | Both | XY pad: scale notes + factory Kaoss CCs; LOCAL and/or USB→DIN |
+| **Chords** | Both | Omnichord-style buttons, strumplate, palette, CHANGES |
 | **Songs** | Both | `.mid` library; tempo; LOCAL and/or USB→DIN |
 | **Presets** | Jambox | Synth slots + session autosave |
 | **Map / Thru** | Remap | Channel / CC / velocity remap; ports; learn → Rust engine |
 | **Log** | Both | Event history / commissioning |
 | **Set** | Both | Opt-in GitHub update (CHECK `master` / UPDATE & restart) |
 
-Boot path: `install-kiosk.sh` enables X11 + Desktop Autologin + **MIDI Tone Kiosk**
-session (Openbox + fullscreen app). No normal Pi desktop shell. Undo with `disable-kiosk.sh`.
+Boot path: `pidi-native.service` (SDL/KMSDRM) + `jambox-engine.service`. LightDM/X must be stopped so DRM is free. The archived Tk session (`install-kiosk.sh` / Openbox) is frozen on `cursor/python-kiosk-archive-dfc2`.
 
 ### Architecture rule (still true — and it helps the jambox)
 
 - **Rust `midi-engine`:** MIDI **thru/remap** hot path only (ALSA in → transform → out). RT-friendly, no UI work.
-- **Kiosk UI (`midi-tone` today):** the **jambox** — soft-synth, drums, sequencer, pads, songs, presets. Talks to the engine over IPC/files when Map mode is active.
+- **Kiosk UI (`pidi-native` today):** the **jambox** — soft-synth, drums, sequencer, pads, kaoss, chords, songs, presets. Talks to the engine over a socket. Python Tk is archived.
 - **UI never sits on the thru hot path.** Touching Map (or Synth) must not add jitter to live thru notes.
 - Soft-synth audio is a first-class product path; it is *not* the remap thru path.
 - **Songs / Pads → DIN** is a *player/emit* path (schedule MIDI out a USB port), not live thru. v1 may open MIDI out from the kiosk; later the engine can own the scheduler if we want RT priority / remap-on-playback.

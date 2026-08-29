@@ -116,6 +116,9 @@ class SineEngine:
         self._vib_hz = 5.0
         self._vib_depth_semis = 0.5
         self._vib_phase = 0.0
+        self._tone_lfo_amount = 0.0
+        self._tone_lfo_hz = 1.73
+        self._tone_lfo_phase = 0.0
         self._tables = tables
         self._voice_names = list(tables.keys())
         self._table_list = [tables[n] for n in self._voice_names]
@@ -304,6 +307,8 @@ class SineEngine:
             vib_always = float(self._vib_always)
             vib_mod = float(self._mod)
             bend = float(self._bend_semitones)
+            tone_lfo_hz = float(self._tone_lfo_hz)
+            tone_lfo_amount = float(self._tone_lfo_amount)
             drum_pitch = float(self._drum_pitch)
             drum_decay = float(self._drum_decay)
             drum_noise = float(self._drum_noise)
@@ -331,6 +336,12 @@ class SineEngine:
         client.synth("vibrato_rate", max(0.0, min(1.0, (vib_hz - 1.0) / 8.0)))
         client.synth("vibrato_always", vib_always)
         client.synth("vibrato_mod", vib_mod)
+        lo, hi = self.TONE_LFO_HZ_MIN, self.TONE_LFO_HZ_MAX
+        tone_lfo_u = 0.0
+        if tone_lfo_hz > lo and hi > lo:
+            tone_lfo_u = math.log(max(lo, tone_lfo_hz) / lo) / math.log(hi / lo)
+        client.synth("tone_lfo_rate", max(0.0, min(1.0, tone_lfo_u)))
+        client.synth("tone_lfo_amount", tone_lfo_amount)
         client.synth("pitch_bend", bend)
         client.synth("drum_pitch", drum_pitch)
         client.synth("drum_decay", drum_decay)
@@ -737,6 +748,8 @@ class SineEngine:
     VIB_DEPTH_MAX = 2.0  # semitones — matches the knob's top end
     VIB_HZ_MIN = 1.0
     VIB_HZ_MAX = 9.0
+    TONE_LFO_HZ_MIN = 0.3
+    TONE_LFO_HZ_MAX = 10.0
 
     def vib_state(self) -> Tuple[float, float, float]:
         """(depth semitones, rate Hz, always-on amount 0..1) for the touch UI."""
@@ -780,6 +793,29 @@ class SineEngine:
         with self._lock:
             self._vib_hz = 1.0 + t * 8.0
         self._remote_synth("vibrato_rate", t)
+
+    def set_tone_lfo_rate(self, value: float) -> None:
+        """0..1 pad Y → exponential tone-LFO rate (Kaoss WAH)."""
+        if value > 1.0:
+            value = value / 127.0
+        t = max(0.0, min(1.0, float(value)))
+        lo, hi = self.TONE_LFO_HZ_MIN, self.TONE_LFO_HZ_MAX
+        with self._lock:
+            self._tone_lfo_hz = lo * ((hi / lo) ** t)
+        self._remote_synth("tone_lfo_rate", t)
+
+    def set_tone_lfo_amount(self, amount: float) -> float:
+        """0 = sticky tone knob; 1 = LFO sweeps the filter 0..1."""
+        with self._lock:
+            self._tone_lfo_amount = max(0.0, min(1.0, float(amount)))
+            out = float(self._tone_lfo_amount)
+        self._remote_synth("tone_lfo_amount", out)
+        return out
+
+    def tone_lfo_state(self) -> Tuple[float, float]:
+        """(rate Hz, amount 0..1)."""
+        with self._lock:
+            return (float(self._tone_lfo_hz), float(self._tone_lfo_amount))
 
     def set_pad_pressure(self, channel: int, note: Optional[int], value: int) -> None:
         """Live volume trim for held drum pads (aftertouch / pressure)."""
@@ -1007,6 +1043,10 @@ class SineEngine:
             self.set_vib_depth(value)
             self.set_vib_always(1.0 if float(value) > 0.02 else 0.0)
             return
+        if name == "tone_lfo":
+            self.set_tone_lfo_rate(value)
+            self.set_tone_lfo_amount(1.0)
+            return
         if name == "pitch_bend":
             # Pad Y 0..1 with midline = unison; edges = ±12 semis (native BEND).
             y = max(0.0, min(1.0, float(value)))
@@ -1037,6 +1077,7 @@ class SineEngine:
         with self._lock:
             self._bus_fx.reset_to_defaults()
         self.set_vib_always(0.0)
+        self.set_tone_lfo_amount(0.0)
         snap = self.bus_fx_snapshot()
         self._remote_fx(JamboxClient.bus_target(), "drive", float(snap["fx_drive"]))
         self._remote_fx(JamboxClient.bus_target(), "delay_time", float(snap["fx_delay_time"]))
@@ -1295,6 +1336,8 @@ class SineEngine:
                 "vib_hz": self._vib_hz,
                 "vib_depth": self._vib_depth_semis,
                 "vib_always": self._vib_always,
+                "tone_lfo_hz": self._tone_lfo_hz,
+                "tone_lfo_amount": self._tone_lfo_amount,
                 "drum_pitch": self._drum_pitch,
                 "drum_decay": self._drum_decay,
                 "drum_noise": self._drum_noise,
@@ -1414,6 +1457,9 @@ class SineEngine:
             self._vib_depth_semis = 0.5
             self._vib_phase = 0.0
             self._vib_always = 0.0
+            self._tone_lfo_amount = 0.0
+            self._tone_lfo_hz = 1.73
+            self._tone_lfo_phase = 0.0
             self._morph_a = 0
             self._morph_b = 1 if len(self._voice_names) > 1 else 0
             self._morph = 0.0
@@ -1476,6 +1522,8 @@ class SineEngine:
             vib_depth = self._vib_depth_semis
             table = self._morph_table
             tone = self._tone
+            tone_lfo_amt = self._tone_lfo_amount
+            tone_lfo_hz = self._tone_lfo_hz
             synth_level = self._synth_level
             drum_level = self._drum_level
             attack_sec = self._attack_sec
@@ -1495,6 +1543,12 @@ class SineEngine:
             if self._vib_phase > 2.0 * math.pi:
                 self._vib_phase %= 2.0 * math.pi
             vib_semis = vib_depth * mod * math.sin(self._vib_phase)
+        if tone_lfo_amt > 0.01:
+            self._tone_lfo_phase += 2.0 * math.pi * tone_lfo_hz * (frames / sr)
+            if self._tone_lfo_phase > 2.0 * math.pi:
+                self._tone_lfo_phase %= 2.0 * math.pi
+            lfo = 0.5 + 0.5 * math.sin(self._tone_lfo_phase)
+            tone = max(0.0, min(1.0, tone * (1.0 - tone_lfo_amt) + lfo * tone_lfo_amt))
         block_turns = frames / sr
 
         if frames > self._key_bus.shape[0]:

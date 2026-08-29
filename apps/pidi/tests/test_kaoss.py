@@ -226,6 +226,18 @@ class PadPlayTest(unittest.TestCase):
         self.assertEqual(params[0].param, "tone")
         self.assertAlmostEqual(params[0].param_value, 0.25, places=3)
 
+    def test_wah_plays_note_and_writes_tone_lfo_rate(self) -> None:
+        self.pad.program_id = "wah"
+        events = self.pad.touch(0.0, 0.75)
+        self.assertIn("note_on", self.kinds(events))
+        note = next(e for e in events if e.kind == "note_on")
+        self.assertEqual(note.note, 48)
+        params = [e for e in events if e.kind == "param"]
+        self.assertTrue(params)
+        self.assertEqual(params[0].param, "tone_lfo")
+        self.assertAlmostEqual(params[0].param_value, 0.75, places=3)
+        self.assertIn("wah", PROGRAM_IDS)
+
     def test_fx_program_has_no_notes(self) -> None:
         self.pad.program_id = "echo"
         events = self.pad.touch(0.2, 0.8)

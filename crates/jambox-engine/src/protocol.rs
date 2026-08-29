@@ -8,9 +8,7 @@ use jambox_core::{
     Clip, ClipEvent, ClipEventKind, Command, FxParam, FxTarget, LaunchMode, Quantize,
     RepeatDivision, SynthParam,
 };
-use jambox_protocol::{
-    HelloReply, RepeatDivision as WireRepeatDivision, RepeatPhase, TouchPhase,
-};
+use jambox_protocol::{HelloReply, RepeatDivision as WireRepeatDivision, RepeatPhase, TouchPhase};
 use serde::{Deserialize, Serialize};
 
 /// One request from the UI.
@@ -37,6 +35,9 @@ pub enum Request {
     Synth {
         param: String,
         value: f32,
+        /// When set, drum_* params apply to that kit model index (0..15).
+        #[serde(default)]
+        drum: Option<u8>,
     },
     Fx {
         target: FxTargetSpec,
@@ -232,7 +233,9 @@ impl From<WireClipEvent> for ClipEvent {
 pub enum Response {
     Ok,
     Hello(HelloReply),
-    Error { message: String },
+    Error {
+        message: String,
+    },
     Status(StatusReply),
     /// Unsolicited: a MIDI event the engine heard (notes already went to DSP).
     Midi(MidiNotice),
@@ -423,12 +426,23 @@ fn parse_synth_param(name: &str) -> Option<SynthParam> {
         "vibrato_rate" => SynthParam::VibratoRate,
         "vibrato_mod" => SynthParam::VibratoMod,
         "vibrato_always" => SynthParam::VibratoAlways,
+        "tone_lfo_rate" => SynthParam::ToneLfoRate,
+        "tone_lfo_amount" => SynthParam::ToneLfoAmount,
         "pitch_bend" => SynthParam::PitchBend,
         "drum_pitch" => SynthParam::DrumPitch,
         "drum_decay" => SynthParam::DrumDecay,
         "drum_noise" => SynthParam::DrumNoise,
         "drum_tone" => SynthParam::DrumTone,
         "drum_level" => SynthParam::DrumLevel,
+        "fm_enable" => SynthParam::FmEnable,
+        "fm_recipe" => SynthParam::FmRecipe,
+        "fm_op" => SynthParam::FmOp,
+        "fm_connect" => SynthParam::FmConnect,
+        "fm_clear" => SynthParam::FmClear,
+        "fm_bright" => SynthParam::FmBright,
+        "fm_clang" => SynthParam::FmClang,
+        "fm_hit" => SynthParam::FmHit,
+        "fm_tail" => SynthParam::FmTail,
         _ => return None,
     })
 }
@@ -533,10 +547,28 @@ pub fn decode(request: Request) -> Result<Decoded, String> {
         },
         Request::AllNotesOff => Decoded::Command(Command::AllNotesOff),
         Request::Panic => Decoded::Command(Command::Panic),
-        Request::Synth { param, value } => {
+        Request::Synth { param, value, drum } => {
             let param =
                 parse_synth_param(&param).ok_or_else(|| format!("unknown param {param}"))?;
-            Decoded::Command(Command::SetSynth { param, value })
+            if let Some(index) = drum {
+                if matches!(
+                    param,
+                    SynthParam::DrumPitch
+                        | SynthParam::DrumDecay
+                        | SynthParam::DrumNoise
+                        | SynthParam::DrumTone
+                ) {
+                    Decoded::Command(Command::SetDrumMacro {
+                        model: index,
+                        param,
+                        value,
+                    })
+                } else {
+                    Decoded::Command(Command::SetSynth { param, value })
+                }
+            } else {
+                Decoded::Command(Command::SetSynth { param, value })
+            }
         }
         Request::Fx {
             target,
@@ -605,9 +637,7 @@ pub fn decode(request: Request) -> Result<Decoded, String> {
             control,
             value,
         } => {
-            let ev = midi_event_from_parts(
-                &kind, channel, note, velocity, control, value,
-            )?;
+            let ev = midi_event_from_parts(&kind, channel, note, velocity, control, value)?;
             let mut buf = [0u8; 3];
             let n = ev.encode(&mut buf);
             Decoded::Command(Command::MidiEmit {
@@ -677,6 +707,7 @@ fn map_repeat_division(division: WireRepeatDivision) -> RepeatDivision {
         WireRepeatDivision::Eighth => RepeatDivision::Eighth,
         WireRepeatDivision::EighthTriplet => RepeatDivision::EighthTriplet,
         WireRepeatDivision::Sixteenth => RepeatDivision::Sixteenth,
+        WireRepeatDivision::QuarterTriplet => RepeatDivision::QuarterTriplet,
     }
 }
 
@@ -752,6 +783,20 @@ mod tests {
     }
 
     #[test]
+    fn fm_connect_decodes_as_a_raw_synth_value() {
+        let d = decode_line(r#"{"cmd":"synth","param":"fm_connect","value":3.7}"#);
+        match d {
+            Decoded::Command(Command::SetSynth {
+                param: SynthParam::FmConnect,
+                value,
+            }) => {
+                assert!((value - 3.7).abs() < 1e-5);
+            }
+            _ => panic!("wrong decode"),
+        }
+    }
+
+    #[test]
     fn unknown_param_is_reported_not_panicked() {
         let request: Request =
             serde_json::from_str(r#"{"cmd":"synth","param":"nope","value":1.0}"#).unwrap();
@@ -808,9 +853,7 @@ mod tests {
 
     #[test]
     fn touch_and_repeat_decode_from_json() {
-        let d = decode_line(
-            r#"{"cmd":"touch","gesture":41,"phase":"down","x":0.1,"y":0.9}"#,
-        );
+        let d = decode_line(r#"{"cmd":"touch","gesture":41,"phase":"down","x":0.1,"y":0.9}"#);
         assert!(matches!(d, Decoded::Touch { gesture: 41, .. }));
         let d = decode_line(r#"{"cmd":"repeat","gesture":7,"phase":"down","note":36}"#);
         match d {
@@ -832,5 +875,26 @@ mod tests {
     fn audio_reopen_decodes() {
         let d = decode_line(r#"{"cmd":"audio_reopen"}"#);
         assert!(matches!(d, Decoded::AudioReopen));
+    }
+
+    #[test]
+    fn drum_synth_param_targets_one_model() {
+        let d = decode_line(r#"{"cmd":"synth","param":"drum_pitch","value":0.8,"drum":0}"#);
+        match d {
+            Decoded::Command(Command::SetDrumMacro {
+                model: 0,
+                param: SynthParam::DrumPitch,
+                value,
+            }) => assert!((value - 0.8).abs() < 1e-6),
+            _ => panic!("expected SetDrumMacro"),
+        }
+        let d = decode_line(r#"{"cmd":"synth","param":"drum_pitch","value":0.8}"#);
+        match d {
+            Decoded::Command(Command::SetSynth {
+                param: SynthParam::DrumPitch,
+                value,
+            }) => assert!((value - 0.8).abs() < 1e-6),
+            _ => panic!("expected global SetSynth drum_pitch"),
+        }
     }
 }

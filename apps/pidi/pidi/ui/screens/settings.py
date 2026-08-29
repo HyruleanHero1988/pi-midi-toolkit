@@ -14,6 +14,11 @@ from pidi.ui.touch_keyboard import TouchKeyboardOptions
 WIFI_LIST_VISIBLE = 4
 
 
+def _tk_label(text: str) -> str:
+    """Tk treats ``&`` as a keyboard mnemonic — show it literally on touch buttons."""
+    return text.replace("&", "&&")
+
+
 class SettingsScreenMixin:
     def _build_settings_mode(self) -> None:
         panel = getattr(self, "_settings_panel", "hub") or "hub"
@@ -390,16 +395,17 @@ class SettingsScreenMixin:
         def _dim(btn: Optional[tk.Button], label: str, idle_bg: str) -> None:
             if btn is None:
                 return
+            show = _tk_label(label)
             if busy:
                 btn.configure(
-                    text=label,
+                    text=show,
                     bg="#3c3836",
                     activebackground="#3c3836",
                     state=tk.DISABLED,
                 )
             else:
                 btn.configure(
-                    text=label,
+                    text=show,
                     bg=idle_bg,
                     activebackground=idle_bg,
                     state=tk.NORMAL,
@@ -417,13 +423,13 @@ class SettingsScreenMixin:
             return
         if self._update_confirming:
             check_btn.configure(
-                text="CANCEL",
+                text=_tk_label("CANCEL"),
                 bg="#504945",
                 activebackground="#504945",
                 state=tk.NORMAL,
             )
             update_btn.configure(
-                text="INSTALL NOW",
+                text=_tk_label("INSTALL NOW"),
                 bg="#9d0006",
                 activebackground="#9d0006",
                 state=tk.NORMAL,
@@ -432,9 +438,11 @@ class SettingsScreenMixin:
         available = bool(self._update_check and self._update_check.available)
         color = "#689d6a" if available or self._update_check is None else "#3c3836"
         check_btn.configure(
-            text="CHECK", bg="#458588", activebackground="#458588", state=tk.NORMAL
+            text=_tk_label("CHECK"), bg="#458588", activebackground="#458588", state=tk.NORMAL
         )
-        update_btn.configure(text="UPDATE", bg=color, activebackground=color, state=tk.NORMAL)
+        update_btn.configure(
+            text=_tk_label("UPDATE"), bg=color, activebackground=color, state=tk.NORMAL
+        )
 
     def _refresh_settings_status(self) -> None:
         panel = getattr(self, "_settings_panel", "hub")

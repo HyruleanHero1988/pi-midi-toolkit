@@ -13,11 +13,10 @@ use crate::command::{
 use crate::drums::{
     drum_model_for_note, DrumKit, DrumMacros, DrumModel, DRUM_MODEL_COUNT, MAX_DRUM_HITS,
 };
+use crate::fm::FmSynth;
 use crate::fx::{FxParams, FxUnit};
 use crate::kaoss::{unpack_xy, KaossMapper, LatestTouch, TouchDelta};
-use crate::repeat::{
-    RepeatEvent, RepeatRack, MAX_REPEAT_EVENTS_PER_BLOCK,
-};
+use crate::repeat::{RepeatEvent, RepeatRack, MAX_REPEAT_EVENTS_PER_BLOCK};
 use crate::transport::Transport;
 use crate::voice::{VoiceContext, VoicePool, MAX_VOICES};
 use crate::wavetable::WaveBank;
@@ -41,6 +40,17 @@ const ATTACK_SEC_MIN: f32 = 0.002;
 const ATTACK_SEC_MAX: f32 = 0.400;
 const RELEASE_SEC_MIN: f32 = 0.010;
 const RELEASE_SEC_MAX: f32 = 0.800;
+
+/// Slow filter sweep at the bottom of the WAH pad.
+pub const TONE_LFO_HZ_MIN: f32 = 0.3;
+/// Fast auto-wah at the top of the WAH pad.
+pub const TONE_LFO_HZ_MAX: f32 = 10.0;
+
+/// Pad Y 0..1 → tone-LFO rate. Exponential so the lower half stays a slow sweep.
+pub fn tone_lfo_hz_from_unit(unit: f32) -> f32 {
+    let t = unit.clamp(0.0, 1.0);
+    TONE_LFO_HZ_MIN * (TONE_LFO_HZ_MAX / TONE_LFO_HZ_MIN).powf(t)
+}
 
 /// Exponential knob → seconds, matching Python `set_attack` / `set_release`.
 fn map_exp_time(unit: f32, min: f32, max: f32) -> f32 {
@@ -67,6 +77,57 @@ fn apply_tone_lowpass(buf: &mut [f32], tone: f32, lp: &mut f32, bp: &mut f32, sa
     let mut l = *lp;
     let mut b = *bp;
     for s in buf.iter_mut() {
+        l += f * b;
+        let hp = *s - l - damp * b;
+        b += f * hp;
+        *s = l;
+    }
+    *lp = l;
+    *bp = b;
+}
+
+/// Same SVF as [`apply_tone_lowpass`], with a per-sample sine on cutoff.
+///
+/// `amount` 0 = the sticky tone knob; 1 = the LFO owns brightness (0..1).
+fn apply_tone_lowpass_lfo(
+    buf: &mut [f32],
+    base_tone: f32,
+    amount: f32,
+    rate_hz: f32,
+    phase: &mut f64,
+    lp: &mut f32,
+    bp: &mut f32,
+    sample_rate: f32,
+) {
+    if buf.is_empty() {
+        return;
+    }
+    let amount = amount.clamp(0.0, 1.0);
+    if amount <= 0.01 {
+        apply_tone_lowpass(buf, base_tone, lp, bp, sample_rate);
+        return;
+    }
+    let sr = sample_rate.max(8000.0);
+    let phase_inc = std::f64::consts::TAU * rate_hz.max(0.01) as f64 / sr as f64;
+    let base = base_tone.clamp(0.0, 1.0);
+    let mut l = *lp;
+    let mut b = *bp;
+    for s in buf.iter_mut() {
+        *phase += phase_inc;
+        if *phase > std::f64::consts::TAU {
+            *phase %= std::f64::consts::TAU;
+        }
+        let lfo = 0.5 + 0.5 * (*phase).sin() as f32;
+        let tone = (base * (1.0 - amount) + lfo * amount).clamp(0.0, 1.0);
+        if tone >= 0.985 {
+            l = *s;
+            b = 0.0;
+            continue;
+        }
+        let fc = 90.0 * (8000.0_f32 / 90.0).powf(tone);
+        let fc = fc.min(sr * 0.14);
+        let f = (2.0 * std::f32::consts::PI * fc / sr).sin();
+        let damp = 0.38 + 0.62 * tone;
         l += f * b;
         let hp = *s - l - damp * b;
         b += f * hp;
@@ -142,6 +203,8 @@ pub struct JamboxEngine {
     transport: Transport,
     bank: WaveBank,
     voices: VoicePool,
+    fm: FmSynth,
+    fm_enabled: bool,
     drums: DrumKit,
     sequencer: Sequencer,
     repeats: RepeatRack,
@@ -169,6 +232,9 @@ pub struct JamboxEngine {
     vib_mod: f32,
     vib_always: f32,
     vib_phase: f64,
+    tone_lfo_amount: f32,
+    tone_lfo_rate_hz: f32,
+    tone_lfo_phase: f64,
     bend_semis: f32,
     tone_lp: f32,
     tone_bp: f32,
@@ -191,6 +257,8 @@ impl JamboxEngine {
             transport: Transport::new(sample_rate),
             bank,
             voices: VoicePool::new(),
+            fm: FmSynth::new(),
+            fm_enabled: false,
             drums: DrumKit::new(sr),
             sequencer: Sequencer::new(),
             repeats: RepeatRack::new(),
@@ -231,6 +299,9 @@ impl JamboxEngine {
             vib_mod: 0.0,
             vib_always: 0.0,
             vib_phase: 0.0,
+            tone_lfo_amount: 0.0,
+            tone_lfo_rate_hz: tone_lfo_hz_from_unit(0.5),
+            tone_lfo_phase: 0.0,
             bend_semis: 0.0,
             tone_lp: 0.0,
             tone_bp: 0.0,
@@ -300,6 +371,7 @@ impl JamboxEngine {
         self.bus_fx = FxUnit::new(sr);
         self.bus_fx.set_params(bus);
         self.voices.silence();
+        self.fm.silence();
         self.drums.silence();
     }
 
@@ -444,7 +516,7 @@ impl JamboxEngine {
         self.status = EngineStatus {
             position: self.transport.position(),
             bpm: self.transport.bpm() as f32,
-            active_voices: self.voices.active_count() as u16,
+            active_voices: (self.voices.active_count() + self.fm.active_count()) as u16,
             active_drums: self.drums.active_count() as u16,
             active_repeats: self.repeats.active_count() as u16,
             playing_clips: self.sequencer.playing_count() as u16,
@@ -462,6 +534,8 @@ impl JamboxEngine {
             transport,
             bank,
             voices,
+            fm,
+            fm_enabled,
             drums,
             voice_fx,
             drum_fx,
@@ -480,6 +554,9 @@ impl JamboxEngine {
             vib_mod,
             vib_always,
             vib_phase,
+            tone_lfo_amount,
+            tone_lfo_rate_hz,
+            tone_lfo_phase,
             bend_semis,
             tone_lp,
             tone_bp,
@@ -501,10 +578,11 @@ impl JamboxEngine {
             vib = (*vib_phase).sin() as f32 * *vib_depth_semis * vib_amt;
         }
 
+        let pitch_mul = 2f32.powf((*bend_semis + vib) / 12.0);
         bank.rebuild_morph();
         let ctx = VoiceContext {
             sample_rate: sr,
-            pitch_mul: 2f32.powf((*bend_semis + vib) / 12.0),
+            pitch_mul,
             attack_sec: *attack_sec,
             release_sec: *release_sec,
         };
@@ -526,8 +604,30 @@ impl JamboxEngine {
             }
         }
 
+        if *fm_enabled || fm.active_count() > 0 {
+            group_buf[..n].iter_mut().for_each(|s| *s = 0.0);
+            fm.render(&mut group_buf[..n], sr, pitch_mul);
+            for i in 0..n {
+                key_bus[i] += group_buf[i];
+            }
+        }
+
         // Tone (brightness) is a keys-only resonant lowpass; drums have their own tone macro.
-        apply_tone_lowpass(&mut key_bus[..n], *tone, tone_lp, tone_bp, sr);
+        // Kaoss WAH overlays a sine on cutoff without rewriting the sticky tone knob.
+        if *tone_lfo_amount > 0.01 {
+            apply_tone_lowpass_lfo(
+                &mut key_bus[..n],
+                *tone,
+                *tone_lfo_amount,
+                *tone_lfo_rate_hz,
+                tone_lfo_phase,
+                tone_lp,
+                tone_bp,
+                sr,
+            );
+        } else {
+            apply_tone_lowpass(&mut key_bus[..n], *tone, tone_lp, tone_bp, sr);
+        }
 
         // Drums: per-model insert, then the shared kit bus.
         let mut models = [0usize; MAX_DRUM_HITS];
@@ -579,8 +679,11 @@ impl JamboxEngine {
             } => {
                 if velocity == 0 {
                     self.voices.note_off(channel, note);
+                    self.fm.note_off(channel, note);
                 } else if channel == DRUM_CHANNEL {
                     self.drums.trigger(drum_model_for_note(note), velocity);
+                } else if self.fm_enabled {
+                    self.fm.note_on(channel, note, velocity);
                 } else {
                     let group = self.bank.nearer_index();
                     self.voices.note_on(channel, note, velocity, group);
@@ -589,15 +692,18 @@ impl JamboxEngine {
             Command::NoteOff { channel, note } => {
                 if channel != DRUM_CHANNEL {
                     self.voices.note_off(channel, note);
+                    self.fm.note_off(channel, note);
                 }
             }
             Command::AllNotesOff => {
                 self.voices.all_notes_off();
+                self.fm.all_notes_off();
                 self.repeats.stop_all();
                 self.release_kaoss();
             }
             Command::Panic => {
                 self.voices.silence();
+                self.fm.silence();
                 self.drums.silence();
                 self.repeats.stop_all();
                 self.release_kaoss();
@@ -617,6 +723,11 @@ impl JamboxEngine {
                 self.bus_fx.reset();
             }
             Command::SetSynth { param, value } => self.set_synth(param, value),
+            Command::SetDrumMacro {
+                model,
+                param,
+                value,
+            } => self.set_drum_macro(model, param, value),
             Command::SetFx {
                 target,
                 param,
@@ -734,8 +845,7 @@ impl JamboxEngine {
                 root_midi,
                 octaves,
             } => {
-                self.kaoss
-                    .configure(scale_index, key, root_midi, octaves);
+                self.kaoss.configure(scale_index, key, root_midi, octaves);
             }
             Command::SetEmitMode { target, mode } => {
                 let mode = EmitMode::from_u8(mode);
@@ -827,6 +937,8 @@ impl JamboxEngine {
             SynthParam::VibratoRate => self.vib_rate_hz = 1.0 + unit * 8.0,
             SynthParam::VibratoMod => self.vib_mod = unit,
             SynthParam::VibratoAlways => self.vib_always = unit,
+            SynthParam::ToneLfoRate => self.tone_lfo_rate_hz = tone_lfo_hz_from_unit(unit),
+            SynthParam::ToneLfoAmount => self.tone_lfo_amount = unit,
             SynthParam::PitchBend => self.bend_semis = value.clamp(-24.0, 24.0),
             SynthParam::DrumPitch => {
                 macros.pitch = unit;
@@ -845,7 +957,49 @@ impl JamboxEngine {
                 self.drums.set_macros(macros);
             }
             SynthParam::DrumLevel => self.drum_level = unit,
+            SynthParam::FmEnable => {
+                let enable = value > 0.5;
+                if enable != self.fm_enabled {
+                    if enable {
+                        self.voices.all_notes_off();
+                    } else {
+                        self.fm.all_notes_off();
+                    }
+                    self.fm_enabled = enable;
+                }
+            }
+            SynthParam::FmRecipe => {
+                self.fm.set_recipe(value.round().clamp(0.0, 7.0) as usize);
+            }
+            SynthParam::FmOp => {
+                self.fm.set_selected(value.round() as usize);
+            }
+            SynthParam::FmConnect => {
+                let (from, to, amount) = crate::fm::unpack_fm_link(value);
+                self.fm.set_link(from, to, amount);
+            }
+            SynthParam::FmClear => {
+                self.fm.clear_links();
+            }
+            SynthParam::FmBright => self.fm.set_bright(unit),
+            SynthParam::FmClang => self.fm.set_clang(unit),
+            SynthParam::FmHit => self.fm.set_hit(unit),
+            SynthParam::FmTail => self.fm.set_tail(unit),
         }
+    }
+
+    fn set_drum_macro(&mut self, model: u8, param: SynthParam, value: f32) {
+        let unit = value.clamp(0.0, 1.0);
+        let model = DrumModel::from_index(model as usize);
+        let mut macros = self.drums.macros_for(model);
+        match param {
+            SynthParam::DrumPitch => macros.pitch = unit,
+            SynthParam::DrumDecay => macros.decay = unit,
+            SynthParam::DrumNoise => macros.noise = unit,
+            SynthParam::DrumTone => macros.tone = unit,
+            _ => return,
+        }
+        self.drums.set_model_macros(model, macros);
     }
 
     fn set_fx(&mut self, target: FxTarget, param: FxParam, value: f32) {
@@ -876,6 +1030,10 @@ impl JamboxEngine {
     /// Drum macros, for status / UI mirroring.
     pub fn drum_macros(&self) -> DrumMacros {
         self.drums.macros()
+    }
+
+    pub fn drum_macros_for(&self, model: DrumModel) -> DrumMacros {
+        self.drums.macros_for(model)
     }
 
     /// Clip slot mode, for status / UI mirroring.
@@ -929,6 +1087,81 @@ mod tests {
         e.render(&mut out, &cmds, &mut midi);
         assert!(peak(&out) > 0.01);
         assert_eq!(e.status().active_voices, 1);
+    }
+
+    #[test]
+    fn fm_enable_routes_keys_to_the_fm_playground() {
+        let mut e = engine();
+        apply_now(
+            &mut e,
+            Command::SetSynth {
+                param: SynthParam::FmEnable,
+                value: 1.0,
+            },
+        );
+        apply_now(
+            &mut e,
+            Command::SetSynth {
+                param: SynthParam::FmRecipe,
+                value: 0.0,
+            },
+        );
+        let mut out = vec![0.0f32; 1024];
+        let mut midi = MidiOutSink::new();
+        let cmds = [ScheduledCommand::now(Command::NoteOn {
+            channel: 0,
+            note: 72,
+            velocity: 120,
+        })];
+        e.render(&mut out, &cmds, &mut midi);
+        assert!(
+            peak(&out) > 0.01,
+            "FM playground should be audible, peak={}",
+            peak(&out)
+        );
+        assert_eq!(e.voices.active_count(), 0, "wavetable should stay quiet");
+        assert_eq!(e.fm.active_count(), 1);
+        assert_eq!(e.status().active_voices, 1);
+    }
+
+    #[test]
+    fn fm_connect_keeps_the_packed_draw_value() {
+        let mut e = engine();
+        apply_now(
+            &mut e,
+            Command::SetSynth {
+                param: SynthParam::FmEnable,
+                value: 1.0,
+            },
+        );
+        apply_now(
+            &mut e,
+            Command::SetSynth {
+                param: SynthParam::FmClear,
+                value: 1.0,
+            },
+        );
+        let packed = crate::fm::pack_fm_link(0, 3, 0.8);
+        assert!(
+            packed > 1.0,
+            "packed draw must survive the 0..1 unit clamp, got {packed}"
+        );
+        apply_now(
+            &mut e,
+            Command::SetSynth {
+                param: SynthParam::FmConnect,
+                value: packed,
+            },
+        );
+        apply_now(
+            &mut e,
+            Command::SetSynth {
+                param: SynthParam::FmOp,
+                value: 1.0,
+            },
+        );
+        assert!((e.fm.patch().matrix[0][3] - 0.8).abs() < 0.02);
+        assert_eq!(e.fm.selected(), 1);
     }
 
     #[test]
@@ -1174,7 +1407,9 @@ mod tests {
     #[test]
     fn tone_lowpass_mid_is_brighter_than_dark() {
         let sr = 44100.0_f32;
-        let src: Vec<f32> = (0..512).map(|i| if i % 2 == 0 { 1.0 } else { -1.0 }).collect();
+        let src: Vec<f32> = (0..512)
+            .map(|i| if i % 2 == 0 { 1.0 } else { -1.0 })
+            .collect();
         let mut dark = src.clone();
         let mut mid = src.clone();
         let mut lp_d = 0.0_f32;
@@ -1234,7 +1469,73 @@ mod tests {
             .zip(wet_buf.iter())
             .map(|(a, b)| (a - b).abs())
             .sum();
-        assert!(diff > 0.5, "always-on vibrato should detune vs gated-off, diff={diff}");
+        assert!(
+            diff > 0.5,
+            "always-on vibrato should detune vs gated-off, diff={diff}"
+        );
+    }
+
+    #[test]
+    fn tone_lfo_hz_is_slow_at_the_bottom_and_fast_at_the_top() {
+        assert!((tone_lfo_hz_from_unit(0.0) - TONE_LFO_HZ_MIN).abs() < 1e-5);
+        assert!((tone_lfo_hz_from_unit(1.0) - TONE_LFO_HZ_MAX).abs() < 1e-5);
+        let mid = tone_lfo_hz_from_unit(0.5);
+        assert!(mid > TONE_LFO_HZ_MIN * 1.5);
+        assert!(mid < (TONE_LFO_HZ_MIN + TONE_LFO_HZ_MAX) * 0.5);
+    }
+
+    #[test]
+    fn tone_lfo_moves_the_filter_vs_sticky_tone() {
+        let mut dry = engine();
+        let mut wet = engine();
+        for e in [&mut dry, &mut wet] {
+            apply_now(
+                e,
+                Command::SetSynth {
+                    param: SynthParam::Tone,
+                    value: 0.5,
+                },
+            );
+            apply_now(
+                e,
+                Command::NoteOn {
+                    channel: 0,
+                    note: 60,
+                    velocity: 127,
+                },
+            );
+        }
+        apply_now(
+            &mut wet,
+            Command::SetSynth {
+                param: SynthParam::ToneLfoRate,
+                value: 1.0,
+            },
+        );
+        apply_now(
+            &mut wet,
+            Command::SetSynth {
+                param: SynthParam::ToneLfoAmount,
+                value: 1.0,
+            },
+        );
+        let mut dry_buf = vec![0.0f32; 2048];
+        let mut wet_buf = vec![0.0f32; 2048];
+        let mut midi = MidiOutSink::new();
+        // Let envelopes match, then compare a block where the LFO has moved.
+        dry.render(&mut dry_buf, &[], &mut midi);
+        wet.render(&mut wet_buf, &[], &mut midi);
+        dry.render(&mut dry_buf, &[], &mut midi);
+        wet.render(&mut wet_buf, &[], &mut midi);
+        let diff: f32 = dry_buf
+            .iter()
+            .zip(wet_buf.iter())
+            .map(|(a, b)| (a - b).abs())
+            .sum();
+        assert!(
+            diff > 0.5,
+            "tone LFO should wah the filter vs sticky tone, diff={diff}"
+        );
     }
 
     #[test]
@@ -1397,5 +1698,31 @@ mod tests {
             &mut midi,
         );
         assert_eq!(e.status().active_repeats, 0);
+    }
+
+    #[test]
+    fn drum_macro_command_is_per_model() {
+        let mut e = engine();
+        apply_now(
+            &mut e,
+            Command::SetDrumMacro {
+                model: DrumModel::Kick.index() as u8,
+                param: SynthParam::DrumPitch,
+                value: 1.0,
+            },
+        );
+        assert!((e.drum_macros_for(DrumModel::Kick).pitch - 1.0).abs() < 1e-6);
+        assert!(
+            (e.drum_macros_for(DrumModel::Snare).pitch - DrumMacros::default().pitch).abs() < 1e-6
+        );
+        apply_now(
+            &mut e,
+            Command::SetSynth {
+                param: SynthParam::DrumPitch,
+                value: 0.1,
+            },
+        );
+        assert!((e.drum_macros_for(DrumModel::Kick).pitch - 0.1).abs() < 1e-6);
+        assert!((e.drum_macros_for(DrumModel::Snare).pitch - 0.1).abs() < 1e-6);
     }
 }
