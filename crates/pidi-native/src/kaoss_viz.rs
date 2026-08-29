@@ -231,19 +231,20 @@ pub fn cell_excit_target(
     e
 }
 
-/// Strongest finger proximity at a pad cell, plus that finger's X (for hue pull).
-pub fn strongest_finger_glow(lx: f32, ly: f32, fingers: &[(f32, f32)]) -> (f32, f32) {
-    let mut best_g = 0.0_f32;
-    let mut best_fx = 0.5_f32;
+/// Per-cell hue proximity and blended finger X (weighted — no winner-take-all flip).
+pub fn finger_hue_pull(lx: f32, ly: f32, fingers: &[(f32, f32)]) -> (f32, f32) {
+    let mut sum_g = 0.0_f32;
+    let mut sum_fx_g = 0.0_f32;
     for &(fx, fy) in fingers {
         let dist = ((lx - fx).hypot(ly - fy)).abs();
         let g = (1.0 - dist / 0.40).max(0.0).powf(1.45);
-        if g >= best_g {
-            best_g = g;
-            best_fx = fx;
-        }
+        sum_g += g;
+        sum_fx_g += fx * g;
     }
-    (best_g, best_fx)
+    if sum_g < 1e-4 {
+        return (0.0, 0.5);
+    }
+    (sum_g.min(1.0), sum_fx_g / sum_g)
 }
 
 /// Soft HSV for a radial sample: `fall` 0 = edge, 1 = core.
@@ -441,7 +442,7 @@ pub fn pad_led_rgb(
     let lx = col as f32 / (cols - 1) as f32;
     let ly = row as f32 / (rows - 1) as f32;
     let mut hue = (lx * 0.70 + hue_shift + t * 0.035).rem_euclid(1.0);
-    let (hue_glow, fx) = strongest_finger_glow(lx, ly, fingers);
+    let (hue_glow, fx) = finger_hue_pull(lx, ly, fingers);
     let sat = (0.55 + hue_glow * 0.45).min(1.0);
     if hue_glow > 0.0 {
         hue = (hue * (1.0 - hue_glow * 0.55) + (fx * 0.70 + hue_shift) * hue_glow).rem_euclid(1.0);
@@ -612,6 +613,19 @@ mod tests {
         assert!(
             drift < 0.12,
             "trail excit should brighten without hue thrash (drift={drift})"
+        );
+    }
+
+    #[test]
+    fn finger_hue_pull_blends_two_fingers_without_flip() {
+        let a = finger_hue_pull(0.5, 0.5, &[(0.2, 0.5), (0.8, 0.5)]);
+        let nudge = finger_hue_pull(0.5, 0.5, &[(0.21, 0.5), (0.79, 0.5)]);
+        assert!(a.0 > 0.2, "midpoint should feel both fingers");
+        assert!(
+            (a.1 - nudge.1).abs() < 0.05,
+            "blended fx should stay stable when fingers nudge, got {} vs {}",
+            a.1,
+            nudge.1
         );
     }
 
