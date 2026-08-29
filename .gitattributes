@@ -1,7 +1,3 @@
-*.sh text eol=lf
-*.py text eol=lf
-
-# Treat staged Pi engines as binary so git never diffs them as text.
-dist/armv7/midi-engine binary
-dist/armv7/jambox-engine binary
-dist/armv7/* linguist-vendored
+# Keep deploy shell scripts LF so WSL/bash does not choke on CRLF.
+deploy/*.sh text eol=lf
+deploy/Dockerfile.pi-bins text eol=lf

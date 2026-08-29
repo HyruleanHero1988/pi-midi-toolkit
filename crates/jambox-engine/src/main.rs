@@ -178,6 +178,8 @@ fn run(
     // RT hints before the stream so the callback thread inherits the policy.
     rt::apply_rt_hints(rt);
 
+    let audio_health = Arc::new(audio::AudioHealth::new());
+
     if null_audio {
         let running = running.clone();
         std::thread::spawn(move || {
@@ -190,8 +192,16 @@ fn run(
             );
         });
     } else {
-        // Reopens after cable unplug / ALSA death; does not kill the control socket.
-        audio::spawn_output(output, audio_side, bank, buffer_frames, running.clone());
+        // Reopens after cable unplug / ALSA death / IPC audio_reopen; does not
+        // kill the control socket.
+        audio::spawn_output(
+            output,
+            audio_side,
+            bank,
+            buffer_frames,
+            Arc::clone(&audio_health),
+            running.clone(),
+        );
     }
 
     midi::spawn_input(
@@ -217,6 +227,7 @@ fn run(
     };
 
     let ipc_running = running.clone();
+    let ipc_health = Arc::clone(&audio_health);
     let ipc_thread = std::thread::spawn(move || {
         ipc::serve(
             endpoint,
@@ -224,6 +235,7 @@ fn run(
             hub,
             midi_map,
             midi_in_bus,
+            ipc_health,
             ipc_running,
         );
     });

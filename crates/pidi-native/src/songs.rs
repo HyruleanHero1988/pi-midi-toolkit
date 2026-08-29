@@ -11,10 +11,7 @@ use crate::seq::SEQ_CLIP_SLOT;
 pub const SONG_CLIP_SLOT: u8 = SEQ_CLIP_SLOT;
 
 pub fn songs_dir_from_env() -> PathBuf {
-    if let Ok(p) = std::env::var("PIDI_SONGS_DIR") {
-        return PathBuf::from(p);
-    }
-    PathBuf::from("songs")
+    crate::paths::songs_dir()
 }
 
 pub fn list_songs(dir: &Path) -> Vec<PathBuf> {

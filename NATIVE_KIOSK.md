@@ -24,16 +24,36 @@ runtime.
 | Nav shell / HOME | Top chrome (PiDI / HOME / POWER / jam tabs); Home 3×3 `HOME_TILES` |
 | PADS | Launch/stop from `phrases/pad-XX.json`; PLAY/EDIT; REC/TRIG/MODE/CLEAR; SEQ→PAD; OUT cycle |
 | SYNTH | Morph A/B wave pick, tone/level/atk/rel, vibrato, scope, kit macros, C4–B4 keys, **SAVE AS** (bake morph→`user-wavetables/` + `.fx.json`); Settings **FLANGE** insert on voice/bus |
-| SEQ | Backbone REC → engine loop clip; KEEP/DROP/UNDO; len×2/÷2/EXTEND; →PAD; PLAY/STOP/CLEAR/BPM. Armed REC also captures SYNTH keys, drums, CHORDS, and incoming MIDI. |
+| SEQ | Backbone REC → engine loop clip; KEEP/DROP/UNDO; len×2/÷2/EXTEND; →PAD; PLAY/STOP/CLEAR/BPM. Top-chrome **REC/STOP** arms recording from any mode. Armed REC also captures SYNTH keys, drums, CHORDS, KAOSS notes, and incoming MIDI. First take auto-trims leading/trailing dead air (Tk parity). |
 | CHORDS | Omnichord-style circle-of-fifths buttons (MAJ/min/7 + combos), **strumplate**, 8-slot **palette**, **CHANGES** (named progressions in the chosen key), LOCAL/USB/BOTH. Block chords (buttons/palette) and harp strums record into SEQ / pad REC while those are armed. |
 | SONGS | List `songs/*.mid`, SMF→clip PLAY/STOP/LOOP, SAVE SEQ, OUT cycle |
 | PRESETS | 8 slots save/load synth params to `user-presets/` |
 | MAP | Thru status; THRU ON / OFF / REFRESH PORTS → `midi-engine` (Linux appliance; Windows host explains Pi-only) |
-| SETTINGS | Panic, all-notes-off, bus/voice/drum-group FX; **WIFI** (`nmcli` / `.wifi-credentials`); **UPDATE** (`updater.py --check` or git) |
+| FX | BUS / VOICE / DRUMS target; DRIVE / DELAY / REVERB / **FLANGE** (bus = global wet; voice mirrors SYNTH FLANGE) |
+| SETTINGS | Appliance hub: Panic, notes-off, **AUDIO**, **WIFI**, **UPDATE**, FONT, LOG, MAP |
 | LOG | Engine counters + recent action lines |
 | Session | Autosave `settings.json` (synth/kaoss/tempo/OUT prefs) |
 
 ## Appliance-oriented hooks
+
+## User data (do not wipe)
+
+All user-editable appliance content lives under one XDG-style root:
+
+```text
+${PIDI_DATA_ROOT:-${XDG_DATA_HOME:-$HOME/.local/share}/pidi}/
+  settings.json
+  songs/
+  phrases/              # pad-01.json …
+  user-presets/
+  user-wavetables/      # SAVE AS + .fx.json
+  .wifi-credentials
+  takes/
+```
+
+Code, factory wavetables, and engines stay in `PIDI_REPO_ROOT` (the git tree).
+SET→UPDATE must never touch the data root. Migrate an existing lab box with
+`./deploy/migrate-user-data.sh`.
 
 Map, WIFI, and UPDATE call host tools when present (`midi-engine`, `nmcli`,
 `python3 apps/pidi/pidi/updater.py`). On a Windows host they report that those
