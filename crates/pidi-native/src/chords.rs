@@ -6,9 +6,9 @@
 //! - same-root and neighbour combos for M7, m7, dim, aug, sus4, add9
 //! - a vertical **strumplate** of about two octaves of the selected chord
 //!
-//! The 8-slot **palette** is a harmonic palette: tap to play a stored chord as a
-//! block, or load a named set of **changes** (common progressions) in the
-//! current key.
+//! The 8-slot **palette** is a harmonic palette: press a stored chord to play it
+//! as a block (MOM releases on lift; HOLD latches), or load a named set of
+//! **changes** (common progressions) in the current key.
 
 use std::fmt;
 
