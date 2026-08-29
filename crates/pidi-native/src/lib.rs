@@ -17,6 +17,7 @@ pub mod layout;
 pub mod mode;
 pub mod chords;
 pub mod model;
+pub mod paths;
 pub mod phrases;
 pub mod presets;
 pub mod render;
@@ -28,6 +29,7 @@ pub mod session;
 pub mod songs;
 pub mod voice_bake;
 pub mod waves;
+pub mod wifi;
 #[cfg(feature = "sdl")]
 pub mod sdl_backend;
 

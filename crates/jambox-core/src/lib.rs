@@ -31,8 +31,8 @@ pub use command::{
     Command, EmitMode, FxParam, FxTarget, ScheduledCommand, SynthParam, MAX_BLOCK_COMMANDS,
 };
 pub use drums::{
-    drum_model_for_note, DrumKit, DrumMacros, DrumModel, DRUM_MODEL_COUNT, DRUM_PREVIEW_SAMPLES,
-    DRUM_PREVIEW_SEC, DRUM_PREVIEW_SR,
+    drum_model_for_note, preview_drum, DrumKit, DrumMacros, DrumModel, DRUM_MODEL_COUNT,
+    DRUM_PREVIEW_SAMPLES, DRUM_PREVIEW_SEC, DRUM_PREVIEW_SR,
 };
 pub use engine::{
     tone_lfo_hz_from_unit, EngineStatus, JamboxEngine, MidiOutSink, MAX_MIDI_OUT, MAX_RENDER_BLOCK,

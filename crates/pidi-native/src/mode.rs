@@ -12,13 +12,14 @@ pub enum UiMode {
     Chords,
     Songs,
     Presets,
+    Fx,
     Map,
     Log,
     Settings,
 }
 
 impl UiMode {
-    pub const ALL: [UiMode; 13] = [
+    pub const ALL: [UiMode; 14] = [
         UiMode::Home,
         UiMode::Synth,
         UiMode::Fm,
@@ -29,6 +30,7 @@ impl UiMode {
         UiMode::Chords,
         UiMode::Songs,
         UiMode::Presets,
+        UiMode::Fx,
         UiMode::Map,
         UiMode::Log,
         UiMode::Settings,
@@ -46,6 +48,7 @@ impl UiMode {
             Self::Chords => "CHD",
             Self::Songs => "SNG",
             Self::Presets => "PRE",
+            Self::Fx => "FX",
             Self::Map => "MAP",
             Self::Log => "LOG",
             Self::Settings => "SET",
@@ -64,6 +67,7 @@ impl UiMode {
             Self::Chords => "CHORDS",
             Self::Songs => "SONGS",
             Self::Presets => "PRESETS",
+            Self::Fx => "FX",
             Self::Map => "MAP",
             Self::Log => "LOG",
             Self::Settings => "SETTINGS",

@@ -261,6 +261,7 @@ pub struct NativeModel {
     pub chords_out: OutMode,
     pub chords_hold: bool,
     pub chords_key: u8,
+    /// Block chords + strumplate octave (−2..+2; 0 = C3 factory).
     pub chords_octave: i8,
     pub chords_arm: bool,
     pub chords_current: Option<ChordSpec>,
@@ -271,6 +272,28 @@ pub struct NativeModel {
     chords_strum_note: Option<u8>,
     pub font_style: FontStyle,
     pub power_menu_open: bool,
+    /// SET → UPDATE submenu (Tk-style: local build, CHECK, then INSTALL).
+    pub update_panel_open: bool,
+    pub update_status: String,
+    pub update_busy: bool,
+    pub update_available: bool,
+    pub update_confirming: bool,
+    update_job: Option<std::sync::mpsc::Receiver<host::UpdateCheckResult>>,
+    update_job_kind: Option<host::UpdateJobKind>,
+    /// SET → WIFI scan/join panel.
+    pub wifi_panel_open: bool,
+    pub wifi_busy: bool,
+    pub wifi_status: String,
+    pub wifi_networks: Vec<crate::wifi::WifiNetwork>,
+    pub wifi_scroll: usize,
+    wifi_job: Option<std::sync::mpsc::Receiver<host::WifiJobResult>>,
+    /// Password keyboard overlay (SSID being joined).
+    pub wifi_kb_open: bool,
+    pub wifi_kb_ssid: String,
+    pub wifi_kb_text: String,
+    pub wifi_kb_shift: bool,
+    pub wifi_kb_sym: bool,
+    pub wifi_kb_show: bool,
     mode_before_power: UiMode,
     pub screensaver: screensaver::IdleWatch,
     panel_backlight: screensaver::PanelBacklight,
@@ -298,6 +321,8 @@ pub struct NativeModel {
     kaoss_trail: Vec<(f32, f32, f32)>,
     /// Ripples `(x, y, age)` with age 0 = fresh → 1 = gone.
     kaoss_ripples: Vec<(f32, f32, f32)>,
+    /// Per-cell touch envelope (CELLS viz) — fades in fast, out slow.
+    cell_amp: [[f32; LED_COLS]; LED_ROWS],
     fingers: [Finger; MAX_FINGERS],
     next_gesture: u32,
     cells: [[u32; LED_COLS]; LED_ROWS],
@@ -317,7 +342,7 @@ impl Default for NativeModel {
 impl NativeModel {
     pub fn new() -> Self {
         let fm_patch = jambox_core::fm_recipe_patch(0);
-        Self {
+        let out = Self {
             layout: Layout::new(),
             mode: UiMode::Kaoss,
             drum_repeat: [RepeatDivisionChoice::Off; DRUM_MODEL_COUNT],
@@ -424,6 +449,25 @@ impl NativeModel {
             chords_strum_note: None,
             font_style: FontStyle::Retro,
             power_menu_open: false,
+            update_panel_open: false,
+            update_status: String::new(),
+            update_busy: false,
+            update_available: false,
+            update_confirming: false,
+            update_job: None,
+            update_job_kind: None,
+            wifi_panel_open: false,
+            wifi_busy: false,
+            wifi_status: String::new(),
+            wifi_networks: Vec::new(),
+            wifi_scroll: 0,
+            wifi_job: None,
+            wifi_kb_open: false,
+            wifi_kb_ssid: String::new(),
+            wifi_kb_text: String::new(),
+            wifi_kb_shift: false,
+            wifi_kb_sym: false,
+            wifi_kb_show: false,
             mode_before_power: UiMode::Kaoss,
             screensaver: screensaver::IdleWatch::new(screensaver::timeout_from_env()),
             panel_backlight: screensaver::PanelBacklight::new(),
@@ -443,6 +487,7 @@ impl NativeModel {
             kaoss_viz_time: 0.0,
             kaoss_trail: Vec::new(),
             kaoss_ripples: Vec::new(),
+            cell_amp: [[0.0; LED_COLS]; LED_ROWS],
             fingers: [Finger::silent(); MAX_FINGERS],
             next_gesture: 1,
             cells: [[0; LED_COLS]; LED_ROWS],
@@ -450,7 +495,10 @@ impl NativeModel {
             session_loaded: false,
             host_rx: None,
             host_busy: None,
-        }
+        };
+        // Ensure ~/.local/share/pidi/{songs,phrases,…} exist on first boot.
+        let _ = crate::paths::data_root();
+        out
     }
 
     pub fn ensure_library_loaded(&mut self) {
@@ -539,6 +587,15 @@ impl NativeModel {
 
     pub fn set_mode(&mut self, mode: UiMode) {
         self.power_menu_open = false;
+        self.update_panel_open = false;
+        self.update_job = None;
+        self.update_job_kind = None;
+        self.update_busy = false;
+        self.update_confirming = false;
+        self.wifi_panel_open = false;
+        self.wifi_kb_open = false;
+        self.wifi_job = None;
+        self.wifi_busy = false;
         self.mode = mode;
         self.status_line.clear();
         self.kaoss_picker = None;
@@ -553,6 +610,9 @@ impl NativeModel {
         self.kit_repeat_open = false;
         self.chords_overlay = None;
         self.chords_arm = false;
+        if mode == UiMode::Drums {
+            self.kit_wave_dirty = true;
+        }
         if mode != UiMode::Kaoss && self.kaoss_full {
             self.kaoss_full = false;
             self.kaoss_full_exit_since = None;
@@ -602,6 +662,7 @@ impl NativeModel {
                 | UiMode::Chords
                 | UiMode::Songs
                 | UiMode::Presets
+                | UiMode::Fx
                 | UiMode::Log
                 | UiMode::Settings
         )
@@ -631,6 +692,15 @@ impl NativeModel {
     fn overlay_nav_target(&self) -> Option<&'static str> {
         if self.power_menu_open {
             return Some("power");
+        }
+        if self.update_panel_open {
+            return Some("update");
+        }
+        if self.wifi_kb_open {
+            return Some("wifi_kb");
+        }
+        if self.wifi_panel_open {
+            return Some("wifi");
         }
         if self.kaoss_color_picker_open {
             return Some("kaoss_color");
@@ -717,6 +787,9 @@ impl NativeModel {
         }
         match self.overlay_nav_target() {
             Some("power") => self.close_power_menu(true),
+            Some("update") => self.close_update_panel(),
+            Some("wifi_kb") => self.close_wifi_keyboard(),
+            Some("wifi") => self.close_wifi_panel(),
             Some("kaoss_color") => self.close_kaoss_color_picker(),
             Some("kaoss_settings") => self.close_kaoss_settings(),
             Some("kaoss_picker") => self.kaoss_picker = None,
@@ -760,6 +833,7 @@ impl NativeModel {
             "chd" | "chords" => UiMode::Chords,
             "sng" | "songs" => UiMode::Songs,
             "pre" | "presets" => UiMode::Presets,
+            "fx" => UiMode::Fx,
             "map" => UiMode::Map,
             "log" => UiMode::Log,
             "set" | "settings" => UiMode::Settings,
@@ -799,6 +873,28 @@ impl NativeModel {
             }
         }
         n
+    }
+
+    /// Peak GLOW envelope across all finger blooms (wash / tests).
+    pub fn kaoss_glow_amp(&self) -> f32 {
+        self.kaoss_glow
+            .iter()
+            .map(|g| g.amp)
+            .fold(0.0_f32, f32::max)
+    }
+
+    /// Pad X for the note currently sounding (live finger or HOLD latch).
+    pub fn kaoss_sounding_x(&self) -> Option<f32> {
+        if !kaoss_ui::program(self.kaoss_program).note {
+            return None;
+        }
+        if let Some((x, _)) = self.kaoss_finger() {
+            return Some(x);
+        }
+        if self.kaoss_hold_gesture.is_some() || (self.kaoss_hold && self.kaoss_gate_on) {
+            return Some(self.kaoss_latched_xy.0);
+        }
+        None
     }
 
     pub fn kaoss_viz_time(&self) -> f32 {
@@ -874,6 +970,8 @@ impl NativeModel {
         self.tick_kaoss_gate(outbox);
         self.tick_screensaver(dt);
         self.poll_host_job();
+        self.poll_update_job();
+        self.poll_wifi_job();
         if self.mode == UiMode::Drums && self.kit_edit_open && self.kit_wave_dirty {
             self.rebuild_kit_wave();
         }
@@ -953,6 +1051,11 @@ impl NativeModel {
         self.kaoss_color_picker_open = false;
         self.synth_vib_open = false;
         self.synth_pick_a = None;
+        self.update_panel_open = false;
+        self.update_job = None;
+        self.wifi_panel_open = false;
+        self.wifi_kb_open = false;
+        self.wifi_job = None;
         self.power_menu_open = true;
         self.status_line = "power menu".into();
         self.mark_dirty();
@@ -969,12 +1072,376 @@ impl NativeModel {
         self.mark_dirty();
     }
 
+    fn open_update_panel(&mut self) {
+        self.power_menu_open = false;
+        self.wifi_panel_open = false;
+        self.wifi_kb_open = false;
+        self.wifi_job = None;
+        self.update_panel_open = true;
+        self.update_busy = false;
+        self.update_available = false;
+        self.update_confirming = false;
+        self.update_job = None;
+        self.update_job_kind = None;
+        // Local stamp only — never blocks on network.
+        self.update_status = format!(
+            "{}\n\nRemote: —\nTap CHECK to look at GitHub master.",
+            host::update_local_status()
+        );
+        self.status_line = "Update".into();
+        self.mark_dirty();
+    }
+
+    fn close_update_panel(&mut self) {
+        if !self.update_panel_open {
+            return;
+        }
+        self.update_panel_open = false;
+        self.update_busy = false;
+        self.update_confirming = false;
+        self.update_job = None;
+        self.update_job_kind = None;
+        self.status_line.clear();
+        self.mark_dirty();
+    }
+
+    fn open_wifi_panel(&mut self) {
+        self.power_menu_open = false;
+        self.update_panel_open = false;
+        self.wifi_kb_open = false;
+        self.wifi_panel_open = true;
+        self.wifi_busy = false;
+        self.wifi_job = None;
+        self.wifi_scroll = 0;
+        self.wifi_status = "Tap SCAN to list networks, or REJOIN saved credentials.".into();
+        self.status_line = "Wi-Fi".into();
+        self.mark_dirty();
+        if self.wifi_networks.is_empty() {
+            self.start_wifi_scan();
+        }
+    }
+
+    fn close_wifi_panel(&mut self) {
+        self.close_wifi_keyboard();
+        if !self.wifi_panel_open {
+            return;
+        }
+        self.wifi_panel_open = false;
+        self.wifi_busy = false;
+        self.wifi_job = None;
+        self.status_line.clear();
+        self.mark_dirty();
+    }
+
+    fn start_wifi_scan(&mut self) {
+        if self.wifi_busy {
+            return;
+        }
+        self.wifi_busy = true;
+        self.wifi_status = "Scanning…".into();
+        self.wifi_job = Some(host::spawn_wifi_job(host::WifiJobKind::Scan));
+        self.status_line = "SCAN…".into();
+        self.mark_dirty();
+    }
+
+    fn start_wifi_rejoin(&mut self) {
+        if self.wifi_busy {
+            return;
+        }
+        self.wifi_busy = true;
+        self.wifi_status = "Rejoining…".into();
+        self.wifi_job = Some(host::spawn_wifi_job(host::WifiJobKind::Rejoin));
+        self.status_line = "REJOIN…".into();
+        self.mark_dirty();
+    }
+
+    fn start_wifi_join(&mut self, ssid: String, password: String) {
+        if self.wifi_busy {
+            return;
+        }
+        self.wifi_busy = true;
+        self.wifi_status = format!("Joining {ssid}…");
+        self.wifi_job = Some(host::spawn_wifi_job(host::WifiJobKind::Join {
+            ssid,
+            password,
+        }));
+        self.status_line = "JOIN…".into();
+        self.mark_dirty();
+    }
+
+    fn open_wifi_keyboard(&mut self, ssid: String) {
+        self.wifi_kb_open = true;
+        self.wifi_kb_ssid = ssid;
+        self.wifi_kb_text.clear();
+        self.wifi_kb_shift = false;
+        self.wifi_kb_sym = false;
+        self.wifi_kb_show = false;
+        self.wifi_status = format!("Enter password for {}", self.wifi_kb_ssid);
+        self.mark_dirty();
+    }
+
+    fn close_wifi_keyboard(&mut self) {
+        if !self.wifi_kb_open {
+            return;
+        }
+        self.wifi_kb_open = false;
+        self.wifi_kb_ssid.clear();
+        self.wifi_kb_text.clear();
+        self.wifi_kb_shift = false;
+        self.wifi_kb_sym = false;
+        self.wifi_kb_show = false;
+        self.mark_dirty();
+    }
+
+    fn wifi_scroll_by(&mut self, delta: i32) {
+        let max_scroll = self
+            .wifi_networks
+            .len()
+            .saturating_sub(crate::wifi::LIST_VISIBLE);
+        let next = (self.wifi_scroll as i32 + delta).clamp(0, max_scroll as i32);
+        self.wifi_scroll = next as usize;
+        self.mark_dirty();
+    }
+
+    fn wifi_select_row(&mut self, row: usize) {
+        if self.wifi_busy {
+            return;
+        }
+        let idx = self.wifi_scroll + row;
+        let Some(net) = self.wifi_networks.get(idx).cloned() else {
+            return;
+        };
+        if net.is_open() {
+            self.start_wifi_join(net.ssid, String::new());
+        } else {
+            self.open_wifi_keyboard(net.ssid);
+        }
+    }
+
+    fn handle_wifi_kb_key(&mut self, row: usize, col: usize) {
+        let rows = if self.wifi_kb_sym {
+            crate::wifi::keyboard_sym_rows()
+        } else {
+            crate::wifi::keyboard_abc_rows(self.wifi_kb_shift)
+        };
+        let Some(r) = rows.get(row) else {
+            return;
+        };
+        let Some((_label, action, _span)) = r.get(col) else {
+            return;
+        };
+        match *action {
+            "pad" => {}
+            "shift" => {
+                self.wifi_kb_shift = !self.wifi_kb_shift;
+            }
+            "sym" => {
+                self.wifi_kb_sym = true;
+                self.wifi_kb_shift = false;
+            }
+            "abc" => {
+                self.wifi_kb_sym = false;
+            }
+            "back" => {
+                self.wifi_kb_text.pop();
+            }
+            "space" => {
+                self.wifi_kb_text.push(' ');
+            }
+            "ok" => {
+                let ssid = self.wifi_kb_ssid.clone();
+                let pass = self.wifi_kb_text.clone();
+                self.close_wifi_keyboard();
+                self.start_wifi_join(ssid, pass);
+                return;
+            }
+            ch => {
+                self.wifi_kb_text.push_str(ch);
+                if self.wifi_kb_shift && !self.wifi_kb_sym {
+                    self.wifi_kb_shift = false;
+                }
+            }
+        }
+        self.mark_dirty();
+    }
+
+    fn poll_wifi_job(&mut self) {
+        let Some(rx) = self.wifi_job.as_ref() else {
+            return;
+        };
+        let Ok(result) = rx.try_recv() else {
+            return;
+        };
+        self.wifi_job = None;
+        self.wifi_busy = false;
+        match result {
+            host::WifiJobResult::Scan { networks, error } => {
+                self.wifi_networks = networks;
+                self.wifi_scroll = 0;
+                if error.is_empty() {
+                    self.wifi_status = format!("{} networks", self.wifi_networks.len());
+                    self.status_line = "scan ok".into();
+                } else {
+                    self.wifi_status = error.clone();
+                    self.status_line = "scan fail".into();
+                    self.push_log(error);
+                }
+            }
+            host::WifiJobResult::Rejoin { ok, detail, lines } => {
+                for line in lines {
+                    self.push_log(line);
+                }
+                self.wifi_status = detail.clone();
+                self.status_line = if ok {
+                    format!("WIFI OK {detail}")
+                } else {
+                    format!("WIFI {detail}")
+                };
+            }
+            host::WifiJobResult::Join { ok, detail, ssid } => {
+                self.push_log(detail.clone());
+                self.wifi_status = detail.clone();
+                self.status_line = if ok {
+                    format!("joined {ssid}")
+                } else {
+                    format!("join fail")
+                };
+                if ok {
+                    self.close_wifi_keyboard();
+                }
+            }
+        }
+        self.mark_dirty();
+    }
+
+    fn start_update_check(&mut self) {
+        if self.update_busy {
+            return;
+        }
+        if self.update_confirming {
+            self.update_confirming = false;
+            self.update_status = format!(
+                "{}\n\nConfirm cancelled.",
+                host::update_local_status()
+            );
+            self.mark_dirty();
+            return;
+        }
+        self.update_busy = true;
+        self.update_confirming = false;
+        self.update_status = format!(
+            "{}\n\nChecking GitHub for the latest master…",
+            host::update_local_status()
+        );
+        self.update_job_kind = Some(host::UpdateJobKind::Check);
+        self.update_job = Some(host::spawn_update_job(host::UpdateJobKind::Check));
+        self.status_line = "CHECK…".into();
+        self.mark_dirty();
+    }
+
+    fn start_update_apply(&mut self) {
+        if self.update_busy {
+            return;
+        }
+        if !self.update_confirming {
+            if !self.update_available {
+                // No prior CHECK, or already up to date — run CHECK first.
+                self.update_busy = true;
+                self.update_status = format!(
+                    "{}\n\nChecking before install…",
+                    host::update_local_status()
+                );
+                self.update_job_kind = Some(host::UpdateJobKind::Check);
+                self.update_job = Some(host::spawn_update_job(host::UpdateJobKind::Check));
+                // When check returns available, arm confirm (see poll_update_job).
+                self.status_line = "CHECK…".into();
+                self.mark_dirty();
+                return;
+            }
+            self.update_confirming = true;
+            self.update_status = format!(
+                "{}\n\nThis deploys new code from GitHub, then restarts.\n\
+                 Phrases, songs, presets, and settings.json are kept.\n\
+                 Tap INSTALL NOW to continue, or CANCEL (CHECK).",
+                host::update_local_status()
+            );
+            self.status_line = "confirm install".into();
+            self.mark_dirty();
+            return;
+        }
+        self.update_confirming = false;
+        self.update_busy = true;
+        self.update_status = "Starting install…\n(UI stays responsive; engines restart when done.)".into();
+        self.update_job_kind = Some(host::UpdateJobKind::Apply);
+        self.update_job = Some(host::spawn_update_job(host::UpdateJobKind::Apply));
+        self.status_line = "INSTALL…".into();
+        self.mark_dirty();
+    }
+
+    fn poll_update_job(&mut self) {
+        let Some(rx) = self.update_job.as_ref() else {
+            return;
+        };
+        let Ok(result) = rx.try_recv() else {
+            return;
+        };
+        let kind = self.update_job_kind.take();
+        self.update_job = None;
+        self.update_busy = false;
+        for line in &result.lines {
+            self.push_log(line.clone());
+        }
+        match kind {
+            Some(host::UpdateJobKind::Check) => {
+                self.update_available = result.available;
+                let local = host::update_local_status();
+                if result.available && self.update_status.contains("Checking before install") {
+                    self.update_confirming = true;
+                    self.update_status = format!(
+                        "{}\n\n{}\n\nTap INSTALL NOW to continue, or CANCEL (CHECK).",
+                        local, result.status
+                    );
+                    self.status_line = "confirm install".into();
+                } else {
+                    self.update_confirming = false;
+                    let remote = if result.available {
+                        format!("{}\nUPDATE available.", result.status)
+                    } else {
+                        result.status.clone()
+                    };
+                    self.update_status = format!("{local}\n\n{remote}");
+                    self.status_line = if result.available {
+                        "UPDATE ready".into()
+                    } else if result.ok {
+                        "up to date".into()
+                    } else {
+                        "CHECK failed".into()
+                    };
+                }
+            }
+            Some(host::UpdateJobKind::Apply) => {
+                self.update_available = false;
+                self.update_confirming = false;
+                self.update_status = result.status.clone();
+                self.status_line = if result.ok {
+                    "installed".into()
+                } else {
+                    "INSTALL failed".into()
+                };
+            }
+            None => {}
+        }
+        self.mark_dirty();
+    }
+
     fn show_screensaver(&mut self) {
         if !self.screensaver.activate() {
             return;
         }
         self.panel_backlight.dim();
         self.close_power_menu(false);
+        self.close_update_panel();
+        self.close_wifi_panel();
         self.mark_dirty();
     }
 
@@ -1033,7 +1500,14 @@ impl NativeModel {
         self.kaoss_hold = s.kaoss_hold;
         self.kaoss_show_all = s.kaoss_show_all;
         self.kaoss_channel = s.kaoss_channel & 0x0f;
-        self.fx_bus = [s.fx_bus[0], s.fx_bus[1], s.fx_bus[2], s.fx_flanger];
+        self.fx_bus = [
+            s.fx_bus[0],
+            s.fx_bus[1],
+            s.fx_bus[2],
+            s.fx_bus_flanger.clamp(0.0, 1.0),
+        ];
+        // Voice flange (SYNTH / FX→VOICE); bus flange is independent global wet.
+        self.fx_voice[3] = s.fx_flanger.clamp(0.0, 1.0);
         self.pads_out = s.pads_out;
         self.song_out = s.song_out;
         self.kaoss_out = s.kaoss_out;
@@ -1075,6 +1549,7 @@ impl NativeModel {
         {
             outbox.fx_bus(name, self.fx_bus[i]);
         }
+        self.push_voice_fx("flanger_mix", self.fx_voice[3], outbox);
         self.sync_wave_bank();
         self.push_kaoss_scale(outbox);
         if !s.mode.is_empty() {
@@ -1105,7 +1580,8 @@ impl NativeModel {
             kaoss_gate: self.kaoss_gate,
             kaoss_hold: self.kaoss_hold,
             fx_bus: [self.fx_bus[0], self.fx_bus[1], self.fx_bus[2]],
-            fx_flanger: self.fx_bus[3],
+            fx_flanger: self.fx_voice[3],
+            fx_bus_flanger: self.fx_bus[3],
             kaoss_show_all: self.kaoss_show_all,
             kaoss_channel: self.kaoss_channel,
             vibrato_always: self.vibrato_always,
@@ -1254,13 +1730,45 @@ impl NativeModel {
             let base = self.layout.hit(self.mode, px, py);
             if matches!(
                 base,
-                Hit::Nav(_) | Hit::NavBack | Hit::Power | Hit::HomeTile(_)
+                Hit::Nav(_) | Hit::NavBack | Hit::Power | Hit::HomeTile(_) | Hit::SeqRec
             ) {
                 base
             } else {
                 self.layout.hit_power_menu(px, py)
             }
-        } else if self.mode == UiMode::Synth && (self.synth_pick_a.is_some() || self.synth_vib_open)
+        } else if self.update_panel_open {
+            let base = self.layout.hit(self.mode, px, py);
+            if matches!(
+                base,
+                Hit::Nav(_) | Hit::NavBack | Hit::Power | Hit::HomeTile(_) | Hit::SeqRec
+            ) {
+                base
+            } else {
+                self.layout.hit_update_panel(px, py)
+            }
+        } else if self.wifi_kb_open {
+            let base = self.layout.hit(self.mode, px, py);
+            if matches!(
+                base,
+                Hit::Nav(_) | Hit::NavBack | Hit::Power | Hit::HomeTile(_) | Hit::SeqRec
+            ) {
+                base
+            } else {
+                self.layout
+                    .hit_wifi_keyboard(px, py, self.wifi_kb_sym, self.wifi_kb_shift)
+            }
+        } else if self.wifi_panel_open {
+            let base = self.layout.hit(self.mode, px, py);
+            if matches!(
+                base,
+                Hit::Nav(_) | Hit::NavBack | Hit::Power | Hit::HomeTile(_) | Hit::SeqRec
+            ) {
+                base
+            } else {
+                self.layout.hit_wifi_panel(px, py)
+            }
+        } else if self.mode == UiMode::Synth
+            && (self.synth_pick_a.is_some() || self.synth_vib_open)
         {
             self.layout
                 .hit_synth_overlay(px, py, self.synth_vib_open, self.synth_pick_a.is_some())
@@ -1743,9 +2251,13 @@ impl NativeModel {
                     surface: Surface::SynthKey { note },
                     gate_on: false,
                 };
-                outbox.note_on(0, note, 110);
-                self.seq.push_note(true, 0, note, 110);
-                self.push_pad_rec(true, 0, note, 110);
+                // Two fingers on the same key share one MIDI note — only the
+                // first contact sounds it; later ones just claim ownership.
+                if !self.synth_note_held_elsewhere(slot, note) {
+                    outbox.note_on(0, note, 110);
+                    self.seq.push_note(true, 0, note, 110);
+                    self.push_pad_rec(true, 0, note, 110);
+                }
             }
             Hit::KaossProg => {
                 self.tap_ui(slot, id, gesture, px, py);
@@ -2321,11 +2833,7 @@ impl NativeModel {
                 self.status_line = "all notes off".into();
                 self.push_log("all notes off");
             }
-            Hit::SettingsFxTarget => {
-                self.tap_ui(slot, id, gesture, px, py);
-                self.cycle_fx_target();
-            }
-            Hit::SettingsFx(index) => {
+            Hit::SettingsAudio => {
                 self.fingers[slot] = Finger {
                     active: true,
                     id,
@@ -2334,18 +2842,89 @@ impl NativeModel {
                     y: 0.0,
                     px,
                     py,
-                    surface: Surface::SettingsFx { index },
+                    surface: Surface::UiTap,
+                    gate_on: false,
+                };
+                // Clear hanging notes, then reopen ALSA after a jack swap.
+                outbox.all_notes_off();
+                outbox.audio_reopen();
+                self.status_line = "audio reopen".into();
+                self.push_log("audio reopen");
+            }
+            Hit::FxTarget => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.cycle_fx_target();
+            }
+            Hit::FxSlider(index) => {
+                self.fingers[slot] = Finger {
+                    active: true,
+                    id,
+                    gesture,
+                    x: 0.0,
+                    y: 0.0,
+                    px,
+                    py,
+                    surface: Surface::FxSlider { index },
                     gate_on: false,
                 };
                 self.apply_fx_slider(index, py, outbox);
             }
             Hit::SettingsWifi => {
                 self.tap_ui(slot, id, gesture, px, py);
-                self.start_host_job(HostTask::Wifi);
+                self.open_wifi_panel();
             }
             Hit::SettingsUpdate => {
                 self.tap_ui(slot, id, gesture, px, py);
-                self.start_host_job(HostTask::UpdateCheck);
+                self.open_update_panel();
+            }
+            Hit::WifiClose => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.close_wifi_panel();
+            }
+            Hit::WifiScan => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.start_wifi_scan();
+            }
+            Hit::WifiRejoin => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.start_wifi_rejoin();
+            }
+            Hit::WifiScrollUp => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.wifi_scroll_by(-(crate::wifi::LIST_VISIBLE as i32));
+            }
+            Hit::WifiScrollDown => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.wifi_scroll_by(crate::wifi::LIST_VISIBLE as i32);
+            }
+            Hit::WifiRow(row) => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.wifi_select_row(row);
+            }
+            Hit::WifiKbCancel => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.close_wifi_keyboard();
+            }
+            Hit::WifiKbShow => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.wifi_kb_show = !self.wifi_kb_show;
+                self.mark_dirty();
+            }
+            Hit::WifiKbKey { row, col } => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.handle_wifi_kb_key(row, col);
+            }
+            Hit::UpdateClose => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.close_update_panel();
+            }
+            Hit::UpdateCheck => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.start_update_check();
+            }
+            Hit::UpdateApply => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.start_update_apply();
             }
             Hit::SettingsFont => {
                 self.tap_ui(slot, id, gesture, px, py);
@@ -2384,6 +2963,10 @@ impl NativeModel {
             Hit::ChordsHold => {
                 self.tap_ui(slot, id, gesture, px, py);
                 self.chords_hold = !self.chords_hold;
+                if !self.chords_hold && !self.chords_contact_held() {
+                    // Leaving HOLD with nothing pressed: silence a latched block.
+                    self.chords_block_off(outbox);
+                }
                 self.status_line = if self.chords_hold {
                     "HOLD on".into()
                 } else {
@@ -2465,8 +3048,25 @@ impl NativeModel {
                 self.chords_strum_to(y, outbox);
             }
             Hit::ChordsPalette { slot: pal } => {
-                self.tap_ui(slot, id, gesture, px, py);
-                self.chords_palette_tap(pal, outbox);
+                // ARM / empty-store stay as taps. Playing a filled slot tracks the
+                // finger so MOM can release on lift (HOLD keeps the latch).
+                if self.chords_arm || self.chords_palette[pal].is_none() {
+                    self.tap_ui(slot, id, gesture, px, py);
+                    self.chords_palette_tap(pal, outbox);
+                } else {
+                    self.fingers[slot] = Finger {
+                        active: true,
+                        id,
+                        gesture,
+                        x: 0.0,
+                        y: 0.0,
+                        px,
+                        py,
+                        surface: Surface::ChordsPalette { slot: pal },
+                        gate_on: false,
+                    };
+                    self.chords_palette_press(pal, outbox);
+                }
             }
             Hit::LogClear => {
                 self.tap_ui(slot, id, gesture, px, py);
@@ -2509,7 +3109,7 @@ impl NativeModel {
             Surface::KitSlider { index } => {
                 self.apply_kit_slider(index, py, outbox);
             }
-            Surface::SettingsFx { index } => {
+            Surface::FxSlider { index } => {
                 self.apply_fx_slider(index, py, outbox);
             }
             Surface::ChordsStrum => {
@@ -2521,12 +3121,18 @@ impl NativeModel {
                 if let Some(raw) = self.layout.synth_keyboard_note_at(px, py) {
                     let new_note = self.transpose_synth_key(raw);
                     if new_note != note {
-                        outbox.note_off(0, note);
-                        self.seq.push_note(false, 0, note, 0);
-                        self.push_pad_rec(false, 0, note, 0);
-                        outbox.note_on(0, new_note, 110);
-                        self.seq.push_note(true, 0, new_note, 110);
-                        self.push_pad_rec(true, 0, new_note, 110);
+                        // Glissando must not kill a note another finger still holds
+                        // (lift smear often parks the rising finger on the neighbor).
+                        if !self.synth_note_held_elsewhere(slot, note) {
+                            outbox.note_off(0, note);
+                            self.seq.push_note(false, 0, note, 0);
+                            self.push_pad_rec(false, 0, note, 0);
+                        }
+                        if !self.synth_note_held_elsewhere(slot, new_note) {
+                            outbox.note_on(0, new_note, 110);
+                            self.seq.push_note(true, 0, new_note, 110);
+                            self.push_pad_rec(true, 0, new_note, 110);
+                        }
                         self.fingers[slot].surface = Surface::SynthKey { note: new_note };
                     }
                 }
@@ -2582,9 +3188,12 @@ impl NativeModel {
                 self.push_pad_rec(false, DRUM_CHANNEL, note, 0);
             }
             Surface::SynthKey { note } => {
-                outbox.note_off(0, note);
-                self.seq.push_note(false, 0, note, 0);
-                self.push_pad_rec(false, 0, note, 0);
+                // Finger already cleared above; remaining holders keep the note.
+                if !self.synth_note_held_elsewhere(slot, note) {
+                    outbox.note_off(0, note);
+                    self.seq.push_note(false, 0, note, 0);
+                    self.push_pad_rec(false, 0, note, 0);
+                }
             }
             Surface::FmGraph { from } => {
                 self.finish_fm_draw(from, finger.px, finger.py, outbox);
@@ -2593,6 +3202,9 @@ impl NativeModel {
                 if let Some(qrow) = QualityRow::from_index(row) {
                     self.chords_release_button(finger.gesture, col, qrow, outbox);
                 }
+            }
+            Surface::ChordsPalette { .. } => {
+                self.chords_palette_release(outbox);
             }
             Surface::ChordsStrum => {
                 self.chords_strum_off(outbox);
@@ -2612,8 +3224,7 @@ impl NativeModel {
             | Surface::SynthSlider { .. }
             | Surface::FmSlider { .. }
             | Surface::KitSlider { .. }
-            | Surface::SettingsFx { .. }
-            | Surface::ChordsPalette { .. }
+            | Surface::FxSlider { .. }
             | Surface::UiTap => {}
         }
     }
@@ -2845,27 +3456,37 @@ impl NativeModel {
     }
 
     fn finish_pad_record(&mut self, index: usize, outbox: &mut Outbox) {
-        let started = self.pad_rec_started.take();
+        let _started = self.pad_rec_started.take();
         let events = std::mem::take(&mut self.pad_rec_events);
         if events.is_empty() {
             self.status_line = format!("{} REC empty — dropped", phrases::pad_label(index));
             return;
         }
-        let length_secs = started
-            .map(|t| t.elapsed().as_secs_f64())
-            .unwrap_or(0.05)
-            .max(0.05);
-        let last_t = events.iter().map(|e| e.t).fold(0.0_f64, f64::max);
-        let length_secs = last_t.max(0.05).min(length_secs) + 0.05;
-        let length_ticks = phrases::seconds_to_ticks(length_secs, self.bpm);
-        let wire: Vec<WireClipEvent> = events
+        let take: Vec<crate::seq::RecEvent> = events
             .iter()
-            .map(|e| WireClipEvent {
-                tick: phrases::seconds_to_ticks(e.t, self.bpm),
+            .map(|e| crate::seq::RecEvent {
+                t: e.t,
                 on: e.on,
                 channel: e.ch,
                 note: e.note,
                 velocity: e.vel,
+            })
+            .collect();
+        let (trimmed, length_secs) = crate::seq::trim_loop_take(&take, 0.35, 0.05, 2.0);
+        if trimmed.is_empty() || length_secs <= 0.0 {
+            self.status_line = format!("{} REC empty — dropped", phrases::pad_label(index));
+            return;
+        }
+        let trimmed = crate::seq::close_open_notes(trimmed, length_secs);
+        let length_ticks = phrases::seconds_to_ticks(length_secs, self.bpm);
+        let wire: Vec<WireClipEvent> = trimmed
+            .iter()
+            .map(|e| WireClipEvent {
+                tick: phrases::seconds_to_ticks(e.t, self.bpm),
+                on: e.on,
+                channel: e.channel,
+                note: e.note,
+                velocity: e.velocity,
             })
             .collect();
         let pad = phrases::from_wire(wire, length_ticks.max(1), self.bpm, false);
@@ -2940,13 +3561,21 @@ impl NativeModel {
 
     const SYNTH_PARAM_NAMES: [&'static str; 5] = ["morph", "tone", "level", "attack", "release"];
 
+
     fn apply_synth_slider(&mut self, index: usize, _px: i32, py: i32, outbox: &mut Outbox) {
-        if index >= 5 {
-            return;
-        }
         let track = self.layout.synth_slider(index);
         let y = 1.0 - ((py - track.y) as f32 / track.h.max(1) as f32);
         let value = y.clamp(0.0, 1.0);
+        if index == 5 {
+            self.fx_voice[3] = value;
+            self.push_voice_fx("flanger_mix", value, outbox);
+            self.status_line = format!("voice flange {:.2}", value);
+            self.mark_dirty();
+            return;
+        }
+        if index >= 5 {
+            return;
+        }
         self.synth_params[index] = value;
         outbox.synth(Self::SYNTH_PARAM_NAMES[index], value);
         if index == 0 {
@@ -3256,24 +3885,35 @@ impl NativeModel {
         let track = self.layout.settings_fx_slider(index);
         let y = 1.0 - ((py - track.y) as f32 / track.h.max(1) as f32);
         let value = y.clamp(0.0, 1.0);
+        let name = Self::FX_PARAM_NAMES[index];
         match self.fx_target {
             FxEditTarget::Bus => {
                 self.fx_bus[index] = value;
-                outbox.fx_bus(Self::FX_PARAM_NAMES[index], value);
-                self.status_line = format!("bus {} {:.2}", Self::FX_PARAM_NAMES[index], value);
+                outbox.fx_bus(name, value);
+                self.status_line = format!("bus {name} {:.2}", value);
             }
             FxEditTarget::Voice => {
                 self.fx_voice[index] = value;
-                outbox.fx_voice(0, Self::FX_PARAM_NAMES[index], value);
-                self.status_line = format!("voice0 {} {:.2}", Self::FX_PARAM_NAMES[index], value);
+                self.push_voice_fx(name, value, outbox);
+                self.status_line = format!("voice {name} {:.2}", value);
             }
             FxEditTarget::DrumGroup => {
                 self.fx_drum[index] = value;
-                outbox.fx_drum_group(Self::FX_PARAM_NAMES[index], value);
-                self.status_line = format!("drums {} {:.2}", Self::FX_PARAM_NAMES[index], value);
+                outbox.fx_drum_group(name, value);
+                self.status_line = format!("drums {name} {:.2}", value);
             }
         }
         self.mark_dirty();
+    }
+
+    /// Apply an insert FX param to both morph endpoints so flange survives the 50% nearer flip.
+    fn push_voice_fx(&mut self, name: &str, value: f32, outbox: &mut Outbox) {
+        let a = self.morph_a;
+        let b = self.morph_b;
+        outbox.fx_voice(a, name, value);
+        if b != a {
+            outbox.fx_voice(b, name, value);
+        }
     }
 
     fn cycle_fx_target(&mut self) {
@@ -3381,7 +4021,13 @@ impl NativeModel {
                 if prev.y_param == "tone_lfo" && p.y_param != "tone_lfo" {
                     self.reset_kaoss_tone_lfo(outbox);
                 }
-                if self.kaoss_hold || self.kaoss_touching {
+                // HOLD drone survives program changes — reassert XY so FILTER/FLANGE
+                // immediately ride the latched lead without requiring a fresh press.
+                if self.kaoss_hold
+                    && (self.kaoss_hold_gesture.is_some()
+                        || self.kaoss_gate_on
+                        || self.kaoss_touching)
+                {
                     let (x, y) = self.kaoss_latched_xy;
                     self.apply_kaoss_xy(p, x, y, outbox);
                 }
@@ -3482,7 +4128,13 @@ impl NativeModel {
         // Count excludes this contact only if it isn't registered yet — callers
         // always arm the Finger slot before invoking us, so subtract one.
         let others = self.kaoss_active_count().saturating_sub(1);
-        if others == 0 {
+        let prog = kaoss_ui::program(self.kaoss_program);
+        // HOLD + FX program: keep the latched lead drone so FILTER/FLANGE can
+        // audition on top of it (Tk `_kaoss_apply_program` keep_hold path).
+        let keep_hold_drone = self.kaoss_hold
+            && !prog.note
+            && (self.kaoss_hold_gesture.is_some() || self.kaoss_gate_on);
+        if others == 0 && !keep_hold_drone {
             if let Some(held) = self.kaoss_hold_gesture.take() {
                 self.kaoss_touch_edge(held, TouchPhase::Up, 0.0, 0.0, outbox);
             }
@@ -3496,10 +4148,10 @@ impl NativeModel {
         self.kaoss_touching = true;
         self.kaoss_latched_xy = (x, y);
         self.push_kaoss_trail(x, y);
-        let prog = kaoss_ui::program(self.kaoss_program);
         let gated = prog.note && kaoss_ui::gate(self.kaoss_gate).beats > 0.0;
         if prog.note && !gated {
             self.kaoss_touch_edge(gesture, TouchPhase::Down, x, y, outbox);
+            self.record_kaoss_note(true, x, y);
             self.kaoss_usb_note_on(x, y, outbox);
         } else if gated {
             // Shared clock; this gesture joins on the next tick. Mark ownership
@@ -3564,15 +4216,27 @@ impl NativeModel {
         let remaining = self.kaoss_active_count();
         let prog = kaoss_ui::program(self.kaoss_program);
         let gated = prog.note && kaoss_ui::gate(self.kaoss_gate).beats > 0.0;
-        if self.kaoss_hold && prog.note && remaining == 0 {
-            if !gated {
-                self.kaoss_hold_gesture = Some(gesture);
-            } else {
-                // Preserve on-phase across the latch so HOLD doesn't click off.
-                self.kaoss_gate_gesture = Some(gesture);
-                self.kaoss_latched_xy = (x, y);
-                self.kaoss_gate_on = was_gate_on;
+        if self.kaoss_hold && remaining == 0 {
+            if prog.note {
+                if !gated {
+                    self.kaoss_hold_gesture = Some(gesture);
+                    self.kaoss_latched_xy = (x, y);
+                } else {
+                    // Preserve on-phase across the latch so HOLD doesn't click off.
+                    self.kaoss_gate_gesture = Some(gesture);
+                    self.kaoss_latched_xy = (x, y);
+                    self.kaoss_gate_on = was_gate_on;
+                }
+                self.kaoss_touching = false;
+                self.status_line = "HOLD latched".into();
+                return;
             }
+            // Switched to FILTER/FLANGE (etc.) while the finger was still down:
+            // keep the sounding drone under HOLD and remember ownership.
+            if self.kaoss_hold_gesture.is_none() && !gated {
+                self.kaoss_hold_gesture = Some(gesture);
+            }
+            self.kaoss_latched_xy = (x, y);
             self.kaoss_touching = false;
             self.status_line = "HOLD latched".into();
             return;
@@ -3580,6 +4244,7 @@ impl NativeModel {
         if gated {
             if was_gate_on {
                 self.kaoss_touch_edge(gesture, TouchPhase::Up, x, y, outbox);
+                self.record_kaoss_note(false, x, y);
             }
             if remaining == 0 {
                 self.kaoss_usb_note_off(outbox);
@@ -3597,6 +4262,7 @@ impl NativeModel {
             }
         } else if prog.note {
             self.kaoss_touch_edge(gesture, TouchPhase::Up, x, y, outbox);
+            self.record_kaoss_note(false, x, y);
             if remaining == 0 {
                 self.kaoss_usb_note_off(outbox);
             }
@@ -3695,10 +4361,12 @@ impl NativeModel {
             };
             if want_on && !self.kaoss_gate_on {
                 self.kaoss_touch_edge(gesture, TouchPhase::Down, x, y, outbox);
+                self.record_kaoss_note(true, x, y);
                 self.kaoss_usb_note_on(x, y, outbox);
                 self.kaoss_gate_on = true;
             } else if !want_on && self.kaoss_gate_on {
                 self.kaoss_touch_edge(gesture, TouchPhase::Up, x, y, outbox);
+                self.record_kaoss_note(false, x, y);
                 self.kaoss_usb_note_off(outbox);
                 self.kaoss_gate_on = false;
             } else if want_on && self.kaoss_gate_on {
@@ -3715,10 +4383,12 @@ impl NativeModel {
             let was = self.fingers[slot].gate_on;
             if want_on && !was {
                 self.kaoss_touch_edge(gesture, TouchPhase::Down, x, y, outbox);
+                self.record_kaoss_note(true, x, y);
                 self.fingers[slot].gate_on = true;
                 usb_xy = (x, y);
             } else if !want_on && was {
                 self.kaoss_touch_edge(gesture, TouchPhase::Up, x, y, outbox);
+                self.record_kaoss_note(false, x, y);
                 self.fingers[slot].gate_on = false;
             } else if want_on && was {
                 self.kaoss_touch_edge(gesture, TouchPhase::Move, x, y, outbox);
@@ -3738,6 +4408,28 @@ impl NativeModel {
             self.kaoss_usb_note_off(outbox);
             self.kaoss_gate_on = false;
         }
+    }
+
+    fn record_kaoss_note(&mut self, on: bool, x: f32, y: f32) {
+        if !self.kaoss_out.includes_local() {
+            return;
+        }
+        if !kaoss_ui::program(self.kaoss_program).note {
+            return;
+        }
+        let note = self.kaoss_note_at(x);
+        let velocity = if on {
+            if kaoss_ui::program(self.kaoss_program).y_param == "pitch_bend" {
+                100
+            } else {
+                velocity_at_y(y)
+            }
+        } else {
+            0
+        };
+        self.seq
+            .push_note(on, self.kaoss_channel, note, velocity);
+        self.push_pad_rec(on, self.kaoss_channel, note, velocity);
     }
 
     fn kaoss_touch_edge(
@@ -3992,36 +4684,14 @@ impl NativeModel {
             } else if prog.y_param == "pitch_bend" {
                 self.apply_kaoss_pitch_bend(y, outbox);
             } else {
-                if Self::is_bus_param(prog.y_param) {
-                    outbox.fx_bus(prog.y_param, y);
-                } else {
-                    outbox.synth(prog.y_param, y);
-                    if let Some(i) = Self::synth_param_index(prog.y_param) {
-                        self.synth_params[i] = y;
-                        if i == 0 {
-                            self.sync_wave_bank();
-                        }
-                    }
-                }
+                self.apply_named_param(prog.y_param, y, outbox);
                 self.mark_dirty();
             }
         } else {
             if let Some(xp) = prog.x_param {
-                if Self::is_bus_param(xp) {
-                    outbox.fx_bus(xp, x);
-                } else {
-                    outbox.synth(xp, x);
-                    if let Some(i) = Self::synth_param_index(xp) {
-                        self.synth_params[i] = x;
-                        if i == 0 {
-                            self.sync_wave_bank();
-                        }
-                    }
-                }
+                self.apply_named_param(xp, x, outbox);
             }
-            if Self::is_bus_param(prog.y_param) {
-                outbox.fx_bus(prog.y_param, y);
-            } else if prog.y_param == "vib" {
+            if prog.y_param == "vib" {
                 self.vibrato_depth = (y * 2.0).clamp(0.0, 2.0);
                 self.vibrato_always = if y > 0.02 { 1.0 } else { 0.0 };
                 outbox.synth("vibrato_depth", y.clamp(0.0, 1.0));
@@ -4030,15 +4700,31 @@ impl NativeModel {
                 outbox.synth("tone_lfo_rate", y.clamp(0.0, 1.0));
                 outbox.synth("tone_lfo_amount", 1.0);
             } else {
-                outbox.synth(prog.y_param, y);
-                if let Some(i) = Self::synth_param_index(prog.y_param) {
-                    self.synth_params[i] = y;
-                    if i == 0 {
-                        self.sync_wave_bank();
-                    }
-                }
+                self.apply_named_param(prog.y_param, y, outbox);
             }
             self.mark_dirty();
+        }
+    }
+
+    fn apply_named_param(&mut self, name: &str, value: f32, outbox: &mut Outbox) {
+        let v = value.clamp(0.0, 1.0);
+        if Self::is_voice_fx_param(name) {
+            if name == "flanger_mix" {
+                self.fx_voice[3] = v;
+            }
+            self.push_voice_fx(name, v, outbox);
+            return;
+        }
+        if Self::is_bus_param(name) {
+            outbox.fx_bus(name, v);
+            return;
+        }
+        outbox.synth(name, v);
+        if let Some(i) = Self::synth_param_index(name) {
+            self.synth_params[i] = v;
+            if i == 0 {
+                self.sync_wave_bank();
+            }
         }
     }
 
@@ -4089,9 +4775,13 @@ impl NativeModel {
     }
 
     fn is_bus_param(name: &str) -> bool {
+        matches!(name, "drive" | "delay_mix" | "reverb_mix" | "delay_time")
+    }
+
+    fn is_voice_fx_param(name: &str) -> bool {
         matches!(
             name,
-            "drive" | "delay_mix" | "reverb_mix" | "delay_time" | "flanger_mix" | "flanger_rate"
+            "flanger_mix" | "flanger_rate" | "flanger_depth" | "flanger_fb"
         )
     }
 
@@ -4129,6 +4819,15 @@ impl NativeModel {
     fn transpose_synth_key(&self, c4_note: u8) -> u8 {
         let deg = c4_note.saturating_sub(Layout::SYNTH_KEY_BASE);
         self.synth_key_base().saturating_add(deg).min(127)
+    }
+
+    /// True when another active synth-key contact still owns `note`.
+    fn synth_note_held_elsewhere(&self, except_slot: usize, note: u8) -> bool {
+        self.fingers.iter().enumerate().any(|(i, f)| {
+            i != except_slot
+                && f.active
+                && matches!(f.surface, Surface::SynthKey { note: n } if n == note)
+        })
     }
 
     fn nudge_synth_octave(&mut self, delta: i8) {
@@ -4351,11 +5050,7 @@ impl NativeModel {
         let tone = self.synth_params[1];
         let delay_mix = self.fx_bus[1];
         let reverb_mix = self.fx_bus[2];
-        let flanger_mix = if self.fx_target == FxEditTarget::Voice {
-            self.fx_voice[3]
-        } else {
-            self.fx_bus[3]
-        };
+        let flanger_mix = self.fx_voice[3];
         let existing = self.wave_names.clone();
         let morph_a = self.morph_a as usize;
         let morph_b = self.morph_b as usize;
@@ -4425,6 +5120,7 @@ impl NativeModel {
         self.synth_params[0] = 1.0 - self.synth_params[0];
         outbox.morph_pair(self.morph_a, self.morph_b);
         outbox.synth("morph", self.synth_params[0]);
+        self.push_voice_fx("flanger_mix", self.fx_voice[3], outbox);
         self.sync_wave_bank();
         self.status_line = format!(
             "swap {} ↔ {}",
@@ -4444,6 +5140,7 @@ impl NativeModel {
             self.morph_b = index as u16;
         }
         outbox.morph_pair(self.morph_a, self.morph_b);
+        self.push_voice_fx("flanger_mix", self.fx_voice[3], outbox);
         self.sync_wave_bank();
         self.status_line = format!(
             "{} = {}",
@@ -4625,9 +5322,21 @@ impl NativeModel {
             return;
         }
         self.chords_sync_from_held(outbox);
-        if self.chords_held.iter().all(|(g, _, _)| g.is_none()) {
+        if !self.chords_contact_held() {
             self.chords_block_off(outbox);
         }
+    }
+
+    /// True while a grid button or palette pad finger is still down.
+    fn chords_contact_held(&self) -> bool {
+        self.chords_held.iter().any(|(g, _, _)| g.is_some())
+            || self.fingers.iter().any(|f| {
+                f.active
+                    && matches!(
+                        f.surface,
+                        Surface::ChordsButton { .. } | Surface::ChordsPalette { .. }
+                    )
+            })
     }
 
     fn chords_held_list(&self) -> Vec<(usize, QualityRow)> {
@@ -4637,6 +5346,7 @@ impl NativeModel {
             .collect()
     }
 
+    /// Buttons currently held (for chord-grid highlight). Empty → use resolved chord.
     pub fn chords_held_buttons(&self) -> Vec<(usize, QualityRow)> {
         self.chords_held_list()
     }
@@ -4741,6 +5451,22 @@ impl NativeModel {
         }
     }
 
+    fn chords_palette_press(&mut self, slot: usize, outbox: &mut Outbox) {
+        if let Some(spec) = self.chords_palette.get(slot).copied().flatten() {
+            self.chords_select(spec, true, outbox);
+        }
+    }
+
+    fn chords_palette_release(&mut self, outbox: &mut Outbox) {
+        if self.chords_hold {
+            // Latch like the Omnichord memory / grid HOLD path.
+            return;
+        }
+        if !self.chords_contact_held() {
+            self.chords_block_off(outbox);
+        }
+    }
+
     fn load_changes(&mut self, index: usize) {
         let Some(prog) = chords::PROGRESSIONS.get(index) else {
             return;
@@ -4779,9 +5505,11 @@ impl NativeModel {
 
     fn wipe_kaoss_fx(&mut self, outbox: &mut Outbox) {
         self.fx_bus = [0.0, 0.0, 0.0, 0.0];
+        self.fx_voice[3] = 0.0;
         for name in Self::FX_PARAM_NAMES {
             outbox.fx_bus(name, 0.0);
         }
+        self.push_voice_fx("flanger_mix", 0.0, outbox);
         let defaults = session::SessionState::default();
         self.synth_params[0] = defaults.morph;
         self.synth_params[1] = defaults.tone;
@@ -4921,8 +5649,6 @@ impl NativeModel {
         let mut finger_buf = [(0.0_f32, 0.0_f32); MAX_FINGERS];
         let n = self.copy_kaoss_fingers(&mut finger_buf);
         let fingers = &finger_buf[..n];
-        let trail = self.kaoss_trail.clone();
-        let ripples = self.kaoss_ripples.clone();
         let hold = self.kaoss_hold && self.kaoss_touching;
         let gate_flash = self.kaoss_gate_flash();
         let hue_shift = crate::kaoss_viz::program_hue(kaoss_ui::program(self.kaoss_program).id);
@@ -4930,14 +5656,22 @@ impl NativeModel {
         let solid = crate::kaoss_viz::pad_color_hs(self.kaoss_mono_color);
         for row in 0..LED_ROWS {
             for col in 0..LED_COLS {
+                let excit = self.cell_amp[row][col];
                 self.cells[row][col] = if rainbow {
                     crate::kaoss_viz::pad_led_rgb(
-                        col, row, t, fingers, &trail, &ripples, hold, gate_flash, hue_shift,
+                        col,
+                        row,
+                        t,
+                        fingers,
+                        excit,
+                        hold,
+                        gate_flash,
+                        hue_shift,
                     )
                 } else {
                     let (h, s) = solid.unwrap_or((0.93, 0.88));
                     crate::kaoss_viz::pad_led_mono(
-                        col, row, t, fingers, &trail, &ripples, hold, gate_flash, h, s,
+                        col, row, t, excit, hold, gate_flash, h, s,
                     )
                 };
             }
@@ -4945,7 +5679,8 @@ impl NativeModel {
     }
 
     fn push_kaoss_trail(&mut self, x: f32, y: f32) {
-        // Update the nearest recent spark so two fingers don't thrash one trail.
+        // Prefer updating the nearest recent spark so two fingers don't thrash
+        // a single shared "last" point.
         const NEAR: f32 = 0.0004;
         let mut best: Option<usize> = None;
         let mut best_d2 = NEAR;
@@ -4980,6 +5715,24 @@ impl NativeModel {
         self.kaoss_trail.retain(|p| p.2 > 0.0);
         // Expanding touch rings removed — they punched a black hole into the pad.
         self.kaoss_ripples.clear();
+        if self.kaoss_viz_style.is_cells() {
+            let mut finger_buf = [(0.0_f32, 0.0_f32); MAX_FINGERS];
+            let n = self.copy_kaoss_fingers(&mut finger_buf);
+            let fingers = &finger_buf[..n];
+            let trail = self.kaoss_trail.clone();
+            let mut cell_dt = dt;
+            // First frame after a touch can be dt≈0 — still nudge attack forward.
+            if n > 0 && cell_dt <= 0.0 {
+                cell_dt = 0.02;
+            }
+            for row in 0..LED_ROWS {
+                for col in 0..LED_COLS {
+                    let target = crate::kaoss_viz::cell_excit_target(col, row, fingers, &trail);
+                    self.cell_amp[row][col] =
+                        crate::kaoss_viz::cell_step(self.cell_amp[row][col], target, cell_dt);
+                }
+            }
+        }
         if self.kaoss_viz_style.is_glow() {
             let mut peak = 0.0_f32;
             for slot in 0..MAX_FINGERS {
@@ -5093,6 +5846,70 @@ mod tests {
         model.finger_up(1, &mut out);
         let batch = out.take();
         assert!(batch.iter().any(|r| matches!(r, Request::Touch { .. })));
+    }
+
+    #[test]
+    fn kaoss_hold_survives_filter_pad_touch() {
+        // HOLD a LEAD note, switch to FILTER, touch the pad — drone must stay.
+        let mut model = NativeModel::new();
+        model.kaoss_out = OutMode::Local;
+        model.kaoss_hold = true;
+        model.kaoss_program = kaoss_ui::KAOSS_PROGRAMS
+            .iter()
+            .position(|p| p.id == "lead")
+            .expect("lead");
+        let mut out = Outbox::new();
+        let cell = model.layout.kaoss_cell(4, 3);
+        model.finger_down(1, cell.x + 4, cell.y + 4, &mut out);
+        let down = out.take();
+        let hold_gesture = down.iter().find_map(|r| match r {
+            Request::Touch {
+                phase: TouchPhase::Down,
+                gesture,
+                ..
+            } => Some(*gesture),
+            _ => None,
+        });
+        assert!(hold_gesture.is_some(), "LEAD press should start a touch: {down:?}");
+        model.finger_up(1, &mut out);
+        let lift = out.take();
+        assert!(
+            lift.iter().all(|r| !matches!(
+                r,
+                Request::Touch {
+                    phase: TouchPhase::Up,
+                    ..
+                }
+            )),
+            "HOLD lift must not note-off: {lift:?}"
+        );
+        assert!(model.kaoss_hold_gesture.is_some());
+
+        model.kaoss_program = kaoss_ui::KAOSS_PROGRAMS
+            .iter()
+            .position(|p| p.id == "filter")
+            .expect("filter");
+        let filter_cell = model.layout.kaoss_cell(2, 2);
+        model.finger_down(2, filter_cell.x + 4, filter_cell.y + 4, &mut out);
+        let fx = out.take();
+        assert!(
+            fx.iter().all(|r| !matches!(
+                r,
+                Request::Touch {
+                    phase: TouchPhase::Up,
+                    ..
+                }
+            )),
+            "FILTER press must not release the HOLD drone: {fx:?}"
+        );
+        assert_eq!(model.kaoss_hold_gesture, hold_gesture);
+        assert!(
+            fx.iter().any(|r| matches!(
+                r,
+                Request::Synth { param, .. } if param == "tone" || param == "morph"
+            )) || fx.iter().any(|r| matches!(r, Request::Fx { .. })),
+            "FILTER XY should still drive params: {fx:?}"
+        );
     }
 
     #[test]
@@ -5284,6 +6101,46 @@ mod tests {
     }
 
     #[test]
+    fn kaoss_viz_tracks_multiple_fingers() {
+        let mut model = NativeModel::new();
+        model.kaoss_viz_style = crate::kaoss_viz::KaossVizStyle::Glow;
+        let mut out = Outbox::new();
+        let a = model.layout.kaoss_cell(1, 3);
+        let b = model.layout.kaoss_cell(10, 3);
+        model.finger_down(1, a.x + 4, a.y + 4, &mut out);
+        model.finger_down(2, b.x + 4, b.y + 4, &mut out);
+        for _ in 0..10 {
+            model.tick(1.0 / 60.0, &mut out);
+        }
+        let lit: Vec<_> = model
+            .kaoss_glow
+            .iter()
+            .enumerate()
+            .filter(|(_, g)| g.amp > 0.2)
+            .collect();
+        assert!(
+            lit.len() >= 2,
+            "each Kaoss contact should drive its own glow bloom: {:?}",
+            model.kaoss_glow.iter().map(|g| g.amp).collect::<Vec<_>>()
+        );
+        let dx = (lit[0].1.xy.0 - lit[1].1.xy.0).abs();
+        assert!(dx > 0.4, "blooms should sit under different pad X positions");
+
+        model.kaoss_viz_style = crate::kaoss_viz::KaossVizStyle::Cells;
+        for _ in 0..10 {
+            model.tick(1.0 / 60.0, &mut out);
+        }
+        let left = model.cell(1, 3);
+        let right = model.cell(10, 3);
+        let mid = model.cell(5, 3);
+        let bright = |c: u32| ((c >> 16) & 0xff).max((c >> 8) & 0xff).max(c & 0xff);
+        assert!(
+            bright(left) > bright(mid) && bright(right) > bright(mid),
+            "CELLS should light both fingers, not only the first"
+        );
+    }
+
+    #[test]
     fn a_snare_can_fire_while_kick_repeats() {
         let mut model = NativeModel::new();
         model.set_mode(UiMode::Drums);
@@ -5309,6 +6166,27 @@ mod tests {
         assert!(!batch
             .iter()
             .any(|r| matches!(r, Request::Repeat { note: 37, .. })));
+    }
+
+    #[test]
+    fn drum_edit_slider_emits_kit_macro() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Drums);
+        model.kit_edit_open = true;
+        model.kit_selected = 4;
+        let mut out = Outbox::new();
+        let track = model.layout.kit_edit_slider(0);
+        model.finger_down(1, track.x + 4, track.y + track.h / 4, &mut out);
+        let batch = out.take();
+        assert!(batch.iter().any(|r| matches!(
+            r,
+            Request::Synth {
+                param,
+                drum: Some(0),
+                ..
+            } if param == "drum_tone"
+        )));
+        assert!(model.edit_drum_macros()[0] > 0.5);
     }
 
     #[test]
@@ -5384,46 +6262,6 @@ mod tests {
     }
 
     #[test]
-    fn kaoss_viz_tracks_multiple_fingers() {
-        let mut model = NativeModel::new();
-        model.kaoss_viz_style = crate::kaoss_viz::KaossVizStyle::Glow;
-        let mut out = Outbox::new();
-        let a = model.layout.kaoss_cell(1, 3);
-        let b = model.layout.kaoss_cell(10, 3);
-        model.finger_down(1, a.x + 4, a.y + 4, &mut out);
-        model.finger_down(2, b.x + 4, b.y + 4, &mut out);
-        for _ in 0..10 {
-            model.tick(1.0 / 60.0, &mut out);
-        }
-        let lit: Vec<_> = model
-            .kaoss_glow
-            .iter()
-            .enumerate()
-            .filter(|(_, g)| g.amp > 0.2)
-            .collect();
-        assert!(
-            lit.len() >= 2,
-            "each Kaoss contact should drive its own glow bloom: {:?}",
-            model.kaoss_glow.iter().map(|g| g.amp).collect::<Vec<_>>()
-        );
-        let dx = (lit[0].1.xy.0 - lit[1].1.xy.0).abs();
-        assert!(dx > 0.4, "blooms should sit under different pad X positions");
-
-        model.kaoss_viz_style = crate::kaoss_viz::KaossVizStyle::Cells;
-        for _ in 0..10 {
-            model.tick(1.0 / 60.0, &mut out);
-        }
-        let left = model.cell(1, 3);
-        let right = model.cell(10, 3);
-        let mid = model.cell(5, 3);
-        let bright = |c: u32| ((c >> 16) & 0xff).max((c >> 8) & 0xff).max(c & 0xff);
-        assert!(
-            bright(left) > bright(mid) && bright(right) > bright(mid),
-            "CELLS should light both fingers, not only the first"
-        );
-    }
-
-    #[test]
     fn curated_program_pick_stores_absolute_index() {
         let mut model = NativeModel::new();
         model.kaoss_show_all = false;
@@ -5466,9 +6304,9 @@ mod tests {
     }
 
     #[test]
-    fn settings_fx_target_routes_to_voice() {
+    fn fx_target_routes_to_voice() {
         let mut model = NativeModel::new();
-        model.set_mode(UiMode::Settings);
+        model.set_mode(UiMode::Fx);
         model.fx_target = FxEditTarget::Voice;
         let mut out = Outbox::new();
         let track = model.layout.settings_fx_slider(0);
@@ -5488,6 +6326,7 @@ mod tests {
     fn drum_macro_emits_kit_param() {
         let mut model = NativeModel::new();
         model.set_mode(UiMode::Drums);
+        model.kit_edit_open = true;
         model.ensure_library_loaded();
         let mut out = Outbox::new();
         let wave = model.layout.kit_wave;
@@ -5802,6 +6641,55 @@ mod tests {
     }
 
     #[test]
+    fn synth_lift_smear_does_not_kill_second_key() {
+        // Finger A on C, finger B on E; A glides onto E then lifts — E must stay on.
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Synth);
+        let mut out = Outbox::new();
+        let c = model.layout.synth_keyboard_white_rect(0);
+        let e = model.layout.synth_keyboard_white_rect(2);
+        model.finger_down(1, c.x + 4, c.y + c.h - 8, &mut out);
+        model.finger_down(2, e.x + 4, e.y + e.h - 8, &mut out);
+        out.take();
+
+        model.finger_move(1, e.x + 4, e.y + e.h - 8, &mut out);
+        let glide = out.take();
+        assert!(
+            glide.iter().any(|r| matches!(r, Request::NoteOff { note: 60, .. })),
+            "leaving C should note-off C: {glide:?}"
+        );
+        assert!(
+            !glide
+                .iter()
+                .any(|r| matches!(r, Request::NoteOff { note: 64, .. })),
+            "glide onto E must not note-off E while finger 2 holds it: {glide:?}"
+        );
+        assert!(
+            !glide
+                .iter()
+                .any(|r| matches!(r, Request::NoteOn { note: 64, .. })),
+            "E is already held — no second note-on: {glide:?}"
+        );
+
+        model.finger_up(1, &mut out);
+        let lift = out.take();
+        assert!(
+            !lift
+                .iter()
+                .any(|r| matches!(r, Request::NoteOff { note: 64, .. })),
+            "lifting the smeared finger must not kill E: {lift:?}"
+        );
+
+        model.finger_up(2, &mut out);
+        let end = out.take();
+        assert!(
+            end.iter()
+                .any(|r| matches!(r, Request::NoteOff { note: 64, .. })),
+            "lifting the remaining finger should release E: {end:?}"
+        );
+    }
+
+    #[test]
     fn chords_c_major_button_plays_local_triad() {
         let mut model = NativeModel::new();
         model.set_mode(UiMode::Chords);
@@ -5825,6 +6713,93 @@ mod tests {
         let pcs: Vec<u8> = notes.iter().map(|n| n % 12).collect();
         assert!(pcs.contains(&0) && pcs.contains(&4) && pcs.contains(&7));
         assert_eq!(model.chords_current.unwrap().name(), "C");
+    }
+
+    #[test]
+    fn chords_octave_shifts_block_notes() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Chords);
+        model.chords_out = OutMode::Local;
+        model.chords_hold = true;
+        model.chords_octave = 0;
+        let mut out = Outbox::new();
+        let c = crate::chords::col_for_root_pc(0);
+        let cell = model.layout.chords_button(c, 0);
+        model.finger_down(1, cell.x + 4, cell.y + 4, &mut out);
+        let base_notes: Vec<u8> = out
+            .take()
+            .into_iter()
+            .filter_map(|r| match r {
+                Request::NoteOn { note, .. } => Some(note),
+                _ => None,
+            })
+            .collect();
+        assert!(!base_notes.is_empty());
+        let oct = model.layout.chords_oct_up();
+        model.finger_down(2, oct.x + 4, oct.y + 4, &mut out);
+        model.finger_up(2, &mut out);
+        let shifted: Vec<u8> = out
+            .take()
+            .into_iter()
+            .filter_map(|r| match r {
+                Request::NoteOn { note, .. } => Some(note),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(model.chords_octave, 1);
+        assert!(
+            shifted.iter().any(|&n| base_notes.iter().any(|&b| n == b + 12)),
+            "octave up should re-voice +12; base={base_notes:?} shifted={shifted:?}"
+        );
+    }
+
+    #[test]
+    fn chords_palette_mom_releases_on_lift() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Chords);
+        model.chords_out = OutMode::Local;
+        model.chords_hold = false;
+        model.chords_palette[0] = Some(ChordSpec::new(0, chords::ChordQuality::Maj));
+        let mut out = Outbox::new();
+        let cell = model.layout.chords_palette_slot(0);
+        model.finger_down(1, cell.x + 4, cell.y + 4, &mut out);
+        let ons: Vec<_> = out
+            .take()
+            .into_iter()
+            .filter(|r| matches!(r, Request::NoteOn { .. }))
+            .collect();
+        assert!(ons.len() >= 3, "palette press should sound, got {ons:?}");
+        model.finger_up(1, &mut out);
+        let offs: Vec<_> = out
+            .take()
+            .into_iter()
+            .filter(|r| matches!(r, Request::NoteOff { .. }))
+            .collect();
+        assert!(
+            offs.len() >= 3,
+            "MOM palette lift should silence, got {offs:?}"
+        );
+        assert!(model.chords_block.iter().all(|n| n.is_none()));
+    }
+
+    #[test]
+    fn chords_palette_hold_latches_after_lift() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Chords);
+        model.chords_out = OutMode::Local;
+        model.chords_hold = true;
+        model.chords_palette[0] = Some(ChordSpec::new(0, chords::ChordQuality::Maj));
+        let mut out = Outbox::new();
+        let cell = model.layout.chords_palette_slot(0);
+        model.finger_down(1, cell.x + 4, cell.y + 4, &mut out);
+        out.take();
+        model.finger_up(1, &mut out);
+        let after = out.take();
+        assert!(
+            after.iter().all(|r| !matches!(r, Request::NoteOff { .. })),
+            "HOLD should keep notes after lift, got {after:?}"
+        );
+        assert!(model.chords_block.iter().any(|n| n.is_some()));
     }
 
     #[test]
@@ -5914,17 +6889,113 @@ mod tests {
     }
 
     #[test]
-    fn settings_flange_slider_sends_flanger_mix() {
+    fn settings_update_opens_panel_without_blocking_check() {
         let mut model = NativeModel::new();
         model.set_mode(UiMode::Settings);
         let mut out = Outbox::new();
-        let track = model.layout.settings_fx_slider(3);
+        let btn = model.layout.settings_update;
+        model.finger_down(1, btn.x + 4, btn.y + 4, &mut out);
+        model.finger_up(1, &mut out);
+        assert!(model.update_panel_open, "UPDATE should open the submenu");
+        assert!(!model.update_busy, "opening must not start a sync CHECK");
+        assert!(model.update_job.is_none());
+        assert!(model.update_status.contains("Running:"));
+        assert!(model.update_status.contains("CHECK"));
+        // CLOSE dismisses
+        let close = model.layout.update_close;
+        model.finger_down(2, close.x + 4, close.y + 4, &mut out);
+        model.finger_up(2, &mut out);
+        assert!(!model.update_panel_open);
+    }
+
+    #[test]
+    fn synth_flange_slider_sends_voice_flanger_mix() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Synth);
+        model.morph_a = 2;
+        model.morph_b = 5;
+        let mut out = Outbox::new();
+        let track = model.layout.synth_slider(5);
         model.finger_down(1, track.x + 4, track.y + 8, &mut out);
         let batch = out.take();
         assert!(batch.iter().any(|r| matches!(
             r,
-            Request::Fx { param, .. } if param == "flanger_mix"
+            Request::Fx {
+                target: jambox_protocol::FxTargetSpec::Voice { index: 2 },
+                param,
+                ..
+            } if param == "flanger_mix"
         )));
+        assert!(batch.iter().any(|r| matches!(
+            r,
+            Request::Fx {
+                target: jambox_protocol::FxTargetSpec::Voice { index: 5 },
+                param,
+                ..
+            } if param == "flanger_mix"
+        )));
+        assert!(model.fx_voice[3] > 0.5);
+    }
+
+    #[test]
+    fn fx_menu_bus_flange_sends_global_flanger_mix() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Fx);
+        model.fx_target = FxEditTarget::Bus;
+        let mut out = Outbox::new();
+        let track = model.layout.settings_fx_slider(3);
+        // Top of the slider → wet ≈ 1.
+        model.finger_down(1, track.x + 8, track.y + 4, &mut out);
+        let batch = out.take();
+        assert!(
+            batch.iter().any(|r| matches!(
+                r,
+                Request::Fx {
+                    target: jambox_protocol::FxTargetSpec::Bus,
+                    param,
+                    ..
+                } if param == "flanger_mix"
+            )),
+            "expected bus flanger_mix, got {batch:?}"
+        );
+        assert!(model.fx_bus[3] > 0.5);
+    }
+
+    #[test]
+    fn settings_no_longer_hosts_fx_sliders() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Settings);
+        let mut out = Outbox::new();
+        let track = model.layout.settings_fx_slider(0);
+        model.finger_down(1, track.x + 8, track.y + 8, &mut out);
+        let batch = out.take();
+        assert!(
+            batch.iter().all(|r| !matches!(r, Request::Fx { .. })),
+            "Settings must not own FX sliders: {batch:?}"
+        );
+    }
+
+    #[test]
+    fn wifi_settings_opens_panel() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Settings);
+        // Avoid auto-scan thread in the unit test.
+        model.wifi_networks.push(crate::wifi::WifiNetwork {
+            ssid: "TestNet".into(),
+            signal: 70,
+            security: "WPA2".into(),
+            in_use: false,
+        });
+        let mut out = Outbox::new();
+        let btn = model.layout.settings_wifi;
+        model.finger_down(1, btn.x + 4, btn.y + 4, &mut out);
+        model.finger_up(1, &mut out);
+        assert!(model.wifi_panel_open);
+        let row = model.layout.wifi_row(0);
+        model.finger_down(2, row.x + 4, row.y + 4, &mut out);
+        model.finger_up(2, &mut out);
+        assert!(model.wifi_kb_open, "secured net should open password keyboard");
+        assert_eq!(model.wifi_kb_ssid, "TestNet");
     }
 
     #[test]

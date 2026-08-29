@@ -19,6 +19,10 @@ RestartSec=2
 Environment=RUST_LOG=info
 Environment=SDL_VIDEODRIVER=kmsdrm
 Environment=SDL_AUDIODRIVER=dummy
+# User library (songs/pads/settings/presets/user waves/Wi-Fi) — never under the git tree.
+Environment=PIDI_DATA_ROOT=%h/.local/share/pidi
+Environment=PIDI_REPO_ROOT=/home/pi/pi-midi-toolkit
+Environment=JAMBOX_USER_WAVETABLES=%h/.local/share/pidi/user-wavetables
 
 [Install]
 WantedBy=multi-user.target

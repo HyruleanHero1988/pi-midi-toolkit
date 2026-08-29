@@ -41,20 +41,26 @@ impl Default for PresetSnapshot {
 }
 
 pub fn presets_dir_from_env() -> PathBuf {
-    if let Ok(p) = std::env::var("PIDI_PRESETS_DIR") {
-        return PathBuf::from(p);
-    }
-    PathBuf::from("user-presets")
+    crate::paths::presets_dir()
 }
 
 pub fn slot_path(dir: &Path, slot: usize) -> PathBuf {
     dir.join(format!("slot-{}.json", slot + 1))
 }
 
+fn slot_path_padded(dir: &Path, slot: usize) -> PathBuf {
+    dir.join(format!("slot-{:02}.json", slot + 1))
+}
+
 pub fn load_slot(dir: &Path, slot: usize) -> Option<PresetSnapshot> {
-    let path = slot_path(dir, slot);
-    let raw = fs::read_to_string(path).ok()?;
-    serde_json::from_str(&raw).ok()
+    for path in [slot_path(dir, slot), slot_path_padded(dir, slot)] {
+        if let Ok(raw) = fs::read_to_string(&path) {
+            if let Ok(p) = serde_json::from_str(&raw) {
+                return Some(p);
+            }
+        }
+    }
+    None
 }
 
 pub fn save_slot(dir: &Path, slot: usize, preset: &PresetSnapshot) -> bool {
