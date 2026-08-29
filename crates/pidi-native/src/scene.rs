@@ -1438,6 +1438,7 @@ fn draw_chords(scene: &mut Scene, model: &NativeModel) {
         scene.text_centered(cell, tools[i], 0xfbf1c7, 2);
     }
 
+    scene.fill_rect(layout.chords_root_strip, 0x111111);
     for col in 0..12 {
         let label = layout.chords_root_label(col);
         scene.text_centered(label, ROOT_NAMES[col], 0xa89984, 1);

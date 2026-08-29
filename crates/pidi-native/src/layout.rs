@@ -322,6 +322,8 @@ pub struct Layout {
     pub log_clear: Rect,
     pub log_all_off: Rect,
     pub chords_toolbar: Rect,
+    /// Root-name strip (F C G …) between the toolbar and the MAJ/min/7 grid.
+    pub chords_root_strip: Rect,
     pub chords_grid: Rect,
     pub chords_strum: Rect,
     pub chords_palette: Rect,
@@ -1058,18 +1060,23 @@ impl Layout {
                 w: SCREEN_W - 16,
                 h: 44,
             },
-            // Root-name strip above the MAJ/min/7 grid (non-interactive).
+            chords_root_strip: Rect {
+                x: 8,
+                y: HUD_H + 58,
+                w: 560,
+                h: 18,
+            },
             chords_grid: Rect {
                 x: 8,
-                y: HUD_H + 74,
+                y: HUD_H + 80,
                 w: 560,
-                h: 228,
+                h: 222,
             },
             chords_strum: Rect {
                 x: 576,
-                y: HUD_H + 54,
+                y: HUD_H + 80,
                 w: 216,
-                h: 248,
+                h: 222,
             },
             chords_palette: Rect {
                 x: 8,
@@ -2000,12 +2007,12 @@ impl Layout {
 
     /// Non-hit root name above each fifths column.
     pub fn chords_root_label(&self, col: usize) -> Rect {
-        let gw = self.chords_grid.w / 12;
+        let gw = self.chords_root_strip.w / 12;
         Rect {
-            x: self.chords_grid.x + (col as i32) * gw + 1,
-            y: self.chords_grid.y - 20,
+            x: self.chords_root_strip.x + (col as i32) * gw + 1,
+            y: self.chords_root_strip.y,
             w: gw - 2,
-            h: 18,
+            h: self.chords_root_strip.h,
         }
     }
 
@@ -2941,6 +2948,22 @@ mod tests {
             layout.hit(UiMode::Home, home_fm.x + 4, home_fm.y + 4),
             Hit::HomeTile(UiMode::Fm)
         );
+    }
+
+    #[test]
+    fn chords_root_strip_clears_toolbar() {
+        let layout = Layout::new();
+        let toolbar_bottom = layout.chords_toolbar.y + layout.chords_toolbar.h;
+        let gap = layout.chords_root_strip.y - toolbar_bottom;
+        assert!(
+            gap >= 8,
+            "root strip should sit below BOTH/MOM toolbar, gap={gap}"
+        );
+        assert!(
+            layout.chords_grid.y >= layout.chords_root_strip.y + layout.chords_root_strip.h + 2,
+            "grid should sit below root labels"
+        );
+        assert_eq!(layout.chords_grid.y, layout.chords_strum.y);
     }
 
     #[test]
