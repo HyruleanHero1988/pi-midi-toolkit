@@ -1481,19 +1481,24 @@ impl Layout {
         }
     }
 
-    pub fn home_tile(&self, index: usize) -> Rect {
-        let cols = 5i32;
-        let rows = 2i32;
-        let gw = (self.content.w - 24) / cols;
-        let gh = (self.content.h - 40) / rows;
-        let col = (index as i32) % cols;
-        let row = (index as i32) / cols;
-        Rect {
-            x: self.content.x + 12 + col * gw + 4,
-            y: self.content.y + 36 + row * gh + 4,
-            w: gw - 8,
-            h: gh - 8,
+    pub fn home_grid(&self) -> crate::scroll::GridScroll {
+        const COLS: usize = 5;
+        let gh = (self.content.h - 40) / 2;
+        crate::scroll::GridScroll {
+            cols: COLS,
+            cell_h: gh,
+            item_count: HOME_TILES.len(),
+            viewport: Rect {
+                x: self.content.x + 12,
+                y: self.content.y + 36,
+                w: self.content.w - 24,
+                h: self.content.h - 36,
+            },
         }
+    }
+
+    pub fn home_tile(&self, index: usize, scroll_y: i32) -> Rect {
+        self.home_grid().cell_rect(index, scroll_y)
     }
 
     /// Scrollable KAOSS settings panel (Tk ⚙ overlay).
@@ -2120,7 +2125,7 @@ impl Layout {
         match mode {
             UiMode::Kaoss => self.hit_kaoss(px, py),
             UiMode::Pads => self.hit_pads(px, py),
-            UiMode::Home => self.hit_home(px, py),
+            UiMode::Home => self.hit_home(px, py, 0),
             UiMode::Synth => self.hit_synth(px, py),
             UiMode::Fm => self.hit_fm(px, py),
             UiMode::Drums => self.hit_drums(px, py),
@@ -2269,11 +2274,10 @@ impl Layout {
         Hit::None
     }
 
-    fn hit_home(&self, px: i32, py: i32) -> Hit {
-        for (i, (mode, _, _)) in HOME_TILES.iter().enumerate() {
-            if self.home_tile(i).contains(px, py) {
-                return Hit::HomeTile(*mode);
-            }
+    fn hit_home(&self, px: i32, py: i32, scroll_y: i32) -> Hit {
+        let grid = self.home_grid();
+        if let Some(index) = grid.index_at(px, py, scroll_y) {
+            return Hit::HomeTile(HOME_TILES[index].0);
         }
         Hit::None
     }
@@ -2523,10 +2527,14 @@ impl Layout {
 
     pub fn song_list_scroll(&self, item_count: usize) -> crate::scroll::ListScroll {
         crate::scroll::ListScroll {
-            row_h: self.song_row(0).h,
+            row_h: self.song_row_step(),
             item_count,
             visible_rows: 5,
         }
+    }
+
+    pub fn song_row_step(&self) -> i32 {
+        56
     }
 
     pub fn log_list_scroll(&self, item_count: usize) -> crate::scroll::ListScroll {
@@ -2555,12 +2563,12 @@ impl Layout {
     }
 
     pub fn song_row(&self, index: usize) -> Rect {
-        let h = 56;
+        let step = self.song_row_step();
         Rect {
             x: self.song_list.x + 4,
-            y: self.song_list.y + 4 + (index as i32) * h,
+            y: self.song_list.y + 4 + (index as i32) * step,
             w: self.song_list.w - 8,
-            h: h - 4,
+            h: step - 4,
         }
     }
 
@@ -2952,10 +2960,27 @@ mod tests {
             Hit::SynthKey { .. } => {}
             other => panic!("{other:?}"),
         }
-        let home_fm = layout.home_tile(1);
+        let home_fm = layout.home_tile(1, 0);
         assert_eq!(
             layout.hit(UiMode::Home, home_fm.x + 4, home_fm.y + 4),
             Hit::HomeTile(UiMode::Fm)
+        );
+    }
+
+    #[test]
+    fn home_settings_requires_scroll() {
+        let layout = Layout::new();
+        let settings_idx = HOME_TILES.len() - 1;
+        let grid = layout.home_grid();
+        let offscreen = layout.home_tile(settings_idx, 0);
+        assert!(
+            offscreen.y + offscreen.h > grid.viewport.y + grid.viewport.h,
+            "settings tile should sit below the first home viewport"
+        );
+        let visible = layout.home_tile(settings_idx, grid.max_scroll());
+        assert!(
+            grid.viewport.contains(visible.x + 4, visible.y + visible.h / 2),
+            "max scroll should expose settings inside the viewport"
         );
     }
 

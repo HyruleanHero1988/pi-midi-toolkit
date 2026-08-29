@@ -190,6 +190,7 @@ pub struct NativeModel {
     /// Vibrato depth / rate / always-on overlay (replaces redundant VOICES grid).
     pub synth_vib_open: bool,
     pub synth_pick_scroll: i32,
+    pub home_scroll: i32,
     /// On-screen keyboard octave relative to C4 (−3 = C1 … +3 = C7).
     pub synth_octave: i8,
     /// Four-operator FM playground: recipe, selected op, per-op knobs, draw matrix.
@@ -373,6 +374,7 @@ impl NativeModel {
             synth_pick_a: None,
             synth_vib_open: false,
             synth_pick_scroll: 0,
+            home_scroll: 0,
             synth_octave: 0,
             fm_recipe: 0,
             fm_selected: 3,
@@ -1792,6 +1794,8 @@ impl NativeModel {
             } else {
                 self.layout.hit_kit_repeat(px, py)
             }
+        } else if self.mode == UiMode::Home && self.layout.content.contains(px, py) {
+            Hit::ScrollArea(ScrollKind::Home)
         } else if self.mode == UiMode::Songs && self.layout.song_list.contains(px, py) {
             Hit::ScrollArea(ScrollKind::SongList)
         } else if self.mode == UiMode::Log {
@@ -3161,9 +3165,24 @@ impl NativeModel {
     }
 
     pub fn finger_up(&mut self, id: i32, outbox: &mut Outbox) {
+        self.finger_up_at(id, None, None, outbox);
+    }
+
+    /// End a contact, optionally applying a final lift position reported by the driver.
+    pub fn finger_up_at(
+        &mut self,
+        id: i32,
+        px: Option<i32>,
+        py: Option<i32>,
+        outbox: &mut Outbox,
+    ) {
         let Some(slot) = self.fingers.iter().position(|f| f.active && f.id == id) else {
             return;
         };
+        if let (Some(px), Some(py)) = (px, py) {
+            self.fingers[slot].px = px;
+            self.fingers[slot].py = py;
+        }
         let finger = self.fingers[slot];
         self.fingers[slot] = Finger::silent();
         match finger.surface {
@@ -3212,11 +3231,14 @@ impl NativeModel {
             Surface::ScrollDrag {
                 kind,
                 start_py,
+                scroll_at_start,
                 dragging,
                 ..
             } => {
                 let scrolled = dragging || (finger.py - start_py).abs() >= TOUCH_SCROLL_THRESH_PX;
-                if !scrolled {
+                if scrolled {
+                    self.apply_scroll_drag(kind, start_py, finger.py, scroll_at_start);
+                } else {
                     self.resolve_scroll_tap(kind, finger.px, finger.py, outbox);
                 }
             }
@@ -4878,6 +4900,7 @@ impl NativeModel {
             ScrollKind::SynthMorphPick => self.synth_pick_scroll,
             ScrollKind::KaossPicker => self.kaoss_picker_scroll,
             ScrollKind::KaossSettings => self.kaoss_settings_scroll,
+            ScrollKind::Home => self.home_scroll,
             ScrollKind::SongList => self.song_scroll as i32,
             ScrollKind::Log => self.log_scroll as i32,
         }
@@ -4900,6 +4923,10 @@ impl NativeModel {
                 self.kaoss_settings_scroll =
                     value.clamp(0, self.layout.kaoss_settings_max_scroll());
             }
+            ScrollKind::Home => {
+                let grid = self.layout.home_grid();
+                self.home_scroll = grid.clamp_scroll(value);
+            }
             ScrollKind::SongList => {
                 let list = self.layout.song_list_scroll(self.song_files.len());
                 self.song_scroll = list.clamp_scroll(value.max(0) as usize);
@@ -4920,7 +4947,10 @@ impl NativeModel {
         scroll_at_start: i32,
     ) {
         match kind {
-            ScrollKind::SynthMorphPick | ScrollKind::KaossPicker | ScrollKind::KaossSettings => {
+            ScrollKind::SynthMorphPick
+            | ScrollKind::KaossPicker
+            | ScrollKind::KaossSettings
+            | ScrollKind::Home => {
                 let delta = start_py - py;
                 self.set_scroll_offset(kind, scroll_at_start + delta);
             }
@@ -4988,6 +5018,14 @@ impl NativeModel {
             }
             ScrollKind::Log => {}
             ScrollKind::KaossSettings => {}
+            ScrollKind::Home => {
+                let grid = self.layout.home_grid();
+                if let Some(index) = grid.index_at(px, py, self.home_scroll) {
+                    let mode = crate::layout::HOME_TILES[index].0;
+                    self.push_nav_history(mode);
+                    self.switch_mode(mode, outbox);
+                }
+            }
         }
     }
 
@@ -7002,7 +7040,7 @@ mod tests {
     fn fm_mode_enables_engine_and_plays_a_key() {
         let mut model = NativeModel::new();
         let mut out = Outbox::new();
-        let tile = model.layout.home_tile(1);
+        let tile = model.layout.home_tile(1, 0);
         model.set_mode(UiMode::Home);
         model.finger_down(1, tile.x + 8, tile.y + 8, &mut out);
         model.finger_up(1, &mut out);
@@ -7100,5 +7138,74 @@ mod tests {
             r,
             Request::Synth { param, value, .. } if param == "fm_enable" && *value < 0.5
         )));
+    }
+
+    #[test]
+    fn home_touch_scroll_reaches_settings() {
+        let mut model = NativeModel::new();
+        let mut out = Outbox::new();
+        model.set_mode(UiMode::Home);
+        let grid = model.layout.home_grid();
+        let settings_idx = crate::layout::HOME_TILES.len() - 1;
+        let settings = model.layout.home_tile(settings_idx, grid.max_scroll());
+        let px = settings.x + settings.w / 2;
+        let py = settings.y + settings.h / 2;
+        let start_x = model.layout.content.x + model.layout.content.w / 2;
+        let start_y = grid.viewport.y + grid.viewport.h / 2;
+        model.finger_down(1, start_x, start_y, &mut out);
+        model.finger_up_at(1, Some(start_x), Some(start_y - grid.max_scroll() - 20), &mut out);
+        assert!(
+            model.home_scroll > 0,
+            "drag lift should scroll the home grid"
+        );
+        model.finger_down(2, px, py, &mut out);
+        model.finger_up(2, &mut out);
+        assert_eq!(model.mode, UiMode::Settings);
+    }
+
+    #[test]
+    fn song_list_touch_scroll_works_without_move_events() {
+        use std::path::PathBuf;
+
+        let mut model = NativeModel::new();
+        let mut out = Outbox::new();
+        model.switch_mode(UiMode::Songs, &mut out);
+        model.song_files = (0..12)
+            .map(|i| PathBuf::from(format!("song-{i:02}.mid")))
+            .collect();
+        let list = model.layout.song_list;
+        let px = list.x + list.w / 2;
+        let py = model.layout.song_row(2).y + 20;
+        model.finger_down(1, px, py, &mut out);
+        assert_eq!(model.song_scroll, 0);
+        model.finger_up_at(1, Some(px), Some(py - 120), &mut out);
+        assert!(
+            model.song_scroll > 0,
+            "lift with vertical delta should scroll the list"
+        );
+    }
+
+    #[test]
+    fn song_list_touch_scroll_tracks_move_events() {
+        use std::path::PathBuf;
+
+        let mut model = NativeModel::new();
+        let mut out = Outbox::new();
+        model.switch_mode(UiMode::Songs, &mut out);
+        model.song_files = (0..12)
+            .map(|i| PathBuf::from(format!("song-{i:02}.mid")))
+            .collect();
+        let list = model.layout.song_list;
+        let px = list.x + list.w / 2;
+        let py = model.layout.song_row(2).y + 20;
+        model.finger_down(1, px, py, &mut out);
+        for step in 1..=8 {
+            model.finger_move(1, px, py - step * 16, &mut out);
+        }
+        assert!(
+            model.song_scroll > 0,
+            "move stream should advance song_scroll"
+        );
+        model.finger_up(1, &mut out);
     }
 }

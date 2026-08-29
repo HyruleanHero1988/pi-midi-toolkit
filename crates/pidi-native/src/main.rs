@@ -117,7 +117,9 @@ fn main() {
             match event {
                 TouchEvent::Down { id, x, y } => model.finger_down(id, x, y, &mut client.outbox),
                 TouchEvent::Move { id, x, y } => model.finger_move(id, x, y, &mut client.outbox),
-                TouchEvent::Up { id } => model.finger_up(id, &mut client.outbox),
+                TouchEvent::Up { id, x, y } => {
+                    model.finger_up_at(id, x, y, &mut client.outbox)
+                }
             }
         }
 

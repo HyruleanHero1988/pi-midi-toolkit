@@ -1364,12 +1364,12 @@ fn draw_home(scene: &mut Scene, model: &NativeModel) {
     scene.text_scaled(
         layout.content.x + layout.content.w - 160,
         layout.content.y + 14,
-        "tap a mode",
+        "tap a mode · drag",
         0x928374,
         2,
     );
     for (i, (_mode, title, color)) in HOME_TILES.iter().enumerate() {
-        let cell = layout.home_tile(i);
+        let cell = layout.home_tile(i, model.home_scroll);
         scene.button(cell, *color);
         scene.text_centered(cell, title, 0xfbf1c7, 2);
     }

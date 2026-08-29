@@ -4,7 +4,13 @@
 pub enum TouchEvent {
     Down { id: i32, x: i32, y: i32 },
     Move { id: i32, x: i32, y: i32 },
-    Up { id: i32 },
+    /// Lift contact. When the driver reports a final position, include it so
+    /// scroll drags still resolve if no `Move` events arrived mid-gesture.
+    Up {
+        id: i32,
+        x: Option<i32>,
+        y: Option<i32>,
+    },
 }
 
 pub fn norm_to_px(x: f32, y: f32, width: i32, height: i32) -> (i32, i32) {
