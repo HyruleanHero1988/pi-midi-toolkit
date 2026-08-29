@@ -2369,6 +2369,10 @@ impl NativeModel {
             Hit::ChordsHold => {
                 self.tap_ui(slot, id, gesture, px, py);
                 self.chords_hold = !self.chords_hold;
+                if !self.chords_hold && !self.chords_contact_held() {
+                    // Leaving HOLD with nothing pressed: silence a latched block.
+                    self.chords_block_off(outbox);
+                }
                 self.status_line = if self.chords_hold {
                     "HOLD on".into()
                 } else {
@@ -2450,8 +2454,25 @@ impl NativeModel {
                 self.chords_strum_to(y, outbox);
             }
             Hit::ChordsPalette { slot: pal } => {
-                self.tap_ui(slot, id, gesture, px, py);
-                self.chords_palette_tap(pal, outbox);
+                // ARM / empty-store stay as taps. Playing a filled slot tracks the
+                // finger so MOM can release on lift (HOLD keeps the latch).
+                if self.chords_arm || self.chords_palette[pal].is_none() {
+                    self.tap_ui(slot, id, gesture, px, py);
+                    self.chords_palette_tap(pal, outbox);
+                } else {
+                    self.fingers[slot] = Finger {
+                        active: true,
+                        id,
+                        gesture,
+                        x: 0.0,
+                        y: 0.0,
+                        px,
+                        py,
+                        surface: Surface::ChordsPalette { slot: pal },
+                        gate_on: false,
+                    };
+                    self.chords_palette_press(pal, outbox);
+                }
             }
             Hit::LogClear => {
                 self.tap_ui(slot, id, gesture, px, py);
@@ -2579,6 +2600,9 @@ impl NativeModel {
                     self.chords_release_button(finger.gesture, col, qrow, outbox);
                 }
             }
+            Surface::ChordsPalette { .. } => {
+                self.chords_palette_release(outbox);
+            }
             Surface::ChordsStrum => {
                 self.chords_strum_off(outbox);
             }
@@ -2598,7 +2622,6 @@ impl NativeModel {
             | Surface::FmSlider { .. }
             | Surface::KitSlider { .. }
             | Surface::SettingsFx { .. }
-            | Surface::ChordsPalette { .. }
             | Surface::UiTap => {}
         }
     }
@@ -4610,9 +4633,21 @@ impl NativeModel {
             return;
         }
         self.chords_sync_from_held(outbox);
-        if self.chords_held.iter().all(|(g, _, _)| g.is_none()) {
+        if !self.chords_contact_held() {
             self.chords_block_off(outbox);
         }
+    }
+
+    /// True while a grid button or palette pad finger is still down.
+    fn chords_contact_held(&self) -> bool {
+        self.chords_held.iter().any(|(g, _, _)| g.is_some())
+            || self.fingers.iter().any(|f| {
+                f.active
+                    && matches!(
+                        f.surface,
+                        Surface::ChordsButton { .. } | Surface::ChordsPalette { .. }
+                    )
+            })
     }
 
     fn chords_held_list(&self) -> Vec<(usize, QualityRow)> {
@@ -4723,6 +4758,22 @@ impl NativeModel {
         } else if let Some(spec) = self.chords_current {
             self.chords_palette[slot] = Some(spec);
             self.status_line = format!("palette {} ← {}", slot + 1, spec.name());
+        }
+    }
+
+    fn chords_palette_press(&mut self, slot: usize, outbox: &mut Outbox) {
+        if let Some(spec) = self.chords_palette.get(slot).copied().flatten() {
+            self.chords_select(spec, true, outbox);
+        }
+    }
+
+    fn chords_palette_release(&mut self, outbox: &mut Outbox) {
+        if self.chords_hold {
+            // Latch like the Omnichord memory / grid HOLD path.
+            return;
+        }
+        if !self.chords_contact_held() {
+            self.chords_block_off(outbox);
         }
     }
 
@@ -5727,6 +5778,55 @@ mod tests {
         let pcs: Vec<u8> = notes.iter().map(|n| n % 12).collect();
         assert!(pcs.contains(&0) && pcs.contains(&4) && pcs.contains(&7));
         assert_eq!(model.chords_current.unwrap().name(), "C");
+    }
+
+    #[test]
+    fn chords_palette_mom_releases_on_lift() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Chords);
+        model.chords_out = OutMode::Local;
+        model.chords_hold = false;
+        model.chords_palette[0] = Some(ChordSpec::new(0, chords::ChordQuality::Maj));
+        let mut out = Outbox::new();
+        let cell = model.layout.chords_palette_slot(0);
+        model.finger_down(1, cell.x + 4, cell.y + 4, &mut out);
+        let ons: Vec<_> = out
+            .take()
+            .into_iter()
+            .filter(|r| matches!(r, Request::NoteOn { .. }))
+            .collect();
+        assert!(ons.len() >= 3, "palette press should sound, got {ons:?}");
+        model.finger_up(1, &mut out);
+        let offs: Vec<_> = out
+            .take()
+            .into_iter()
+            .filter(|r| matches!(r, Request::NoteOff { .. }))
+            .collect();
+        assert!(
+            offs.len() >= 3,
+            "MOM palette lift should silence, got {offs:?}"
+        );
+        assert!(model.chords_block.iter().all(|n| n.is_none()));
+    }
+
+    #[test]
+    fn chords_palette_hold_latches_after_lift() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Chords);
+        model.chords_out = OutMode::Local;
+        model.chords_hold = true;
+        model.chords_palette[0] = Some(ChordSpec::new(0, chords::ChordQuality::Maj));
+        let mut out = Outbox::new();
+        let cell = model.layout.chords_palette_slot(0);
+        model.finger_down(1, cell.x + 4, cell.y + 4, &mut out);
+        out.take();
+        model.finger_up(1, &mut out);
+        let after = out.take();
+        assert!(
+            after.iter().all(|r| !matches!(r, Request::NoteOff { .. })),
+            "HOLD should keep notes after lift, got {after:?}"
+        );
+        assert!(model.chords_block.iter().any(|n| n.is_some()));
     }
 
     #[test]
