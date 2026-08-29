@@ -196,7 +196,11 @@ impl EvdevDecoder {
             let y = map(slot.y, self.min_y, self.max_y, self.screen_h);
             if slot.tracking < 0 {
                 if slot.was_active && slot.last_id >= 0 {
-                    out.push(TouchEvent::Up { id: slot.last_id });
+                    out.push(TouchEvent::Up {
+                        id: slot.last_id,
+                        x: Some(x),
+                        y: Some(y),
+                    });
                 }
                 slot.was_active = false;
                 slot.last_id = -1;
@@ -222,9 +226,13 @@ impl EvdevDecoder {
 
     fn flush_type_a(&mut self, out: &mut Vec<TouchEvent>) {
         let frame = std::mem::take(&mut self.type_a_frame);
-        for &(id, _, _) in &self.type_a_prev {
+        for &(id, raw_x, raw_y) in &self.type_a_prev {
             if !frame.iter().any(|(fid, _, _)| *fid == id) {
-                out.push(TouchEvent::Up { id });
+                out.push(TouchEvent::Up {
+                    id,
+                    x: Some(map(raw_x, self.min_x, self.max_x, self.screen_w)),
+                    y: Some(map(raw_y, self.min_y, self.max_y, self.screen_h)),
+                });
             }
         }
         for &(id, x, y) in &frame {
@@ -325,7 +333,7 @@ mod tests {
         out.clear();
         dec.feed(RawEvent::syn(SYN_REPORT), &mut out);
         assert!(
-            out.iter().any(|e| matches!(e, TouchEvent::Up { id: 3 })),
+            out.iter().any(|e| matches!(e, TouchEvent::Up { id: 3, .. })),
             "empty type-A frame should lift the contact: {out:?}"
         );
     }
@@ -343,6 +351,6 @@ mod tests {
         dec.feed(RawEvent::abs(ABS_MT_SLOT, 0), &mut out);
         dec.feed(RawEvent::abs(ABS_MT_TRACKING_ID, -1), &mut out);
         dec.feed(RawEvent::syn(SYN_REPORT), &mut out);
-        assert!(matches!(out.as_slice(), [TouchEvent::Up { id: 9 }]));
+        assert!(matches!(out.as_slice(), [TouchEvent::Up { id: 9, .. }]));
     }
 }

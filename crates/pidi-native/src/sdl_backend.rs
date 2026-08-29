@@ -119,9 +119,17 @@ impl SdlDisplay {
                         y: py,
                     });
                 }
-                Event::FingerUp { finger_id, .. } if collect_touch => {
+                Event::FingerUp {
+                    finger_id,
+                    x,
+                    y,
+                    ..
+                } if collect_touch => {
+                    let (px, py) = input::norm_to_px(x, y, SCREEN_W as i32, SCREEN_H as i32);
                     out.push(TouchEvent::Up {
                         id: finger_id as i32,
+                        x: Some(px),
+                        y: Some(py),
                     });
                 }
                 Event::MouseButtonDown {
@@ -154,8 +162,11 @@ impl SdlDisplay {
                 } if collect_touch => {
                     self.mouse_down = false;
                     let (px, py) = window_to_surface(x, y, ww, wh);
-                    out.push(TouchEvent::Up { id: 0 });
-                    let _ = (px, py);
+                    out.push(TouchEvent::Up {
+                        id: 0,
+                        x: Some(px),
+                        y: Some(py),
+                    });
                 }
                 _ => {}
             }
