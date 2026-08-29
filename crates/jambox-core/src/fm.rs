@@ -15,8 +15,14 @@ const SINE_MASK: usize = SINE_SIZE - 1;
 pub const MAX_FM_VOICES: usize = 8;
 pub const FM_RECIPE_COUNT: usize = 8;
 pub const FM_OP_COUNT: usize = 4;
-const VOICE_AMP: f32 = 0.38;
-const INDEX_SCALE: f32 = SINE_SIZE as f32 / std::f32::consts::TAU * 5.5;
+/// Heard mix pad only. Never bake this into `last[]` or the envelope target —
+/// that made every recipe a mild tone while the on-screen scope still looked
+/// jagged (preview uses a full-scale wave).
+const VOICE_AMP: f32 = 0.32;
+/// Cross-mod: amount 1 ≈ 7.2 rad, matching the old 2-op BRIGHT-at-full index.
+const INDEX_SCALE: f32 = SINE_SIZE as f32 / std::f32::consts::TAU * 7.2;
+/// Self-mod (feedback) is hotter: one-sample delay needs more gain to rasp.
+const FEEDBACK_SCALE: f32 = SINE_SIZE as f32 * 0.42;
 
 /// Discrete operator frequency ratios, in order of "clang".
 pub const CLANG_RATIOS: [f32; 10] = [0.5, 1.0, 1.414, 2.0, 3.0, 3.5, 5.0, 7.0, 11.0, 14.0];
@@ -209,18 +215,18 @@ pub fn fm_recipe_patch(index: usize) -> FmPatch {
                 quiet(0.15),
                 op(0.12, 0.72, 0.0, 0.42, 0.78),
             ];
-            p.matrix[0][3] = 0.40;
+            p.matrix[0][3] = 0.55;
         }
         2 => {
             // Bass: folded A with feedback, 2:1 into D.
             p.ops = [
-                op(0.32, 0.0, 0.40, 0.22, 0.92),
+                op(0.32, 0.0, 0.48, 0.22, 0.92),
                 quiet(0.15),
                 quiet(0.15),
-                op(0.12, 1.0, 0.14, 0.30, 1.0),
+                op(0.12, 1.0, 0.10, 0.30, 1.0),
             ];
-            p.matrix[0][0] = 0.48;
-            p.matrix[0][3] = 0.52;
+            p.matrix[0][0] = 0.58;
+            p.matrix[0][3] = 0.62;
         }
         3 => {
             // Brass: slow stack A→B→D, no fold — brightness after the press.
@@ -265,16 +271,16 @@ pub fn fm_recipe_patch(index: usize) -> FmPatch {
             p.matrix[1][3] = 0.56;
         }
         _ => {
-            // Growl: A feedback + A→D + B→D, lots of fold.
+            // Growl: silent A rasps itself then chews D. Dirt is FM, not a mixed square.
             p.ops = [
-                op(0.12, 0.12, 0.66, 0.28, 0.85),
-                op(0.32, 0.0, 0.28, 0.24, 0.80),
+                op(0.12, 0.0, 0.58, 0.22, 0.90),
+                op(0.32, 0.0, 0.22, 0.20, 0.80),
                 quiet(0.15),
-                op(0.12, 1.0, 0.20, 0.40, 0.90),
+                op(0.12, 1.0, 0.06, 0.36, 1.0),
             ];
-            p.matrix[0][0] = 0.72;
-            p.matrix[0][3] = 0.50;
-            p.matrix[1][3] = 0.34;
+            p.matrix[0][0] = 0.82;
+            p.matrix[0][3] = 0.68;
+            p.matrix[1][3] = 0.40;
         }
     }
     p
@@ -417,7 +423,7 @@ impl FmSynth {
         }
         self.serial = self.serial.wrapping_add(1);
         let vel = (velocity as f32 / 127.0).clamp(0.05, 1.0);
-        let target = vel * VOICE_AMP;
+        let target = vel;
 
         if let Some(slot) = self.find_playing(channel, note) {
             let v = &mut self.voices[slot];
@@ -508,23 +514,17 @@ impl FmSynth {
                         dec[i],
                         rel[i],
                     );
-                    let mut mod_phase = 0.0f32;
-                    for src in 0..FM_OP_COUNT {
-                        let amt = patch.matrix[src][i];
-                        if amt > 0.001 {
-                            mod_phase += prev[src] * amt * INDEX_SCALE;
-                        }
-                    }
+                    let mod_phase = phase_mod(&prev, &patch.matrix, i);
                     let s = sine_at(&self.sine, v.phase[i] + mod_phase);
-                    let shaped = waveshape(s, patch.ops[i].fold) * v.amp[i];
-                    v.last[i] = shaped;
-                    mix += shaped * patch.ops[i].audio;
+                    let wave = waveshape(s, patch.ops[i].fold);
+                    v.last[i] = wave * v.amp[i];
+                    mix += v.last[i] * patch.ops[i].audio;
                     v.phase[i] += inc[i];
                     if v.phase[i] >= size {
                         v.phase[i] -= size * (v.phase[i] / size).floor();
                     }
                 }
-                *sample += mix * 0.72;
+                *sample += mix * VOICE_AMP;
             }
 
             if v.releasing && v.amp.iter().all(|a| *a < 0.0008) {
@@ -552,13 +552,7 @@ impl FmSynth {
             let prev = last;
             for i in 0..FM_OP_COUNT {
                 let inc = clang_ratio(patch.ops[i].ratio) * SINE_SIZE as f32 / n;
-                let mut mod_phase = 0.0f32;
-                for src in 0..FM_OP_COUNT {
-                    let amt = patch.matrix[src][i];
-                    if amt > 0.001 {
-                        mod_phase += prev[src] * amt * INDEX_SCALE;
-                    }
-                }
+                let mod_phase = phase_mod(&prev, &patch.matrix, i);
                 let s = sine_at(&sine, phase[i] + mod_phase);
                 let shaped = waveshape(s, patch.ops[i].fold);
                 last[i] = shaped;
@@ -600,6 +594,28 @@ impl FmSynth {
     fn test_op_amps(&self) -> Option<[f32; FM_OP_COUNT]> {
         self.voices.iter().find(|v| v.active).map(|v| v.amp)
     }
+}
+
+/// One-sample-delayed FM: self-links use the hotter feedback scale.
+#[inline]
+fn phase_mod(
+    prev: &[f32; FM_OP_COUNT],
+    matrix: &[[f32; FM_OP_COUNT]; FM_OP_COUNT],
+    dst: usize,
+) -> f32 {
+    let mut mod_phase = 0.0f32;
+    for src in 0..FM_OP_COUNT {
+        let amt = matrix[src][dst];
+        if amt > 0.001 {
+            let scale = if src == dst {
+                FEEDBACK_SCALE
+            } else {
+                INDEX_SCALE
+            };
+            mod_phase += prev[src] * amt * scale;
+        }
+    }
+    mod_phase
 }
 
 #[inline]
@@ -799,5 +815,83 @@ mod tests {
         assert!(late[1] > 0.08, "warm body B should still be held");
         assert!(late[3] > 0.08, "D body should still be held");
         assert_eq!(fm.active_count(), 1);
+    }
+
+    fn waveform_edge(buf: &[f32]) -> f32 {
+        let mut delta = 0.0f32;
+        let mut mag = 0.0f32;
+        for w in buf.windows(2) {
+            delta += (w[1] - w[0]).abs();
+            mag += w[1].abs();
+        }
+        delta / mag.max(1e-8)
+    }
+
+    fn held_note(recipe: usize) -> Vec<f32> {
+        let mut fm = FmSynth::new();
+        fm.set_recipe(recipe);
+        fm.note_on(0, 48, 127);
+        let mut buf = vec![0.0f32; 2048];
+        for _ in 0..24 {
+            buf.iter_mut().for_each(|s| *s = 0.0);
+            fm.render(&mut buf, 48_000.0, 1.0);
+        }
+        buf.iter_mut().for_each(|s| *s = 0.0);
+        fm.render(&mut buf, 48_000.0, 1.0);
+        buf
+    }
+
+    #[test]
+    fn growl_held_note_has_more_bite_than_flute() {
+        let growl = waveform_edge(&held_note(7));
+        let flute = waveform_edge(&held_note(4));
+        assert!(
+            growl > flute * 1.8,
+            "growl should rasp, not sit as a tone: growl={growl} flute={flute}"
+        );
+        let organ = waveform_edge(&held_note(5));
+        assert!(
+            growl > organ * 1.15,
+            "growl should be brighter than stacked sines: growl={growl} organ={organ}"
+        );
+    }
+
+    #[test]
+    fn feedback_is_what_puts_the_rasp_on_growl() {
+        let with_fb = fm_recipe_patch(7);
+        let mut no_fb = with_fb;
+        no_fb.matrix[0][0] = 0.0;
+
+        let mut a = [0.0f32; 256];
+        let mut b = [0.0f32; 256];
+        FmSynth::preview_cycle(with_fb, &mut a);
+        FmSynth::preview_cycle(no_fb, &mut b);
+        let hot = waveform_edge(&a);
+        let flat = waveform_edge(&b);
+        assert!(
+            hot > flat * 1.25,
+            "A→A feedback should add bite: with={hot} without={flat}"
+        );
+    }
+
+    #[test]
+    fn voice_pad_does_not_crush_fm_index() {
+        // A full-velocity note's modulator must reach ~1 so INDEX_SCALE is real.
+        let mut fm = FmSynth::new();
+        fm.set_recipe(7);
+        fm.note_on(0, 48, 127);
+        let mut buf = vec![0.0f32; 512];
+        fm.render(&mut buf, 48_000.0, 1.0);
+        let amps = fm.test_op_amps().unwrap();
+        assert!(
+            amps[0] > 0.7,
+            "envelope target must not include VOICE_AMP, ampA={}",
+            amps[0]
+        );
+        assert!(
+            amps[3] > 0.7,
+            "carrier envelope must not include VOICE_AMP, ampD={}",
+            amps[3]
+        );
     }
 }
