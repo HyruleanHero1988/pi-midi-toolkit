@@ -31,6 +31,9 @@ pub const QUALITY_ROWS: usize = 3;
 pub const PALETTE_SLOTS: usize = 8;
 /// Harp strings on the strum plate (matches the drawn lines).
 pub const STRUM_STRINGS: usize = 8;
+/// Insets within `Layout::chords_strum_play()` — must match `draw_chords`.
+pub const STRUM_BAND_TOP_INSET: i32 = 18;
+pub const STRUM_BAND_BOTTOM_INSET: i32 = 4;
 /// Lowest strum string ≈ C3 (MIDI 48) for a C chord — midrange, not sub-bass.
 pub const STRUM_BASE: u8 = 48;
 /// Close-position block voicing around C3 (MIDI 48).
@@ -339,8 +342,23 @@ pub fn strum_strings_at(spec: ChordSpec, base: u8) -> [u8; STRUM_STRINGS] {
     out
 }
 
-/// Map pad Y (1 = top of screen, 0 = bottom) onto harp strings.
-/// Top of the plate is the highest note; bottom is the lowest.
+/// Normalized strum Y from a pixel in the play rect: 1 = top band (highest string).
+pub fn strum_y_from_play_py(play_y: i32, play_h: i32, py: i32) -> f32 {
+    let band_h = ((play_h - STRUM_BAND_TOP_INSET - STRUM_BAND_BOTTOM_INSET).max(1) as f32)
+        / STRUM_STRINGS as f32;
+    let top = (play_y + STRUM_BAND_TOP_INSET) as f32;
+    let bottom = top + (STRUM_STRINGS as f32 - 1.0) * band_h;
+    if (py as f32) <= top {
+        return 1.0;
+    }
+    if (py as f32) >= bottom {
+        return 0.0;
+    }
+    let t = 1.0 - ((py as f32 - top) / (bottom - top).max(1.0));
+    t.clamp(0.0, 1.0)
+}
+
+/// Map normalized strum Y (1 = highest string) onto the harp table.
 pub fn string_at(y: f32, strings: &[u8; STRUM_STRINGS]) -> u8 {
     let t = y.clamp(0.0, 1.0) * (STRUM_STRINGS.saturating_sub(1)) as f32;
     let i = t.round() as usize;
@@ -587,6 +605,29 @@ mod tests {
         let s = c.strum_strings();
         assert_eq!(string_at(1.0, &s), s[STRUM_STRINGS - 1], "pad top → high");
         assert_eq!(string_at(0.0, &s), s[0], "pad bottom → low");
+    }
+
+    #[test]
+    fn strum_touch_y_tracks_drawn_bands() {
+        let play_y = 120;
+        let play_h = 170;
+        let band_h =
+            ((play_h - STRUM_BAND_TOP_INSET - STRUM_BAND_BOTTOM_INSET).max(1) as f32) / 8.0;
+        let top = play_y + STRUM_BAND_TOP_INSET;
+        let c = ChordSpec::new(0, ChordQuality::Maj);
+        let s = c.strum_strings();
+        for band in 0..STRUM_STRINGS {
+            let py = (top as f32 + band as f32 * band_h + band_h * 0.5) as i32;
+            let y = strum_y_from_play_py(play_y, play_h, py);
+            let note = string_at(y, &s);
+            let expected = s[STRUM_STRINGS - 1 - band];
+            assert_eq!(
+                note, expected,
+                "band {band} py={py} y={y:.2} expected {} got {}",
+                crate::kaoss_ui::midi_note_label(expected),
+                crate::kaoss_ui::midi_note_label(note),
+            );
+        }
     }
 
     #[test]

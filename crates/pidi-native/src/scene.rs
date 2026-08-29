@@ -765,11 +765,6 @@ fn draw_kaoss(scene: &mut Scene, model: &NativeModel) {
         }
         draw_kaoss_axes(scene, layout.kaoss, model);
         draw_kaoss_note_readout(scene, layout.kaoss, model);
-        let mut finger_buf = [(0.0_f32, 0.0_f32); crate::model::MAX_FINGERS];
-        let n = model.copy_kaoss_fingers(&mut finger_buf);
-        for &(fx, fy) in &finger_buf[..n] {
-            draw_kaoss_cursor(scene, layout.kaoss, fx, fy, model);
-        }
     }
 
     let prog = kaoss_ui::program(model.kaoss_program);
@@ -1115,10 +1110,11 @@ fn draw_kaoss_axes(scene: &mut Scene, pad: crate::layout::Rect, model: &NativeMo
         };
         scene.text_scaled(pad.x + 6, pad.y + pad.h / 2 - 20, y_label, 0xd3869b, 2);
         // BEND: pitch lives on the horizontal midline (not the bottom edge).
+        // Keep X label well inside the pad — glyphs render after button fills.
         let x_label_y = if bend {
             pad.y + pad.h / 2 - 10
         } else {
-            pad.y + pad.h - 36
+            pad.y + pad.h - 52
         };
         scene.text_scaled(pad.x + pad.w / 2 - 40, x_label_y, x_label, 0xd3869b, 2);
     }
@@ -1193,48 +1189,6 @@ fn draw_kaoss_grid(
                 0x3a1528,
             );
         }
-    }
-}
-
-/// Per-finger crosshair (CELLS / non-GLOW). GLOW uses the membrane field + fixed readout.
-fn draw_kaoss_cursor(
-    scene: &mut Scene,
-    pad: crate::layout::Rect,
-    fx: f32,
-    fy: f32,
-    model: &NativeModel,
-) {
-    if model.kaoss_viz_style.is_glow() {
-        return;
-    }
-    let cx = pad.x as f32 + fx.clamp(0.0, 1.0) * pad.w as f32;
-    let cy = pad.y as f32 + (1.0 - fy.clamp(0.0, 1.0)) * pad.h as f32;
-    let note_label = if kaoss_ui::program(model.kaoss_program).note {
-        Some(kaoss_ui::midi_note_label(model.kaoss_note_at(fx)))
-    } else {
-        None
-    };
-    let (hue, sat) = if kaoss_viz::pad_color_is_rainbow(model.kaoss_mono_color) {
-        (
-            (fx.clamp(0.0, 1.0) * 0.70
-                + kaoss_viz::program_hue(kaoss_ui::program(model.kaoss_program).id))
-            .rem_euclid(1.0),
-            0.90,
-        )
-    } else {
-        let (h, s) = kaoss_viz::pad_color_hs(model.kaoss_mono_color).unwrap_or((0.93, 0.88));
-        (h, s.max(0.35))
-    };
-    let outer = kaoss_viz::hsv_color(hue, sat, 0.55);
-    let mid = kaoss_viz::hsv_color(hue, sat.min(0.85), 1.0);
-    let core = kaoss_viz::hsv_color(hue, 0.12, 1.0);
-    scene.stroke_disc(cx, cy, 34.0, 2.0, outer, 0x08040a);
-    scene.stroke_disc(cx, cy, 20.0, 3.0, mid, 0x08040a);
-    scene.fill_disc(cx, cy, 7.0, core);
-    scene.fill(cx - 28.0, cy - 1.0, 56.0, 2.0, mid);
-    scene.fill(cx - 1.0, cy - 28.0, 2.0, 56.0, mid);
-    if let Some(ref label) = note_label {
-        scene.text_scaled((cx as i32) - 12, (cy as i32) - 40, label, 0xfbf1c7, 2);
     }
 }
 
@@ -1539,10 +1493,11 @@ fn draw_chords(scene: &mut Scene, model: &NativeModel) {
     let strum_notes = model.chords_current.map(|spec| {
         spec.strum_strings_at(chords::strum_base_for_octave(model.chords_octave))
     });
-    let band_h = (play.h - 22).max(1) / strings as i32;
+    let band_h = (play.h - chords::STRUM_BAND_TOP_INSET - chords::STRUM_BAND_BOTTOM_INSET).max(1)
+        / strings as i32;
     for i in 0..strings {
         let i = i as i32;
-        let y = play.y + 18 + i * band_h;
+        let y = play.y + chords::STRUM_BAND_TOP_INSET + i * band_h;
         scene.fill_rect(
             Rect {
                 x: play.x + 12,

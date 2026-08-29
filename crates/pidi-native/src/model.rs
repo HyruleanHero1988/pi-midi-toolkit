@@ -3113,7 +3113,7 @@ impl NativeModel {
                 self.apply_fx_slider(index, py, outbox);
             }
             Surface::ChordsStrum => {
-                let (_x, y) = self.layout.chords_strum_play().pad_xy(px, py);
+                let y = self.layout.chords_strum_touch_y(py);
                 self.fingers[slot].y = y;
                 self.chords_strum_to(y, outbox);
             }
