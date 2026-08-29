@@ -6230,6 +6230,38 @@ mod tests {
     }
 
     #[test]
+    fn kaoss_two_fingers_emit_two_touch_downs() {
+        let mut model = NativeModel::new();
+        assert!(kaoss_ui::program(model.kaoss_program).note);
+        let mut out = Outbox::new();
+        let a = model.layout.kaoss_cell(1, 3);
+        let b = model.layout.kaoss_cell(10, 3);
+        model.finger_down(1, a.x + 4, a.y + 4, &mut out);
+        model.finger_down(2, b.x + 4, b.y + 4, &mut out);
+        let batch = out.take();
+        let downs: Vec<u32> = batch
+            .iter()
+            .filter_map(|r| match r {
+                Request::Touch {
+                    phase: TouchPhase::Down,
+                    gesture,
+                    ..
+                } => Some(*gesture),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            downs.len(),
+            2,
+            "each Kaoss contact must start its own engine voice: {batch:?}"
+        );
+        assert_ne!(downs[0], downs[1]);
+        let mut buf = [(0.0, 0.0); MAX_FINGERS];
+        assert_eq!(model.copy_kaoss_fingers(&mut buf), 2);
+        assert!((buf[0].0 - buf[1].0).abs() > 0.4);
+    }
+
+    #[test]
     fn curated_program_pick_stores_absolute_index() {
         let mut model = NativeModel::new();
         model.kaoss_show_all = false;
