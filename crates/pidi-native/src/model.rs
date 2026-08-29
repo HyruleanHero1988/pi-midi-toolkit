@@ -786,6 +786,21 @@ impl NativeModel {
             .map(|f| (f.x, f.y))
     }
 
+    /// Fill `out` with live Kaoss pad contacts (pad-normalized XY). Returns count.
+    pub fn copy_kaoss_fingers(&self, out: &mut [(f32, f32)]) -> usize {
+        let mut n = 0;
+        for f in &self.fingers {
+            if n >= out.len() {
+                break;
+            }
+            if f.active && f.surface == Surface::Kaoss {
+                out[n] = (f.x, f.y);
+                n += 1;
+            }
+        }
+        n
+    }
+
     pub fn kaoss_viz_time(&self) -> f32 {
         self.kaoss_viz_time
     }
@@ -4903,7 +4918,9 @@ impl NativeModel {
 
     fn paint_cells(&mut self) {
         let t = self.kaoss_viz_time;
-        let finger = self.kaoss_finger();
+        let mut finger_buf = [(0.0_f32, 0.0_f32); MAX_FINGERS];
+        let n = self.copy_kaoss_fingers(&mut finger_buf);
+        let fingers = &finger_buf[..n];
         let trail = self.kaoss_trail.clone();
         let ripples = self.kaoss_ripples.clone();
         let hold = self.kaoss_hold && self.kaoss_touching;
@@ -4915,12 +4932,12 @@ impl NativeModel {
             for col in 0..LED_COLS {
                 self.cells[row][col] = if rainbow {
                     crate::kaoss_viz::pad_led_rgb(
-                        col, row, t, finger, &trail, &ripples, hold, gate_flash, hue_shift,
+                        col, row, t, fingers, &trail, &ripples, hold, gate_flash, hue_shift,
                     )
                 } else {
                     let (h, s) = solid.unwrap_or((0.93, 0.88));
                     crate::kaoss_viz::pad_led_mono(
-                        col, row, t, finger, &trail, &ripples, hold, gate_flash, h, s,
+                        col, row, t, fingers, &trail, &ripples, hold, gate_flash, h, s,
                     )
                 };
             }
@@ -4928,19 +4945,28 @@ impl NativeModel {
     }
 
     fn push_kaoss_trail(&mut self, x: f32, y: f32) {
-        if let Some(last) = self.kaoss_trail.last_mut() {
-            let dx = last.0 - x;
-            let dy = last.1 - y;
-            if dx * dx + dy * dy < 0.0004 {
-                last.0 = x;
-                last.1 = y;
-                last.2 = 1.0;
-                return;
+        // Update the nearest recent spark so two fingers don't thrash one trail.
+        const NEAR: f32 = 0.0004;
+        let mut best: Option<usize> = None;
+        let mut best_d2 = NEAR;
+        for (i, p) in self.kaoss_trail.iter().enumerate() {
+            let dx = p.0 - x;
+            let dy = p.1 - y;
+            let d2 = dx * dx + dy * dy;
+            if d2 < best_d2 {
+                best_d2 = d2;
+                best = Some(i);
             }
         }
+        if let Some(i) = best {
+            self.kaoss_trail[i].0 = x;
+            self.kaoss_trail[i].1 = y;
+            self.kaoss_trail[i].2 = 1.0;
+            return;
+        }
         self.kaoss_trail.push((x, y, 1.0));
-        if self.kaoss_trail.len() > 12 {
-            let drop = self.kaoss_trail.len() - 12;
+        if self.kaoss_trail.len() > 24 {
+            let drop = self.kaoss_trail.len() - 24;
             self.kaoss_trail.drain(0..drop);
         }
     }
@@ -5323,6 +5349,78 @@ mod tests {
         assert_eq!(model.active_fingers(), 5);
         model.finger_down(99, k.x + 100, k.y + 100, &mut out);
         assert_eq!(model.active_fingers(), 5);
+    }
+
+    #[test]
+    fn kaoss_two_fingers_emit_two_touch_downs() {
+        let mut model = NativeModel::new();
+        assert!(kaoss_ui::program(model.kaoss_program).note);
+        let mut out = Outbox::new();
+        let a = model.layout.kaoss_cell(1, 3);
+        let b = model.layout.kaoss_cell(10, 3);
+        model.finger_down(1, a.x + 4, a.y + 4, &mut out);
+        model.finger_down(2, b.x + 4, b.y + 4, &mut out);
+        let batch = out.take();
+        let downs: Vec<u32> = batch
+            .iter()
+            .filter_map(|r| match r {
+                Request::Touch {
+                    phase: TouchPhase::Down,
+                    gesture,
+                    ..
+                } => Some(*gesture),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            downs.len(),
+            2,
+            "each Kaoss contact must start its own engine voice: {batch:?}"
+        );
+        assert_ne!(downs[0], downs[1]);
+        let mut buf = [(0.0, 0.0); MAX_FINGERS];
+        assert_eq!(model.copy_kaoss_fingers(&mut buf), 2);
+        assert!((buf[0].0 - buf[1].0).abs() > 0.4);
+    }
+
+    #[test]
+    fn kaoss_viz_tracks_multiple_fingers() {
+        let mut model = NativeModel::new();
+        model.kaoss_viz_style = crate::kaoss_viz::KaossVizStyle::Glow;
+        let mut out = Outbox::new();
+        let a = model.layout.kaoss_cell(1, 3);
+        let b = model.layout.kaoss_cell(10, 3);
+        model.finger_down(1, a.x + 4, a.y + 4, &mut out);
+        model.finger_down(2, b.x + 4, b.y + 4, &mut out);
+        for _ in 0..10 {
+            model.tick(1.0 / 60.0, &mut out);
+        }
+        let lit: Vec<_> = model
+            .kaoss_glow
+            .iter()
+            .enumerate()
+            .filter(|(_, g)| g.amp > 0.2)
+            .collect();
+        assert!(
+            lit.len() >= 2,
+            "each Kaoss contact should drive its own glow bloom: {:?}",
+            model.kaoss_glow.iter().map(|g| g.amp).collect::<Vec<_>>()
+        );
+        let dx = (lit[0].1.xy.0 - lit[1].1.xy.0).abs();
+        assert!(dx > 0.4, "blooms should sit under different pad X positions");
+
+        model.kaoss_viz_style = crate::kaoss_viz::KaossVizStyle::Cells;
+        for _ in 0..10 {
+            model.tick(1.0 / 60.0, &mut out);
+        }
+        let left = model.cell(1, 3);
+        let right = model.cell(10, 3);
+        let mid = model.cell(5, 3);
+        let bright = |c: u32| ((c >> 16) & 0xff).max((c >> 8) & 0xff).max(c & 0xff);
+        assert!(
+            bright(left) > bright(mid) && bright(right) > bright(mid),
+            "CELLS should light both fingers, not only the first"
+        );
     }
 
     #[test]

@@ -31,7 +31,7 @@ struct Cli {
     #[arg(long, default_value = "auto")]
     display: String,
     /// Touch source: auto, sdl, evdev, or none.
-    /// auto uses SDL FingerId when the presenter is SDL, otherwise evdev.
+    /// auto prefers evdev (type-A/B slots) and falls back to SDL FingerId.
     #[arg(long, default_value = "auto")]
     touch: String,
     /// Linux framebuffer device (only for --display fb).
@@ -72,15 +72,21 @@ fn main() {
     let mut frame = Frame::new();
     let mut client = NativeClient::new(cli.control.clone(), cli.tcp);
     let mut presenter = Presenter::open(&cli);
-    let sdl_touch = presenter.is_sdl() && matches!(cli.touch.as_str(), "auto" | "sdl");
-    let mut input = if matches!(cli.touch.as_str(), "evdev") || (cli.touch == "auto" && !sdl_touch)
-    {
-        Input::open(&cli.evdev)
-    } else {
-        Input::None
+    // Prefer kernel type-A/B slots over SDL FingerId. SDL on KMSDRM often
+    // synthesizes a single mouse from the whole pad, which is why GLOW could
+    // track per-finger state and still only ever see one contact.
+    let mut input = match cli.touch.as_str() {
+        "none" | "sdl" => Input::None,
+        _ => Input::open(&cli.evdev),
     };
+    let evdev_live = input.is_evdev();
+    let sdl_touch = presenter.is_sdl()
+        && (cli.touch == "sdl" || (cli.touch == "auto" && !evdev_live));
     if cli.touch == "sdl" && !presenter.is_sdl() {
         warn!("native: --touch sdl ignored without an SDL presenter");
+    }
+    if cli.touch == "evdev" && !evdev_live {
+        warn!("native: --touch evdev requested but no capacitive panel opened");
     }
     info!(
         display = presenter.name(),
@@ -312,6 +318,17 @@ impl Input {
         Self::None
     }
 
+    fn is_evdev(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            return matches!(self, Self::Evdev(_));
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            false
+        }
+    }
+
     fn name(&self) -> &'static str {
         match self {
             Self::None => "none",
@@ -513,44 +530,15 @@ mod linux_evdev {
     use std::os::unix::io::AsRawFd;
     use std::path::PathBuf;
 
+    use pidi_native::evdev_touch::{
+        EvdevDecoder, RawEvent, ABS_MT_POSITION_X, ABS_MT_POSITION_Y,
+    };
     use pidi_native::input::TouchEvent;
-
-    const EV_SYN: u16 = 0;
-    const EV_ABS: u16 = 3;
-    const ABS_MT_SLOT: u16 = 0x2f;
-    const ABS_MT_POSITION_X: u16 = 0x35;
-    const ABS_MT_POSITION_Y: u16 = 0x36;
-    const ABS_MT_TRACKING_ID: u16 = 0x39;
-
-    #[derive(Clone, Copy)]
-    struct Slot {
-        tracking: i32,
-        x: i32,
-        y: i32,
-        dirty: bool,
-        was_active: bool,
-    }
-
-    impl Slot {
-        const fn new() -> Self {
-            Self {
-                tracking: -1,
-                x: 0,
-                y: 0,
-                dirty: false,
-                was_active: false,
-            }
-        }
-    }
+    use pidi_native::render::{SCREEN_H, SCREEN_W};
 
     pub struct Device {
         file: File,
-        slots: [Slot; 10],
-        current: usize,
-        min_x: i32,
-        max_x: i32,
-        min_y: i32,
-        max_y: i32,
+        decoder: EvdevDecoder,
         buf: Vec<u8>,
         pending: Vec<u8>,
     }
@@ -570,15 +558,22 @@ mod linux_evdev {
                 let flags = libc::fcntl(fd, libc::F_GETFL);
                 libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
             }
-            tracing::info!(path = %path.display(), "native: evdev");
+            let mut decoder = EvdevDecoder::new();
+            decoder.set_screen(SCREEN_W as i32, SCREEN_H as i32);
+            let (min_x, max_x) = read_abs_range(fd, ABS_MT_POSITION_X, (0, SCREEN_W as i32));
+            let (min_y, max_y) = read_abs_range(fd, ABS_MT_POSITION_Y, (0, SCREEN_H as i32));
+            decoder.set_abs_range(min_x, max_x, min_y, max_y);
+            tracing::info!(
+                path = %path.display(),
+                min_x,
+                max_x,
+                min_y,
+                max_y,
+                "native: evdev"
+            );
             Ok(Self {
                 file,
-                slots: [Slot::new(); 10],
-                current: 0,
-                min_x: 0,
-                max_x: 800,
-                min_y: 0,
-                max_y: 480,
+                decoder,
                 buf: vec![0; 16 * 64],
                 pending: Vec::new(),
             })
@@ -610,67 +605,44 @@ mod linux_evdev {
             while self.pending.len() >= size {
                 let chunk: Vec<u8> = self.pending.drain(..size).collect();
                 let ev = unsafe { ptr_read(&chunk) };
-                match ev.type_ {
-                    EV_ABS => match ev.code {
-                        ABS_MT_SLOT => {
-                            self.current = (ev.value as usize).min(self.slots.len() - 1)
-                        }
-                        ABS_MT_TRACKING_ID => {
-                            self.slots[self.current].tracking = ev.value;
-                            self.slots[self.current].dirty = true;
-                        }
-                        // Type-B only: ignore legacy ABS_X/ABS_Y (they mirror a
-                        // single "primary" contact and corrupt other slots).
-                        ABS_MT_POSITION_X => {
-                            self.slots[self.current].x = ev.value;
-                            self.slots[self.current].dirty = true;
-                        }
-                        ABS_MT_POSITION_Y => {
-                            self.slots[self.current].y = ev.value;
-                            self.slots[self.current].dirty = true;
-                        }
-                        _ => {}
+                self.decoder.feed(
+                    RawEvent {
+                        type_: ev.type_,
+                        code: ev.code,
+                        value: ev.value,
                     },
-                    EV_SYN => {
-                        if ev.code == 0 {
-                            self.flush_slots(out);
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-
-        fn flush_slots(&mut self, out: &mut Vec<TouchEvent>) {
-            for (i, slot) in self.slots.iter_mut().enumerate() {
-                if !slot.dirty {
-                    continue;
-                }
-                slot.dirty = false;
-                let id = i as i32;
-                let x = map(slot.x, self.min_x, self.max_x, 800);
-                let y = map(slot.y, self.min_y, self.max_y, 480);
-                if slot.tracking < 0 {
-                    if slot.was_active {
-                        out.push(TouchEvent::Up { id });
-                    }
-                    slot.was_active = false;
-                } else if !slot.was_active {
-                    out.push(TouchEvent::Down { id, x, y });
-                    slot.was_active = true;
-                } else {
-                    out.push(TouchEvent::Move { id, x, y });
-                }
+                    out,
+                );
             }
         }
     }
 
-    fn map(v: i32, min: i32, max: i32, screen: i32) -> i32 {
-        if max <= min {
-            return v.clamp(0, screen - 1);
+    fn read_abs_range(fd: i32, axis: u16, fallback: (i32, i32)) -> (i32, i32) {
+        #[repr(C)]
+        struct InputAbsinfo {
+            value: i32,
+            minimum: i32,
+            maximum: i32,
+            fuzz: i32,
+            flat: i32,
+            resolution: i32,
         }
-        ((v - min) as i64 * (screen as i64 - 1) / (max - min) as i64).clamp(0, screen as i64 - 1)
-            as i32
+        let mut info = InputAbsinfo {
+            value: 0,
+            minimum: 0,
+            maximum: 0,
+            fuzz: 0,
+            flat: 0,
+            resolution: 0,
+        };
+        // EVIOCGABS(axis) = _IOR('E', 0x40+axis, sizeof(input_absinfo)=24)
+        let ioc = 0x8018_4500u32 | (0x40 + axis as u32);
+        let rc = unsafe { libc::ioctl(fd, ioc as libc::c_ulong, &mut info) };
+        if rc == 0 && info.maximum > info.minimum {
+            (info.minimum, info.maximum)
+        } else {
+            fallback
+        }
     }
 
     fn find_touch_device() -> Option<PathBuf> {

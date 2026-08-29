@@ -562,7 +562,9 @@ fn draw_kaoss(scene: &mut Scene, model: &NativeModel) {
             }
         }
         draw_kaoss_axes(scene, layout.kaoss, model);
-        if let Some((fx, fy)) = model.kaoss_finger() {
+        let mut finger_buf = [(0.0_f32, 0.0_f32); crate::model::MAX_FINGERS];
+        let n = model.copy_kaoss_fingers(&mut finger_buf);
+        for &(fx, fy) in &finger_buf[..n] {
             draw_kaoss_cursor(scene, layout.kaoss, fx, fy, model);
         }
     }

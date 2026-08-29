@@ -29,6 +29,9 @@ pub struct SdlDisplay {
 impl SdlDisplay {
     pub fn open(fullscreen: bool) -> Result<Self, String> {
         sdl2::hint::set("SDL_AUDIODRIVER", "dummy");
+        // Don't let the first contact also become MouseButton id=0 — that
+        // steals a finger slot and collapses multitouch on KMSDRM panels.
+        sdl2::hint::set("SDL_TOUCH_MOUSE_EVENTS", "0");
         let sdl = sdl2::init()?;
         let video: VideoSubsystem = sdl.video()?;
 
