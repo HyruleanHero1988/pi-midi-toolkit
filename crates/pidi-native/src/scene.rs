@@ -364,8 +364,13 @@ fn draw_update_panel(scene: &mut Scene, model: &NativeModel) {
     // Status body — wrap by drawing lines.
     let mut y = layout.content.y + 72;
     for line in model.update_status.lines().take(12) {
-        let color = if line.contains("available") || line.contains("UPDATE available") {
+        let color = if line.contains("available")
+            || line.contains("UPDATE available")
+            || line.contains("Reloading")
+        {
             0xb8bb26
+        } else if line.contains("stale") || line.contains("INSTALL failed") {
+            0xfb4934
         } else if line.starts_with("Running:") {
             0xfabd2f
         } else {

@@ -287,6 +287,9 @@ pub struct NativeModel {
     pub update_confirming: bool,
     update_job: Option<std::sync::mpsc::Receiver<host::UpdateCheckResult>>,
     update_job_kind: Option<host::UpdateJobKind>,
+    /// Seconds left before an in-process kiosk reload after a successful OTA.
+    pub reload_ui_in: Option<f32>,
+    request_reexec: bool,
     /// SET → WIFI scan/join panel.
     pub wifi_panel_open: bool,
     pub wifi_busy: bool,
@@ -465,6 +468,8 @@ impl NativeModel {
             update_confirming: false,
             update_job: None,
             update_job_kind: None,
+            reload_ui_in: None,
+            request_reexec: false,
             wifi_panel_open: false,
             wifi_busy: false,
             wifi_status: String::new(),
@@ -982,6 +987,7 @@ impl NativeModel {
         self.poll_host_job();
         self.poll_update_job();
         self.poll_wifi_job();
+        self.tick_ota_reload(dt);
         if self.mode == UiMode::Drums && self.kit_edit_open && self.kit_wave_dirty {
             self.rebuild_kit_wave();
         }
@@ -1370,7 +1376,8 @@ impl NativeModel {
             }
             self.update_confirming = true;
             self.update_status = format!(
-                "{}\n\nThis deploys new code from GitHub, then restarts.\n\
+                "{}\n\nThis deploys new code from GitHub.\n\
+                 The screen stays on; the kiosk reloads itself when ready.\n\
                  Phrases, songs, presets, and settings.json are kept.\n\
                  Tap INSTALL NOW to continue, or CANCEL (CHECK).",
                 host::update_local_status()
@@ -1381,7 +1388,9 @@ impl NativeModel {
         }
         self.update_confirming = false;
         self.update_busy = true;
-        self.update_status = "Starting install…\n(UI stays responsive; engines restart when done.)".into();
+        self.update_status =
+            "Starting install…\n(Screen stays on — do not unplug. Engines restart when done.)"
+                .into();
         self.update_job_kind = Some(host::UpdateJobKind::Apply);
         self.update_job = Some(host::spawn_update_job(host::UpdateJobKind::Apply));
         self.status_line = "INSTALL…".into();
@@ -1438,10 +1447,31 @@ impl NativeModel {
                 } else {
                     "INSTALL failed".into()
                 };
+                if result.ok && result.reload_kiosk {
+                    self.reload_ui_in = Some(1.6);
+                }
             }
             None => {}
         }
         self.mark_dirty();
+    }
+
+    fn tick_ota_reload(&mut self, dt: f32) {
+        let Some(left) = self.reload_ui_in.as_mut() else {
+            return;
+        };
+        *left -= dt;
+        if *left > 0.0 {
+            return;
+        }
+        self.reload_ui_in = None;
+        self.request_reexec = true;
+    }
+
+    /// After a successful OTA that replaced `pidi-native`, the main loop
+    /// drops KMSDRM and execs the new binary. False on dummy/`--frames` tests.
+    pub fn take_reexec(&mut self) -> bool {
+        std::mem::take(&mut self.request_reexec)
     }
 
     fn show_screensaver(&mut self) {
@@ -7216,6 +7246,53 @@ mod tests {
         model.finger_down(2, close.x + 4, close.y + 4, &mut out);
         model.finger_up(2, &mut out);
         assert!(!model.update_panel_open);
+    }
+
+    #[test]
+    fn successful_native_ota_schedules_kiosk_reload() {
+        let mut model = NativeModel::new();
+        let (tx, rx) = std::sync::mpsc::channel();
+        model.update_job = Some(rx);
+        model.update_job_kind = Some(host::UpdateJobKind::Apply);
+        model.update_busy = true;
+        tx.send(host::UpdateCheckResult {
+            status: "Installed master abc1234\nReloading kiosk…".into(),
+            lines: vec!["Installed pidi-native → bin/".into()],
+            available: false,
+            ok: true,
+            reload_kiosk: true,
+        })
+        .unwrap();
+        let mut out = Outbox::new();
+        model.tick(0.0, &mut out);
+        assert_eq!(model.status_line, "installed");
+        assert!(model.reload_ui_in.is_some());
+        assert!(!model.take_reexec());
+        model.tick(2.0, &mut out);
+        assert!(model.take_reexec(), "countdown should request reexec");
+        assert!(model.reload_ui_in.is_none());
+    }
+
+    #[test]
+    fn failed_ota_does_not_reexec() {
+        let mut model = NativeModel::new();
+        let (tx, rx) = std::sync::mpsc::channel();
+        model.update_job = Some(rx);
+        model.update_job_kind = Some(host::UpdateJobKind::Apply);
+        model.update_busy = true;
+        tx.send(host::UpdateCheckResult {
+            status: "INSTALL failed (exit 1): network error".into(),
+            lines: vec![],
+            available: false,
+            ok: false,
+            reload_kiosk: false,
+        })
+        .unwrap();
+        let mut out = Outbox::new();
+        model.tick(0.0, &mut out);
+        assert_eq!(model.status_line, "INSTALL failed");
+        model.tick(2.0, &mut out);
+        assert!(!model.take_reexec());
     }
 
     #[test]

@@ -738,6 +738,8 @@ pub struct UpdateCheckResult {
     pub lines: Vec<String>,
     pub available: bool,
     pub ok: bool,
+    /// Staged `pidi-native` was installed — caller should re-exec this process.
+    pub reload_kiosk: bool,
 }
 
 /// Fast local stamp for the Update panel — file reads only (no network).
@@ -861,6 +863,7 @@ pub fn update_check_detailed() -> UpdateCheckResult {
             lines,
             available: code == 0 && available,
             ok: code == 0,
+            reload_kiosk: false,
         };
     }
 
@@ -899,6 +902,7 @@ pub fn update_check_detailed() -> UpdateCheckResult {
             lines,
             available,
             ok: true,
+            reload_kiosk: false,
         };
     }
     UpdateCheckResult {
@@ -906,6 +910,7 @@ pub fn update_check_detailed() -> UpdateCheckResult {
         lines,
         available: false,
         ok: false,
+        reload_kiosk: false,
     }
 }
 
@@ -919,6 +924,7 @@ pub fn update_apply() -> UpdateCheckResult {
             lines,
             available: false,
             ok: false,
+            reload_kiosk: false,
         };
     }
     let (code, stdout, stderr) = run_capture(
@@ -928,22 +934,39 @@ pub fn update_apply() -> UpdateCheckResult {
             .current_dir(&root),
         600,
     );
+    update_apply_result(code, &stdout, &stderr)
+}
+
+pub(crate) fn update_apply_result(code: i32, stdout: &str, stderr: &str) -> UpdateCheckResult {
+    let mut lines = Vec::new();
     if !stdout.is_empty() {
-        lines.push(truncate_lines(&stdout, 20, 1200));
+        lines.push(truncate_lines(stdout, 20, 1200));
     }
     if !stderr.is_empty() {
-        lines.push(truncate_lines(&stderr, 8, 400));
+        lines.push(truncate_lines(stderr, 8, 400));
     }
+    let blob = format!("{stdout}\n{stderr}");
+    let reload_kiosk = code == 0
+        && (blob.contains("RELOAD_KIOSK=1") || blob.contains("Installed pidi-native"));
     let status = if code == 0 {
-        stdout
+        let last = stdout
             .lines()
-            .last()
-            .unwrap_or("install finished — restarting…")
-            .to_string()
+            .rev()
+            .find(|l| !l.contains("RELOAD_KIOSK="))
+            .unwrap_or("install finished");
+        if reload_kiosk {
+            format!("{last}\nReloading kiosk…")
+        } else {
+            last.to_string()
+        }
     } else {
         format!(
             "INSTALL failed (exit {code}): {}",
-            stderr.lines().next().or_else(|| stdout.lines().next()).unwrap_or("see LOG")
+            stderr
+                .lines()
+                .next()
+                .or_else(|| stdout.lines().next())
+                .unwrap_or("see LOG")
         )
     };
     UpdateCheckResult {
@@ -951,6 +974,27 @@ pub fn update_apply() -> UpdateCheckResult {
         lines,
         available: false,
         ok: code == 0,
+        reload_kiosk,
+    }
+}
+
+/// Replace this process with the binary now on disk (same argv / PID).
+///
+/// Used after OTA installs a new `pidi-native` so we never `systemctl stop`
+/// the kiosk from inside the update. Callers must drop the SDL/KMSDRM
+/// presenter first so the new image can acquire the display.
+pub fn reexec_current_process() -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+        let err = Command::new(&exe).args(args).exec();
+        Err(format!("reexec {} failed: {err}", exe.display()))
+    }
+    #[cfg(not(unix))]
+    {
+        Err("reexec is Unix-only".into())
     }
 }
 
@@ -1067,5 +1111,34 @@ mod tests {
         let (status, _) = HostTask::UpdateCheck.run();
         set_dry_run(false);
         assert!(status.contains("dry-run"), "{status}");
+    }
+
+    #[test]
+    fn apply_result_reloads_kiosk_when_native_bin_installed() {
+        let result = update_apply_result(
+            0,
+            "[90% · 0:12] Installed pidi-native → bin/\nRELOAD_KIOSK=1\nnow abc1234 (master)",
+            "",
+        );
+        assert!(result.ok);
+        assert!(result.reload_kiosk);
+        assert!(result.status.contains("Reloading kiosk"));
+        assert!(!result.status.contains("RELOAD_KIOSK"));
+    }
+
+    #[test]
+    fn apply_result_keeps_kiosk_up_when_only_engines_match() {
+        let result = update_apply_result(0, "Already on latest.\nnow abc1234 (master)", "");
+        assert!(result.ok);
+        assert!(!result.reload_kiosk);
+        assert!(!result.status.contains("Reloading"));
+    }
+
+    #[test]
+    fn apply_result_failed_does_not_reload() {
+        let result = update_apply_result(1, "", "INSTALL failed (exit 1): network error");
+        assert!(!result.ok);
+        assert!(!result.reload_kiosk);
+        assert!(result.status.contains("INSTALL failed"));
     }
 }

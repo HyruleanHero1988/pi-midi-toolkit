@@ -313,10 +313,40 @@ class CheckUpdateTest(unittest.TestCase):
             )
             with mock.patch.object(updater, "load_credentials", return_value=updater.Credentials()), mock.patch.object(
                 updater, "detect_branch", return_value="master"
-            ), mock.patch.object(updater, "remote_head", return_value=remote):
+            ), mock.patch.object(updater, "remote_head", return_value=remote), mock.patch.object(
+                updater, "repo_root_for", return_value=install
+            ):
                 result = updater.check_for_update(install)
             self.assertFalse(result.available)
             self.assertIn("Already on", result.message)
+
+    def test_same_sha_but_stale_engines_is_available(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            install = root / "apps" / "pidi"
+            install.mkdir(parents=True)
+            (root / "Cargo.toml").write_text("[workspace]\n", encoding="utf-8")
+            (install / "midi_tone.py").write_text("app\n", encoding="utf-8")
+            (root / "dist" / "armv7").mkdir(parents=True)
+            (root / "bin").mkdir()
+            (root / "dist" / "armv7" / "pidi-native").write_bytes(b"NEWUI")
+            (root / "bin" / "pidi-native").write_bytes(b"OLDUI")
+            updater.write_version_file(
+                install,
+                updater.VersionInfo(sha="aaa1111", branch="master", source="file"),
+            )
+            remote = updater.VersionInfo(
+                sha="aaa1111", branch="master", source="remote"
+            )
+            with mock.patch.object(updater, "load_credentials", return_value=updater.Credentials()), mock.patch.object(
+                updater, "detect_branch", return_value="master"
+            ), mock.patch.object(updater, "remote_head", return_value=remote), mock.patch.object(
+                updater, "repo_root_for", return_value=root
+            ):
+                result = updater.check_for_update(install)
+            self.assertTrue(result.available)
+            self.assertIn("stale", result.message)
+            self.assertIn("pidi-native", result.message)
 
     def test_different_sha_is_available(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -425,11 +455,46 @@ class ApplyUpdateTest(unittest.TestCase):
             ), mock.patch.object(updater, "remote_head", return_value=remote), mock.patch.object(
                 updater, "git_root", return_value=None
             ), mock.patch.object(
+                updater, "repo_root_for", return_value=install
+            ), mock.patch.object(
                 updater, "apply_from_archive", side_effect=AssertionError("should not download")
             ):
                 info = updater.apply_update(install, progress=notes.append)
             self.assertEqual(info.sha, sha)
             self.assertTrue(any("Already" in n for n in notes))
+
+    def test_apply_installs_stale_engines_when_sha_matches(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            install = root / "apps" / "pidi"
+            install.mkdir(parents=True)
+            (root / "Cargo.toml").write_text("[workspace]\n", encoding="utf-8")
+            (install / "midi_tone.py").write_text("app\n", encoding="utf-8")
+            (root / "dist" / "armv7").mkdir(parents=True)
+            (root / "bin").mkdir()
+            (root / "dist" / "armv7" / "pidi-native").write_bytes(b"NEWUI")
+            (root / "bin" / "pidi-native").write_bytes(b"OLDUI")
+            sha = "abc1234deadbeef"
+            updater.write_version_file(
+                install,
+                updater.VersionInfo(sha=sha, branch="master", source="file"),
+            )
+            remote = updater.VersionInfo(sha=sha, branch="master", source="remote")
+            notes: list[str] = []
+            restart = mock.Mock()
+            with mock.patch.object(updater, "load_credentials", return_value=updater.Credentials()), mock.patch.object(
+                updater, "detect_branch", return_value="master"
+            ), mock.patch.object(updater, "remote_head", return_value=remote), mock.patch.object(
+                updater, "repo_root_for", return_value=root
+            ), mock.patch.object(updater, "git_root", return_value=None), mock.patch.object(
+                updater, "apply_from_archive", side_effect=AssertionError("should not download")
+            ), mock.patch.object(updater, "_restart_engines", restart):
+                info = updater.apply_update(install, progress=notes.append)
+            self.assertEqual(info.sha, sha)
+            self.assertEqual((root / "bin" / "pidi-native").read_bytes(), b"NEWUI")
+            restart.assert_called_once()
+            self.assertTrue(any(updater.RELOAD_KIOSK_MARK in n for n in notes))
+            self.assertTrue(any("stale" in n.lower() or "git already" in n.lower() for n in notes))
 
     def test_apply_uses_archive_overlay_when_not_a_git_checkout(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -507,6 +572,23 @@ class InstallPiBinariesTest(unittest.TestCase):
             self.assertEqual(installed, ["jambox-engine"])
             self.assertEqual((root / "bin" / "jambox-engine").read_bytes(), b"NEW")
             self.assertFalse((root / "bin" / "jambox-engine.ota-new").exists())
+
+    def test_stop_and_restart_never_touch_pidi_native(self) -> None:
+        calls: list[list[str]] = []
+
+        def fake_run(args, **_kwargs):
+            calls.append([str(a) for a in args])
+            return mock.Mock(returncode=0, stdout="", stderr="")
+
+        with mock.patch.object(updater, "_engine_unit_enabled", return_value=True), mock.patch(
+            "subprocess.run", side_effect=fake_run
+        ), mock.patch.object(updater.time, "sleep"):
+            updater._stop_engines(lambda _: None)
+            updater._restart_engines(lambda _: None)
+        blob = " ".join(" ".join(c) for c in calls)
+        self.assertNotIn("pidi-native", blob)
+        self.assertTrue(any("midi-engine" in " ".join(c) for c in calls))
+        self.assertTrue(any("jambox-engine" in " ".join(c) for c in calls))
 
     def test_identical_staged_and_live_skips_without_stop(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

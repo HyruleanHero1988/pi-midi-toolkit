@@ -130,6 +130,17 @@ fn main() {
         model.status = client.last_status;
         model.tick(dt, &mut client.outbox);
         model.maybe_autosave();
+        if model.take_reexec() {
+            info!("pidi-native: reloading after OTA");
+            model.cancel_all(&mut client.outbox);
+            client.flush();
+            drop(input);
+            drop(presenter);
+            if let Err(err) = pidi_native::host::reexec_current_process() {
+                error!(%err, "pidi-native: OTA reload failed — exiting so systemd can restart");
+                std::process::exit(1);
+            }
+        }
         let scene = scene::build(&model);
         presenter.present(&scene, &mut frame);
 
