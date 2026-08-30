@@ -599,6 +599,74 @@ fn draw_chrome(scene: &mut Scene, model: &NativeModel) {
         scene.text_centered(cell, mode.label(), 0xfbf1c7, 2);
     }
 
+    scene.fill_rect(layout.status_bar, 0x161616);
+    let status = chrome_status(model);
+    if !status.is_empty() {
+        scene.text_centered(layout.status_bar, &status, 0xfe8019, 2);
+    }
+}
+
+fn chrome_status(model: &NativeModel) -> String {
+    // Short live readout for the status strip — long hints use status_line in content.
+    match model.mode {
+        UiMode::Kaoss => {
+            if model.kaoss_settings_open {
+                return "SETTINGS".into();
+            }
+            if model.kaoss_color_picker_open {
+                return "PAD COLOR".into();
+            }
+            format!(
+                "{:.0} BPM {}",
+                model.bpm,
+                kaoss_ui::gate(model.kaoss_gate).label
+            )
+        }
+        UiMode::Seq => format!("{:.0} BPM", model.bpm),
+        UiMode::Chords => {
+            let name = model
+                .chords_current
+                .map(|c| c.name())
+                .unwrap_or_else(|| "CHORDS".into());
+            if model.seq.is_recording() {
+                format!("REC {name}")
+            } else if model.pads_recording.is_some() {
+                format!("PAD {name}")
+            } else {
+                name
+            }
+        }
+        UiMode::Presets => format!("SLOT {}", model.preset_selected + 1),
+        UiMode::Fm => format!(
+            "{} · {}",
+            jambox_core::fm_recipe(model.fm_recipe).label,
+            jambox_core::OP_NAMES[model.fm_selected]
+        ),
+        UiMode::Synth if model.synth_vib_open => "VIB".into(),
+        UiMode::Drums if model.kit_edit_open => "WAVE".into(),
+        UiMode::Drums if model.kit_repeat_open => "REPEAT".into(),
+        UiMode::Fx => {
+            if model.status_line.is_empty() {
+                "FX".into()
+            } else {
+                model.status_line.chars().take(24).collect()
+            }
+        }
+        UiMode::Settings => {
+            if model.status_line.is_empty() {
+                "SETTINGS".into()
+            } else {
+                model.status_line.chars().take(24).collect()
+            }
+        }
+        _ => {
+            if !model.status_line.is_empty() && model.status_line.chars().count() <= 18 {
+                model.status_line.clone()
+            } else {
+                String::new()
+            }
+        }
+    }
 }
 
 fn chrome_rec_label(model: &NativeModel) -> (&'static str, u32) {
@@ -1041,12 +1109,11 @@ fn draw_kaoss_axes(scene: &mut Scene, pad: crate::layout::Rect, model: &NativeMo
             }
         };
         scene.text_scaled(pad.x + 6, pad.y + pad.h / 2 - 20, y_label, 0xd3869b, 2);
-        // BEND: pitch lives on the horizontal midline (not the bottom edge).
-        // Keep X label well inside the pad — glyphs render after button fills.
+        // Bottom edge of the pad (Tk parity). Footer chrome starts below the pad gap.
         let x_label_y = if bend {
             pad.y + pad.h / 2 - 10
         } else {
-            pad.y + pad.h - 60
+            pad.y + pad.h - 22
         };
         scene.text_scaled(pad.x + pad.w / 2 - 40, x_label_y, x_label, 0xd3869b, 2);
     }
@@ -2198,7 +2265,6 @@ fn draw_seq(scene: &mut Scene, model: &NativeModel) {
     let seq = &model.seq;
 
     scene.text(16, HUD_H + 10, "Sequencer", 0xfbf1c7);
-    scene.text(160, HUD_H + 12, &format!("{:.0} BPM", seq.bpm), 0xa89984);
     let status = if seq.status.chars().count() > 38 {
         format!("{}…", seq.status.chars().take(38).collect::<String>())
     } else {

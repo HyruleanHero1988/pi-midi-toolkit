@@ -6,8 +6,12 @@ pub const SCREEN_W: i32 = 800;
 pub const SCREEN_H: i32 = 480;
 /// Bottom strip removed — Tk chrome lives in the top bar (`HUD_H`).
 pub const NAV_H: i32 = 0;
-/// Top chrome: PiDI brand + HOME/POWER + jam tabs (matches Tk nav height).
-pub const HUD_H: i32 = 52;
+/// Nav button row: PiDI brand + HOME/POWER/REC + jam tabs.
+pub const NAV_BAR_H: i32 = 52;
+/// Live readout strip under the nav row (BPM, gate, slot, …).
+pub const STATUS_H: i32 = 24;
+/// Total top chrome height (nav + status).
+pub const HUD_H: i32 = NAV_BAR_H + STATUS_H;
 
 /// Jam-mode tabs on the right of the top chrome (Tk order + chords + FM).
 pub const JAM_MODES: [UiMode; 6] = [
@@ -217,6 +221,7 @@ pub struct Layout {
     pub hud: Rect,
     pub content: Rect,
     pub nav: Rect,
+    pub status_bar: Rect,
     pub kaoss: Rect,
     pub drums: Rect,
     pub divisions: Rect,
@@ -424,7 +429,13 @@ impl Layout {
                 x: 0,
                 y: 0,
                 w: SCREEN_W,
-                h: HUD_H,
+                h: NAV_BAR_H,
+            },
+            status_bar: Rect {
+                x: 0,
+                y: NAV_BAR_H,
+                w: SCREEN_W,
+                h: STATUS_H,
             },
             // Full-width Kaoss pad like Tk (drums live on SEQ / kit, not here).
             // Leave headroom above footer chrome so axis labels (drawn after
@@ -2868,6 +2879,19 @@ mod tests {
     }
 
     #[test]
+    fn layout_audit_status_bar_below_nav() {
+        let layout = Layout::new();
+        assert_eq!(layout.nav.h, NAV_BAR_H);
+        assert_eq!(layout.status_bar.y, NAV_BAR_H);
+        assert_eq!(layout.status_bar.h, STATUS_H);
+        assert_eq!(layout.content.y, HUD_H);
+        assert!(
+            layout.status_bar.y >= layout.nav.y + layout.nav.h,
+            "status strip should sit directly under nav buttons"
+        );
+    }
+
+    #[test]
     fn layout_audit_mode_chrome_on_screen() {
         let layout = Layout::new();
         let checks: &[(&str, Rect)] = &[
@@ -2904,8 +2928,8 @@ mod tests {
             gap_below(layout.kaoss, layout.kaoss_prog) >= 12,
             "kaoss pad should sit above footer"
         );
-        // draw_kaoss_axes places X label ~60px above pad bottom.
-        let axis_top = bottom(layout.kaoss) - 60;
+        // draw_kaoss_axes places X label ~22px above pad bottom.
+        let axis_top = bottom(layout.kaoss) - 22;
         assert!(
             layout.kaoss_prog.y - axis_top >= 8,
             "axis label band should clear footer buttons"
