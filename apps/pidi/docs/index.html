@@ -331,7 +331,7 @@
 
     <section class="screen" id="kaoss-programs">
       <h2>KAOSS programs</h2>
-      <p class="lede">PROG is two families. Note programs play the scale on X. FX programs do not start a note — they sculpt whatever is already sounding.</p>
+      <p class="lede">PROG is two families. Note programs play the scale on X. FX programs do not start a note — they sculpt the synth voice (not the drum kit).</p>
       <figure>
         <img src="screens/20-kaoss-programs.png" alt="KAOSS program picker" width="800" height="480" />
         <figcaption>20 — PROG picker (SHOW ALL). Curated set is LEAD / MORPH / VIB / FILTER / ECHO / DRIVE / FLANGE / BEND / WAH.</figcaption>
@@ -348,12 +348,12 @@
       <h3>FX programs — no pitch from the pad</h3>
       <table>
         <tr><th>FILTER</th><td>X = TONE, Y = MORPH (momentary unless HOLD).</td></tr>
-        <tr><th>ECHO</th><td>X = delay time, Y = delay mix.</td></tr>
-        <tr><th>DRIVE</th><td>X = drive, Y = reverb.</td></tr>
+        <tr><th>ECHO</th><td>X = delay time, Y = delay mix. Voice insert — drums stay dry.</td></tr>
+        <tr><th>DRIVE</th><td>X = drive, Y = reverb. Voice insert — drums stay dry.</td></tr>
         <tr><th>FLANGE</th><td>X = flanger rate, Y = flanger mix. Curated. Latch a note first (LEAD + HOLD), then pick FLANGE.</td></tr>
         <tr><th>SPACE / RESO / WASH / CRUSH / SWEEP / SWELL</th><td>SHOW ALL extras — delay/reverb/drive pairs. Lift restores unless HOLD is on.</td></tr>
       </table>
-      <p class="note"><strong>FILTER / FLANGE / ECHO do not play notes.</strong> If you open them on an empty pad you hear silence. Latch a sound first, then sculpt.</p>
+      <p class="note"><strong>FILTER / FLANGE / ECHO do not play notes.</strong> If you open them on an empty pad you hear silence. Latch a synth sound first (LEAD + HOLD), then sculpt. The kit stays dry — use KIT → ALL DRUMS or FX → DRUMS for drum echo.</p>
     </section>
 
     <section class="screen" id="kaoss-scales">
@@ -390,7 +390,7 @@
         <figcaption>15 — KAOSS settings</figcaption>
       </figure>
       <table>
-        <tr><th>WIPE FX</th><td>Zero bus/voice FX and restore tone/morph defaults.</td></tr>
+        <tr><th>WIPE FX</th><td>Zero voice pad FX (and leftover bus wet) and restore tone/morph defaults.</td></tr>
         <tr><th>CURATED / ALL SCALES</th><td>Short vs factory PROG and SCALE lists.</td></tr>
         <tr><th>AXES / GRID</th><td>X/Y labels and grid lines on the pad.</td></tr>
         <tr><th>PAD VIZ</th><td>CELLS (LED matrix) or GLOW (soft bloom).</td></tr>

@@ -4728,14 +4728,10 @@ impl NativeModel {
     fn apply_named_param(&mut self, name: &str, value: f32, outbox: &mut Outbox) {
         let v = value.clamp(0.0, 1.0);
         if Self::is_voice_fx_param(name) {
-            if name == "flanger_mix" {
-                self.fx_voice[3] = v;
+            if let Some(i) = Self::voice_fx_slider_index(name) {
+                self.fx_voice[i] = v;
             }
             self.push_voice_fx(name, v, outbox);
-            return;
-        }
-        if Self::is_bus_param(name) {
-            outbox.fx_bus(name, v);
             return;
         }
         outbox.synth(name, v);
@@ -4793,14 +4789,31 @@ impl NativeModel {
         }
     }
 
-    fn is_bus_param(name: &str) -> bool {
-        matches!(name, "drive" | "delay_mix" | "reverb_mix" | "delay_time")
+    fn voice_fx_slider_index(name: &str) -> Option<usize> {
+        match name {
+            "drive" => Some(0),
+            "delay_mix" => Some(1),
+            "reverb_mix" => Some(2),
+            "flanger_mix" => Some(3),
+            _ => None,
+        }
     }
 
+    /// Pad XY FX (echo / reverb / drive / flange) rides the voice insert so a
+    /// dry kit stays dry. Master-bus wet is FX MODE → BUS only.
     fn is_voice_fx_param(name: &str) -> bool {
         matches!(
             name,
-            "flanger_mix" | "flanger_rate" | "flanger_depth" | "flanger_fb"
+            "drive"
+                | "delay_mix"
+                | "delay_time"
+                | "delay_fb"
+                | "reverb_mix"
+                | "reverb_size"
+                | "flanger_mix"
+                | "flanger_rate"
+                | "flanger_depth"
+                | "flanger_fb"
         )
     }
 
@@ -5577,12 +5590,25 @@ impl NativeModel {
     }
 
     fn wipe_kaoss_fx(&mut self, outbox: &mut Outbox) {
+        self.fx_voice = [0.0, 0.0, 0.0, 0.0];
+        for name in [
+            "drive",
+            "delay_mix",
+            "delay_time",
+            "delay_fb",
+            "reverb_mix",
+            "reverb_size",
+            "flanger_mix",
+            "flanger_rate",
+        ] {
+            self.push_voice_fx(name, 0.0, outbox);
+        }
+        // Also dry the master bus so leftover pad wet from the old mix-bus
+        // routing (echo/reverb used to smear drums) is gone in one tap.
         self.fx_bus = [0.0, 0.0, 0.0, 0.0];
-        self.fx_voice[3] = 0.0;
         for name in Self::FX_PARAM_NAMES {
             outbox.fx_bus(name, 0.0);
         }
-        self.push_voice_fx("flanger_mix", 0.0, outbox);
         let defaults = session::SessionState::default();
         self.synth_params[0] = defaults.morph;
         self.synth_params[1] = defaults.tone;
@@ -6392,6 +6418,104 @@ mod tests {
                 param,
                 ..
             } if param == "drive"
+        )));
+    }
+
+    fn select_kaoss_program(model: &mut NativeModel, id: &str) {
+        model.kaoss_program = kaoss_ui::KAOSS_PROGRAMS
+            .iter()
+            .position(|p| p.id == id)
+            .unwrap_or_else(|| panic!("missing kaoss program {id}"));
+    }
+
+    fn assert_voice_fx(batch: &[Request], index: u16, param: &str) {
+        assert!(
+            batch.iter().any(|r| matches!(
+                r,
+                Request::Fx {
+                    target: jambox_protocol::FxTargetSpec::Voice { index: i },
+                    param: p,
+                    ..
+                } if *i == index && p == param
+            )),
+            "expected voice {index} {param}, got {batch:?}"
+        );
+    }
+
+    fn assert_no_bus_fx(batch: &[Request]) {
+        assert!(
+            batch.iter().all(|r| !matches!(
+                r,
+                Request::Fx {
+                    target: jambox_protocol::FxTargetSpec::Bus,
+                    ..
+                }
+            )),
+            "Kaoss pad FX must not wet the master bus (drums): {batch:?}"
+        );
+    }
+
+    #[test]
+    fn kaoss_echo_sends_voice_delay_not_bus() {
+        let mut model = NativeModel::new();
+        select_kaoss_program(&mut model, "echo");
+        model.morph_a = 2;
+        model.morph_b = 5;
+        let mut out = Outbox::new();
+        let k = model.layout.kaoss;
+        // Top-right: high delay time (X) and high delay mix (Y).
+        model.finger_down(1, k.x + k.w - 8, k.y + 4, &mut out);
+        let batch = out.take();
+        assert_voice_fx(&batch, 2, "delay_mix");
+        assert_voice_fx(&batch, 5, "delay_mix");
+        assert_voice_fx(&batch, 2, "delay_time");
+        assert_no_bus_fx(&batch);
+        assert!(model.fx_voice[1] > 0.5, "Y should raise voice delay mix");
+    }
+
+    #[test]
+    fn kaoss_space_sends_voice_reverb_not_bus() {
+        let mut model = NativeModel::new();
+        select_kaoss_program(&mut model, "space");
+        model.morph_a = 1;
+        model.morph_b = 1;
+        let mut out = Outbox::new();
+        let k = model.layout.kaoss;
+        model.finger_down(1, k.x + k.w / 2, k.y + 4, &mut out);
+        let batch = out.take();
+        assert_voice_fx(&batch, 1, "reverb_mix");
+        assert_voice_fx(&batch, 1, "delay_mix");
+        assert_no_bus_fx(&batch);
+        assert!(model.fx_voice[2] > 0.5, "Y should raise voice reverb mix");
+    }
+
+    #[test]
+    fn kaoss_wipe_fx_clears_voice_delay_and_reverb() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Kaoss);
+        model.kaoss_settings_open = true;
+        model.fx_voice = [0.4, 0.8, 0.6, 0.5];
+        model.fx_bus = [0.3, 0.7, 0.5, 0.2];
+        let mut out = Outbox::new();
+        model.wipe_kaoss_fx(&mut out);
+        assert!(model.fx_voice.iter().all(|v| *v == 0.0));
+        assert!(model.fx_bus.iter().all(|v| *v == 0.0));
+        let batch = out.take();
+        assert!(batch.iter().any(|r| matches!(
+            r,
+            Request::Fx {
+                target: jambox_protocol::FxTargetSpec::Voice { .. },
+                param,
+                value,
+            } if param == "delay_mix" && *value == 0.0
+        )));
+        assert!(batch.iter().any(|r| matches!(
+            r,
+            Request::Fx {
+                target: jambox_protocol::FxTargetSpec::Voice { .. },
+                param,
+                value,
+            } if param == "reverb_mix" && *value == 0.0
         )));
     }
 
