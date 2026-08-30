@@ -3,4 +3,4 @@ built_utc=2026-08-30T00:08:49Z
 host=Linux x86_64
 host_glibc=2.35
 git_sha=6170176e76f4cbc7593c98b07a598acf428f38df
-crates=pidi-native
+crates=midi-engine,jambox-engine,pidi-native
