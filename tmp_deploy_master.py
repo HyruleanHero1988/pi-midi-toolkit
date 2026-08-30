@@ -286,6 +286,15 @@ def main() -> int:
             sftp_put_bytes(client, version_json.encode(), dest + ".tmp")
             run(client, f"mv -f '{dest}.tmp' '{dest}'")
 
+        unit_path = ROOT / "tmp_pidi-native.service"
+        if unit_path.is_file():
+            sftp_put_bytes(client, unit_path.read_bytes(), "/tmp/pidi-native.service")
+            sudo(
+                client,
+                password,
+                "cp /tmp/pidi-native.service /etc/systemd/system/pidi-native.service",
+            )
+
         sudo(client, password, "systemctl daemon-reload")
         sudo(client, password, "systemctl enable jambox-engine pidi-native")
         sudo(client, password, "systemctl restart jambox-engine")
