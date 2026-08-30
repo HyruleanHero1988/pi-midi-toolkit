@@ -46,6 +46,10 @@ const KAOSS_CC_TOUCH: u8 = 92;
 /// KIT sliders: tone / snap(noise) / pitch / decay.
 const DEFAULT_DRUM_MACROS: [f32; 4] = [0.60, 0.45, 0.50, 0.55];
 const KIT_WAVE_POINTS: usize = 160;
+/// How long two chord-button fingers may come up apart and still count as one
+/// combo lift (m7 / M7 / dim / …). Shorter than this and the leftover button
+/// would steal the strum-pad chord.
+const CHORDS_COMBO_RELEASE_S: f32 = 0.2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RepeatDivisionChoice {
@@ -271,6 +275,8 @@ pub struct NativeModel {
     chords_held: [(Option<u32>, usize, QualityRow); MAX_FINGERS],
     chords_block: [Option<u8>; 4],
     chords_strum_note: Option<u8>,
+    /// Seconds left in the combo-lift window; 0 = inactive.
+    chords_combo_grace: f32,
     pub font_style: FontStyle,
     pub power_menu_open: bool,
     /// SET → UPDATE submenu (Tk-style: local build, CHECK, then INSTALL).
@@ -449,6 +455,7 @@ impl NativeModel {
             chords_held: [(None, 0, QualityRow::Maj); MAX_FINGERS],
             chords_block: [None; 4],
             chords_strum_note: None,
+            chords_combo_grace: 0.0,
             font_style: FontStyle::Retro,
             power_menu_open: false,
             update_panel_open: false,
@@ -970,6 +977,7 @@ impl NativeModel {
             self.tick_kaoss_full_exit();
         }
         self.tick_kaoss_gate(outbox);
+        self.tick_chords_combo_grace(dt, outbox);
         self.tick_screensaver(dt);
         self.poll_host_job();
         self.poll_update_job();
@@ -5337,6 +5345,13 @@ impl NativeModel {
         if let Some(slot) = self.chords_held.iter().position(|(g, _, _)| g.is_none()) {
             self.chords_held[slot] = (Some(gesture), col, row);
         }
+        // GT911 (and two-finger lifts) often re-down the leftover contact as a
+        // new id. During the combo-lift window that is still the same m7/M7,
+        // not a new single-button chord.
+        if self.chords_combo_grace > 0.0 && self.chords_held_is_subset_of_current() {
+            self.chords_combo_grace = CHORDS_COMBO_RELEASE_S;
+            return;
+        }
         self.chords_sync_from_held(outbox);
     }
 
@@ -5351,6 +5366,17 @@ impl NativeModel {
             if slot.0 == Some(gesture) {
                 *slot = (None, 0, QualityRow::Maj);
             }
+        }
+        // Staggered lift of a combo (Gm7 = min+7, etc.): don't let whichever
+        // finger came up last rewrite the strum-pad chord to Gm or G7.
+        if self.chords_current_is_combo() && self.chords_held_is_subset_of_current() {
+            if self.chords_combo_grace <= 0.0 {
+                self.chords_combo_grace = CHORDS_COMBO_RELEASE_S;
+            }
+            if !self.chords_hold && !self.chords_contact_held() {
+                self.chords_block_off(outbox);
+            }
+            return;
         }
         if self.chords_hold {
             // Memory: keep last resolved chord sounding until a new one is chosen.
@@ -5381,8 +5407,40 @@ impl NativeModel {
             .collect()
     }
 
+    fn chords_current_is_combo(&self) -> bool {
+        self.chords_current
+            .map(chords::is_combo)
+            .unwrap_or(false)
+    }
+
+    fn chords_held_is_subset_of_current(&self) -> bool {
+        let Some(spec) = self.chords_current else {
+            return false;
+        };
+        chords::held_is_subset_of(&self.chords_held_list(), spec)
+    }
+
+    fn tick_chords_combo_grace(&mut self, dt: f32, outbox: &mut Outbox) {
+        if self.chords_combo_grace <= 0.0 {
+            return;
+        }
+        self.chords_combo_grace = (self.chords_combo_grace - dt).max(0.0);
+        if self.chords_combo_grace > 0.0 {
+            return;
+        }
+        // Window closed: leftover button(s) still down → they meant that chord.
+        if !self.chords_held_list().is_empty() {
+            self.chords_sync_from_held(outbox);
+        }
+    }
+
     /// Buttons currently held (for chord-grid highlight). Empty → use resolved chord.
     pub fn chords_held_buttons(&self) -> Vec<(usize, QualityRow)> {
+        if self.chords_combo_grace > 0.0 {
+            if let Some(spec) = self.chords_current {
+                return chords::lit_buttons_for_chord(spec);
+            }
+        }
         self.chords_held_list()
     }
 
@@ -5394,6 +5452,7 @@ impl NativeModel {
     }
 
     fn chords_select(&mut self, spec: ChordSpec, play_block: bool, outbox: &mut Outbox) {
+        self.chords_combo_grace = 0.0;
         self.chords_current = Some(spec);
         self.status_line = spec.name();
         if play_block {
@@ -6786,6 +6845,124 @@ mod tests {
         let pcs: Vec<u8> = notes.iter().map(|n| n % 12).collect();
         assert!(pcs.contains(&0) && pcs.contains(&4) && pcs.contains(&7));
         assert_eq!(model.chords_current.unwrap().name(), "C");
+    }
+
+    fn press_g_min7(model: &mut NativeModel, out: &mut Outbox) {
+        let g = crate::chords::col_for_root_pc(7);
+        let min = model.layout.chords_button(g, 1);
+        let seven = model.layout.chords_button(g, 2);
+        model.finger_down(1, min.x + 4, min.y + 4, out);
+        model.finger_down(2, seven.x + 4, seven.y + 4, out);
+        assert_eq!(model.chords_current.unwrap().name(), "Gm7");
+    }
+
+    #[test]
+    fn chords_staggered_combo_lift_keeps_gm7_on_strum() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Chords);
+        model.chords_out = OutMode::Local;
+        model.chords_hold = false;
+        let mut out = Outbox::new();
+        press_g_min7(&mut model, &mut out);
+        out.take();
+        // Lift min first, then 7 — fingers never come up in the same instant.
+        model.finger_up(1, &mut out);
+        assert_eq!(
+            model.chords_current.unwrap().name(),
+            "Gm7",
+            "first finger up must not collapse m7 to the leftover 7"
+        );
+        model.finger_up(2, &mut out);
+        assert_eq!(
+            model.chords_current.unwrap().name(),
+            "Gm7",
+            "strum pad should keep Gm7 after a staggered two-button lift"
+        );
+        model.tick(0.05, &mut out);
+        assert_eq!(model.chords_current.unwrap().name(), "Gm7");
+        model.tick(0.2, &mut out);
+        assert_eq!(
+            model.chords_current.unwrap().name(),
+            "Gm7",
+            "grace expiry with nothing held must not rewrite the combo"
+        );
+
+        // Opposite order: 7 comes up first, min is "last".
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Chords);
+        model.chords_hold = false;
+        press_g_min7(&mut model, &mut out);
+        model.finger_up(2, &mut out);
+        model.finger_up(1, &mut out);
+        assert_eq!(
+            model.chords_current.unwrap().name(),
+            "Gm7",
+            "last finger up must not win over the combo"
+        );
+    }
+
+    #[test]
+    fn chords_combo_leftover_repress_does_not_steal_gm7() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Chords);
+        model.chords_out = OutMode::Local;
+        model.chords_hold = true;
+        let mut out = Outbox::new();
+        press_g_min7(&mut model, &mut out);
+        out.take();
+        model.finger_up(1, &mut out);
+        model.finger_up(2, &mut out);
+        // Driver re-assigns the last contact as a new id on the leftover 7.
+        let g = crate::chords::col_for_root_pc(7);
+        let seven = model.layout.chords_button(g, 2);
+        model.finger_down(3, seven.x + 4, seven.y + 4, &mut out);
+        assert_eq!(
+            model.chords_current.unwrap().name(),
+            "Gm7",
+            "ghost re-down of the last combo button must not select G7"
+        );
+        model.finger_up(3, &mut out);
+        assert_eq!(model.chords_current.unwrap().name(), "Gm7");
+    }
+
+    #[test]
+    fn chords_combo_subset_commits_after_grace() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Chords);
+        model.chords_out = OutMode::Local;
+        model.chords_hold = true;
+        let mut out = Outbox::new();
+        press_g_min7(&mut model, &mut out);
+        out.take();
+        model.finger_up(2, &mut out); // lift 7, keep min
+        assert_eq!(model.chords_current.unwrap().name(), "Gm7");
+        model.tick(0.25, &mut out);
+        assert_eq!(
+            model.chords_current.unwrap().name(),
+            "Gm",
+            "holding the leftover min after the window should select Gm"
+        );
+    }
+
+    #[test]
+    fn chords_new_root_during_combo_grace_switches_immediately() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Chords);
+        model.chords_out = OutMode::Local;
+        model.chords_hold = true;
+        let mut out = Outbox::new();
+        press_g_min7(&mut model, &mut out);
+        out.take();
+        model.finger_up(1, &mut out);
+        model.finger_up(2, &mut out);
+        let c = crate::chords::col_for_root_pc(0);
+        let maj = model.layout.chords_button(c, 0);
+        model.finger_down(3, maj.x + 4, maj.y + 4, &mut out);
+        assert_eq!(
+            model.chords_current.unwrap().name(),
+            "C",
+            "a different root during the lift window is a new chord"
+        );
     }
 
     #[test]
