@@ -427,13 +427,13 @@ impl Layout {
                 h: HUD_H,
             },
             // Full-width Kaoss pad like Tk (drums live on SEQ / kit, not here).
-            // Leave ~16px above the footer chrome so axis/cursor glyphs (drawn
-            // after button fills) never sit on PROG/KEY/GATE controls.
+            // Leave headroom above footer chrome so axis labels (drawn after
+            // button fills) never sit on PROG/KEY/GATE controls.
             kaoss: Rect {
                 x: 8,
                 y: HUD_H + 8,
                 w: SCREEN_W - 16,
-                h: content_h - 124,
+                h: content_h - 128,
             },
             drums: Rect {
                 x: 0,
@@ -973,13 +973,13 @@ impl Layout {
             },
             song_save_seq: Rect {
                 x: 560,
-                y: HUD_H + 332,
+                y: HUD_H + 326,
                 w: 216,
                 h: 44,
             },
             song_out: Rect {
                 x: 560,
-                y: HUD_H + 384,
+                y: HUD_H + 376,
                 w: 216,
                 h: 44,
             },
@@ -1064,25 +1064,25 @@ impl Layout {
             },
             chords_root_strip: Rect {
                 x: 8,
-                y: HUD_H + 58,
+                y: HUD_H + 60,
                 w: 560,
                 h: 18,
             },
             chords_grid: Rect {
                 x: 8,
-                y: HUD_H + 80,
+                y: HUD_H + 82,
                 w: 560,
-                h: 222,
+                h: 218,
             },
             chords_strum: Rect {
                 x: 576,
-                y: HUD_H + 80,
+                y: HUD_H + 82,
                 w: 216,
-                h: 222,
+                h: 218,
             },
             chords_palette: Rect {
                 x: 8,
-                y: HUD_H + 310,
+                y: HUD_H + 306,
                 w: SCREEN_W - 16,
                 h: 110,
             },
@@ -1483,7 +1483,8 @@ impl Layout {
 
     pub fn home_grid(&self) -> crate::scroll::GridScroll {
         const COLS: usize = 5;
-        let gh = (self.content.h - 40) / 2;
+        const VISIBLE_ROWS: i32 = 3;
+        let gh = (self.content.h - 40) / VISIBLE_ROWS;
         crate::scroll::GridScroll {
             cols: COLS,
             cell_h: gh,
@@ -1497,13 +1498,18 @@ impl Layout {
         }
     }
 
+    pub fn home_row_h(&self) -> i32 {
+        (self.content.h - 40) / 3
+    }
+
     pub fn home_tile(&self, index: usize, scroll_y: i32) -> Rect {
         self.home_grid().cell_rect(index, scroll_y)
     }
 
     /// Scrollable KAOSS settings panel (Tk ⚙ overlay).
     pub fn kaoss_settings_content_h(&self) -> i32 {
-        620
+        // OUT row + 16 MIDI channel cells (4×4 grid).
+        496 + 4 * 44 + 8
     }
 
     pub fn kaoss_settings_max_scroll(&self) -> i32 {
@@ -2846,6 +2852,92 @@ mod tests {
     use super::*;
     use crate::chords;
 
+    fn bottom(r: Rect) -> i32 {
+        r.y + r.h
+    }
+
+    fn gap_below(upper: Rect, lower: Rect) -> i32 {
+        lower.y - bottom(upper)
+    }
+
+    fn assert_on_screen(label: &str, r: Rect) {
+        assert!(
+            r.x >= 0 && r.y >= 0 && bottom(r) <= SCREEN_H && r.x + r.w <= SCREEN_W,
+            "{label} off-screen: {r:?}"
+        );
+    }
+
+    #[test]
+    fn layout_audit_mode_chrome_on_screen() {
+        let layout = Layout::new();
+        let checks: &[(&str, Rect)] = &[
+            ("kaoss pad", layout.kaoss),
+            ("kaoss footer", layout.kaoss_prog),
+            ("synth keys", layout.synth_keys),
+            ("chords palette", layout.chords_palette),
+            ("song out", layout.song_out),
+            ("pads stop", layout.stop_all),
+        ];
+        for (label, rect) in checks {
+            if rect.w > 0 && rect.h > 0 {
+                assert_on_screen(label, *rect);
+            }
+        }
+    }
+
+    #[test]
+    fn layout_audit_home_fits_three_rows() {
+        let layout = Layout::new();
+        let settings_idx = HOME_TILES.len() - 1;
+        let settings = layout.home_tile(settings_idx, 0);
+        assert_on_screen("home settings", settings);
+        assert!(
+            layout.home_grid().max_scroll() == 0,
+            "eleven home tiles should fit without scrolling"
+        );
+    }
+
+    #[test]
+    fn layout_audit_kaoss_pad_clears_footer_and_axis_band() {
+        let layout = Layout::new();
+        assert!(
+            gap_below(layout.kaoss, layout.kaoss_prog) >= 12,
+            "kaoss pad should sit above footer"
+        );
+        // draw_kaoss_axes places X label ~60px above pad bottom.
+        let axis_top = bottom(layout.kaoss) - 60;
+        assert!(
+            layout.kaoss_prog.y - axis_top >= 8,
+            "axis label band should clear footer buttons"
+        );
+    }
+
+    #[test]
+    fn layout_audit_songs_column_clears_bottom() {
+        let layout = Layout::new();
+        assert!(
+            bottom(layout.song_out) <= SCREEN_H - 4,
+            "song OUT should leave a bottom margin"
+        );
+    }
+
+    #[test]
+    fn layout_audit_chords_vertical_stack() {
+        let layout = Layout::new();
+        assert!(gap_below(layout.chords_toolbar, layout.chords_root_strip) >= 10);
+        assert!(gap_below(layout.chords_root_strip, layout.chords_grid) >= 4);
+        assert!(bottom(layout.chords_palette) <= bottom(layout.content));
+    }
+
+    #[test]
+    fn layout_audit_synth_sliders_clear_scope() {
+        let layout = Layout::new();
+        assert!(
+            layout.synth_sliders.x + layout.synth_sliders.w <= layout.synth_scope.x,
+            "sliders should not overlap the scope panel"
+        );
+    }
+
     #[test]
     fn kick_is_a5_screen_cell() {
         let layout = Layout::new();
@@ -2968,19 +3060,14 @@ mod tests {
     }
 
     #[test]
-    fn home_settings_requires_scroll() {
+    fn home_settings_visible_without_scroll() {
         let layout = Layout::new();
         let settings_idx = HOME_TILES.len() - 1;
+        let settings = layout.home_tile(settings_idx, 0);
         let grid = layout.home_grid();
-        let offscreen = layout.home_tile(settings_idx, 0);
         assert!(
-            offscreen.y + offscreen.h > grid.viewport.y + grid.viewport.h,
-            "settings tile should sit below the first home viewport"
-        );
-        let visible = layout.home_tile(settings_idx, grid.max_scroll());
-        assert!(
-            grid.viewport.contains(visible.x + 4, visible.y + visible.h / 2),
-            "max scroll should expose settings inside the viewport"
+            grid.viewport.contains(settings.x + 4, settings.y + settings.h / 2),
+            "settings tile should be reachable at scroll 0"
         );
     }
 

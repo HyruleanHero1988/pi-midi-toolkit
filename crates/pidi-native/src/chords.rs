@@ -154,6 +154,11 @@ impl ChordSpec {
     pub fn strum_strings_at(self, base: u8) -> [u8; STRUM_STRINGS] {
         strum_strings_at(self, base)
     }
+
+    /// Shift root by semitones (preserves quality) — used when the song key changes.
+    pub fn transpose(self, semitones: u8) -> Self {
+        Self::new(self.root.wrapping_add(semitones), self.quality)
+    }
 }
 
 impl fmt::Display for ChordSpec {
@@ -628,6 +633,13 @@ mod tests {
                 crate::kaoss_ui::midi_note_label(note),
             );
         }
+    }
+
+    #[test]
+    fn transpose_follows_key_change() {
+        let c = ChordSpec::new(0, ChordQuality::Maj);
+        assert_eq!(c.transpose(7).name(), "G");
+        assert_eq!(ChordSpec::new(9, ChordQuality::Min).transpose(7).name(), "Em");
     }
 
     #[test]

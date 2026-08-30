@@ -3007,10 +3007,7 @@ impl NativeModel {
             }
             Hit::ChordsKeyPick(pc) => {
                 self.tap_ui(slot, id, gesture, px, py);
-                self.chords_key = pc.min(11);
-                self.chords_overlay = None;
-                self.status_line = format!("key {}", chords::KEY_NAMES[self.chords_key as usize]);
-                self.mark_dirty();
+                self.set_chords_key(pc.min(11), outbox);
             }
             Hit::ChordsChangesPick(index) => {
                 self.tap_ui(slot, id, gesture, px, py);
@@ -5414,6 +5411,44 @@ impl NativeModel {
         }
     }
 
+    /// Transpose the live chord, palette, and any sounding block/strum when the song key changes.
+    fn set_chords_key(&mut self, new_key: u8, outbox: &mut Outbox) {
+        let new_key = new_key.min(11);
+        let old_key = self.chords_key;
+        if new_key == old_key {
+            self.chords_overlay = None;
+            self.status_line = format!("key {}", chords::KEY_NAMES[new_key as usize]);
+            self.mark_dirty();
+            return;
+        }
+        let delta =
+            ((new_key as i16 - old_key as i16).rem_euclid(12)) as u8;
+        self.chords_key = new_key;
+        if let Some(spec) = self.chords_current {
+            self.chords_current = Some(spec.transpose(delta));
+        }
+        for slot in &mut self.chords_palette {
+            *slot = slot.map(|spec| spec.transpose(delta));
+        }
+        self.chords_overlay = None;
+        self.status_line = format!("key {}", chords::KEY_NAMES[new_key as usize]);
+        self.mark_dirty();
+        if self.chords_block.iter().any(|n| n.is_some()) {
+            if let Some(spec) = self.chords_current {
+                self.chords_block_on(spec, outbox);
+            }
+        }
+        if let Some(slot) = self
+            .fingers
+            .iter()
+            .position(|f| f.active && matches!(f.surface, Surface::ChordsStrum))
+        {
+            let y = self.fingers[slot].y;
+            self.chords_strum_note = None;
+            self.chords_strum_to(y, outbox);
+        }
+    }
+
     fn chords_block_off(&mut self, outbox: &mut Outbox) {
         for note in self.chords_block.into_iter().flatten() {
             self.chords_note_off(note, outbox);
@@ -6908,6 +6943,22 @@ mod tests {
     }
 
     #[test]
+    fn chords_key_change_transposes_strum() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Chords);
+        model.chords_key = 0;
+        model.chords_current = Some(ChordSpec::new(0, chords::ChordQuality::Maj));
+        let base = chords::strum_base_for_octave(0);
+        let before = model.chords_current.unwrap().strum_strings_at(base);
+        let mut out = Outbox::new();
+        model.set_chords_key(7, &mut out);
+        assert_eq!(model.chords_current.unwrap().name(), "G");
+        let after = model.chords_current.unwrap().strum_strings_at(base);
+        assert_ne!(before, after);
+        assert_eq!(after[0] % 12, 7, "lowest strum string should move to G");
+    }
+
+    #[test]
     fn chords_changes_fill_palette_in_key() {
         let mut model = NativeModel::new();
         model.set_mode(UiMode::Chords);
@@ -7145,21 +7196,12 @@ mod tests {
         let mut model = NativeModel::new();
         let mut out = Outbox::new();
         model.set_mode(UiMode::Home);
-        let grid = model.layout.home_grid();
         let settings_idx = crate::layout::HOME_TILES.len() - 1;
-        let settings = model.layout.home_tile(settings_idx, grid.max_scroll());
+        let settings = model.layout.home_tile(settings_idx, 0);
         let px = settings.x + settings.w / 2;
         let py = settings.y + settings.h / 2;
-        let start_x = model.layout.content.x + model.layout.content.w / 2;
-        let start_y = grid.viewport.y + grid.viewport.h / 2;
-        model.finger_down(1, start_x, start_y, &mut out);
-        model.finger_up_at(1, Some(start_x), Some(start_y - grid.max_scroll() - 20), &mut out);
-        assert!(
-            model.home_scroll > 0,
-            "drag lift should scroll the home grid"
-        );
-        model.finger_down(2, px, py, &mut out);
-        model.finger_up(2, &mut out);
+        model.finger_down(1, px, py, &mut out);
+        model.finger_up(1, &mut out);
         assert_eq!(model.mode, UiMode::Settings);
     }
 

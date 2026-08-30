@@ -599,14 +599,6 @@ fn draw_chrome(scene: &mut Scene, model: &NativeModel) {
         scene.text_centered(cell, mode.label(), 0xfbf1c7, 2);
     }
 
-    let status = chrome_status(model);
-    if !status.is_empty() {
-        let status_x = layout.nav_chrome_rec().x - 8;
-        // Right-align into the gap left of REC when possible.
-        let approx_w = status.chars().count() as i32 * 10;
-        let x = (status_x - approx_w).max(layout.nav_power().x + layout.nav_power().w + 8);
-        scene.text(x, 18, &status, 0xfe8019);
-    }
 }
 
 fn chrome_rec_label(model: &NativeModel) -> (&'static str, u32) {
@@ -615,66 +607,6 @@ fn chrome_rec_label(model: &NativeModel) -> (&'static str, u32) {
         crate::seq::SeqState::Empty => ("REC", 0x9d0006),
         crate::seq::SeqState::Review => ("REC", 0xd79921),
         _ => ("REC", 0x504945),
-    }
-}
-
-fn chrome_status(model: &NativeModel) -> String {
-    // Prefer a short live readout — long status_line belongs in the content area.
-    match model.mode {
-        UiMode::Kaoss => {
-            if model.kaoss_settings_open {
-                return "SETTINGS".into();
-            }
-            format!(
-                "{:.0} BPM {}",
-                model.bpm,
-                kaoss_ui::gate(model.kaoss_gate).label
-            )
-        }
-        UiMode::Seq => format!("{:.0} BPM", model.bpm),
-        UiMode::Chords => {
-            let name = model
-                .chords_current
-                .map(|c| c.name())
-                .unwrap_or_else(|| "CHORDS".into());
-            if model.seq.is_recording() {
-                format!("REC {name}")
-            } else if model.pads_recording.is_some() {
-                format!("PAD {name}")
-            } else {
-                name
-            }
-        }
-        UiMode::Presets => format!("SLOT {}", model.preset_selected + 1),
-        UiMode::Fm => format!(
-            "{} · {}",
-            jambox_core::fm_recipe(model.fm_recipe).label,
-            jambox_core::OP_NAMES[model.fm_selected]
-        ),
-        UiMode::Synth if model.synth_vib_open => "VIB".into(),
-        UiMode::Drums if model.kit_edit_open => "WAVE".into(),
-        UiMode::Drums if model.kit_repeat_open => "REPEAT".into(),
-        UiMode::Fx => {
-            if model.status_line.is_empty() {
-                "FX".into()
-            } else {
-                model.status_line.chars().take(18).collect()
-            }
-        }
-        UiMode::Settings => {
-            if model.status_line.is_empty() {
-                "SETTINGS".into()
-            } else {
-                model.status_line.chars().take(18).collect()
-            }
-        }
-        _ => {
-            if !model.status_line.is_empty() && model.status_line.chars().count() <= 12 {
-                model.status_line.clone()
-            } else {
-                String::new()
-            }
-        }
     }
 }
 
@@ -1114,7 +1046,7 @@ fn draw_kaoss_axes(scene: &mut Scene, pad: crate::layout::Rect, model: &NativeMo
         let x_label_y = if bend {
             pad.y + pad.h / 2 - 10
         } else {
-            pad.y + pad.h - 52
+            pad.y + pad.h - 60
         };
         scene.text_scaled(pad.x + pad.w / 2 - 40, x_label_y, x_label, 0xd3869b, 2);
     }
@@ -1364,7 +1296,7 @@ fn draw_home(scene: &mut Scene, model: &NativeModel) {
     scene.text_scaled(
         layout.content.x + layout.content.w - 160,
         layout.content.y + 14,
-        "tap a mode · drag",
+        "tap a mode",
         0x928374,
         2,
     );
@@ -1511,7 +1443,13 @@ fn draw_chords(scene: &mut Scene, model: &NativeModel) {
             // Band 0 is top (highest note); band strings-1 is bottom (lowest).
             let idx = strings - 1 - i as usize;
             let label = crate::kaoss_ui::midi_note_label(notes[idx]);
-            scene.text(play.x + play.w - 44, y - 2, &label, 0xa89984);
+            scene.text_scaled(
+                play.x + play.w - 36,
+                y + band_h / 2 - 5,
+                &label,
+                0xa89984,
+                1,
+            );
         }
     }
 
@@ -1699,17 +1637,18 @@ fn draw_synth(scene: &mut Scene, model: &NativeModel) {
         let octave = (midi as i32 / 12) - 1;
         format!("C{octave}")
     };
-    scene.text(
-        24,
-        HUD_H + 64,
+    scene.text_scaled(
+        layout.synth_scope.x + 6,
+        layout.synth_scope.y + 4,
         &format!(
-            "{} · vib {:.2}st · {:.1}Hz · {}",
+            "{} {:.1}st {:.0}Hz {}",
             oct_label,
             model.vibrato_depth,
             model.vibrato_rate,
-            if vib_on { "ON" } else { "WHEEL" }
+            if vib_on { "ON" } else { "WHL" }
         ),
         0xa89984,
+        1,
     );
 
     // CRT-ish morph scope (live A/B blend from the loaded wave bank).
@@ -1718,7 +1657,7 @@ fn draw_synth(scene: &mut Scene, model: &NativeModel) {
     for index in 0..6 {
         let track = layout.synth_slider(index);
         scene.fill_rect(track, 0x20202c);
-        scene.text(track.x + 8, track.y - 18, LABELS[index], 0xc0c0d0);
+        scene.text(track.x + 8, track.y + 6, LABELS[index], 0xc0c0d0);
         let value = if index < 5 {
             model.synth_params[index]
         } else {
@@ -1760,7 +1699,7 @@ fn draw_synth(scene: &mut Scene, model: &NativeModel) {
     for index in 0..5 {
         let key = layout.synth_keyboard_black_rect(index);
         scene.fill_rect(key, 0x1a1a22);
-        scene.text(key.x + 6, key.y + key.h - 14, BLACK_LABELS[index], 0xd0d0d8);
+        scene.text_scaled(key.x + 4, key.y + 4, BLACK_LABELS[index], 0xd0d0d8, 1);
     }
 }
 
@@ -1870,7 +1809,7 @@ fn draw_fm(scene: &mut Scene, model: &NativeModel) {
     for index in 0..5 {
         let key = layout.synth_keyboard_black_rect(index);
         scene.fill_rect(key, 0x1a1a22);
-        scene.text(key.x + 6, key.y + key.h - 14, BLACK_LABELS[index], 0xd0d0d8);
+        scene.text_scaled(key.x + 4, key.y + 4, BLACK_LABELS[index], 0xd0d0d8, 1);
     }
 }
 
@@ -2260,8 +2199,13 @@ fn draw_seq(scene: &mut Scene, model: &NativeModel) {
 
     scene.text(16, HUD_H + 10, "Sequencer", 0xfbf1c7);
     scene.text(160, HUD_H + 12, &format!("{:.0} BPM", seq.bpm), 0xa89984);
-    scene.text(16, HUD_H + 30, &seq.status, 0xfabd2f);
-    scene.text(16, HUD_H + 44, &seq.layer_line, 0x83a598);
+    let status = if seq.status.chars().count() > 38 {
+        format!("{}…", seq.status.chars().take(38).collect::<String>())
+    } else {
+        seq.status.clone()
+    };
+    scene.text_scaled(16, HUD_H + 28, &status, 0xfabd2f, 1);
+    scene.text_scaled(16, HUD_H + 42, &seq.layer_line, 0x83a598, 1);
 
     let (rec_label, rec_bg) = seq.rec_label();
     let (play_label, play_bg) = seq.play_label();
@@ -2314,9 +2258,9 @@ fn draw_seq(scene: &mut Scene, model: &NativeModel) {
     scene.fill_rect(layout.seq_bpm_up, 0x282828);
     scene.text_centered(layout.seq_bpm_up, "+ BPM", 0xffffff, 2);
     if model.seq_to_pad_armed {
-        scene.text(400, HUD_H + 30, "tap a PAD slot", 0xfabd2f);
+        scene.text_scaled(520, HUD_H + 42, "tap a PAD slot", 0xfabd2f, 1);
     } else {
-        scene.text(400, HUD_H + 30, ">PAD assigns loop", 0x83a598);
+        scene.text_scaled(520, HUD_H + 42, ">PAD assigns loop", 0x83a598, 1);
     }
 
     scene.text(
