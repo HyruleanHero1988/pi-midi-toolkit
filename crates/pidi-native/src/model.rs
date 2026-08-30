@@ -7308,6 +7308,63 @@ mod tests {
         assert_eq!(model.wifi_kb_ssid, "TestNet");
     }
 
+    fn wifi_kb_key_rect(model: &NativeModel, want: &str) -> crate::layout::Rect {
+        let rows = if model.wifi_kb_sym {
+            crate::wifi::keyboard_sym_rows()
+        } else {
+            crate::wifi::keyboard_abc_rows(model.wifi_kb_shift)
+        };
+        for (ri, row) in rows.iter().enumerate() {
+            let mut col = 0i32;
+            for (_label, action, span) in row {
+                if *action == want {
+                    return model.layout.wifi_kb_key(ri, col, *span);
+                }
+                col += i32::from(*span);
+            }
+        }
+        panic!("missing keyboard action {want}");
+    }
+
+    fn tap_wifi_key(model: &mut NativeModel, out: &mut Outbox, id: i32, action: &str) {
+        let key = wifi_kb_key_rect(model, action);
+        model.finger_down(id, key.x + 4, key.y + 4, out);
+        model.finger_up(id, out);
+    }
+
+    #[test]
+    fn wifi_keyboard_plus_inserts_and_del_backspaces() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Settings);
+        model.wifi_networks.push(crate::wifi::WifiNetwork {
+            ssid: "TestNet".into(),
+            signal: 70,
+            security: "WPA2".into(),
+            in_use: false,
+        });
+        let mut out = Outbox::new();
+        let btn = model.layout.settings_wifi;
+        model.finger_down(1, btn.x + 4, btn.y + 4, &mut out);
+        model.finger_up(1, &mut out);
+        let row = model.layout.wifi_row(0);
+        model.finger_down(2, row.x + 4, row.y + 4, &mut out);
+        model.finger_up(2, &mut out);
+        assert!(model.wifi_kb_open);
+
+        tap_wifi_key(&mut model, &mut out, 3, "a");
+        tap_wifi_key(&mut model, &mut out, 4, "b");
+        assert_eq!(model.wifi_kb_text, "ab");
+
+        tap_wifi_key(&mut model, &mut out, 5, "back");
+        assert_eq!(model.wifi_kb_text, "a", "DEL must delete, not insert '+'");
+
+        tap_wifi_key(&mut model, &mut out, 6, "sym");
+        tap_wifi_key(&mut model, &mut out, 7, "+");
+        assert_eq!(model.wifi_kb_text, "a+");
+        tap_wifi_key(&mut model, &mut out, 8, "back");
+        assert_eq!(model.wifi_kb_text, "a");
+    }
+
     #[test]
     fn fm_mode_enables_engine_and_plays_a_key() {
         let mut model = NativeModel::new();

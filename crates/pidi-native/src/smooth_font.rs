@@ -205,12 +205,13 @@ impl SmoothAtlas {
 }
 
 fn smooth_index(ch: char) -> usize {
-    let mut c = ch as u8;
-    if (b'a'..=b'z').contains(&c) {
-        c -= 32;
+    let mut code = ch as u32;
+    if (b'a' as u32..=b'z' as u32).contains(&code) {
+        code -= 32;
     }
-    if (FIRST..FIRST + COUNT as u8).contains(&c) {
-        (c - FIRST) as usize
+    let first = FIRST as u32;
+    if (first..first + COUNT as u32).contains(&code) {
+        (code - first) as usize
     } else {
         0
     }
@@ -244,6 +245,12 @@ mod tests {
             "scale-2 ascender box should fit a 40–48px button, got {h}"
         );
         assert!(h > 8.0, "scale-2 must stay readable, got {h}");
+    }
+
+    #[test]
+    fn unicode_erase_does_not_alias_to_plus() {
+        assert_ne!(smooth_index('⌫'), smooth_index('+'));
+        assert_eq!(smooth_index('⌫'), 0);
     }
 
     #[test]
