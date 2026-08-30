@@ -1482,6 +1482,7 @@ impl NativeModel {
     pub fn apply_session(&mut self, s: &SessionState, outbox: &mut Outbox) {
         self.bpm = s.bpm.clamp(40.0, 240.0);
         self.seq.bpm = self.bpm;
+        self.seq.cue_beep = s.seq_cue_beep;
         self.synth_params = [s.morph, s.tone, s.level, s.attack, s.release];
         self.vibrato_always = s.vibrato_always.clamp(0.0, 1.0);
         self.vibrato_depth = s.vibrato_depth.clamp(0.0, 2.0);
@@ -1609,6 +1610,7 @@ impl NativeModel {
             screensaver_sec: self.screensaver.timeout_sec,
             kaoss_viz_style: self.kaoss_viz_style.wire().into(),
             kaoss_mono_color: self.kaoss_mono_color,
+            seq_cue_beep: self.seq.cue_beep,
         }
     }
 
@@ -2576,6 +2578,22 @@ impl NativeModel {
                 };
                 self.seq.toggle_extend();
                 self.status_line = self.seq.status.clone();
+            }
+            Hit::SeqCue => {
+                self.fingers[slot] = Finger {
+                    active: true,
+                    id,
+                    gesture,
+                    x: 0.0,
+                    y: 0.0,
+                    px,
+                    py,
+                    surface: Surface::UiTap,
+                    gate_on: false,
+                };
+                let action = self.seq.toggle_cue_beep();
+                self.apply_seq_action(action, outbox);
+                self.mark_dirty();
             }
             Hit::SeqStop => {
                 self.fingers[slot] = Finger {
@@ -7470,5 +7488,31 @@ mod tests {
             "move stream should advance song_scroll"
         );
         model.finger_up(1, &mut out);
+    }
+
+    #[test]
+    fn seq_beep_button_toggles_cue_and_uploads() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Seq);
+        model.seq.seed_playing_backbone(
+            vec![crate::seq::RecEvent {
+                t: 0.0,
+                on: true,
+                channel: 9,
+                note: 36,
+                velocity: 100,
+            }],
+            1.0,
+        );
+        let mut out = Outbox::new();
+        let btn = model.layout.seq_cue;
+        model.finger_down(1, btn.x + 4, btn.y + 4, &mut out);
+        model.finger_up(1, &mut out);
+        assert!(model.seq.cue_beep, "BEEP should latch on");
+        let reqs = out.take();
+        assert!(
+            reqs.iter().any(|r| matches!(r, Request::ClipLoad { .. })),
+            "turning BEEP on should reload the looping clip, got {reqs:?}"
+        );
     }
 }

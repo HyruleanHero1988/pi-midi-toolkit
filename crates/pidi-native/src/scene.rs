@@ -2303,6 +2303,9 @@ fn draw_seq(scene: &mut Scene, model: &NativeModel) {
     let extend_label = if seq.extend_mode { "EXTEND" } else { "WRAP" };
     scene.fill_rect(layout.seq_extend, extend_bg);
     scene.text_centered(layout.seq_extend, extend_label, 0xffffff, 2);
+    let cue_bg = if seq.cue_beep { 0x689d6a } else { 0x3c3836 };
+    scene.fill_rect(layout.seq_cue, cue_bg);
+    scene.text_centered(layout.seq_cue, "BEEP", 0xffffff, 2);
 
     scene.fill_rect(layout.seq_stop, 0x504945);
     scene.text_centered(layout.seq_stop, "STOP", 0xffffff, 2);
@@ -2332,7 +2335,7 @@ fn draw_seq(scene: &mut Scene, model: &NativeModel) {
     scene.text(
         12,
         HUD_H + layout.content.h - 18,
-        "REC locks loop · overdub · KEEP/DROP/UNDO · >PAD assigns",
+        "REC locks loop · overdub · BEEP marks 1 · >PAD assigns",
         0x83a598,
     );
 }

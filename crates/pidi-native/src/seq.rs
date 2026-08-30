@@ -10,6 +10,11 @@ use crate::phrases::{seconds_to_ticks, PPQ};
 
 pub const SEQ_CLIP_SLOT: u8 = 15;
 pub const MAX_CYCLES: usize = 8;
+/// Clave on the drum kit — short enough to mark beat 1 without becoming the groove.
+pub const CUE_NOTE: u8 = 50;
+pub const CUE_CHANNEL: u8 = jambox_core::DRUM_CHANNEL;
+const CUE_VELOCITY: u8 = 108;
+const CUE_LEN_SEC: f64 = 0.045;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SeqState {
@@ -244,6 +249,8 @@ pub struct SeqModel {
     pub status: String,
     pub layer_line: String,
     pub extend_mode: bool,
+    /// Play a clave click at the start of each loop (playback only; not exported).
+    pub cue_beep: bool,
     sequence: Sequence,
     take: Vec<RecEvent>,
     take_started: Option<std::time::Instant>,
@@ -263,6 +270,7 @@ impl SeqModel {
             status: "REC a backbone groove, then overdub layers".into(),
             layer_line: "no layers".into(),
             extend_mode: false,
+            cue_beep: false,
             sequence: Sequence::default(),
             take: Vec::new(),
             take_started: None,
@@ -276,6 +284,13 @@ impl SeqModel {
     #[cfg(test)]
     pub fn recorded_on_notes(&self) -> Vec<u8> {
         self.take.iter().filter(|e| e.on).map(|e| e.note).collect()
+    }
+
+    #[cfg(test)]
+    pub fn seed_playing_backbone(&mut self, events: Vec<RecEvent>, length: f64) {
+        self.sequence.set_backbone(events, length);
+        self.state = SeqState::Playing;
+        self.refresh_lines();
     }
 
     pub fn is_playing(&self) -> bool {
@@ -308,6 +323,15 @@ impl SeqModel {
             return None;
         }
         Some((events, length_ticks, self.sequence.total_len()))
+    }
+
+    fn playback_wire(&self, include_pending: bool) -> (Vec<WireClipEvent>, u32) {
+        let (events, length_ticks) = self.sequence.to_wire(self.bpm, include_pending);
+        if self.cue_beep && !self.sequence.is_empty() {
+            (with_cue_beep(events, self.bpm, length_ticks), length_ticks)
+        } else {
+            (events, length_ticks)
+        }
     }
 
     pub fn rec_label(&self) -> (&'static str, u32) {
@@ -377,7 +401,7 @@ impl SeqModel {
         self.sequence.set_backbone(trimmed, length);
         self.state = SeqState::Playing;
         self.refresh_lines();
-        let (events, length_ticks) = self.sequence.to_wire(self.bpm, false);
+        let (events, length_ticks) = self.playback_wire(false);
         SeqAction::Upload {
             events,
             length_ticks,
@@ -401,7 +425,7 @@ impl SeqModel {
         });
         self.state = SeqState::Overdub;
         self.refresh_lines();
-        let (events, length_ticks) = self.sequence.to_wire(self.bpm, false);
+        let (events, length_ticks) = self.playback_wire(false);
         SeqAction::Upload {
             events,
             length_ticks,
@@ -453,7 +477,7 @@ impl SeqModel {
         });
         self.state = SeqState::Review;
         self.refresh_lines();
-        let (wire, length_ticks) = self.sequence.to_wire(self.bpm, true);
+        let (wire, length_ticks) = self.playback_wire(true);
         SeqAction::Upload {
             events: wire,
             length_ticks,
@@ -471,7 +495,7 @@ impl SeqModel {
         }
         self.state = SeqState::Playing;
         self.refresh_lines();
-        let (events, length_ticks) = self.sequence.to_wire(self.bpm, false);
+        let (events, length_ticks) = self.playback_wire(false);
         SeqAction::Upload {
             events,
             length_ticks,
@@ -499,7 +523,7 @@ impl SeqModel {
         if self.sequence.is_empty() {
             SeqAction::Clear
         } else {
-            let (events, length_ticks) = self.sequence.to_wire(self.bpm, false);
+            let (events, length_ticks) = self.playback_wire(false);
             SeqAction::Upload {
                 events,
                 length_ticks,
@@ -515,7 +539,7 @@ impl SeqModel {
         }
         self.state = SeqState::Playing;
         self.refresh_lines();
-        let (events, length_ticks) = self.sequence.to_wire(self.bpm, false);
+        let (events, length_ticks) = self.playback_wire(false);
         SeqAction::Upload {
             events,
             length_ticks,
@@ -538,7 +562,7 @@ impl SeqModel {
         }
         self.state = SeqState::Playing;
         self.refresh_lines();
-        let (events, length_ticks) = self.sequence.to_wire(self.bpm, self.has_pending());
+        let (events, length_ticks) = self.playback_wire(self.has_pending());
         SeqAction::Upload {
             events,
             length_ticks,
@@ -575,7 +599,7 @@ impl SeqModel {
             return SeqAction::None;
         }
         self.refresh_lines();
-        let (events, length_ticks) = self.sequence.to_wire(self.bpm, false);
+        let (events, length_ticks) = self.playback_wire(false);
         SeqAction::Upload {
             events,
             length_ticks,
@@ -589,7 +613,7 @@ impl SeqModel {
             return SeqAction::None;
         }
         self.refresh_lines();
-        let (events, length_ticks) = self.sequence.to_wire(self.bpm, false);
+        let (events, length_ticks) = self.playback_wire(false);
         SeqAction::Upload {
             events,
             length_ticks,
@@ -604,6 +628,24 @@ impl SeqModel {
         } else {
             "OVERDUB: WRAP".into()
         };
+    }
+
+    pub fn toggle_cue_beep(&mut self) -> SeqAction {
+        self.cue_beep = !self.cue_beep;
+        self.status = if self.cue_beep {
+            "BEEP on — clave marks loop start".into()
+        } else {
+            "BEEP off".into()
+        };
+        if self.sequence.is_empty() {
+            return SeqAction::None;
+        }
+        let (events, length_ticks) = self.playback_wire(self.has_pending());
+        SeqAction::Upload {
+            events,
+            length_ticks,
+            launch: self.is_playing(),
+        }
     }
 
     pub fn nudge_bpm(&mut self, delta: f32) {
@@ -639,6 +681,37 @@ impl SeqModel {
     }
 }
 
+fn with_cue_beep(
+    mut events: Vec<WireClipEvent>,
+    bpm: f32,
+    length_ticks: u32,
+) -> Vec<WireClipEvent> {
+    let off_tick = seconds_to_ticks(CUE_LEN_SEC, bpm)
+        .max(1)
+        .min(length_ticks.saturating_sub(1).max(1));
+    events.push(WireClipEvent {
+        tick: 0,
+        on: true,
+        channel: CUE_CHANNEL,
+        note: CUE_NOTE,
+        velocity: CUE_VELOCITY,
+    });
+    events.push(WireClipEvent {
+        tick: off_tick,
+        on: false,
+        channel: CUE_CHANNEL,
+        note: CUE_NOTE,
+        velocity: 0,
+    });
+    events.sort_by(|a, b| {
+        a.tick
+            .cmp(&b.tick)
+            .then_with(|| a.on.cmp(&b.on))
+            .then_with(|| a.note.cmp(&b.note))
+    });
+    events
+}
+
 fn trim_take(events: &[RecEvent]) -> (Vec<RecEvent>, f64) {
     trim_loop_take(events, 0.35, 0.05, 2.0)
 }
@@ -672,16 +745,16 @@ pub fn trim_loop_take(
                 velocity: e.velocity,
             })
             .collect();
-        let length = shifted
-            .iter()
-            .map(|e| e.t)
-            .fold(0.0_f64, f64::max)
-            + min_gap;
+        let length = shifted.iter().map(|e| e.t).fold(0.0_f64, f64::max) + min_gap;
         return (shifted, length.max(min_gap));
     }
 
     let t0 = ons[0];
-    let gaps: Vec<f64> = ons.windows(2).map(|w| w[1] - w[0]).filter(|g| *g > 0.0).collect();
+    let gaps: Vec<f64> = ons
+        .windows(2)
+        .map(|w| w[1] - w[0])
+        .filter(|g| *g > 0.0)
+        .collect();
     let trail = if gaps.is_empty() {
         default_gap.clamp(min_gap, max_gap)
     } else {
@@ -716,10 +789,7 @@ pub fn trim_loop_take(
             .then_with(|| match (a.on, b.on) {
                 (false, true) => std::cmp::Ordering::Less,
                 (true, false) => std::cmp::Ordering::Greater,
-                _ => a
-                    .channel
-                    .cmp(&b.channel)
-                    .then(a.note.cmp(&b.note)),
+                _ => a.channel.cmp(&b.channel).then(a.note.cmp(&b.note)),
             })
     });
     (shifted, length)
@@ -842,7 +912,10 @@ mod tests {
         let (trimmed, length) = trim_loop_take(&events, 0.35, 0.05, 2.0);
         assert!((trimmed[0].t).abs() < 1e-6, "first on at 0");
         // Inter-onset gap is 0.35s → trail 0.35; length ≈ 0.35 + 0.35 = 0.70
-        assert!(length < 1.0, "trail capped by inter-onset gap, got {length}");
+        assert!(
+            length < 1.0,
+            "trail capped by inter-onset gap, got {length}"
+        );
         assert!(
             trimmed.iter().any(|e| e.note == 38 && e.on),
             "second hit kept"
@@ -895,7 +968,10 @@ mod tests {
         ];
         let (trimmed, length) = trim_loop_take(&events, 0.35, 0.05, 2.0);
         assert!((trimmed[0].t).abs() < 1e-6);
-        assert!((length - 0.35).abs() < 0.05, "single-hit trail ≈ default, got {length}");
+        assert!(
+            (length - 0.35).abs() < 0.05,
+            "single-hit trail ≈ default, got {length}"
+        );
     }
 
     #[test]
@@ -911,5 +987,63 @@ mod tests {
         assert_eq!(closed.len(), 2);
         assert!(!closed[1].on);
         assert!((closed[1].t - 0.999).abs() < 0.01);
+    }
+
+    #[test]
+    fn cue_beep_injects_clave_at_loop_start() {
+        let mut seq = SeqModel::new();
+        seq.sequence.set_backbone(
+            vec![RecEvent {
+                t: 0.0,
+                on: true,
+                channel: 9,
+                note: 36,
+                velocity: 100,
+            }],
+            1.0,
+        );
+        seq.state = SeqState::Playing;
+        match seq.toggle_cue_beep() {
+            SeqAction::Upload { events, .. } => {
+                assert!(
+                    events.iter().any(|e| {
+                        e.on && e.tick == 0 && e.note == CUE_NOTE && e.channel == CUE_CHANNEL
+                    }),
+                    "playback should include a clave on at tick 0, got {events:?}"
+                );
+                assert!(
+                    events.iter().any(|e| e.on && e.note == 36),
+                    "kick backbone must still be present"
+                );
+            }
+            other => panic!("expected upload with cue, got {other:?}"),
+        }
+        let snap = seq.snapshot().expect("sequence should snapshot");
+        assert!(
+            snap.0.iter().all(|e| e.note != CUE_NOTE),
+            "SAVE SEQ / >PAD must not bake the cue into the clip"
+        );
+    }
+
+    #[test]
+    fn cue_beep_off_by_default() {
+        let mut seq = SeqModel::new();
+        seq.sequence.set_backbone(
+            vec![RecEvent {
+                t: 0.0,
+                on: true,
+                channel: 9,
+                note: 36,
+                velocity: 100,
+            }],
+            1.0,
+        );
+        seq.state = SeqState::Stopped;
+        match seq.toggle_play() {
+            SeqAction::Upload { events, .. } => {
+                assert!(events.iter().all(|e| e.note != CUE_NOTE));
+            }
+            other => panic!("expected upload, got {other:?}"),
+        }
     }
 }
