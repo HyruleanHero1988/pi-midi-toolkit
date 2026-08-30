@@ -1145,11 +1145,7 @@ fn draw_kaoss_grid(
         let notes = jambox_core::scale_notes(
             scale.degrees,
             model.kaoss_key,
-            match model.kaoss_octaves {
-                1 | 2 => 48,
-                3 => 36,
-                _ => 24,
-            },
+            kaoss_ui::clamp_root_midi(model.kaoss_root_midi),
             model.kaoss_octaves,
         );
         let n = notes
@@ -2796,6 +2792,31 @@ mod tests {
             .count();
         assert!(vert >= 8, "expected scale-note vertical lines, got {vert}");
         assert_eq!(horiz, 3, "expected Y guides at 25/50/75%, got {horiz}");
+    }
+
+    #[test]
+    fn c8_one_octave_grid_uses_the_selected_start() {
+        let mut model = NativeModel::new();
+        model.kaoss_root_midi = 108;
+        model.kaoss_octaves = 1;
+        let scene = build(&model);
+        let pad = model.layout.kaoss;
+        let vert = scene
+            .color
+            .iter()
+            .filter(|q| {
+                q.w <= 8.0
+                    && q.h >= (pad.h as f32) * 0.9
+                    && q.x >= pad.x as f32 - 4.0
+                    && q.x <= (pad.x + pad.w) as f32 + 4.0
+                    && q.y >= pad.y as f32 - 2.0
+            })
+            .count();
+        // Ionian C8..C9 is 8 notes → 9 cell edges.
+        assert!(
+            (8..=12).contains(&vert),
+            "C8 × 1 OCT should draw one-octave scale lines, got {vert}"
+        );
     }
 
     #[test]
