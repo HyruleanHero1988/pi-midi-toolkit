@@ -916,12 +916,11 @@ pub fn update_check_detailed() -> UpdateCheckResult {
 
 pub fn update_apply() -> UpdateCheckResult {
     let root = find_repo_root();
-    let mut lines = Vec::new();
     let updater = root.join("apps/pidi/pidi/updater.py");
     if !updater.is_file() {
         return UpdateCheckResult {
             status: "UPDATE: updater.py missing".into(),
-            lines,
+            lines: Vec::new(),
             available: false,
             ok: false,
             reload_kiosk: false,
@@ -955,7 +954,7 @@ pub(crate) fn update_apply_result(code: i32, stdout: &str, stderr: &str) -> Upda
             .find(|l| !l.contains("RELOAD_KIOSK="))
             .unwrap_or("install finished");
         if reload_kiosk {
-            format!("{last}\nReloading kiosk…")
+            format!("{last}\nReloading kiosk...")
         } else {
             last.to_string()
         }

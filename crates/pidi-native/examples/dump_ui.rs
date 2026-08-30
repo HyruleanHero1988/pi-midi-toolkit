@@ -181,4 +181,35 @@ fn main() {
         model.tick(1.0 / 60.0, &mut ob);
         dump(&model, out.join("kaoss_programs.ppm"));
     }
+    {
+        let mut model = NativeModel::new();
+        let mut ob = Outbox::new();
+        model.set_mode(UiMode::Settings);
+        let b = model.layout.settings_update;
+        model.finger_down(1, b.x + 4, b.y + 4, &mut ob);
+        model.finger_up(1, &mut ob);
+        model.update_available = true;
+        model.update_confirming = true;
+        model.update_status = "Running: abc1234 (master)\n\n\
+            This deploys new code from GitHub.\n\
+            The screen stays on; the kiosk reloads itself when ready.\n\
+            Phrases, songs, presets, and settings.json are kept.\n\
+            Tap INSTALL NOW to continue, or CANCEL (CHECK)."
+            .into();
+        model.tick(1.0 / 60.0, &mut ob);
+        dump(&model, out.join("update_confirm.ppm"));
+    }
+    {
+        let mut model = NativeModel::new();
+        let mut ob = Outbox::new();
+        model.set_mode(UiMode::Settings);
+        let b = model.layout.settings_update;
+        model.finger_down(1, b.x + 4, b.y + 4, &mut ob);
+        model.finger_up(1, &mut ob);
+        model.update_status = "Installed master abc1234 (updated engines)\n\
+            Reloading kiosk..."
+            .into();
+        model.tick(1.0 / 60.0, &mut ob);
+        dump(&model, out.join("update_reloading.ppm"));
+    }
 }

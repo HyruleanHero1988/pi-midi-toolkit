@@ -6761,8 +6761,9 @@ mod tests {
             "UPDATE tap blocked for {:?}",
             start.elapsed()
         );
-        assert_eq!(model.host_busy(), Some(HostTask::UpdateCheck));
-        assert!(model.status_line.to_ascii_lowercase().contains("check"));
+        assert!(model.update_panel_open);
+        assert_eq!(model.host_busy(), None);
+        assert!(!model.update_busy);
         let home = model.layout.nav_home();
         model.finger_down(2, home.x + 4, home.y + 4, &mut out);
         assert_eq!(model.mode, UiMode::Home);
