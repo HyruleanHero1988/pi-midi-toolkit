@@ -717,10 +717,7 @@ mod tests {
         let mut seen = std::collections::BTreeSet::new();
         for (i, label) in CLANG_LABELS.iter().enumerate() {
             assert!(
-                !label.is_empty()
-                    && label
-                        .chars()
-                        .all(|c| (32..96).contains(&(c as u32))),
+                !label.is_empty() && label.chars().all(|c| (32..96).contains(&(c as u32))),
                 "CLANG_LABELS[{i}]={label:?} must stay in ASCII 32..95"
             );
             assert!(
