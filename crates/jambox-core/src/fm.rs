@@ -19,9 +19,13 @@ const VOICE_AMP: f32 = 0.38;
 const INDEX_SCALE: f32 = SINE_SIZE as f32 / std::f32::consts::TAU * 5.5;
 
 /// Discrete operator frequency ratios, in order of "clang".
+///
+/// Labels stay in ASCII 32..95 so the 5×7 bitmap (and the smooth atlas)
+/// can draw them. `√2` rendered as a blank plus "2" and looked identical
+/// to the next step, `2:1`.
 pub const CLANG_RATIOS: [f32; 10] = [0.5, 1.0, 1.414, 2.0, 3.0, 3.5, 5.0, 7.0, 11.0, 14.0];
 pub const CLANG_LABELS: [&str; 10] = [
-    "1/2", "1:1", "√2", "2:1", "3:1", "3.5", "5:1", "7:1", "11", "14",
+    "1/2", "1:1", "1.41", "2:1", "3:1", "3.5", "5:1", "7:1", "11", "14",
 ];
 pub const OP_NAMES: [&str; FM_OP_COUNT] = ["A", "B", "C", "D"];
 pub const OP_COLORS: [u32; FM_OP_COUNT] = [0xfb4934, 0xfe8019, 0xb8bb26, 0x458588];
@@ -699,8 +703,32 @@ mod tests {
     fn clang_steps_through_musical_ratios() {
         assert_eq!(clang_ratio(0.0), 0.5);
         assert_eq!(clang_ratio(0.15), 1.0);
+        assert_eq!(clang_ratio(0.25), 1.414);
+        assert_eq!(clang_ratio(0.35), 2.0);
         assert_eq!(clang_ratio(0.55), 3.5);
         assert_eq!(clang_ratio(1.0), 14.0);
+        assert_eq!(clang_label(0.25), "1.41");
+        assert_eq!(clang_label(0.35), "2:1");
+        assert_ne!(clang_label(0.25), clang_label(0.35));
+    }
+
+    #[test]
+    fn clang_labels_fit_the_ascii_atlas() {
+        let mut seen = std::collections::BTreeSet::new();
+        for (i, label) in CLANG_LABELS.iter().enumerate() {
+            assert!(
+                !label.is_empty()
+                    && label
+                        .chars()
+                        .all(|c| (32..96).contains(&(c as u32))),
+                "CLANG_LABELS[{i}]={label:?} must stay in ASCII 32..95"
+            );
+            assert!(
+                seen.insert(*label),
+                "CLANG_LABELS[{i}]={label:?} is a duplicate"
+            );
+        }
+        assert_eq!(seen.len(), CLANG_RATIOS.len());
     }
 
     #[test]

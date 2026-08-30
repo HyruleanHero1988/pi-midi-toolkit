@@ -5915,6 +5915,28 @@ mod tests {
     }
 
     #[test]
+    fn fm_ratio_slider_names_sqrt2_and_octave_apart() {
+        let mut model = NativeModel::new();
+        let mut out = Outbox::new();
+        model.switch_mode(UiMode::Fm, &mut out);
+        out.take();
+        let track = model.layout.fm_slider(0);
+        let x = track.x + 4;
+        // clang 0.25 → 1.414 labeled 1.41; 0.35 → 2.0 labeled 2:1.
+        let y_sqrt2 = track.y + (track.h as f32 * 0.75) as i32;
+        model.finger_down(1, x, y_sqrt2, &mut out);
+        model.finger_up(1, &mut out);
+        assert_eq!(model.status_line, "RATIO 1.41");
+        assert_eq!(jambox_core::clang_label(model.fm_params[0]), "1.41");
+
+        let y_octave = track.y + (track.h as f32 * 0.65) as i32;
+        model.finger_down(2, x, y_octave, &mut out);
+        model.finger_up(2, &mut out);
+        assert_eq!(model.status_line, "RATIO 2:1");
+        assert_eq!(jambox_core::clang_label(model.fm_params[0]), "2:1");
+    }
+
+    #[test]
     fn leaving_fm_disables_the_playground() {
         let mut model = NativeModel::new();
         let mut out = Outbox::new();
