@@ -1,6 +1,6 @@
 # Native jambox kiosk
 
-Status: **active kiosk** (Python / Tk frozen on `cursor/python-kiosk-archive-dfc2`)
+Status: **active kiosk** (SDL/KMSDRM + GLES2)
 
 Rust-only appliance UI for the Pi TFT70. `jambox-engine` + `pidi-native` are the
 runtime.
@@ -100,7 +100,14 @@ Unit defaults: `--display sdl --touch evdev`. Optional:
 
 - `--evdev /dev/input/event4` if autodetect picks ADS7846
 - `--phrases /path/to/phrases`
-- `PIDI_PRESETS_DIR`, `PIDI_SONGS_DIR`, `JAMBOX_USER_WAVETABLES`
+- `PIDI_DATA_ROOT` — appliance user-data root (`songs/`, `phrases/`,
+  `user-presets/`, `user-wavetables/`, `settings.json`). systemd sets this to
+  `%h/.local/share/pidi`. Specific `PIDI_*_DIR` / `PIDI_SETTINGS_PATH` /
+  `JAMBOX_USER_WAVETABLES` still win when set.
+- `PIDI_PRESETS_DIR`, `PIDI_SONGS_DIR`, `PIDI_PHRASES_DIR`, `JAMBOX_USER_WAVETABLES`
+
+Migrate existing Tk / cwd libraries into the data root with
+`deploy/migrate-user-data.sh` (idempotent; never deletes the originals).
 
 ## Touch notes
 
