@@ -157,6 +157,16 @@ fn main() {
         let mut model = NativeModel::new();
         let mut ob = Outbox::new();
         model.set_mode(UiMode::Kaoss);
+        model.kaoss_picker = Some(KaossPicker::Octave);
+        model.kaoss_root_midi = 108;
+        model.kaoss_octaves = 1;
+        model.tick(1.0 / 60.0, &mut ob);
+        dump(&model, out.join("kaoss_octave_picker.ppm"));
+    }
+    {
+        let mut model = NativeModel::new();
+        let mut ob = Outbox::new();
+        model.set_mode(UiMode::Kaoss);
         model.kaoss_program = kaoss_ui::KAOSS_PROGRAMS
             .iter()
             .position(|p| p.id == "wah")

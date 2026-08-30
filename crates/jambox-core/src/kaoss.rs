@@ -594,6 +594,15 @@ mod tests {
     }
 
     #[test]
+    fn ionian_c8_one_octave() {
+        let notes = scale_notes(&IONIAN, 0, 108, 1);
+        let n = count_filled(&notes);
+        assert_eq!(notes[0], 108); // C8
+        assert_eq!(notes[n - 1], 120); // C9
+        assert_eq!(n, 8);
+    }
+
+    #[test]
     fn x_zero_is_the_left_cell() {
         let mapper = KaossMapper::new();
         assert_eq!(mapper.note_at(0.0), 48);

@@ -216,7 +216,7 @@ pub struct NativeModel {
     kit_wave_dirty: bool,
     pub kaoss_scale_index: u8,
     pub kaoss_key: u8,
-    /// Left-edge MIDI of the pad window (C1..C5 typically).
+    /// Left-edge MIDI of the pad window (C1..C8).
     pub kaoss_root_midi: u8,
     pub kaoss_octaves: u8,
     pub kaoss_full: bool,
@@ -5905,6 +5905,25 @@ mod tests {
                 (left as i32 / 12) - 1
             )
         );
+    }
+
+    #[test]
+    fn octave_picker_allows_c8_one_octave() {
+        let mut model = NativeModel::new();
+        let mut out = Outbox::new();
+        model.kaoss_picker = Some(KaossPicker::Octave);
+        model.apply_kaoss_picker(7, &mut out); // C8
+        assert_eq!(model.kaoss_root_midi, 108);
+        assert_eq!(kaoss_ui::midi_note_label(model.kaoss_root_midi), "C8");
+        model.kaoss_picker = Some(KaossPicker::Octave);
+        model.apply_kaoss_picker(8, &mut out); // 1 OCT
+        assert_eq!(model.kaoss_octaves, 1);
+        assert_eq!(model.kaoss_note_at(0.0), 108);
+        assert_eq!(model.kaoss_note_at(1.0), 120);
+        model.nudge_kaoss_root_octave(1, &mut out);
+        assert_eq!(model.kaoss_root_midi, 108, "C8 is the top start");
+        model.nudge_kaoss_root_octave(-1, &mut out);
+        assert_eq!(model.kaoss_root_midi, 96);
     }
 
     #[test]
