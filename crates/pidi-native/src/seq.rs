@@ -273,9 +273,18 @@ impl SeqModel {
         matches!(self.state, SeqState::RecBackbone | SeqState::Overdub)
     }
 
+    pub fn rec_origin(&self) -> Option<std::time::Instant> {
+        self.take_started
+    }
+
     #[cfg(test)]
     pub fn recorded_on_notes(&self) -> Vec<u8> {
         self.take.iter().filter(|e| e.on).map(|e| e.note).collect()
+    }
+
+    #[cfg(test)]
+    pub fn recorded_on_times(&self) -> Vec<f64> {
+        self.take.iter().filter(|e| e.on).map(|e| e.t).collect()
     }
 
     pub fn is_playing(&self) -> bool {
@@ -330,14 +339,21 @@ impl SeqModel {
     }
 
     pub fn push_note(&mut self, on: bool, channel: u8, note: u8, velocity: u8) {
-        if !self.is_recording() {
-            return;
-        }
         let Some(started) = self.take_started else {
             return;
         };
+        self.push_note_at(on, channel, note, velocity, started.elapsed().as_secs_f64());
+    }
+
+    pub fn push_note_at(&mut self, on: bool, channel: u8, note: u8, velocity: u8, t: f64) {
+        if !self.is_recording() {
+            return;
+        }
+        if self.take_started.is_none() {
+            return;
+        }
         self.take.push(RecEvent {
-            t: started.elapsed().as_secs_f64(),
+            t: t.max(0.0),
             on,
             channel: channel & 0x0f,
             note: note & 0x7f,
