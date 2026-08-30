@@ -10,23 +10,20 @@ User=pi
 Group=pi
 SupplementaryGroups=audio video render input
 WorkingDirectory=/home/pi/pi-midi-toolkit
-ExecStartPre=/usr/bin/mkdir -p %h/.local/share/pidi/songs %h/.local/share/pidi/phrases %h/.local/share/pidi/user-presets %h/.local/share/pidi/user-wavetables %h/.local/share/pidi/takes
 ExecStart=/home/pi/pi-midi-toolkit/bin/pidi-native \
   --control /tmp/jambox.sock \
   --display sdl \
-  --touch evdev
+  --touch auto
 Restart=on-failure
 RestartSec=2
 Environment=RUST_LOG=info
 Environment=SDL_VIDEODRIVER=kmsdrm
 Environment=SDL_AUDIODRIVER=dummy
-Environment=PIDI_REPO_ROOT=%h/pi-midi-toolkit
-Environment=PIDI_DATA_ROOT=%h/.local/share/pidi
-Environment=PIDI_SONGS_DIR=%h/.local/share/pidi/songs
-Environment=PIDI_PHRASES_DIR=%h/.local/share/pidi/phrases
-Environment=PIDI_PRESETS_DIR=%h/.local/share/pidi/user-presets
-Environment=PIDI_SETTINGS_PATH=%h/.local/share/pidi/settings.json
-Environment=JAMBOX_USER_WAVETABLES=%h/.local/share/pidi/user-wavetables
+# Use absolute paths — %h in Environment= expands to root's home when systemd
+# reloads the unit via sudo, so the kiosk would read an empty /root/.local/share/pidi.
+Environment=PIDI_DATA_ROOT=/home/pi/.local/share/pidi
+Environment=PIDI_REPO_ROOT=/home/pi/pi-midi-toolkit
+Environment=JAMBOX_USER_WAVETABLES=/home/pi/.local/share/pidi/user-wavetables
 
 [Install]
 WantedBy=multi-user.target

@@ -10,6 +10,7 @@ User=pi
 Group=pi
 WorkingDirectory=/home/pi/pi-midi-toolkit
 # The kiosk UI connects to the control socket; it never renders audio itself.
+# Factory waves stay in the deploy tree; user waves live under PIDI_DATA_ROOT.
 ExecStart=/home/pi/pi-midi-toolkit/bin/jambox-engine run \
   --midi-in MPK \
   --output headphone \

@@ -73,7 +73,8 @@ fn main() {
     let mut client = NativeClient::new(cli.control.clone(), cli.tcp);
     let mut presenter = Presenter::open(&cli);
     let sdl_touch = presenter.is_sdl() && matches!(cli.touch.as_str(), "auto" | "sdl");
-    let mut input = if matches!(cli.touch.as_str(), "evdev") || (cli.touch == "auto" && !sdl_touch)
+    let mut input = if matches!(cli.touch.as_str(), "evdev")
+        || (cli.touch == "auto" && !sdl_touch)
     {
         Input::open(&cli.evdev)
     } else {
@@ -116,7 +117,9 @@ fn main() {
             match event {
                 TouchEvent::Down { id, x, y } => model.finger_down(id, x, y, &mut client.outbox),
                 TouchEvent::Move { id, x, y } => model.finger_move(id, x, y, &mut client.outbox),
-                TouchEvent::Up { id } => model.finger_up(id, &mut client.outbox),
+                TouchEvent::Up { id, x, y } => {
+                    model.finger_up_at(id, x, y, &mut client.outbox)
+                }
             }
         }
 
@@ -657,7 +660,11 @@ mod linux_evdev {
                 let y = map(slot.y, self.min_y, self.max_y, 480);
                 if slot.tracking < 0 {
                     if slot.was_active {
-                        out.push(TouchEvent::Up { id });
+                        out.push(TouchEvent::Up {
+                            id,
+                            x: Some(x),
+                            y: Some(y),
+                        });
                     }
                     slot.was_active = false;
                 } else if !slot.was_active {

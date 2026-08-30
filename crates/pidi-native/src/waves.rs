@@ -15,21 +15,19 @@ pub fn waves_dirs_from_env() -> Vec<PathBuf> {
     if let Ok(p) = std::env::var("JAMBOX_WAVETABLES") {
         dirs.push(PathBuf::from(p));
     }
-    if let Some(p) = crate::paths::env_path("JAMBOX_USER_WAVETABLES") {
-        dirs.push(p);
-    } else if let Some(root) = crate::paths::data_root() {
-        dirs.push(root.join("user-wavetables"));
+    // User waves from the data root (or JAMBOX_USER_WAVETABLES override).
+    let user = crate::paths::user_wavetables_dir();
+    if !dirs.iter().any(|d| d == &user) {
+        dirs.push(user);
     }
-    // Lab / appliance defaults (same layout as the Tk kiosk tree).
-    for candidate in [
-        "apps/pidi/wavetables",
-        "apps/pidi/user-wavetables",
-        "wavetables",
-        "user-wavetables",
-        "/home/ray/pi-midi-toolkit/apps/pidi/wavetables",
-        "/home/ray/pi-midi-toolkit/apps/pidi/user-wavetables",
-    ] {
-        let p = PathBuf::from(candidate);
+    // Factory waves live in the deploy/repo tree — never under user-data.
+    let mut factory_candidates = Vec::new();
+    if let Ok(repo) = std::env::var("PIDI_REPO_ROOT") {
+        factory_candidates.push(PathBuf::from(repo).join("apps/pidi/wavetables"));
+    }
+    factory_candidates.push(PathBuf::from("apps/pidi/wavetables"));
+    factory_candidates.push(PathBuf::from("wavetables"));
+    for p in factory_candidates {
         if p.is_dir() && !dirs.iter().any(|d| d == &p) {
             dirs.push(p);
         }

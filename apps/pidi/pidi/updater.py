@@ -67,6 +67,7 @@ KEEP_KIOSK = frozenset(
         "phrases",
         "user-presets",
         "user-wavetables",
+        ".wifi-credentials",
         ".venv",
         ".pi-credentials",
         ".update-credentials",

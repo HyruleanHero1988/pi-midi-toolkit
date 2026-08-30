@@ -1,0 +1,26 @@
+[Unit]
+Description=PiDI native jambox kiosk (SDL/KMSDRM)
+After=jambox-engine.service sound.target
+Wants=jambox-engine.service
+
+[Service]
+Type=simple
+User=ray
+Group=ray
+SupplementaryGroups=audio video render input
+WorkingDirectory=/home/ray/pi-midi-toolkit
+ExecStart=/home/ray/pi-midi-toolkit/bin/pidi-native \
+  --control /tmp/jambox.sock \
+  --display sdl \
+  --touch auto
+Restart=on-failure
+RestartSec=2
+Environment=RUST_LOG=info
+Environment=SDL_VIDEODRIVER=kmsdrm
+Environment=SDL_AUDIODRIVER=dummy
+Environment=PIDI_DATA_ROOT=/home/ray/.local/share/pidi
+Environment=PIDI_REPO_ROOT=/home/ray/pi-midi-toolkit
+Environment=JAMBOX_USER_WAVETABLES=/home/ray/.local/share/pidi/user-wavetables
+
+[Install]
+WantedBy=multi-user.target

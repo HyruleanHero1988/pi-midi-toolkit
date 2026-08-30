@@ -5,24 +5,32 @@
 # SET→UPDATE never cargo-builds on the Pi. It copies these staged files into
 # ~/pi-midi-toolkit/bin/ and restarts the systemd units.
 #
-# On master, GitHub Actions (.github/workflows/build-pi-bins.yml) runs this
-# script and commits dist/armv7 so cloud-agent merges get OTA bins. Manual
-# rebuild is still useful for LAN SSH deploys without waiting for CI:
+# Local (Windows) — preferred entry point (Ubuntu 22.04 WSL or Docker):
+#   .\deploy\build-pi-bins.ps1
+#
+# Local (already inside Ubuntu 22.04 / CI):
 #   ./deploy/build-pi-bins.sh
-#   git add dist/armv7
-#   git commit -m "Rebuild Pi armv7 engines"
+#
+# On master, GitHub Actions (.github/workflows/build-pi-bins.yml) runs this
+# script and commits dist/armv7 so cloud-agent merges get OTA bins.
 #
 # Run this whenever crates/midi-engine, crates/jambox-engine, crates/pidi-native,
 # or their workspace deps change and you are not going through master CI.
 #
 # Env:
-#   TARGET       default armv7-unknown-linux-gnueabihf
-#   SKIP_APT=1   do not apt-install the cross toolchain
+#   TARGET            default armv7-unknown-linux-gnueabihf
+#   SKIP_APT=1        do not apt-install the cross toolchain
 #   PACKAGES=midi-engine,jambox-engine,pidi-native
-#   ALLOW_PARTIAL=1  still stage whichever crates built if one fails
+#   ALLOW_PARTIAL=1   still stage whichever crates built if one fails
+#   FORCE_NEW_GLIBC=1 allow host glibc > 2.36 (bins likely won't run on Pi)
+#   PI_BINS_OK_GLIBC=1 set by wrappers that already verified the host
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# Refuse hosts newer than Pi Bookworm unless a wrapper already vouched for them.
+# shellcheck disable=SC1091
+source "$ROOT/deploy/check-pi-glibc.sh"
+
 TARGET="${TARGET:-armv7-unknown-linux-gnueabihf}"
 STAGE="$ROOT/dist/armv7"
 PACKAGES="${PACKAGES:-midi-engine,jambox-engine,pidi-native}"
@@ -140,7 +148,8 @@ for pkg in "${PKG_LIST[@]}"; do
   [[ -z "$pkg" ]] && continue
   log "cargo build --release -p $pkg --target $TARGET"
   if cargo build --release -p "$pkg" --target "$TARGET"; then
-    src="$ROOT/target/$TARGET/release/$pkg"
+    target_dir="${CARGO_TARGET_DIR:-$ROOT/target}"
+    src="$target_dir/$TARGET/release/$pkg"
     if [[ ! -f "$src" ]]; then
       echo "error: cargo reported success but $src is missing" >&2
       failed+=("$pkg")
@@ -164,6 +173,11 @@ done
   echo "target=$TARGET"
   echo "built_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   echo "host=$(uname -s) $(uname -m)"
+  # Avoid pipefail+head SIGPIPE appending a stray "unknown" line into VERSION.
+  host_glibc="$(ldd --version 2>&1 | awk 'NR==1 {
+    if (match($0, /[0-9]+\.[0-9]+/)) { print substr($0, RSTART, RLENGTH); exit }
+  }')"
+  echo "host_glibc=${host_glibc:-unknown}"
   echo "git_sha=$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
   echo "crates=$(IFS=','; echo "${built[*]}")"
 } > "$STAGE/VERSION"

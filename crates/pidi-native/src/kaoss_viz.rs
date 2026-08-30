@@ -190,11 +190,61 @@ pub fn glow_step(current: f32, target: f32, dt: f32) -> f32 {
     clamp01(cur - step / 0.32)
 }
 
-/// Outer radius of the soft radial bloom (span = min(pad w,h)).
-pub fn glow_outer_radius(span: f32, amp: f32) -> f32 {
-    let span = span.max(1.0);
-    let amp = clamp01(amp);
-    span * 0.55 * amp.powf(1.15)
+/// CELLS excitation envelope: snappy attack, slower release than GLOW.
+pub fn cell_step(current: f32, target: f32, dt: f32) -> f32 {
+    let cur = clamp01(current);
+    let tgt = clamp01(target);
+    let step = dt.clamp(0.0, 0.08);
+    if tgt >= cur {
+        if tgt == cur {
+            return cur;
+        }
+        // ~70 ms to full
+        return clamp01(cur + step / 0.07);
+    }
+    // ~420 ms to dark
+    clamp01(cur - step / 0.42)
+}
+
+/// Instantaneous touch/trail energy for one LED (0..1), before envelope.
+pub fn cell_excit_target(
+    col: usize,
+    row: usize,
+    fingers: &[(f32, f32)],
+    trail: &[(f32, f32, f32)],
+) -> f32 {
+    let cols = LED_COLS.max(2);
+    let rows = LED_ROWS.max(2);
+    let lx = col as f32 / (cols - 1) as f32;
+    let ly = row as f32 / (rows - 1) as f32;
+    let mut e = 0.0_f32;
+    for &(fx, fy) in fingers {
+        let dist = ((lx - fx).hypot(ly - fy)).abs();
+        let glow = (1.0 - dist / 0.40).max(0.0).powf(1.45);
+        e = (e + glow).min(1.0);
+    }
+    for &(tx, ty, age) in trail {
+        let dist = ((lx - tx).hypot(ly - ty)).abs();
+        let spark = (1.0 - dist / 0.22).max(0.0).powf(1.8) * clamp01(age) * 0.55;
+        e = (e + spark).min(1.0);
+    }
+    e
+}
+
+/// Per-cell hue proximity and blended finger X (weighted — no winner-take-all flip).
+pub fn finger_hue_pull(lx: f32, ly: f32, fingers: &[(f32, f32)]) -> (f32, f32) {
+    let mut sum_g = 0.0_f32;
+    let mut sum_fx_g = 0.0_f32;
+    for &(fx, fy) in fingers {
+        let dist = ((lx - fx).hypot(ly - fy)).abs();
+        let g = (1.0 - dist / 0.40).max(0.0).powf(1.45);
+        sum_g += g;
+        sum_fx_g += fx * g;
+    }
+    if sum_g < 1e-4 {
+        return (0.0, 0.5);
+    }
+    (sum_g.min(1.0), sum_fx_g / sum_g)
 }
 
 /// Soft HSV for a radial sample: `fall` 0 = edge, 1 = core.
@@ -206,6 +256,97 @@ pub fn glow_sample(hue: f32, amp: f32, fall: f32, pulse: f32) -> u32 {
     let sat = (0.92 - 0.78 * soft.powf(1.1)).clamp(0.12, 0.95);
     let val = ((0.08 + 0.90 * soft) * (0.35 + 0.65 * amp) + pulse * 0.06 * soft).min(1.0);
     hsv_color(hue, sat, val)
+}
+
+/// Outer radius of the soft radial bloom (span = min(pad w,h)).
+pub fn glow_outer_radius(span: f32, amp: f32) -> f32 {
+    let span = span.max(1.0);
+    let amp = clamp01(amp);
+    span * 0.55 * amp.powf(1.15)
+}
+
+/// Coarse membrane light-field resolution (pad-local quads).
+pub const GLOW_FIELD_COLS: usize = 28;
+pub const GLOW_FIELD_ROWS: usize = 16;
+
+/// Lag shells for GLOW: index 0 = outermost (slowest), last = core (fastest).
+pub const GLOW_LAG_COUNT: usize = 10;
+
+/// One finger's GLOW state: envelope + lag shells for drag smear.
+#[derive(Debug, Clone, Copy)]
+pub struct GlowTouch {
+    pub amp: f32,
+    pub xy: (f32, f32),
+    pub shells: [(f32, f32); GLOW_LAG_COUNT],
+}
+
+impl GlowTouch {
+    pub const fn idle() -> Self {
+        Self {
+            amp: 0.0,
+            xy: (0.5, 0.5),
+            shells: [(0.5, 0.5); GLOW_LAG_COUNT],
+        }
+    }
+}
+
+/// Soft-union of two transmission values — overlaps widen without stacking brightness.
+pub fn glow_soft_or(a: f32, b: f32) -> f32 {
+    let a = clamp01(a);
+    let b = clamp01(b);
+    1.0 - (1.0 - a) * (1.0 - b)
+}
+
+/// Gaussian sigma in pixels for the membrane blob under one press.
+pub fn glow_sigma_px(span: f32, amp: f32) -> f32 {
+    let span = span.max(1.0);
+    let amp = clamp01(amp);
+    span * (0.12 + 0.06 * amp)
+}
+
+/// Membrane transmission at pad-normalized `(nx, ny)` from all touches.
+///
+/// Each finger contributes a soft Gaussian under its core plus a weaker, wider
+/// lagged smear shell so drags leave a short light trail. Multiple fingers
+/// soft-union so intersections blob instead of darkening.
+pub fn glow_field_at(nx: f32, ny: f32, pad_w: f32, pad_h: f32, touches: &[GlowTouch]) -> f32 {
+    let pad_w = pad_w.max(1.0);
+    let pad_h = pad_h.max(1.0);
+    let span = pad_w.min(pad_h);
+    let mut field = 0.0_f32;
+    for touch in touches {
+        if touch.amp < 0.02 {
+            continue;
+        }
+        let sigma_core = glow_sigma_px(span, touch.amp);
+        let sigma_smear = sigma_core * 1.35;
+        let core = touch.shells[GLOW_LAG_COUNT - 1];
+        let smear = touch.shells[GLOW_LAG_COUNT / 3];
+        let mut finger = glow_gauss_px(nx, ny, core.0, core.1, pad_w, pad_h, sigma_core)
+            * touch.amp;
+        let trail = glow_gauss_px(nx, ny, smear.0, smear.1, pad_w, pad_h, sigma_smear)
+            * touch.amp
+            * 0.55;
+        finger = glow_soft_or(finger, trail);
+        field = glow_soft_or(field, finger);
+    }
+    field
+}
+
+fn glow_gauss_px(
+    nx: f32,
+    ny: f32,
+    cx: f32,
+    cy: f32,
+    pad_w: f32,
+    pad_h: f32,
+    sigma: f32,
+) -> f32 {
+    let sigma = sigma.max(1.0);
+    let dx = (nx - cx) * pad_w;
+    let dy = (ny - cy) * pad_h;
+    let dist2 = dx * dx + dy * dy;
+    (-dist2 / (2.0 * sigma * sigma)).exp()
 }
 
 /// Hue for one glow ring. Rainbow mode spreads the spectrum across concentric shells.
@@ -241,9 +382,6 @@ pub fn load_viz_from_session(style_name: &str, mono_color: usize) -> (KaossVizSt
     };
     (style, color)
 }
-
-/// Lag shells for GLOW: index 0 = outermost (slowest), last = core (fastest).
-pub const GLOW_LAG_COUNT: usize = 10;
 
 /// Time constant (seconds) for one lag shell — outer rings take longer to catch up.
 pub fn glow_lag_tau(layer: usize) -> f32 {
@@ -284,32 +422,32 @@ pub fn viz_pulse(t: f32, bpm: f32, gate_flash: f32) -> f32 {
 }
 
 /// One LED in rainbow CELLS mode (Tk colorful `pad_led_hex`).
+///
+/// `excit` drives brightness (smoothed finger + trail). Hue pull must use
+/// **instant finger proximity only** — blending hue with trail excit made
+/// cells thrash through the spectrum as sparks aged behind the finger.
 pub fn pad_led_rgb(
     col: usize,
     row: usize,
     t: f32,
-    finger: Option<(f32, f32)>,
-    trail: &[(f32, f32, f32)],
-    ripples: &[(f32, f32, f32)],
+    fingers: &[(f32, f32)],
+    excit: f32,
     hold: bool,
     gate_flash: f32,
     hue_shift: f32,
 ) -> u32 {
-    let (_h, _s, val) =
-        pad_led_base(col, row, t, finger, trail, ripples, hold, gate_flash);
+    let (_h, _s, val) = pad_led_base(col, row, t, excit, hold, gate_flash);
     let cols = LED_COLS.max(2);
+    let rows = LED_ROWS.max(2);
     let lx = col as f32 / (cols - 1) as f32;
+    let ly = row as f32 / (rows - 1) as f32;
     let mut hue = (lx * 0.70 + hue_shift + t * 0.035).rem_euclid(1.0);
-    let sat;
-    if let Some((fx, fy)) = finger {
-        let dist = ((lx - fx).hypot((row as f32 / (LED_ROWS.max(2) - 1) as f32) - fy)).abs();
-        let glow = (1.0 - dist / 0.40).max(0.0).powf(1.45);
-        sat = (0.55 + glow * 0.45).min(1.0);
-        hue = (hue * (1.0 - glow * 0.55) + (fx * 0.70 + hue_shift) * glow).rem_euclid(1.0);
-    } else {
-        sat = 0.82;
+    let (hue_glow, fx) = finger_hue_pull(lx, ly, fingers);
+    let sat = (0.55 + hue_glow * 0.45).min(1.0);
+    if hue_glow > 0.0 {
+        hue = (hue * (1.0 - hue_glow * 0.55) + (fx * 0.70 + hue_shift) * hue_glow).rem_euclid(1.0);
     }
-    hsv_color(hue, sat, val)
+    hsv_color(hue, if hue_glow < 0.02 { 0.82 } else { sat }, val)
 }
 
 /// Monochrome LED field — same motion response, fixed palette hue/sat.
@@ -317,26 +455,15 @@ pub fn pad_led_mono(
     col: usize,
     row: usize,
     t: f32,
-    finger: Option<(f32, f32)>,
-    trail: &[(f32, f32, f32)],
-    ripples: &[(f32, f32, f32)],
+    excit: f32,
     hold: bool,
     gate_flash: f32,
     hue: f32,
     sat: f32,
 ) -> u32 {
-    let (_h, _s, val) = pad_led_base(col, row, t, finger, trail, ripples, hold, gate_flash);
-    // Boost finger proximity brightness a bit more so mono reads clearly.
-    let mut val = val;
-    if let Some((fx, fy)) = finger {
-        let cols = LED_COLS.max(2);
-        let rows = LED_ROWS.max(2);
-        let lx = col as f32 / (cols - 1) as f32;
-        let ly = row as f32 / (rows - 1) as f32;
-        let dist = ((lx - fx).hypot(ly - fy)).abs();
-        let glow = (1.0 - dist / 0.40).max(0.0).powf(1.45);
-        val = (val + glow * 0.35).min(1.0);
-    }
+    let (_h, _s, mut val) = pad_led_base(col, row, t, excit, hold, gate_flash);
+    // Extra proximity pop so mono reads clearly once the envelope is up.
+    val = (val + clamp01(excit) * 0.35).min(1.0);
     hsv_color(hue, sat, val)
 }
 
@@ -344,38 +471,16 @@ fn pad_led_base(
     col: usize,
     row: usize,
     t: f32,
-    finger: Option<(f32, f32)>,
-    trail: &[(f32, f32, f32)],
-    ripples: &[(f32, f32, f32)],
+    excit: f32,
     hold: bool,
     gate_flash: f32,
 ) -> (f32, f32, f32) {
-    let cols = LED_COLS.max(2);
-    let rows = LED_ROWS.max(2);
-    let lx = col as f32 / (cols - 1) as f32;
-    let ly = row as f32 / (rows - 1) as f32;
     let wave = 0.5 + 0.5 * (t * 1.6 + col as f32 * 0.45 + row as f32 * 0.38).sin();
     let mut val = 0.045 + 0.09 * wave;
     if hold {
         val += 0.05;
     }
-    if let Some((fx, fy)) = finger {
-        let dist = ((lx - fx).hypot(ly - fy)).abs();
-        let glow = (1.0 - dist / 0.40).max(0.0).powf(1.45);
-        val = (val + glow * 0.92).min(1.0);
-    }
-    for &(tx, ty, age) in trail {
-        let dist = ((lx - tx).hypot(ly - ty)).abs();
-        let spark = (1.0 - dist / 0.22).max(0.0).powf(1.8) * clamp01(age) * 0.55;
-        val = (val + spark).min(1.0);
-    }
-    for &(rx, ry, age) in ripples {
-        let age = clamp01(age);
-        let radius = 0.08 + age * 0.72;
-        let dist = ((lx - rx).hypot(ly - ry)).abs();
-        let ring = (1.0 - (dist - radius).abs() / 0.10).max(0.0);
-        val = (val + ring * (1.0 - age) * 0.65).min(1.0);
-    }
+    val = (val + clamp01(excit) * 0.92).min(1.0);
     val = (val + clamp01(gate_flash) * 0.20).min(1.0);
     (0.0, 0.82, val)
 }
@@ -417,6 +522,33 @@ mod tests {
     }
 
     #[test]
+    fn glow_soft_or_merges_without_stacking() {
+        let a = 0.7_f32;
+        let b = 0.7_f32;
+        let merged = glow_soft_or(a, b);
+        assert!(merged > a, "overlap should fill in");
+        assert!(merged < a + b, "should not fully add");
+        assert!(merged <= 1.0);
+        // Midpoint between two nearby blobs stays below a single core peak.
+        let mut left = GlowTouch::idle();
+        left.amp = 1.0;
+        left.shells = [(0.35, 0.5); GLOW_LAG_COUNT];
+        left.xy = (0.35, 0.5);
+        let mut right = GlowTouch::idle();
+        right.amp = 1.0;
+        right.shells = [(0.65, 0.5); GLOW_LAG_COUNT];
+        right.xy = (0.65, 0.5);
+        let touches = [left, right];
+        let mid = glow_field_at(0.5, 0.5, 400.0, 300.0, &touches);
+        let peak = glow_field_at(0.35, 0.5, 400.0, 300.0, &touches);
+        assert!(mid > 0.15, "midpoint should light up when blobs meet");
+        assert!(
+            mid <= peak * 1.05,
+            "merged mid should stay near single-blob brightness, got mid={mid} peak={peak}"
+        );
+    }
+
+    #[test]
     fn glow_lag_outer_is_slower_than_core() {
         assert!(glow_lag_tau(0) > glow_lag_tau(GLOW_LAG_COUNT - 1));
         let start = (0.0, 0.0);
@@ -440,9 +572,18 @@ mod tests {
     }
 
     #[test]
+    fn cell_envelope_attacks_faster_than_release() {
+        let up = cell_step(0.0, 1.0, 0.05);
+        let down = cell_step(1.0, 0.0, 0.05);
+        assert!(up > 0.55, "quick fade-in, got {up}");
+        assert!(down > 0.85, "slower fade-out, got {down}");
+        assert!(up > (1.0 - down), "attack should outpace release");
+    }
+
+    #[test]
     fn cells_are_colorful_not_monotone() {
-        let a = pad_led_rgb(0, 0, 0.0, None, &[], &[], false, 0.0, 0.93);
-        let b = pad_led_rgb(11, 0, 0.0, None, &[], &[], false, 0.0, 0.93);
+        let a = pad_led_rgb(0, 0, 0.0, &[], 0.0, false, 0.0, 0.93);
+        let b = pad_led_rgb(11, 0, 0.0, &[], 0.0, false, 0.0, 0.93);
         assert_ne!(a, b, "columns should differ in hue");
         let r_a = (a >> 16) & 0xff;
         let g_a = (a >> 8) & 0xff;
@@ -454,9 +595,56 @@ mod tests {
     }
 
     #[test]
+    fn rainbow_hue_ignores_trail_excit() {
+        // Far from the finger: trail-pumped excit must not retint the cell.
+        fn rgb_dir(c: u32) -> (f32, f32, f32) {
+            let r = ((c >> 16) & 0xff) as f32;
+            let g = ((c >> 8) & 0xff) as f32;
+            let b = (c & 0xff) as f32;
+            let n = (r + g + b).max(1.0);
+            (r / n, g / n, b / n)
+        }
+        let fingers = [(0.08_f32, 0.5_f32)];
+        let idle = pad_led_rgb(11, 3, 0.0, &[], 0.0, false, 0.0, 0.0);
+        let trail_pumped = pad_led_rgb(11, 3, 0.0, &fingers, 1.0, false, 0.0, 0.0);
+        let (ir, ig, ib) = rgb_dir(idle);
+        let (tr, tg, tb) = rgb_dir(trail_pumped);
+        let drift = (ir - tr).abs() + (ig - tg).abs() + (ib - tb).abs();
+        assert!(
+            drift < 0.12,
+            "trail excit should brighten without hue thrash (drift={drift})"
+        );
+    }
+
+    #[test]
+    fn finger_hue_pull_blends_two_fingers_without_flip() {
+        let a = finger_hue_pull(0.5, 0.5, &[(0.2, 0.5), (0.8, 0.5)]);
+        let nudge = finger_hue_pull(0.5, 0.5, &[(0.21, 0.5), (0.79, 0.5)]);
+        assert!(a.0 > 0.2, "midpoint should feel both fingers");
+        assert!(
+            (a.1 - nudge.1).abs() < 0.05,
+            "blended fx should stay stable when fingers nudge, got {} vs {}",
+            a.1,
+            nudge.1
+        );
+    }
+
+    #[test]
+    fn cell_excit_sums_multiple_fingers() {
+        let one = cell_excit_target(2, 3, &[(0.18, 0.5)], &[]);
+        let two = cell_excit_target(2, 3, &[(0.18, 0.5), (0.85, 0.5)], &[]);
+        let other = cell_excit_target(10, 3, &[(0.18, 0.5), (0.85, 0.5)], &[]);
+        assert!(two >= one, "second finger must not reduce excit at first");
+        assert!(
+            other > 0.3,
+            "far column should light under the second finger"
+        );
+    }
+
+    #[test]
     fn mono_stays_single_hue_family() {
-        let a = pad_led_mono(0, 0, 0.0, None, &[], &[], false, 0.0, 0.93, 0.88);
-        let b = pad_led_mono(11, 6, 0.5, Some((0.5, 0.5)), &[], &[], false, 0.0, 0.93, 0.88);
+        let a = pad_led_mono(0, 0, 0.0, 0.0, false, 0.0, 0.93, 0.88);
+        let b = pad_led_mono(11, 6, 0.5, 1.0, false, 0.0, 0.93, 0.88);
         let r_a = (a >> 16) & 0xff;
         let g_a = (a >> 8) & 0xff;
         let r_b = (b >> 16) & 0xff;

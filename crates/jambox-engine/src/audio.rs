@@ -47,9 +47,36 @@ pub enum AudioError {
     Build(String),
 }
 
-struct StreamHealth {
+/// Shared reopen / liveness flags between IPC, the device callback, and the supervisor.
+pub struct AudioHealth {
     last_callback_ms: AtomicU64,
     error: AtomicBool,
+    /// Edge-triggered IPC / operator request to drop and reopen the stream.
+    reopen: AtomicBool,
+}
+
+impl AudioHealth {
+    pub fn new() -> Self {
+        Self {
+            last_callback_ms: AtomicU64::new(0),
+            error: AtomicBool::new(false),
+            reopen: AtomicBool::new(false),
+        }
+    }
+
+    pub fn request_reopen(&self) {
+        self.reopen.store(true, Ordering::Relaxed);
+    }
+
+    fn take_reopen(&self) -> bool {
+        self.reopen.swap(false, Ordering::Relaxed)
+    }
+}
+
+impl Default for AudioHealth {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Heap engine + rings. The cpal callback holds a raw pointer at this allocation;
@@ -242,11 +269,12 @@ pub fn spawn_output(
     audio: AudioSide,
     bank: WaveBank,
     preferred_frames: u32,
+    health: Arc<AudioHealth>,
     running: Arc<AtomicBool>,
 ) {
     let _ = std::thread::Builder::new()
         .name("jambox-audio-out".into())
-        .spawn(move || supervisor(filter, audio, bank, preferred_frames, running));
+        .spawn(move || supervisor(filter, audio, bank, preferred_frames, health, running));
 }
 
 fn supervisor(
@@ -254,12 +282,9 @@ fn supervisor(
     audio: AudioSide,
     bank: WaveBank,
     preferred_frames: u32,
+    health: Arc<AudioHealth>,
     running: Arc<AtomicBool>,
 ) {
-    let health = Arc::new(StreamHealth {
-        last_callback_ms: AtomicU64::new(0),
-        error: AtomicBool::new(false),
-    });
     let mut pending_audio = Some(audio);
     let mut pending_bank = Some(bank);
     let mut state: Option<Box<RenderState>> = None;
@@ -349,23 +374,26 @@ fn supervisor(
     }
 }
 
-fn watch_stream(running: &AtomicBool, health: &StreamHealth, last_mixer: &mut Instant) {
+fn watch_stream(running: &AtomicBool, health: &AudioHealth, last_mixer: &mut Instant) {
     health.error.store(false, Ordering::Relaxed);
     health.last_callback_ms.store(0, Ordering::Relaxed);
+    let _ = health.take_reopen();
     let opened_at = now_ms();
     while running.load(Ordering::Relaxed) {
         if last_mixer.elapsed() >= MIXER_RESTORE_EVERY {
             restore_mixer();
             *last_mixer = Instant::now();
         }
-        if should_reopen(
-            now_ms(),
-            opened_at,
-            health.last_callback_ms.load(Ordering::Relaxed),
-            health.error.load(Ordering::Relaxed),
-            OPEN_GRACE_MS,
-            STALE_CALLBACK_MS,
-        ) {
+        if health.take_reopen()
+            || should_reopen(
+                now_ms(),
+                opened_at,
+                health.last_callback_ms.load(Ordering::Relaxed),
+                health.error.load(Ordering::Relaxed),
+                OPEN_GRACE_MS,
+                STALE_CALLBACK_MS,
+            )
+        {
             break;
         }
         std::thread::sleep(WATCH_POLL);
@@ -413,7 +441,7 @@ fn restore_mixer() {
 fn open_stream(
     device: &Device,
     state: &mut RenderState,
-    health: &Arc<StreamHealth>,
+    health: &Arc<AudioHealth>,
     preferred_frames: u32,
 ) -> Result<RunningStream, AudioError> {
     let supported = device
@@ -490,7 +518,7 @@ fn build_stream(
     config: &StreamConfig,
     format: SampleFormat,
     state: &mut RenderState,
-    health: Arc<StreamHealth>,
+    health: Arc<AudioHealth>,
     chosen: String,
 ) -> Result<RunningStream, AudioError> {
     let sample_rate = state.sample_rate;
@@ -747,5 +775,14 @@ mod tests {
     fn stale_callbacks_reopen() {
         assert!(!should_reopen(3_000, 0, 2_400, false, 2_000, 1_500));
         assert!(should_reopen(4_000, 0, 2_400, false, 2_000, 1_500));
+    }
+
+    #[test]
+    fn reopen_request_is_edge_triggered() {
+        let health = AudioHealth::new();
+        assert!(!health.take_reopen());
+        health.request_reopen();
+        assert!(health.take_reopen());
+        assert!(!health.take_reopen());
     }
 }

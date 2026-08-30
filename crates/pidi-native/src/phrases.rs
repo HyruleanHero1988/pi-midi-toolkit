@@ -95,13 +95,7 @@ struct FileEvent {
 }
 
 pub fn phrases_dir_from_env() -> PathBuf {
-    if let Some(p) = crate::paths::env_path("PIDI_PHRASES_DIR") {
-        return p;
-    }
-    if let Some(p) = crate::paths::env_path("MIDI_TONE_PHRASES_DIR") {
-        return p;
-    }
-    crate::paths::join_data_or_cwd("phrases")
+    crate::paths::phrases_dir()
 }
 
 pub fn pad_path(dir: &Path, index: usize) -> PathBuf {

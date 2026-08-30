@@ -29,6 +29,9 @@ pub struct SdlDisplay {
 impl SdlDisplay {
     pub fn open(fullscreen: bool) -> Result<Self, String> {
         sdl2::hint::set("SDL_AUDIODRIVER", "dummy");
+        // Don't let the first contact also become MouseButton id=0 — that
+        // steals a finger slot and collapses multitouch on KMSDRM panels.
+        sdl2::hint::set("SDL_TOUCH_MOUSE_EVENTS", "0");
         let sdl = sdl2::init()?;
         let video: VideoSubsystem = sdl.video()?;
 
@@ -116,9 +119,17 @@ impl SdlDisplay {
                         y: py,
                     });
                 }
-                Event::FingerUp { finger_id, .. } if collect_touch => {
+                Event::FingerUp {
+                    finger_id,
+                    x,
+                    y,
+                    ..
+                } if collect_touch => {
+                    let (px, py) = input::norm_to_px(x, y, SCREEN_W as i32, SCREEN_H as i32);
                     out.push(TouchEvent::Up {
                         id: finger_id as i32,
+                        x: Some(px),
+                        y: Some(py),
                     });
                 }
                 Event::MouseButtonDown {
@@ -151,8 +162,11 @@ impl SdlDisplay {
                 } if collect_touch => {
                     self.mouse_down = false;
                     let (px, py) = window_to_surface(x, y, ww, wh);
-                    out.push(TouchEvent::Up { id: 0 });
-                    let _ = (px, py);
+                    out.push(TouchEvent::Up {
+                        id: 0,
+                        x: Some(px),
+                        y: Some(py),
+                    });
                 }
                 _ => {}
             }

@@ -1,0 +1,33 @@
+# Pi armv7 bins — same toolchain floor as GitHub Actions (Ubuntu 22.04 / glibc 2.35).
+# Pi Bookworm has glibc 2.36; bins from Ubuntu 24.04 / Debian 13 need 2.38+ and will not run.
+FROM ubuntu:22.04
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    CARGO_HOME=/usr/local/cargo \
+    RUSTUP_HOME=/usr/local/rustup \
+    PATH=/usr/local/cargo/bin:$PATH \
+    SKIP_APT=1 \
+    PI_BINS_OK_GLIBC=1
+
+RUN apt-get update -qq \
+ && apt-get install -y --no-install-recommends \
+      ca-certificates curl git build-essential pkg-config python3 \
+      gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf \
+ && rm -rf /var/lib/apt/lists/*
+
+# Copy only the ports helper first so apt armhf install can use it.
+COPY deploy/ubuntu-armhf-ports.sh /tmp/ubuntu-armhf-ports.sh
+RUN dpkg --add-architecture armhf \
+ && bash /tmp/ubuntu-armhf-ports.sh \
+ && apt-get update -qq \
+ && apt-get install -y --no-install-recommends \
+      libasound2-dev:armhf libsdl2-dev:armhf libgles2-mesa-dev:armhf \
+      libegl1-mesa-dev:armhf libgbm-dev:armhf libdrm-dev:armhf \
+ && rm -rf /var/lib/apt/lists/* /tmp/ubuntu-armhf-ports.sh
+
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+      | sh -s -- -y --default-toolchain stable --profile minimal \
+ && rustup target add armv7-unknown-linux-gnueabihf
+
+WORKDIR /src
+CMD ["./deploy/build-pi-bins.sh"]

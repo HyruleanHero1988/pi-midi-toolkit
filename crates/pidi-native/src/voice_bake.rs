@@ -9,25 +9,9 @@ const VOICE_NAME_MAX: usize = 24;
 const BUILTINS: &[&str] = &["sine", "square", "saw", "triangle"];
 const SAMPLE_RATE: u32 = 44100;
 
-/// Resolve `user-wavetables/` (env override, data root, then common appliance paths).
+/// Resolve `user-wavetables/` under the appliance data root.
 pub fn user_wavetables_dir() -> PathBuf {
-    if let Some(p) = crate::paths::env_path("JAMBOX_USER_WAVETABLES") {
-        return p;
-    }
-    if crate::paths::data_root().is_some() {
-        return crate::paths::join_data_or_cwd("user-wavetables");
-    }
-    for candidate in [
-        "apps/pidi/user-wavetables",
-        "user-wavetables",
-        "/home/ray/pi-midi-toolkit/apps/pidi/user-wavetables",
-    ] {
-        let p = PathBuf::from(candidate);
-        if p.is_dir() || p.parent().map(|par| par.is_dir()).unwrap_or(false) {
-            return p;
-        }
-    }
-    PathBuf::from("user-wavetables")
+    crate::paths::user_wavetables_dir()
 }
 
 pub fn sanitize_voice_name(raw: &str) -> String {

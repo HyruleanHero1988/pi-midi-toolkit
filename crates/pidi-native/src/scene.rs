@@ -272,6 +272,12 @@ pub fn build(model: &NativeModel) -> Scene {
         draw_screensaver(&mut scene, model);
     } else if model.power_menu_open {
         draw_power_menu(&mut scene, model);
+    } else if model.update_panel_open {
+        draw_update_panel(&mut scene, model);
+    } else if model.wifi_kb_open {
+        draw_wifi_keyboard(&mut scene, model);
+    } else if model.wifi_panel_open {
+        draw_wifi_panel(&mut scene, model);
     } else {
         match model.mode {
             UiMode::Kaoss => draw_kaoss(&mut scene, model),
@@ -285,6 +291,7 @@ pub fn build(model: &NativeModel) -> Scene {
             UiMode::Songs => draw_songs(&mut scene, model),
             UiMode::Map => draw_map(&mut scene, model),
             UiMode::Settings => draw_settings(&mut scene, model),
+            UiMode::Fx => draw_fx(&mut scene, model),
             UiMode::Log => draw_log(&mut scene, model),
             UiMode::Chords => draw_chords(&mut scene, model),
         }
@@ -347,6 +354,175 @@ fn draw_power_menu(scene: &mut Scene, model: &NativeModel) {
     scene.text_centered(layout.power_screen_off, "SCREEN OFF", 0xfbf1c7, 2);
 }
 
+fn draw_update_panel(scene: &mut Scene, model: &NativeModel) {
+    let layout = model.layout;
+    scene.fill_rect(layout.content, 0x111111);
+    scene.text_scaled(layout.content.x + 12, layout.content.y + 12, "UPDATE", 0xfbf1c7, 3);
+    scene.button(layout.update_close, 0x504945);
+    scene.text_centered(layout.update_close, "CLOSE", 0xffffff, 2);
+
+    // Status body — wrap by drawing lines.
+    let mut y = layout.content.y + 72;
+    for line in model.update_status.lines().take(12) {
+        let color = if line.contains("available") || line.contains("UPDATE available") {
+            0xb8bb26
+        } else if line.starts_with("Running:") {
+            0xfabd2f
+        } else {
+            0xebdbb2
+        };
+        scene.text(layout.content.x + 16, y, line, color);
+        y += 22;
+    }
+
+    let check_label = if model.update_confirming {
+        "CANCEL"
+    } else if model.update_busy {
+        "…"
+    } else {
+        "CHECK"
+    };
+    let check_bg = if model.update_confirming {
+        0x504945
+    } else if model.update_busy {
+        0x3c3836
+    } else {
+        0x458588
+    };
+    scene.button(layout.update_check, check_bg);
+    scene.text_centered(layout.update_check, check_label, 0xffffff, 2);
+
+    let (apply_label, apply_bg) = if model.update_busy {
+        ("…", 0x3c3836)
+    } else if model.update_confirming {
+        ("INSTALL NOW", 0x9d0006)
+    } else if model.update_available {
+        ("UPDATE", 0x689d6a)
+    } else {
+        ("UPDATE", 0x3c3836)
+    };
+    scene.button(layout.update_apply, apply_bg);
+    scene.text_centered(layout.update_apply, apply_label, 0xffffff, 2);
+}
+
+fn draw_wifi_panel(scene: &mut Scene, model: &NativeModel) {
+    let layout = model.layout;
+    scene.fill_rect(layout.content, 0x111111);
+    scene.text_scaled(layout.content.x + 12, layout.content.y + 12, "WIFI", 0xfbf1c7, 3);
+    scene.button(layout.wifi_close(), 0x504945);
+    scene.text_centered(layout.wifi_close(), "CLOSE", 0xffffff, 2);
+
+    scene.text(
+        layout.content.x + 16,
+        layout.wifi_status_y(),
+        &model.wifi_status,
+        0xfabd2f,
+    );
+
+    for i in 0..crate::wifi::LIST_VISIBLE {
+        let cell = layout.wifi_row(i);
+        let idx = model.wifi_scroll + i;
+        match model.wifi_networks.get(idx) {
+            Some(net) => {
+                let bg = if net.in_use { 0x458588 } else { 0x3c3836 };
+                scene.button(cell, bg);
+                let label = net.label();
+                let short = if label.len() > 36 {
+                    format!("{}…", &label[..35])
+                } else {
+                    label
+                };
+                scene.text(cell.x + 10, cell.y + 16, &short, 0xfbf1c7);
+            }
+            None => {
+                scene.button(cell, 0x1d2021);
+            }
+        }
+    }
+
+    scene.button(layout.wifi_scroll_up(), 0x504945);
+    scene.text_centered(layout.wifi_scroll_up(), "^", 0xffffff, 2);
+    scene.button(layout.wifi_scroll_down(), 0x504945);
+    scene.text_centered(layout.wifi_scroll_down(), "v", 0xffffff, 2);
+
+    let scan_bg = if model.wifi_busy { 0x3c3836 } else { 0x458588 };
+    let rejoin_bg = if model.wifi_busy { 0x3c3836 } else { 0xd79921 };
+    scene.button(layout.wifi_scan_btn(), scan_bg);
+    scene.text_centered(
+        layout.wifi_scan_btn(),
+        if model.wifi_busy { "…" } else { "SCAN" },
+        0xffffff,
+        2,
+    );
+    scene.button(layout.wifi_rejoin_btn(), rejoin_bg);
+    scene.text_centered(
+        layout.wifi_rejoin_btn(),
+        if model.wifi_busy { "…" } else { "REJOIN" },
+        0xffffff,
+        2,
+    );
+}
+
+fn draw_wifi_keyboard(scene: &mut Scene, model: &NativeModel) {
+    let layout = model.layout;
+    scene.fill_rect(layout.content, 0x111111);
+    scene.text_scaled(layout.content.x + 12, layout.content.y + 10, "PASSWORD", 0xfbf1c7, 2);
+    let sub = if model.wifi_kb_ssid.len() > 28 {
+        format!("{}…", &model.wifi_kb_ssid[..27])
+    } else {
+        model.wifi_kb_ssid.clone()
+    };
+    scene.text(layout.content.x + 200, layout.content.y + 14, &sub, 0xa89984);
+    scene.button(layout.wifi_kb_cancel(), 0x9d0006);
+    scene.text_centered(layout.wifi_kb_cancel(), "CANCEL", 0xffffff, 1);
+
+    let entry = layout.wifi_kb_entry();
+    scene.fill_rect(entry, 0x1d2021);
+    let shown = if model.wifi_kb_show {
+        model.wifi_kb_text.clone()
+    } else {
+        "*".repeat(model.wifi_kb_text.chars().count())
+    };
+    let shown = if shown.len() > 40 {
+        format!("…{}", &shown[shown.len().saturating_sub(39)..])
+    } else {
+        shown
+    };
+    scene.text(entry.x + 8, entry.y + 12, &shown, 0xfbf1c7);
+    scene.button(layout.wifi_kb_show(), 0x504945);
+    scene.text_centered(
+        layout.wifi_kb_show(),
+        if model.wifi_kb_show { "HIDE" } else { "SHOW" },
+        0xffffff,
+        1,
+    );
+
+    let rows = if model.wifi_kb_sym {
+        crate::wifi::keyboard_sym_rows()
+    } else {
+        crate::wifi::keyboard_abc_rows(model.wifi_kb_shift)
+    };
+    for (ri, row) in rows.iter().enumerate() {
+        let mut col = 0i32;
+        for (label, action, span) in row {
+            if *action == "pad" {
+                col += i32::from(*span);
+                continue;
+            }
+            let cell = layout.wifi_kb_key(ri, col, *span);
+            let bg = match *action {
+                "ok" => 0x689d6a,
+                "shift" if model.wifi_kb_shift => 0xd79921,
+                "sym" | "abc" | "shift" | "back" => 0x504945,
+                _ => 0x3c3836,
+            };
+            scene.button(cell, bg);
+            scene.text_centered(cell, label, 0xffffff, 1);
+            col += i32::from(*span);
+        }
+    }
+}
+
 fn draw_screensaver(scene: &mut Scene, model: &NativeModel) {
     scene.fill(0.0, 0.0, SCREEN_W as f32, SCREEN_H as f32, 0x000000);
     let hint = "TAP TO WAKE";
@@ -401,34 +577,44 @@ fn draw_chrome(scene: &mut Scene, model: &NativeModel) {
     );
     scene.text_centered(power, "POWER", 0xfbf1c7, 2);
 
+    let rec = layout.nav_chrome_rec();
+    let (rec_label, rec_bg) = chrome_rec_label(model);
+    scene.fill_rect(rec, rec_bg);
+    scene.text_centered(rec, rec_label, 0xffffff, 2);
+
     for (i, mode) in JAM_MODES.iter().enumerate() {
         let cell = layout.nav_jam(i);
         let active = *mode == model.mode;
-        scene.button(cell, if active { 0x458588 } else { 0x3c3836 });
+        let recording_seq = *mode == UiMode::Seq && model.seq.is_recording();
+        scene.button(
+            cell,
+            if active {
+                0x458588
+            } else if recording_seq {
+                0x9d0006
+            } else {
+                0x3c3836
+            },
+        );
         scene.text_centered(cell, mode.label(), 0xfbf1c7, 2);
     }
 
+    scene.fill_rect(layout.status_bar, 0x161616);
     let status = chrome_status(model);
     if !status.is_empty() {
-        let status_x = layout.nav_power().x + layout.nav_power().w + 10;
-        let jam0 = layout.nav_jam(0).x;
-        let max_w = (jam0 - status_x - 8).max(24);
-        let slot = Rect {
-            x: status_x,
-            y: 10,
-            w: max_w,
-            h: 32,
-        };
-        scene.text_centered(slot, &status, 0xfe8019, 2);
+        scene.text_centered(layout.status_bar, &status, 0xfe8019, 2);
     }
 }
 
 fn chrome_status(model: &NativeModel) -> String {
-    // Prefer a short live readout — long status_line belongs in the content area.
+    // Short live readout for the status strip — long hints use status_line in content.
     match model.mode {
         UiMode::Kaoss => {
             if model.kaoss_settings_open {
                 return "SETTINGS".into();
+            }
+            if model.kaoss_color_picker_open {
+                return "PAD COLOR".into();
             }
             format!(
                 "{:.0} BPM {}",
@@ -459,20 +645,36 @@ fn chrome_status(model: &NativeModel) -> String {
         UiMode::Synth if model.synth_vib_open => "VIB".into(),
         UiMode::Drums if model.kit_edit_open => "WAVE".into(),
         UiMode::Drums if model.kit_repeat_open => "REPEAT".into(),
+        UiMode::Fx => {
+            if model.status_line.is_empty() {
+                "FX".into()
+            } else {
+                model.status_line.chars().take(24).collect()
+            }
+        }
         UiMode::Settings => {
             if model.status_line.is_empty() {
                 "SETTINGS".into()
             } else {
-                model.status_line.chars().take(18).collect()
+                model.status_line.chars().take(24).collect()
             }
         }
         _ => {
-            if !model.status_line.is_empty() && model.status_line.chars().count() <= 12 {
+            if !model.status_line.is_empty() && model.status_line.chars().count() <= 18 {
                 model.status_line.clone()
             } else {
                 String::new()
             }
         }
+    }
+}
+
+fn chrome_rec_label(model: &NativeModel) -> (&'static str, u32) {
+    match model.seq.state {
+        crate::seq::SeqState::RecBackbone | crate::seq::SeqState::Overdub => ("STOP", 0xcc241d),
+        crate::seq::SeqState::Empty => ("REC", 0x9d0006),
+        crate::seq::SeqState::Review => ("REC", 0xd79921),
+        _ => ("REC", 0x504945),
     }
 }
 
@@ -562,9 +764,7 @@ fn draw_kaoss(scene: &mut Scene, model: &NativeModel) {
             }
         }
         draw_kaoss_axes(scene, layout.kaoss, model);
-        if let Some((fx, fy)) = model.kaoss_finger() {
-            draw_kaoss_cursor(scene, layout.kaoss, fx, fy, model);
-        }
+        draw_kaoss_note_readout(scene, layout.kaoss, model);
     }
 
     let prog = kaoss_ui::program(model.kaoss_program);
@@ -832,46 +1032,39 @@ fn draw_kaoss_glow(scene: &mut Scene, pad: crate::layout::Rect, model: &NativeMo
     let t = model.kaoss_viz_time();
     let pulse = kaoss_viz::viz_pulse(t, model.bpm, model.kaoss_gate_flash());
     let hold = model.kaoss_hold && model.kaoss_touching;
-    let amp = model.kaoss_glow_amp;
+    let amp_max = model.kaoss_glow_amp();
     let color_idx = model.kaoss_mono_color;
     let wash_hue = kaoss_viz::glow_ring_hue(color_idx, 0.35, t);
     let wash_sat = kaoss_viz::glow_ring_sat(color_idx) * 0.6;
 
-    let wash_v = (0.04 + 0.06 * pulse + if hold { 0.03 } else { 0.0 }) * (0.30 + 0.70 * amp);
-    scene.fill_rect(pad, kaoss_viz::hsv_color(wash_hue, wash_sat, wash_v));
+    // Mostly dark membrane with a faint under-wash (idle or held).
+    let wash_v = (0.025 + 0.04 * pulse + if hold { 0.02 } else { 0.0 })
+        * (0.55 + 0.45 * amp_max);
+    scene.fill_rect(pad, kaoss_viz::hsv_color(wash_hue, wash_sat * 0.55, wash_v));
 
-    let span = (pad.w.min(pad.h)) as f32;
-    let clip = Some(pad);
+    let pad_w = pad.w as f32;
+    let pad_h = pad.h as f32;
+    let cols = kaoss_viz::GLOW_FIELD_COLS;
+    let rows = kaoss_viz::GLOW_FIELD_ROWS;
+    let cell_w = pad_w / cols as f32;
+    let cell_h = pad_h / rows as f32;
+    let touches = &model.kaoss_glow;
 
-    if amp >= 0.02 {
-        let outer = kaoss_viz::glow_outer_radius(span, amp);
-        // Concentric discs outer→inner; each shell is centered on its own lagged
-        // XY so the halo has to catch up when the finger moves.
-        let rings = (18 + (14.0 * amp).round() as i32).clamp(18, 32);
-        for i in (0..rings).rev() {
-            let u = (i as f32 + 1.0) / rings as f32;
-            let radius = (outer * u).max(1.0);
-            let fall = 1.0 - u;
-            let (sx, sy) = kaoss_viz::glow_lag_xy(&model.kaoss_glow_shells, fall);
-            let px = pad.x as f32 + sx.clamp(0.0, 1.0) * pad.w as f32;
-            let py = pad.y as f32 + (1.0 - sy.clamp(0.0, 1.0)) * pad.h as f32;
-            let hue = kaoss_viz::glow_ring_hue(color_idx, fall, t);
-            let color = kaoss_viz::glow_sample(hue, amp, fall, pulse);
-            scene.fill_disc_clipped(px, py, radius, color, clip);
+    for row in 0..rows {
+        // row 0 at bottom of pad (matches CELLS / finger Y = 0 at bottom).
+        let ny = (row as f32 + 0.5) / rows as f32;
+        let py = pad.y as f32 + pad_h - (row as f32 + 1.0) * cell_h;
+        for col in 0..cols {
+            let nx = (col as f32 + 0.5) / cols as f32;
+            let field = kaoss_viz::glow_field_at(nx, ny, pad_w, pad_h, touches);
+            if field < 0.04 {
+                continue;
+            }
+            let hue = kaoss_viz::glow_ring_hue(color_idx, field, t);
+            let color = kaoss_viz::glow_sample(hue, 1.0, field, pulse);
+            let px = pad.x as f32 + col as f32 * cell_w;
+            scene.fill(px, py, cell_w.max(1.0), cell_h.max(1.0), color);
         }
-        // Hot core rides the fastest (innermost) shell.
-        let (cx, cy) = model.kaoss_glow_shells[kaoss_viz::GLOW_LAG_COUNT - 1];
-        let px = pad.x as f32 + cx.clamp(0.0, 1.0) * pad.w as f32;
-        let py = pad.y as f32 + (1.0 - cy.clamp(0.0, 1.0)) * pad.h as f32;
-        let core_r = (outer * 0.08).max(2.0);
-        let core_hue = kaoss_viz::glow_ring_hue(color_idx, 1.0, t);
-        scene.fill_disc_clipped(
-            px,
-            py,
-            core_r,
-            kaoss_viz::hsv_color(core_hue, 0.12, (0.55 + 0.45 * amp).min(1.0)),
-            clip,
-        );
     }
 }
 
@@ -898,6 +1091,7 @@ fn draw_kaoss_axes(scene: &mut Scene, pad: crate::layout::Rect, model: &NativeMo
             "reverb_size" => "Y SIZE",
             "delay_time" => "Y DLY T",
             "pitch_bend" => "Y BEND",
+            "flanger_mix" => "Y FLANGE",
             _ => "Y",
         };
         let x_label = if prog.note {
@@ -910,15 +1104,16 @@ fn draw_kaoss_axes(scene: &mut Scene, pad: crate::layout::Rect, model: &NativeMo
                 Some("attack") => "X ATTACK",
                 Some("delay_mix") => "X ECHO",
                 Some("reverb_size") => "X SIZE",
+                Some("flanger_rate") => "X RATE",
                 _ => "X",
             }
         };
         scene.text_scaled(pad.x + 6, pad.y + pad.h / 2 - 20, y_label, 0xd3869b, 2);
-        // BEND: pitch lives on the horizontal midline (not the bottom edge).
+        // Bottom edge of the pad (Tk parity). Footer chrome starts below the pad gap.
         let x_label_y = if bend {
             pad.y + pad.h / 2 - 10
         } else {
-            pad.y + pad.h - 36
+            pad.y + pad.h - 22
         };
         scene.text_scaled(pad.x + pad.w / 2 - 40, x_label_y, x_label, 0xd3869b, 2);
     }
@@ -996,49 +1191,27 @@ fn draw_kaoss_grid(
     }
 }
 
-fn draw_kaoss_cursor(
+/// Fixed note HUD (chord-mode style) — never sits under the finger.
+fn draw_kaoss_note_readout(
     scene: &mut Scene,
     pad: crate::layout::Rect,
-    fx: f32,
-    fy: f32,
     model: &NativeModel,
 ) {
-    let cx = pad.x as f32 + fx.clamp(0.0, 1.0) * pad.w as f32;
-    let cy = pad.y as f32 + (1.0 - fy.clamp(0.0, 1.0)) * pad.h as f32;
-    let note_label = if kaoss_ui::program(model.kaoss_program).note {
-        Some(kaoss_ui::midi_note_label(model.kaoss_note_at(fx)))
-    } else {
-        None
-    };
-    // GLOW draws the finger blob; skip hard rings (Tk parity).
-    if model.kaoss_viz_style.is_glow() {
-        if let Some(ref label) = note_label {
-            scene.text_scaled((cx as i32) - 12, (cy as i32) - 28, label, 0xfbf1c7, 2);
-        }
+    let Some(fx) = model.kaoss_sounding_x() else {
         return;
-    }
-    let (hue, sat) = if kaoss_viz::pad_color_is_rainbow(model.kaoss_mono_color) {
-        (
-            (fx.clamp(0.0, 1.0) * 0.70
-                + kaoss_viz::program_hue(kaoss_ui::program(model.kaoss_program).id))
-            .rem_euclid(1.0),
-            0.90,
-        )
-    } else {
-        let (h, s) = kaoss_viz::pad_color_hs(model.kaoss_mono_color).unwrap_or((0.93, 0.88));
-        (h, s.max(0.35))
     };
-    let outer = kaoss_viz::hsv_color(hue, sat, 0.55);
-    let mid = kaoss_viz::hsv_color(hue, sat.min(0.85), 1.0);
-    let core = kaoss_viz::hsv_color(hue, 0.12, 1.0);
-    scene.stroke_disc(cx, cy, 34.0, 2.0, outer, 0x08040a);
-    scene.stroke_disc(cx, cy, 20.0, 3.0, mid, 0x08040a);
-    scene.fill_disc(cx, cy, 7.0, core);
-    scene.fill(cx - 28.0, cy - 1.0, 56.0, 2.0, mid);
-    scene.fill(cx - 1.0, cy - 28.0, 2.0, 56.0, mid);
-    if let Some(ref label) = note_label {
-        scene.text_scaled((cx as i32) - 12, (cy as i32) - 40, label, 0xfbf1c7, 2);
-    }
+    let label = kaoss_ui::midi_note_label(model.kaoss_note_at(fx));
+    // Top-right of the pad: clear of Y-axis labels (left) and typical play area.
+    let w = 104;
+    let h = 40;
+    let r = Rect {
+        x: pad.x + pad.w - w - 8,
+        y: pad.y + 8,
+        w,
+        h,
+    };
+    scene.fill_rect(r, 0x1d2021);
+    scene.text_centered(r, &label, 0xfbf1c7, 3);
 }
 
 fn draw_pads(scene: &mut Scene, model: &NativeModel) {
@@ -1195,7 +1368,7 @@ fn draw_home(scene: &mut Scene, model: &NativeModel) {
         2,
     );
     for (i, (_mode, title, color)) in HOME_TILES.iter().enumerate() {
-        let cell = layout.home_tile(i);
+        let cell = layout.home_tile(i, model.home_scroll);
         scene.button(cell, *color);
         scene.text_centered(cell, title, 0xfbf1c7, 2);
     }
@@ -1265,6 +1438,7 @@ fn draw_chords(scene: &mut Scene, model: &NativeModel) {
         scene.text_centered(cell, tools[i], 0xfbf1c7, 2);
     }
 
+    scene.fill_rect(layout.chords_root_strip, 0x111111);
     for col in 0..12 {
         let label = layout.chords_root_label(col);
         scene.text_centered(label, ROOT_NAMES[col], 0xa89984, 1);
@@ -1318,10 +1492,11 @@ fn draw_chords(scene: &mut Scene, model: &NativeModel) {
     let strum_notes = model.chords_current.map(|spec| {
         spec.strum_strings_at(chords::strum_base_for_octave(model.chords_octave))
     });
-    let band_h = (play.h - 22).max(1) / strings as i32;
+    let band_h = (play.h - chords::STRUM_BAND_TOP_INSET - chords::STRUM_BAND_BOTTOM_INSET).max(1)
+        / strings as i32;
     for i in 0..strings {
         let i = i as i32;
-        let y = play.y + 18 + i * band_h;
+        let y = play.y + chords::STRUM_BAND_TOP_INSET + i * band_h;
         scene.fill_rect(
             Rect {
                 x: play.x + 12,
@@ -1335,7 +1510,13 @@ fn draw_chords(scene: &mut Scene, model: &NativeModel) {
             // Band 0 is top (highest note); band strings-1 is bottom (lowest).
             let idx = strings - 1 - i as usize;
             let label = crate::kaoss_ui::midi_note_label(notes[idx]);
-            scene.text(play.x + play.w - 44, y - 2, &label, 0xa89984);
+            scene.text_scaled(
+                play.x + play.w - 36,
+                y + band_h / 2 - 5,
+                &label,
+                0xa89984,
+                1,
+            );
         }
     }
 
@@ -1484,7 +1665,7 @@ fn draw_synth(scene: &mut Scene, model: &NativeModel) {
         return;
     }
 
-    const LABELS: [&str; 5] = ["MORPH", "TONE", "LEVEL", "ATK", "REL"];
+    const LABELS: [&str; 6] = ["MORPH", "TONE", "LEVEL", "ATK", "REL", "FLANGE"];
 
     let a = waves::short_label(model.wave_label(model.morph_a));
     let b = waves::short_label(model.wave_label(model.morph_b));
@@ -1523,34 +1704,49 @@ fn draw_synth(scene: &mut Scene, model: &NativeModel) {
         let octave = (midi as i32 / 12) - 1;
         format!("C{octave}")
     };
-    scene.text(
-        24,
-        HUD_H + 64,
+    scene.text_scaled(
+        layout.synth_scope.x + 6,
+        layout.synth_scope.y + 4,
         &format!(
-            "{} · vib {:.2}st · {:.1}Hz · {}",
+            "{} {:.1}st {:.0}Hz {}",
             oct_label,
             model.vibrato_depth,
             model.vibrato_rate,
-            if vib_on { "ON" } else { "WHEEL" }
+            if vib_on { "ON" } else { "WHL" }
         ),
         0xa89984,
+        1,
     );
 
     // CRT-ish morph scope (live A/B blend from the loaded wave bank).
     draw_synth_scope(scene, model);
 
-    for index in 0..5 {
+    for index in 0..6 {
         let track = layout.synth_slider(index);
         scene.fill_rect(track, 0x20202c);
-        scene.text(track.x + 8, track.y - 18, LABELS[index], 0xc0c0d0);
-        let fill_h = (track.h as f32 * model.synth_params[index]) as i32;
+        scene.text(track.x + 8, track.y + 6, LABELS[index], 0xc0c0d0);
+        let value = if index < 5 {
+            model.synth_params[index]
+        } else {
+            model.fx_voice[3]
+        };
+        let fill_h = (track.h as f32 * value) as i32;
         let fill = Rect {
             x: track.x + 4,
             y: track.y + track.h - fill_h,
             w: track.w - 8,
             h: fill_h.max(2),
         };
-        scene.fill_rect(fill, if index == 0 { 0xb16286 } else { 0x689d6a });
+        scene.fill_rect(
+            fill,
+            if index == 0 {
+                0xb16286
+            } else if index == 5 {
+                0xd79921
+            } else {
+                0x689d6a
+            },
+        );
     }
 
     for index in 0..Layout::SYNTH_WHITE_COUNT {
@@ -1570,7 +1766,7 @@ fn draw_synth(scene: &mut Scene, model: &NativeModel) {
     for index in 0..5 {
         let key = layout.synth_keyboard_black_rect(index);
         scene.fill_rect(key, 0x1a1a22);
-        scene.text(key.x + 6, key.y + key.h - 14, BLACK_LABELS[index], 0xd0d0d8);
+        scene.text_scaled(key.x + 4, key.y + 4, BLACK_LABELS[index], 0xd0d0d8, 1);
     }
 }
 
@@ -1680,7 +1876,7 @@ fn draw_fm(scene: &mut Scene, model: &NativeModel) {
     for index in 0..5 {
         let key = layout.synth_keyboard_black_rect(index);
         scene.fill_rect(key, 0x1a1a22);
-        scene.text(key.x + 6, key.y + key.h - 14, BLACK_LABELS[index], 0xd0d0d8);
+        scene.text_scaled(key.x + 4, key.y + 4, BLACK_LABELS[index], 0xd0d0d8, 1);
     }
 }
 
@@ -2069,9 +2265,13 @@ fn draw_seq(scene: &mut Scene, model: &NativeModel) {
     let seq = &model.seq;
 
     scene.text(16, HUD_H + 10, "Sequencer", 0xfbf1c7);
-    scene.text(160, HUD_H + 12, &format!("{:.0} BPM", seq.bpm), 0xa89984);
-    scene.text(16, HUD_H + 30, &seq.status, 0xfabd2f);
-    scene.text(16, HUD_H + 44, &seq.layer_line, 0x83a598);
+    let status = if seq.status.chars().count() > 38 {
+        format!("{}…", seq.status.chars().take(38).collect::<String>())
+    } else {
+        seq.status.clone()
+    };
+    scene.text_scaled(16, HUD_H + 28, &status, 0xfabd2f, 1);
+    scene.text_scaled(16, HUD_H + 42, &seq.layer_line, 0x83a598, 1);
 
     let (rec_label, rec_bg) = seq.rec_label();
     let (play_label, play_bg) = seq.play_label();
@@ -2124,9 +2324,9 @@ fn draw_seq(scene: &mut Scene, model: &NativeModel) {
     scene.fill_rect(layout.seq_bpm_up, 0x282828);
     scene.text_centered(layout.seq_bpm_up, "+ BPM", 0xffffff, 2);
     if model.seq_to_pad_armed {
-        scene.text(400, HUD_H + 30, "tap a PAD slot", 0xfabd2f);
+        scene.text_scaled(520, HUD_H + 42, "tap a PAD slot", 0xfabd2f, 1);
     } else {
-        scene.text(400, HUD_H + 30, ">PAD assigns loop", 0x83a598);
+        scene.text_scaled(520, HUD_H + 42, ">PAD assigns loop", 0x83a598, 1);
     }
 
     scene.text(
@@ -2344,52 +2544,13 @@ fn draw_map(scene: &mut Scene, model: &NativeModel) {
 
 fn draw_settings(scene: &mut Scene, model: &NativeModel) {
     let layout = model.layout;
+    scene.text_scaled(layout.content.x + 12, layout.content.y + 8, "SETTINGS", 0xfbf1c7, 2);
     scene.fill_rect(layout.settings_panic, 0x9d0006);
     scene.text_centered(layout.settings_panic, "PANIC", 0xffffff, 2);
     scene.fill_rect(layout.settings_all_off, 0x504945);
     scene.text_centered(layout.settings_all_off, "NOTES OFF", 0xffffff, 2);
-    scene.fill_rect(
-        layout.settings_fx_target,
-        match model.fx_target {
-            crate::model::FxEditTarget::Bus => 0x458588,
-            crate::model::FxEditTarget::Voice => 0xb16286,
-            crate::model::FxEditTarget::DrumGroup => 0xd79921,
-        },
-    );
-    scene.text_centered(
-        layout.settings_fx_target,
-        match model.fx_target {
-            crate::model::FxEditTarget::Bus => "FX: BUS",
-            crate::model::FxEditTarget::Voice => "FX: VOICE",
-            crate::model::FxEditTarget::DrumGroup => "FX: DRUMS",
-        },
-        0xffffff,
-        2,
-    );
-    const LABELS: [&str; 4] = ["DRIVE", "DELAY", "REVERB", "FLANGE"];
-    let values = match model.fx_target {
-        crate::model::FxEditTarget::Bus => &model.fx_bus,
-        crate::model::FxEditTarget::Voice => &model.fx_voice,
-        crate::model::FxEditTarget::DrumGroup => &model.fx_drum,
-    };
-    let fill_color = match model.fx_target {
-        crate::model::FxEditTarget::Bus => 0x458588,
-        crate::model::FxEditTarget::Voice => 0xb16286,
-        crate::model::FxEditTarget::DrumGroup => 0xd79921,
-    };
-    for index in 0..4 {
-        let track = layout.settings_fx_slider(index);
-        scene.fill_rect(track, 0x20202c);
-        scene.text(track.x + 8, track.y - 18, LABELS[index], 0xc0c0d0);
-        let fill_h = (track.h as f32 * values[index]) as i32;
-        let fill = Rect {
-            x: track.x + 4,
-            y: track.y + track.h - fill_h,
-            w: track.w - 8,
-            h: fill_h,
-        };
-        scene.fill_rect(fill, fill_color);
-    }
+    scene.fill_rect(layout.settings_audio, 0x458588);
+    scene.text_centered(layout.settings_audio, "AUDIO", 0xffffff, 2);
     scene.fill_rect(layout.settings_log, 0x504945);
     scene.text_centered(layout.settings_log, "LOG", 0xffffff, 2);
     scene.fill_rect(layout.settings_map, 0x83a598);
@@ -2427,9 +2588,56 @@ fn draw_settings(scene: &mut Scene, model: &NativeModel) {
         2,
     );
     // WIFI / UPDATE / MAP write status_line — show it here (chrome truncates >12 chars).
-    if !model.status_line.is_empty() {
+    if !model.status_line.is_empty() && !model.update_panel_open && !model.wifi_panel_open {
         let c = layout.content;
         scene.text(c.x + 16, c.y + c.h - 28, &model.status_line, 0xfabd2f);
+    }
+}
+
+fn draw_fx(scene: &mut Scene, model: &NativeModel) {
+    let layout = model.layout;
+    scene.text_scaled(layout.content.x + 12, layout.content.y + 8, "FX", 0xfbf1c7, 2);
+    scene.fill_rect(
+        layout.settings_fx_target,
+        match model.fx_target {
+            crate::model::FxEditTarget::Bus => 0x458588,
+            crate::model::FxEditTarget::Voice => 0xb16286,
+            crate::model::FxEditTarget::DrumGroup => 0xd79921,
+        },
+    );
+    scene.text_centered(
+        layout.settings_fx_target,
+        match model.fx_target {
+            crate::model::FxEditTarget::Bus => "TARGET: BUS (global)",
+            crate::model::FxEditTarget::Voice => "TARGET: VOICE",
+            crate::model::FxEditTarget::DrumGroup => "TARGET: DRUMS",
+        },
+        0xffffff,
+        2,
+    );
+    const LABELS: [&str; 4] = ["DRIVE", "DELAY", "REVERB", "FLANGE"];
+    let values = match model.fx_target {
+        crate::model::FxEditTarget::Bus => &model.fx_bus,
+        crate::model::FxEditTarget::Voice => &model.fx_voice,
+        crate::model::FxEditTarget::DrumGroup => &model.fx_drum,
+    };
+    let fill_color = match model.fx_target {
+        crate::model::FxEditTarget::Bus => 0x458588,
+        crate::model::FxEditTarget::Voice => 0xb16286,
+        crate::model::FxEditTarget::DrumGroup => 0xd79921,
+    };
+    for index in 0..4 {
+        let track = layout.settings_fx_slider(index);
+        scene.fill_rect(track, 0x20202c);
+        scene.text(track.x + 4, track.y - 18, LABELS[index], 0xc0c0d0);
+        let fill_h = (track.h as f32 * values[index]) as i32;
+        let fill = Rect {
+            x: track.x + 4,
+            y: track.y + track.h - fill_h,
+            w: track.w - 8,
+            h: fill_h,
+        };
+        scene.fill_rect(fill, fill_color);
     }
 }
 
@@ -2536,8 +2744,24 @@ mod tests {
             .count();
         assert_eq!(grid_cells, 0, "GLOW should not paint the 12×7 LED grid");
         assert!(
-            model.kaoss_glow_amp > 0.1,
+            model.kaoss_glow_amp() > 0.1,
             "touch should ramp the glow envelope"
+        );
+        let field_cells = scene
+            .color
+            .iter()
+            .filter(|q| {
+                q.x >= model.layout.kaoss.x as f32
+                    && q.y >= model.layout.kaoss.y as f32
+                    && q.w > 0.0
+                    && q.h > 0.0
+                    && q.w < 40.0
+                    && q.h < 40.0
+            })
+            .count();
+        assert!(
+            field_cells > 20,
+            "GLOW should paint a soft light-field, got {field_cells}"
         );
     }
 

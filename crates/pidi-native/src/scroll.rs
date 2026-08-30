@@ -12,6 +12,7 @@ pub enum ScrollKind {
     KaossSettings,
     SongList,
     Log,
+    Home,
 }
 
 /// Fixed-row grid inside a viewport (voice grids, kaoss program picker, …).
@@ -123,19 +124,15 @@ mod tests {
     }
 
     #[test]
-    fn grid_hit_with_scroll() {
-        let grid = GridScroll {
-            cols: 2,
-            cell_h: 40,
-            item_count: 8,
-            viewport: Rect {
-                x: 0,
-                y: 0,
-                w: 200,
-                h: 80,
-            },
+    fn list_scroll_from_drag_uses_row_step() {
+        let list = ListScroll {
+            row_h: 56,
+            item_count: 12,
+            visible_rows: 5,
         };
-        assert!(grid.index_at(30, 30, 0).is_some());
-        assert!(grid.index_at(30, 30, 200).is_none());
+        assert_eq!(
+            ListScroll::scroll_from_drag(0, 200, 88, list.row_h, list.max_scroll()),
+            2
+        );
     }
 }
