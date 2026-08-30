@@ -6943,6 +6943,50 @@ mod tests {
     }
 
     #[test]
+    fn chords_strum_starts_from_octave_label() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Chords);
+        model.chords_out = OutMode::Local;
+        model.chords_current = Some(ChordSpec::new(0, chords::ChordQuality::Maj));
+        let mut out = Outbox::new();
+        let label = model.layout.chords_oct_label();
+        model.finger_down(1, label.x + label.w / 2, label.y + label.h / 2, &mut out);
+        let first: Vec<u8> = out
+            .take()
+            .into_iter()
+            .filter_map(|r| match r {
+                Request::NoteOn { note, .. } => Some(note),
+                _ => None,
+            })
+            .collect();
+        let strings = model
+            .chords_current
+            .unwrap()
+            .strum_strings_at(chords::strum_base_for_octave(0));
+        assert_eq!(
+            first,
+            vec![strings[chords::STRUM_STRINGS - 1]],
+            "octave label should sound the highest string"
+        );
+
+        let play = model.layout.chords_strum_play();
+        let bottom_py = play.y + play.h - chords::STRUM_BAND_BOTTOM_INSET - 2;
+        model.finger_move(1, play.x + 4, bottom_py, &mut out);
+        let moved: Vec<u8> = out
+            .take()
+            .into_iter()
+            .filter_map(|r| match r {
+                Request::NoteOn { note, .. } => Some(note),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            moved.contains(&strings[0]),
+            "drag down from the label should reach the lowest string, got {moved:?}"
+        );
+    }
+
+    #[test]
     fn chords_key_change_transposes_strum() {
         let mut model = NativeModel::new();
         model.set_mode(UiMode::Chords);

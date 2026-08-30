@@ -2684,7 +2684,9 @@ impl Layout {
         if self.chords_oct_up().contains(px, py) {
             return Hit::ChordsOctUp;
         }
-        if self.chords_strum_play().contains(px, py) {
+        // Octave label and other STRUM chrome have no tap action — they are
+        // the run-up above the highest string so a down-strum can start there.
+        if self.chords_strum.contains(px, py) {
             let y = self.chords_strum_touch_y(py);
             return Hit::ChordsStrum { y };
         }
@@ -3145,6 +3147,17 @@ mod tests {
         match layout.hit(UiMode::Chords, play.x + 4, bottom_py) {
             Hit::ChordsStrum { y } => assert!(y < 0.15, "bottom band should be low y, got {y}"),
             other => panic!("expected strum at bottom, got {other:?}"),
+        }
+        let label = layout.chords_oct_label();
+        match layout.hit(
+            UiMode::Chords,
+            label.x + label.w / 2,
+            label.y + label.h / 2,
+        ) {
+            Hit::ChordsStrum { y } => {
+                assert!(y > 0.85, "octave label should start a down-strum, got {y}")
+            }
+            other => panic!("expected strum on octave label, got {other:?}"),
         }
     }
 }
