@@ -68,6 +68,52 @@ impl OutMode {
     }
 }
 
+/// Where KAOSS pad FX (echo / reverb / drive / flange) lands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum KaossFxTarget {
+    #[default]
+    Voice,
+    Drums,
+    Both,
+}
+
+impl KaossFxTarget {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Voice => "VOICE",
+            Self::Drums => "DRUMS",
+            Self::Both => "BOTH",
+        }
+    }
+
+    pub fn set_label(self) -> &'static str {
+        match self {
+            Self::Voice => "SET VOX",
+            Self::Drums => "SET DRM",
+            Self::Both => "SET BOTH",
+        }
+    }
+
+    pub fn color(self) -> u32 {
+        match self {
+            Self::Voice => 0xb16286,
+            Self::Drums => 0xd79921,
+            Self::Both => 0x689d6a,
+        }
+    }
+
+    pub fn includes_voice(self) -> bool {
+        matches!(self, Self::Voice | Self::Both)
+    }
+
+    pub fn includes_drums(self) -> bool {
+        matches!(self, Self::Drums | Self::Both)
+    }
+
+    pub const ALL: [KaossFxTarget; 3] = [Self::Voice, Self::Drums, Self::Both];
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionState {
     pub version: u32,
@@ -98,6 +144,9 @@ pub struct SessionState {
     /// Global bus flanger wet (FX→BUS FLANGE).
     #[serde(default)]
     pub fx_bus_flanger: f32,
+    /// KAOSS pad FX destination: voice insert, kit-group insert, or both.
+    #[serde(default)]
+    pub kaoss_fx_target: KaossFxTarget,
     #[serde(default)]
     pub kaoss_show_all: bool,
     #[serde(default)]
@@ -185,6 +234,7 @@ impl Default for SessionState {
             fx_bus: [0.0, 0.0, 0.0],
             fx_flanger: 0.0,
             fx_bus_flanger: 0.0,
+            kaoss_fx_target: KaossFxTarget::Voice,
             kaoss_show_all: false,
             kaoss_channel: 0,
             vibrato_always: 0.0,
@@ -259,5 +309,15 @@ mod tests {
         assert_eq!(s.song_out, OutMode::Both);
         assert_eq!(s.kaoss_out, OutMode::Local);
         assert_eq!(s.font_style, FontStyle::Retro);
+        assert_eq!(s.kaoss_fx_target, KaossFxTarget::Voice);
+    }
+
+    #[test]
+    fn session_roundtrip_includes_kaoss_fx_target() {
+        let mut s = SessionState::default();
+        s.kaoss_fx_target = KaossFxTarget::Both;
+        let json = serde_json::to_string(&s).unwrap();
+        let back: SessionState = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.kaoss_fx_target, KaossFxTarget::Both);
     }
 }
