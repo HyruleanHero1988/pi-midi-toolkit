@@ -178,6 +178,18 @@ pub fn col_for_root_pc(pc: u8) -> usize {
         .unwrap_or(1)
 }
 
+/// True when `spec` is a multi-button combo (m7, M7, dim, aug, sus4, add9).
+pub fn is_combo(spec: ChordSpec) -> bool {
+    lit_buttons_for_chord(spec).len() > 1
+}
+
+/// True when every held button is one of the buttons that form `spec`
+/// (empty held counts as a subset — used while lifting a combo).
+pub fn held_is_subset_of(held: &[(usize, QualityRow)], spec: ChordSpec) -> bool {
+    let lit = lit_buttons_for_chord(spec);
+    held.iter().all(|b| lit.iter().any(|l| l == b))
+}
+
 /// Which quality-row buttons should light for a resolved chord on its root column
 /// (and neighbour columns for sus4 / add9).
 pub fn lit_buttons_for_chord(spec: ChordSpec) -> Vec<(usize, QualityRow)> {
@@ -568,6 +580,12 @@ mod tests {
                 .quality,
             ChordQuality::Add9
         );
+        let cm7 = resolve_held(&[(c, QualityRow::Maj), (c, QualityRow::Seven)]).unwrap();
+        assert!(is_combo(cm7));
+        assert!(!is_combo(resolve_held(&[(c, QualityRow::Maj)]).unwrap()));
+        assert!(held_is_subset_of(&[(c, QualityRow::Seven)], cm7));
+        assert!(held_is_subset_of(&[], cm7));
+        assert!(!held_is_subset_of(&[(f, QualityRow::Maj)], cm7));
     }
 
     #[test]
