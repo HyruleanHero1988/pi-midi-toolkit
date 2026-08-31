@@ -80,6 +80,10 @@ pub enum Request {
         quantize: Option<String>,
     },
     StopAllClips,
+    ClipGain {
+        slot: u8,
+        value: f32,
+    },
     Status,
     /// Inject MIDI as if it arrived on the hardware input (touch/KAOSS, tests).
     Midi {
@@ -617,6 +621,7 @@ pub fn decode(request: Request) -> Result<Decoded, String> {
             quantize: parse_quantize(quantize.as_deref()),
         }),
         Request::StopAllClips => Decoded::Command(Command::StopAllClips),
+        Request::ClipGain { slot, value } => Decoded::Command(Command::SetClipGain { slot, value }),
         Request::Status => Decoded::StatusRequest,
         Request::KaossScale {
             scale_index,
@@ -751,7 +756,16 @@ mod tests {
     }
 
     #[test]
-    fn fx_target_selects_the_right_insert() {
+    fn clip_gain_is_a_plain_command() {
+        let d = decode_line(r#"{"cmd":"clip_gain","slot":16,"value":0.5}"#);
+        match d {
+            Decoded::Command(Command::SetClipGain { slot, value }) => {
+                assert_eq!(slot, 16);
+                assert!((value - 0.5).abs() < 1e-6);
+            }
+            _ => panic!("wrong decode: {d:?}"),
+        }
+    }
         let d = decode_line(
             r#"{"cmd":"fx","target":{"kind":"drum","index":3},"param":"delay_mix","value":0.5}"#,
         );
@@ -779,6 +793,18 @@ mod tests {
                 assert_eq!(clip.length_ticks(), 3840);
             }
             _ => panic!("wrong decode"),
+        }
+    }
+
+    #[test]
+    fn clip_gain_is_a_plain_command() {
+        let d = decode_line(r#"{"cmd":"clip_gain","slot":16,"value":0.5}"#);
+        match d {
+            Decoded::Command(Command::SetClipGain { slot, value }) => {
+                assert_eq!(slot, 16);
+                assert!((value - 0.5).abs() < 1e-6);
+            }
+            _ => panic!("wrong decode: {d:?}"),
         }
     }
 

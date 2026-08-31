@@ -23,8 +23,8 @@ pub const JAM_MODES: [UiMode; 6] = [
     UiMode::Chords,
 ];
 
-/// Home grid entries (5×2). LOG / MAP live under Settings.
-pub const HOME_TILES: [(UiMode, &'static str, u32); 11] = [
+/// Home grid entries (5×3). LOG / MAP live under Settings.
+pub const HOME_TILES: [(UiMode, &'static str, u32); 12] = [
     (UiMode::Synth, "SYNTH", 0x458588),
     (UiMode::Fm, "FM", 0x8ec07c),
     (UiMode::Drums, "DRUMS", 0x98971a),
@@ -35,6 +35,7 @@ pub const HOME_TILES: [(UiMode, &'static str, u32); 11] = [
     (UiMode::Songs, "SONGS", 0x689d6a),
     (UiMode::Presets, "PRESETS", 0x83a598),
     (UiMode::Fx, "FX", 0xb16286),
+    (UiMode::Mix, "MIX", 0xfabd2f),
     (UiMode::Settings, "SETTINGS", 0x665c54),
 ];
 
@@ -161,6 +162,8 @@ pub enum Hit {
     SettingsAudio,
     FxTarget,
     FxSlider(usize),
+    MixBus(usize),
+    MixPad(usize),
     SettingsWifi,
     SettingsUpdate,
     SettingsFont,
@@ -1938,6 +1941,12 @@ impl Layout {
     pub const FX_KEYS_LEVEL: usize = 4;
     pub const FX_DRUMS_LEVEL: usize = 5;
 
+    /// MIX page: LIVE / KIT / SEQ bus strips, then 16 pad faders.
+    pub const MIX_BUS_COUNT: usize = 3;
+    pub const MIX_LIVE: usize = 0;
+    pub const MIX_KIT: usize = 1;
+    pub const MIX_SEQ: usize = 2;
+
     /// Notes are returned relative to C4 (MIDI 60); the model applies `synth_octave`.
     pub const SYNTH_KEY_BASE: u8 = 60;
     pub const SYNTH_WHITE_COUNT: usize = 7;
@@ -2157,6 +2166,7 @@ impl Layout {
             UiMode::Songs => self.hit_songs(px, py),
             UiMode::Settings => self.hit_settings(px, py),
             UiMode::Fx => self.hit_fx(px, py),
+            UiMode::Mix => self.hit_mix(px, py),
             UiMode::Log => self.hit_log(px, py),
             UiMode::Map => self.hit_map(px, py),
             UiMode::Chords => self.hit_chords(px, py),
@@ -2763,6 +2773,50 @@ impl Layout {
         Hit::None
     }
 
+    pub fn mix_bus_slider(&self, index: usize) -> Rect {
+        let i = (index % Self::MIX_BUS_COUNT) as i32;
+        let w = 62;
+        let gap = 10;
+        Rect {
+            x: self.content.x + 12 + i * (w + gap),
+            y: self.content.y + 44,
+            w,
+            h: self.content.h - 60,
+        }
+    }
+
+    pub fn mix_pad_cell(&self, index: usize) -> Rect {
+        let i = (index % 16) as i32;
+        let col = i % 4;
+        let row = i / 4;
+        let left = self.content.x + 236;
+        let top = self.content.y + 44;
+        let area_w = self.content.x + self.content.w - 12 - left;
+        let area_h = self.content.h - 60;
+        let cw = area_w / 4;
+        let rh = area_h / 4;
+        Rect {
+            x: left + col * cw + 4,
+            y: top + row * rh + 4,
+            w: cw - 8,
+            h: rh - 8,
+        }
+    }
+
+    fn hit_mix(&self, px: i32, py: i32) -> Hit {
+        for index in 0..Self::MIX_BUS_COUNT {
+            if self.mix_bus_slider(index).contains(px, py) {
+                return Hit::MixBus(index);
+            }
+        }
+        for index in 0..16 {
+            if self.mix_pad_cell(index).contains(px, py) {
+                return Hit::MixPad(index);
+            }
+        }
+        Hit::None
+    }
+
     fn hit_seq(&self, px: i32, py: i32) -> Hit {
         if self.seq_rec.contains(px, py) {
             return Hit::SeqRec;
@@ -2849,6 +2903,12 @@ pub enum Surface {
     FxSlider {
         index: usize,
     },
+    MixBus {
+        index: usize,
+    },
+    MixPad {
+        index: usize,
+    },
     ChordsButton {
         col: usize,
         row: usize,
@@ -2925,7 +2985,7 @@ mod tests {
         assert_on_screen("home settings", settings);
         assert!(
             layout.home_grid().max_scroll() == 0,
-            "eleven home tiles should fit without scrolling"
+            "twelve home tiles should fit without scrolling"
         );
     }
 
@@ -3182,5 +3242,35 @@ mod tests {
             Hit::FxSlider(i) if i == Layout::FX_DRUMS_LEVEL => {}
             other => panic!("expected drums level slider, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn layout_audit_mix_controls_on_screen() {
+        let layout = Layout::new();
+        for i in 0..Layout::MIX_BUS_COUNT {
+            let r = layout.mix_bus_slider(i);
+            assert_on_screen(&format!("mix bus {i}"), r);
+            assert_eq!(
+                layout.hit(UiMode::Mix, r.x + 4, r.y + r.h / 2),
+                Hit::MixBus(i)
+            );
+        }
+        let a1 = layout.mix_pad_cell(0);
+        let b8 = layout.mix_pad_cell(15);
+        assert_on_screen("mix pad A1", a1);
+        assert_on_screen("mix pad B8", b8);
+        assert_eq!(
+            layout.hit(UiMode::Mix, a1.x + 4, a1.y + a1.h / 2),
+            Hit::MixPad(0)
+        );
+        assert_eq!(
+            layout.hit(UiMode::Mix, b8.x + 4, b8.y + b8.h / 2),
+            Hit::MixPad(15)
+        );
+        let live = layout.mix_bus_slider(Layout::MIX_LIVE);
+        assert!(
+            a1.x >= live.x + live.w,
+            "pad grid should sit to the right of LIVE/KIT/SEQ"
+        );
     }
 }

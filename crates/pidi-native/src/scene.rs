@@ -292,6 +292,7 @@ pub fn build(model: &NativeModel) -> Scene {
             UiMode::Map => draw_map(&mut scene, model),
             UiMode::Settings => draw_settings(&mut scene, model),
             UiMode::Fx => draw_fx(&mut scene, model),
+            UiMode::Mix => draw_mix(&mut scene, model),
             UiMode::Log => draw_log(&mut scene, model),
             UiMode::Chords => draw_chords(&mut scene, model),
         }
@@ -653,6 +654,13 @@ fn chrome_status(model: &NativeModel) -> String {
         UiMode::Fx => {
             if model.status_line.is_empty() {
                 "FX".into()
+            } else {
+                model.status_line.chars().take(24).collect()
+            }
+        }
+        UiMode::Mix => {
+            if model.status_line.is_empty() {
+                "MIX".into()
             } else {
                 model.status_line.chars().take(24).collect()
             }
@@ -2658,6 +2666,54 @@ fn draw_fx(scene: &mut Scene, model: &NativeModel) {
             insert_color
         };
         scene.fill_rect(fill, fill_color);
+    }
+}
+
+fn draw_mix(scene: &mut Scene, model: &NativeModel) {
+    let layout = model.layout;
+    scene.text_scaled(layout.content.x + 12, layout.content.y + 8, "MIX", 0xfbf1c7, 2);
+    const BUS: [(&str, u32); 3] = [
+        ("LIVE", 0x689d6a),
+        ("KIT", 0xd79921),
+        ("SEQ", 0xb16286),
+    ];
+    let bus_values = [
+        model.synth_params[2],
+        model.drum_level,
+        (model.seq_level / 2.0).clamp(0.0, 1.0),
+    ];
+    for index in 0..Layout::MIX_BUS_COUNT {
+        let track = layout.mix_bus_slider(index);
+        scene.fill_rect(track, 0x20202c);
+        scene.text(track.x + 4, track.y - 18, BUS[index].0, 0xc0c0d0);
+        let fill_h = (track.h as f32 * bus_values[index]) as i32;
+        let fill = Rect {
+            x: track.x + 4,
+            y: track.y + track.h - fill_h,
+            w: track.w - 8,
+            h: fill_h,
+        };
+        scene.fill_rect(fill, BUS[index].1);
+    }
+    scene.text_scaled(layout.content.x + 240, layout.content.y + 8, "PADS", 0xfbf1c7, 2);
+    for index in 0..16 {
+        let cell = layout.mix_pad_cell(index);
+        let pad = &model.phrases[index];
+        scene.fill_rect(cell, if pad.empty { 0x1a1a22 } else { 0x20202c });
+        let label = phrases::pad_label(index);
+        scene.text(cell.x + 4, cell.y + 4, &label, if pad.empty { 0x665c54 } else { 0xc0c0d0 });
+        if pad.empty {
+            continue;
+        }
+        let fill_t = (pad.gain / 2.0).clamp(0.0, 1.0);
+        let fill_h = ((cell.h - 18) as f32 * fill_t) as i32;
+        let fill = Rect {
+            x: cell.x + 6,
+            y: cell.y + cell.h - fill_h - 4,
+            w: cell.w - 12,
+            h: fill_h,
+        };
+        scene.fill_rect(fill, 0xd79921);
     }
 }
 

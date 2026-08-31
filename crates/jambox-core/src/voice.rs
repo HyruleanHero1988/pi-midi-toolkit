@@ -3,7 +3,9 @@
 //! Voices are grouped by the wavetable they play, because that group is also the
 //! FX insert slot: melody FX on `saw` must not wet a dry kit (see `PLAN.md`).
 
+use crate::mix::MixSource;
 use crate::wavetable::{TABLE_MASK, TABLE_SIZE};
+use crate::clip::MAX_CLIPS;
 
 /// Fixed polyphony. Sized for Pi 2; the array is allocated once.
 pub const MAX_VOICES: usize = 16;
@@ -15,6 +17,8 @@ struct Voice {
     note: u8,
     /// Wavetable index — also the FX insert slot.
     group: usize,
+    /// Live keys vs a clip slot (MIX trims).
+    mix: MixSource,
     phase: f64,
     amp: f32,
     target_amp: f32,
@@ -29,6 +33,7 @@ impl Voice {
             channel: 0,
             note: 0,
             group: 0,
+            mix: MixSource::Live,
             phase: 0.0,
             amp: 0.0,
             target_amp: 0.0,
@@ -46,6 +51,9 @@ pub struct VoiceContext {
     pub pitch_mul: f32,
     pub attack_sec: f32,
     pub release_sec: f32,
+    /// Live-keys MIX trim. Clip voices use `clip_gains`.
+    pub live_gain: f32,
+    pub clip_gains: [f32; MAX_CLIPS],
 }
 
 /// Fixed-size voice allocator and renderer.
@@ -75,8 +83,19 @@ impl VoicePool {
         self.voices.iter().filter(|v| v.active).count()
     }
 
-    /// Start (or retrigger) a note on `group`'s wavetable.
+    /// Start (or retrigger) a live note on `group`'s wavetable.
     pub fn note_on(&mut self, channel: u8, note: u8, velocity: u8, group: usize) {
+        self.note_on_mix(channel, note, velocity, group, MixSource::Live);
+    }
+
+    pub fn note_on_mix(
+        &mut self,
+        channel: u8,
+        note: u8,
+        velocity: u8,
+        group: usize,
+        mix: MixSource,
+    ) {
         if velocity == 0 {
             self.note_off(channel, note);
             return;
@@ -87,6 +106,7 @@ impl VoicePool {
         if let Some(slot) = self.find_playing(channel, note) {
             let v = &mut self.voices[slot];
             v.group = group;
+            v.mix = mix;
             v.phase = 0.0;
             v.amp = 0.0;
             v.target_amp = target;
@@ -101,6 +121,7 @@ impl VoicePool {
             channel,
             note,
             group,
+            mix,
             phase: 0.0,
             amp: 0.0,
             target_amp: target,
@@ -208,7 +229,8 @@ impl VoicePool {
                 let i1 = (i0 + 1) & TABLE_MASK;
                 let frac = (v.phase - v.phase.floor()) as f32;
                 let s = table[i0] * (1.0 - frac) + table[i1] * frac;
-                *sample += s * v.amp;
+                let g = v.mix.gain(ctx.live_gain, &ctx.clip_gains);
+                *sample += s * v.amp * g;
 
                 v.phase += phase_inc;
                 if v.phase >= TABLE_SIZE as f64 {
@@ -245,6 +267,8 @@ mod tests {
             pitch_mul: 1.0,
             attack_sec: 0.002,
             release_sec: 0.010,
+            live_gain: 1.0,
+            clip_gains: [1.0; MAX_CLIPS],
         }
     }
 

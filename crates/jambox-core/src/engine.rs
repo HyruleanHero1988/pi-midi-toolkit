@@ -6,7 +6,8 @@
 
 use midi_core::MidiEvent;
 
-use crate::clip::{ClipEventKind, LaunchMode, SeqEvent, Sequencer};
+use crate::clip::{ClipEventKind, LaunchMode, SeqEvent, Sequencer, MAX_CLIPS};
+use crate::mix::MixSource;
 use crate::command::{
     Command, EmitMode, FxParam, FxTarget, ScheduledCommand, SynthParam, MAX_BLOCK_COMMANDS,
 };
@@ -225,6 +226,7 @@ pub struct JamboxEngine {
     tone: f32,
     level: f32,
     drum_level: f32,
+    clip_gain: [f32; MAX_CLIPS],
     attack_sec: f32,
     release_sec: f32,
     vib_depth_semis: f32,
@@ -292,6 +294,7 @@ impl JamboxEngine {
             tone: 1.0,
             level: 1.0,
             drum_level: 1.0,
+            clip_gain: [1.0; MAX_CLIPS],
             attack_sec: 0.012,
             release_sec: 0.030,
             vib_depth_semis: 0.5,
@@ -431,7 +434,8 @@ impl JamboxEngine {
                         note,
                         velocity,
                     } => (
-                        Command::NoteOn {
+                        Command::ClipNoteOn {
+                            slot: ev.slot as u8,
                             channel,
                             note,
                             velocity,
@@ -547,6 +551,7 @@ impl JamboxEngine {
             tone,
             level,
             drum_level,
+            clip_gain,
             attack_sec,
             release_sec,
             vib_depth_semis,
@@ -585,7 +590,11 @@ impl JamboxEngine {
             pitch_mul,
             attack_sec: *attack_sec,
             release_sec: *release_sec,
+            live_gain: *level,
+            clip_gains: *clip_gain,
         };
+
+        drums.set_mix_gains(*drum_level, *clip_gain);
 
         // Keys: one FX insert per wavetable group.
         let mut groups = [0usize; MAX_VOICES];
@@ -607,8 +616,9 @@ impl JamboxEngine {
         if *fm_enabled || fm.active_count() > 0 {
             group_buf[..n].iter_mut().for_each(|s| *s = 0.0);
             fm.render(&mut group_buf[..n], sr, pitch_mul);
+            let fm_g = *level;
             for i in 0..n {
-                key_bus[i] += group_buf[i];
+                key_bus[i] += group_buf[i] * fm_g;
             }
         }
 
@@ -651,10 +661,9 @@ impl JamboxEngine {
             drum_group_fx.process(&mut drum_bus[..n]);
         }
 
-        // Keys `level` and kit `drum_level` are independent trims (Python
-        // `synth_level` / `drum_level`). Master makeup is after the bus insert.
+        // Keys `level` / kit `drum_level` / clip gains are applied at the voice.
         for i in 0..n {
-            out[i] = key_bus[i] * *level + drum_bus[i] * *drum_level;
+            out[i] = key_bus[i] + drum_bus[i];
         }
         if !bus_fx.params().is_bypassed() {
             bus_fx.process(out);
@@ -677,19 +686,13 @@ impl JamboxEngine {
                 channel,
                 note,
                 velocity,
-            } => {
-                if velocity == 0 {
-                    self.voices.note_off(channel, note);
-                    self.fm.note_off(channel, note);
-                } else if channel == DRUM_CHANNEL {
-                    self.drums.trigger(drum_model_for_note(note), velocity);
-                } else if self.fm_enabled {
-                    self.fm.note_on(channel, note, velocity);
-                } else {
-                    let group = self.bank.nearer_index();
-                    self.voices.note_on(channel, note, velocity, group);
-                }
-            }
+            } => self.sound_on(channel, note, velocity, MixSource::Live),
+            Command::ClipNoteOn {
+                slot,
+                channel,
+                note,
+                velocity,
+            } => self.sound_on(channel, note, velocity, MixSource::clip(slot as usize)),
             Command::NoteOff { channel, note } => {
                 if channel != DRUM_CHANNEL {
                     self.voices.note_off(channel, note);
@@ -769,6 +772,10 @@ impl JamboxEngine {
                 if let Some(s) = self.sequencer.slot_mut(slot as usize) {
                     s.set_mode(mode);
                 }
+            }
+            Command::SetClipGain { slot, value } => {
+                let i = (slot as usize).min(MAX_CLIPS - 1);
+                self.clip_gain[i] = value.clamp(0.0, 2.0);
             }
             Command::StartRepeat {
                 owner,
@@ -864,13 +871,26 @@ impl JamboxEngine {
         }
     }
 
-    fn start_touch_note(&mut self, channel: u8, note: u8, velocity: u8) {
+    fn sound_on(&mut self, channel: u8, note: u8, velocity: u8, mix: MixSource) {
+        if velocity == 0 {
+            self.voices.note_off(channel, note);
+            self.fm.note_off(channel, note);
+            return;
+        }
         if channel == DRUM_CHANNEL {
-            self.drums.trigger(drum_model_for_note(note), velocity);
+            self.drums
+                .trigger_mix(drum_model_for_note(note), velocity, mix);
+        } else if self.fm_enabled {
+            self.fm.note_on(channel, note, velocity);
         } else {
             let group = self.bank.nearer_index();
-            self.voices.note_on(channel, note, velocity, group);
+            self.voices
+                .note_on_mix(channel, note, velocity, group, mix);
         }
+    }
+
+    fn start_touch_note(&mut self, channel: u8, note: u8, velocity: u8) {
+        self.sound_on(channel, note, velocity, MixSource::Live);
     }
 
     fn apply_touch_delta(&mut self, delta: TouchDelta) {
@@ -1267,6 +1287,68 @@ mod tests {
             &mut midi,
         );
         assert_eq!(peak(&out), 0.0, "keys level 0 must silence the melody");
+    }
+
+    #[test]
+    fn live_level_does_not_duck_clip_keys() {
+        let mut e = engine();
+        let mut out = vec![0.0f32; 512];
+        let mut midi = MidiOutSink::new();
+        e.render(
+            &mut out,
+            &[
+                ScheduledCommand::now(Command::SetSynth {
+                    param: SynthParam::Level,
+                    value: 0.0,
+                }),
+                ScheduledCommand::now(Command::ClipNoteOn {
+                    slot: 0,
+                    channel: 0,
+                    note: 69,
+                    velocity: 120,
+                }),
+            ],
+            &mut midi,
+        );
+        assert!(
+            peak(&out) > 0.01,
+            "sequenced keys must still speak when LIVE is down"
+        );
+        e.render(
+            &mut out,
+            &[ScheduledCommand::now(Command::SetClipGain {
+                slot: 0,
+                value: 0.0,
+            })],
+            &mut midi,
+        );
+        assert_eq!(peak(&out), 0.0, "clip gain 0 must silence that clip");
+    }
+
+    #[test]
+    fn clip_gain_does_not_duck_live_keys() {
+        let mut e = engine();
+        let mut out = vec![0.0f32; 512];
+        let mut midi = MidiOutSink::new();
+        e.render(
+            &mut out,
+            &[
+                ScheduledCommand::now(Command::SetClipGain {
+                    slot: 0,
+                    value: 0.0,
+                }),
+                ScheduledCommand::now(Command::NoteOn {
+                    channel: 0,
+                    note: 69,
+                    velocity: 120,
+                }),
+            ],
+            &mut midi,
+        );
+        assert!(
+            peak(&out) > 0.01,
+            "live keys must still speak when a clip fader is down"
+        );
     }
 
     #[test]
