@@ -97,6 +97,7 @@ fn main() {
     let mut last = Instant::now();
     let mut status_tick = Instant::now();
     let mut n = 0u64;
+    let mut ota_reload = false;
 
     loop {
         let now = Instant::now();
@@ -130,6 +131,13 @@ fn main() {
         model.status = client.last_status;
         model.tick(dt, &mut client.outbox);
         model.maybe_autosave();
+        if model.take_reexec() {
+            info!("pidi-native: reloading after OTA");
+            model.cancel_all(&mut client.outbox);
+            client.flush();
+            ota_reload = true;
+            break;
+        }
         let scene = scene::build(&model);
         presenter.present(&scene, &mut frame);
 
@@ -144,6 +152,16 @@ fn main() {
                 std::thread::sleep(frame_time - spent);
             }
         }
+    }
+
+    if ota_reload {
+        drop(input);
+        drop(presenter);
+        if let Err(err) = pidi_native::host::reexec_current_process() {
+            error!(%err, "pidi-native: OTA reload failed — exiting so systemd can restart");
+            std::process::exit(1);
+        }
+        return;
     }
 
     model.cancel_all(&mut client.outbox);

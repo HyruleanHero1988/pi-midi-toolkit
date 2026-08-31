@@ -235,7 +235,7 @@ drop-in / main-conf kiosk session keys. Does **not** uninstall Openbox packages.
 | `install-kiosk.sh` | Packages + X session + enable boot |
 | `disable-kiosk.sh` | Restore desktop boot |
 | `kiosk.sh` | Session entry: Openbox (optional) + app restart loop |
-| `updater.py` | SET → CHECK / UPDATE (GitHub `master`; preserves user data; installs `dist/armv7` → `bin/`) |
+| `updater.py` | SET → CHECK / UPDATE (GitHub `master`; preserves user data; installs `dist/armv7` → `bin/`; never stops the kiosk) |
 | `kiosk/midi-tone-kiosk.desktop` | xsessions definition |
 | `kiosk/lightdm/99-midi-tone-kiosk.conf` | LightDM drop-in template |
 | `kiosk/openbox/rc.xml` | Undecorated / fullscreen-friendly WM config |
