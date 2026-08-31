@@ -2620,27 +2620,42 @@ fn draw_fx(scene: &mut Scene, model: &NativeModel) {
         0xffffff,
         2,
     );
-    const LABELS: [&str; 4] = ["DRIVE", "DELAY", "REVERB", "FLANGE"];
-    let values = match model.fx_target {
+    const LABELS: [&str; Layout::FX_SLIDER_COUNT] =
+        ["DRIVE", "DELAY", "REVERB", "FLANGE", "LEVEL", "DRUMS"];
+    let inserts = match model.fx_target {
         crate::model::FxEditTarget::Bus => &model.fx_bus,
         crate::model::FxEditTarget::Voice => &model.fx_voice,
         crate::model::FxEditTarget::DrumGroup => &model.fx_drum,
     };
-    let fill_color = match model.fx_target {
+    let insert_color = match model.fx_target {
         crate::model::FxEditTarget::Bus => 0x458588,
         crate::model::FxEditTarget::Voice => 0xb16286,
         crate::model::FxEditTarget::DrumGroup => 0xd79921,
     };
-    for index in 0..4 {
+    for index in 0..Layout::FX_SLIDER_COUNT {
         let track = layout.settings_fx_slider(index);
         scene.fill_rect(track, 0x20202c);
         scene.text(track.x + 4, track.y - 18, LABELS[index], 0xc0c0d0);
-        let fill_h = (track.h as f32 * values[index]) as i32;
+        let value = if index == Layout::FX_KEYS_LEVEL {
+            model.synth_params[2]
+        } else if index == Layout::FX_DRUMS_LEVEL {
+            model.drum_level
+        } else {
+            inserts[index]
+        };
+        let fill_h = (track.h as f32 * value) as i32;
         let fill = Rect {
             x: track.x + 4,
             y: track.y + track.h - fill_h,
             w: track.w - 8,
             h: fill_h,
+        };
+        let fill_color = if index == Layout::FX_KEYS_LEVEL {
+            0x689d6a
+        } else if index == Layout::FX_DRUMS_LEVEL {
+            0xd79921
+        } else {
+            insert_color
         };
         scene.fill_rect(fill, fill_color);
     }

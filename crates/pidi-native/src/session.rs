@@ -75,6 +75,9 @@ pub struct SessionState {
     pub morph: f32,
     pub tone: f32,
     pub level: f32,
+    /// Kit bus trim. Missing in old sessions → unity (1.0).
+    #[serde(default = "default_drum_level")]
+    pub drum_level: f32,
     pub attack: f32,
     pub release: f32,
     pub morph_a: u16,
@@ -138,6 +141,10 @@ pub struct SessionState {
     pub kaoss_mono_color: usize,
 }
 
+fn default_drum_level() -> f32 {
+    1.0
+}
+
 fn default_kaoss_root_midi() -> u8 {
     jambox_core::DEFAULT_ROOT_MIDI
 }
@@ -170,6 +177,7 @@ impl Default for SessionState {
             morph: 0.5,
             tone: 0.5,
             level: 0.8,
+            drum_level: default_drum_level(),
             attack: 0.05,
             release: 0.3,
             morph_a: 0,
@@ -259,5 +267,6 @@ mod tests {
         assert_eq!(s.song_out, OutMode::Both);
         assert_eq!(s.kaoss_out, OutMode::Local);
         assert_eq!(s.font_style, FontStyle::Retro);
+        assert!((s.drum_level - 1.0).abs() < 1e-6);
     }
 }

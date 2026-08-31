@@ -651,16 +651,17 @@ impl JamboxEngine {
             drum_group_fx.process(&mut drum_bus[..n]);
         }
 
+        // Keys `level` and kit `drum_level` are independent trims (Python
+        // `synth_level` / `drum_level`). Master makeup is after the bus insert.
         for i in 0..n {
-            out[i] = key_bus[i] + drum_bus[i] * *drum_level;
+            out[i] = key_bus[i] * *level + drum_bus[i] * *drum_level;
         }
         if !bus_fx.params().is_bypassed() {
             bus_fx.process(out);
         }
 
-        let gain = *level * OUTPUT_MAKEUP;
         for s in out.iter_mut() {
-            *s = (*s * gain).tanh() * 0.97;
+            *s = (*s * OUTPUT_MAKEUP).tanh() * 0.97;
         }
     }
 
@@ -1196,6 +1197,76 @@ mod tests {
         assert_eq!(e.status().active_voices, 0);
         assert_eq!(e.status().active_drums, 1);
         assert!(peak(&out) > 0.0);
+    }
+
+    #[test]
+    fn keys_level_does_not_duck_the_kit() {
+        let mut e = engine();
+        let mut out = vec![0.0f32; 512];
+        let mut midi = MidiOutSink::new();
+        e.render(
+            &mut out,
+            &[
+                ScheduledCommand::now(Command::SetSynth {
+                    param: SynthParam::Level,
+                    value: 0.0,
+                }),
+                ScheduledCommand::now(Command::NoteOn {
+                    channel: DRUM_CHANNEL,
+                    note: 36,
+                    velocity: 120,
+                }),
+            ],
+            &mut midi,
+        );
+        assert!(
+            peak(&out) > 0.05,
+            "kit must still speak when melody level is zero"
+        );
+        e.render(
+            &mut out,
+            &[ScheduledCommand::now(Command::SetSynth {
+                param: SynthParam::DrumLevel,
+                value: 0.0,
+            })],
+            &mut midi,
+        );
+        assert_eq!(peak(&out), 0.0, "drum_level 0 must silence the kit");
+    }
+
+    #[test]
+    fn drum_level_does_not_duck_the_keys() {
+        let mut e = engine();
+        let mut out = vec![0.0f32; 512];
+        let mut midi = MidiOutSink::new();
+        e.render(
+            &mut out,
+            &[
+                ScheduledCommand::now(Command::SetSynth {
+                    param: SynthParam::DrumLevel,
+                    value: 0.0,
+                }),
+                ScheduledCommand::now(Command::NoteOn {
+                    channel: 0,
+                    note: 69,
+                    velocity: 120,
+                }),
+            ],
+            &mut midi,
+        );
+        assert!(
+            peak(&out) > 0.01,
+            "melody must still speak when kit level is zero"
+        );
+        e.render(
+            &mut out,
+            &[ScheduledCommand::now(Command::SetSynth {
+                param: SynthParam::Level,
+                value: 0.0,
+            })],
+            &mut midi,
+        );
+        assert_eq!(peak(&out), 0.0, "keys level 0 must silence the melody");
     }
 
     #[test]

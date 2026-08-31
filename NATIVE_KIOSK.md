@@ -29,7 +29,7 @@ runtime.
 | SONGS | List `songs/*.mid`, SMF→clip PLAY/STOP/LOOP, SAVE SEQ, OUT cycle |
 | PRESETS | 8 slots save/load synth params to `user-presets/` |
 | MAP | Thru status; THRU ON / OFF / REFRESH PORTS → `midi-engine` (Linux appliance; Windows host explains Pi-only) |
-| FX | BUS / VOICE / DRUMS target; DRIVE / DELAY / REVERB / **FLANGE** (bus = global wet; voice mirrors SYNTH FLANGE) |
+| FX | BUS / VOICE / DRUMS insert target; DRIVE / DELAY / REVERB / **FLANGE**; always-on **LEVEL** (keys) and **DRUMS** mix trims |
 | SETTINGS | Appliance hub: Panic, notes-off, **AUDIO**, **WIFI**, **UPDATE**, FONT, LOG, MAP |
 | LOG | Engine counters + recent action lines |
 | Session | Autosave `settings.json` (synth/kaoss/tempo/OUT prefs) |

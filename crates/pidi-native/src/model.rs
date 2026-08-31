@@ -259,6 +259,8 @@ pub struct NativeModel {
     pub fx_voice: [f32; 4],
     pub fx_drum: [f32; 4],
     pub fx_target: FxEditTarget,
+    /// Kit bus trim (FX DRUMS). Independent of melody `synth_params[2]` (LEVEL).
+    pub drum_level: f32,
     pub log_lines: Vec<String>,
     pub pads_out: OutMode,
     pub song_out: OutMode,
@@ -443,6 +445,7 @@ impl NativeModel {
             fx_voice: [0.0, 0.0, 0.0, 0.0],
             fx_drum: [0.0, 0.0, 0.0, 0.0],
             fx_target: FxEditTarget::Bus,
+            drum_level: 1.0,
             log_lines: Vec::new(),
             pads_out: OutMode::Both,
             song_out: OutMode::Both,
@@ -1513,6 +1516,7 @@ impl NativeModel {
         self.bpm = s.bpm.clamp(40.0, 240.0);
         self.seq.bpm = self.bpm;
         self.synth_params = [s.morph, s.tone, s.level, s.attack, s.release];
+        self.drum_level = s.drum_level.clamp(0.0, 1.0);
         self.vibrato_always = s.vibrato_always.clamp(0.0, 1.0);
         self.vibrato_depth = s.vibrato_depth.clamp(0.0, 2.0);
         self.vibrato_rate = s.vibrato_rate.clamp(1.0, 9.0);
@@ -1570,6 +1574,7 @@ impl NativeModel {
         outbox.synth("morph", self.synth_params[0]);
         outbox.synth("tone", self.synth_params[1]);
         outbox.synth("level", self.synth_params[2]);
+        outbox.synth("drum_level", self.drum_level);
         outbox.synth("attack", self.synth_params[3]);
         outbox.synth("release", self.synth_params[4]);
         outbox.synth("vibrato_always", self.vibrato_always);
@@ -1607,6 +1612,7 @@ impl NativeModel {
             morph: self.synth_params[0],
             tone: self.synth_params[1],
             level: self.synth_params[2],
+            drum_level: self.drum_level,
             attack: self.synth_params[3],
             release: self.synth_params[4],
             morph_a: self.morph_a,
@@ -3936,12 +3942,26 @@ impl NativeModel {
     }
 
     fn apply_fx_slider(&mut self, index: usize, py: i32, outbox: &mut Outbox) {
-        if index >= 4 {
+        if index >= Layout::FX_SLIDER_COUNT {
             return;
         }
         let track = self.layout.settings_fx_slider(index);
         let y = 1.0 - ((py - track.y) as f32 / track.h.max(1) as f32);
         let value = y.clamp(0.0, 1.0);
+        if index == Layout::FX_KEYS_LEVEL {
+            self.synth_params[2] = value;
+            outbox.synth("level", value);
+            self.status_line = format!("keys {:.2}", value);
+            self.mark_dirty();
+            return;
+        }
+        if index == Layout::FX_DRUMS_LEVEL {
+            self.drum_level = value;
+            outbox.synth("drum_level", value);
+            self.status_line = format!("drums {:.2}", value);
+            self.mark_dirty();
+            return;
+        }
         let name = Self::FX_PARAM_NAMES[index];
         match self.fx_target {
             FxEditTarget::Bus => {
@@ -5277,6 +5297,7 @@ impl NativeModel {
 
     fn factory_reset_synth(&mut self, outbox: &mut Outbox) {
         self.synth_params = [0.5, 0.5, 0.8, 0.05, 0.3];
+        self.drum_level = 1.0;
         self.vibrato_always = 0.0;
         self.vibrato_depth = 0.5;
         self.vibrato_rate = 5.0;
@@ -5286,6 +5307,7 @@ impl NativeModel {
         outbox.synth("morph", self.synth_params[0]);
         outbox.synth("tone", self.synth_params[1]);
         outbox.synth("level", self.synth_params[2]);
+        outbox.synth("drum_level", self.drum_level);
         outbox.synth("attack", self.synth_params[3]);
         outbox.synth("release", self.synth_params[4]);
         self.push_vibrato_params(outbox);
@@ -7347,6 +7369,45 @@ mod tests {
             "expected bus flanger_mix, got {batch:?}"
         );
         assert!(model.fx_bus[3] > 0.5);
+    }
+
+    #[test]
+    fn fx_menu_level_sends_keys_gain() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Fx);
+        let mut out = Outbox::new();
+        let track = model.layout.settings_fx_slider(Layout::FX_KEYS_LEVEL);
+        model.finger_down(1, track.x + 8, track.y + 4, &mut out);
+        let batch = out.take();
+        assert!(
+            batch.iter().any(|r| matches!(
+                r,
+                Request::Synth { param, value, .. }
+                    if param == "level" && *value > 0.9
+            )),
+            "expected keys level, got {batch:?}"
+        );
+        assert!(model.synth_params[2] > 0.9);
+    }
+
+    #[test]
+    fn fx_menu_drums_sends_kit_gain() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Fx);
+        let mut out = Outbox::new();
+        let track = model.layout.settings_fx_slider(Layout::FX_DRUMS_LEVEL);
+        // Bottom of the slider → near 0.
+        model.finger_down(1, track.x + 8, track.y + track.h - 4, &mut out);
+        let batch = out.take();
+        assert!(
+            batch.iter().any(|r| matches!(
+                r,
+                Request::Synth { param, value, .. }
+                    if param == "drum_level" && *value < 0.1
+            )),
+            "expected drum_level, got {batch:?}"
+        );
+        assert!(model.drum_level < 0.1);
     }
 
     #[test]

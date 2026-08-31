@@ -299,4 +299,13 @@ fn main() {
         tick_n(&mut model, &mut ob, 2);
         dump(&model, &out, "24-wifi-keyboard-symbols");
     }
+    {
+        let (mut model, mut ob) = fresh();
+        model.set_mode(UiMode::Fx);
+        model.fx_bus = [0.22, 0.38, 0.28, 0.18];
+        model.synth_params[2] = 0.72;
+        model.drum_level = 0.48;
+        tick_n(&mut model, &mut ob, 2);
+        dump(&model, &out, "25-fx");
+    }
 }

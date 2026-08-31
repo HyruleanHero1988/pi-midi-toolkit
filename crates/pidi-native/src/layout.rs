@@ -1932,6 +1932,12 @@ impl Layout {
     }
 
     /// One-octave piano keyboard inside `synth_keys`.
+    /// FX page: four insert sliders + KEYS / DRUMS mix levels.
+    pub const FX_INSERT_COUNT: usize = 4;
+    pub const FX_SLIDER_COUNT: usize = 6;
+    pub const FX_KEYS_LEVEL: usize = 4;
+    pub const FX_DRUMS_LEVEL: usize = 5;
+
     /// Notes are returned relative to C4 (MIDI 60); the model applies `synth_octave`.
     pub const SYNTH_KEY_BASE: u8 = 60;
     pub const SYNTH_WHITE_COUNT: usize = 7;
@@ -2706,8 +2712,8 @@ impl Layout {
     }
 
     pub fn settings_fx_slider(&self, index: usize) -> Rect {
-        // Bus / voice / drum inserts: drive + delay + reverb + flange.
-        let n = 4i32;
+        // Inserts (drive / delay / reverb / flange) plus KEYS / DRUMS mix levels.
+        let n = Self::FX_SLIDER_COUNT as i32;
         let w = self.settings_fx.w / n;
         Rect {
             x: self.settings_fx.x + (index as i32) * w + 8,
@@ -2749,7 +2755,7 @@ impl Layout {
         if self.settings_fx_target.contains(px, py) {
             return Hit::FxTarget;
         }
-        for index in 0..4 {
+        for index in 0..Self::FX_SLIDER_COUNT {
             if self.settings_fx_slider(index).contains(px, py) {
                 return Hit::FxSlider(index);
             }
@@ -3158,6 +3164,23 @@ mod tests {
                 assert!(y > 0.85, "octave label should start a down-strum, got {y}")
             }
             other => panic!("expected strum on octave label, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn layout_audit_fx_mix_sliders_fit() {
+        let layout = Layout::new();
+        let first = layout.settings_fx_slider(0);
+        let last = layout.settings_fx_slider(Layout::FX_SLIDER_COUNT - 1);
+        assert!(first.x >= layout.settings_fx.x);
+        assert!(last.x + last.w <= layout.settings_fx.x + layout.settings_fx.w);
+        assert!(
+            last.x > first.x,
+            "KEYS/DRUMS columns should sit to the right of DRIVE"
+        );
+        match layout.hit(UiMode::Fx, last.x + 4, last.y + last.h / 2) {
+            Hit::FxSlider(i) if i == Layout::FX_DRUMS_LEVEL => {}
+            other => panic!("expected drums level slider, got {other:?}"),
         }
     }
 }
