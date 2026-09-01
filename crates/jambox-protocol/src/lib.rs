@@ -112,6 +112,11 @@ pub enum Request {
         quantize: Option<String>,
     },
     StopAllClips,
+    /// Per-slot mix trim (phrase pads 0..15, SEQ/songs on slot 16). 0..2, unity 1.0.
+    ClipGain {
+        slot: u8,
+        value: f32,
+    },
     Status,
     Midi {
         kind: String,
@@ -358,5 +363,23 @@ mod tests {
         let legacy: Request =
             serde_json::from_str(r#"{"cmd":"synth","param":"drum_tone","value":0.7}"#).unwrap();
         assert!(matches!(legacy, Request::Synth { drum: None, .. }));
+    }
+
+    #[test]
+    fn clip_gain_round_trips() {
+        let request = Request::ClipGain {
+            slot: 16,
+            value: 0.5,
+        };
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(json.contains("\"cmd\":\"clip_gain\""));
+        let decoded: Request = serde_json::from_str(&json).unwrap();
+        assert!(matches!(
+            decoded,
+            Request::ClipGain {
+                slot: 16,
+                value,
+            } if (value - 0.5).abs() < 1e-6
+        ));
     }
 }

@@ -132,9 +132,20 @@ pub enum Command {
         quantize: Quantize,
     },
     StopAllClips,
+    /// Clip playback note (MIX source = this slot). Live MIDI uses `NoteOn`.
+    ClipNoteOn {
+        slot: u8,
+        channel: u8,
+        note: u8,
+        velocity: u8,
+    },
     SetClipMode {
         slot: u8,
         mode: LaunchMode,
+    },
+    SetClipGain {
+        slot: u8,
+        value: f32,
     },
     StartRepeat {
         owner: u32,

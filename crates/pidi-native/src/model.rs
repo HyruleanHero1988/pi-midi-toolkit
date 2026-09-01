@@ -259,8 +259,10 @@ pub struct NativeModel {
     pub fx_voice: [f32; 4],
     pub fx_drum: [f32; 4],
     pub fx_target: FxEditTarget,
-    /// Kit bus trim (FX DRUMS). Independent of melody `synth_params[2]` (LEVEL).
+    /// Kit bus trim (FX DRUMS / MIX KIT). Independent of melody `synth_params[2]` (LEVEL).
     pub drum_level: f32,
+    /// SEQ / songs clip trim (MIX SEQ). Phrase pads use `phrases[i].gain`.
+    pub seq_level: f32,
     pub log_lines: Vec<String>,
     pub pads_out: OutMode,
     pub song_out: OutMode,
@@ -446,6 +448,7 @@ impl NativeModel {
             fx_drum: [0.0, 0.0, 0.0, 0.0],
             fx_target: FxEditTarget::Bus,
             drum_level: 1.0,
+            seq_level: 1.0,
             log_lines: Vec::new(),
             pads_out: OutMode::Both,
             song_out: OutMode::Both,
@@ -586,18 +589,13 @@ impl NativeModel {
         let dir = phrases::phrases_dir_from_env();
         self.phrases = phrases::load_bank(&dir, self.bpm);
         let mut n = 0usize;
-        for (slot, pad) in self.phrases.iter().enumerate() {
-            if pad.empty {
+        for slot in 0..16 {
+            if self.phrases[slot].empty {
                 outbox.clip_clear(slot as u8);
                 continue;
             }
             n += 1;
-            outbox.clip_load(
-                slot as u8,
-                pad.length_ticks,
-                if pad.loop_mode { "loop" } else { "oneshot" },
-                pad.events.clone(),
-            );
+            self.send_phrase_clip(slot, outbox);
         }
         self.status_line = format!("phrases {}/16 from {}", n, dir.display());
     }
@@ -680,6 +678,7 @@ impl NativeModel {
                 | UiMode::Songs
                 | UiMode::Presets
                 | UiMode::Fx
+                | UiMode::Mix
                 | UiMode::Log
                 | UiMode::Settings
         )
@@ -851,6 +850,7 @@ impl NativeModel {
             "sng" | "songs" => UiMode::Songs,
             "pre" | "presets" => UiMode::Presets,
             "fx" => UiMode::Fx,
+            "mix" => UiMode::Mix,
             "map" => UiMode::Map,
             "log" => UiMode::Log,
             "set" | "settings" => UiMode::Settings,
@@ -1517,6 +1517,7 @@ impl NativeModel {
         self.seq.bpm = self.bpm;
         self.synth_params = [s.morph, s.tone, s.level, s.attack, s.release];
         self.drum_level = s.drum_level.clamp(0.0, 1.0);
+        self.seq_level = s.seq_level.clamp(0.0, 2.0);
         self.vibrato_always = s.vibrato_always.clamp(0.0, 1.0);
         self.vibrato_depth = s.vibrato_depth.clamp(0.0, 2.0);
         self.vibrato_rate = s.vibrato_rate.clamp(1.0, 9.0);
@@ -1575,6 +1576,7 @@ impl NativeModel {
         outbox.synth("tone", self.synth_params[1]);
         outbox.synth("level", self.synth_params[2]);
         outbox.synth("drum_level", self.drum_level);
+        outbox.clip_gain(SEQ_CLIP_SLOT, self.seq_level);
         outbox.synth("attack", self.synth_params[3]);
         outbox.synth("release", self.synth_params[4]);
         outbox.synth("vibrato_always", self.vibrato_always);
@@ -1613,6 +1615,7 @@ impl NativeModel {
             tone: self.synth_params[1],
             level: self.synth_params[2],
             drum_level: self.drum_level,
+            seq_level: self.seq_level,
             attack: self.synth_params[3],
             release: self.synth_params[4],
             morph_a: self.morph_a,
@@ -2917,6 +2920,34 @@ impl NativeModel {
                 };
                 self.apply_fx_slider(index, py, outbox);
             }
+            Hit::MixBus(index) => {
+                self.fingers[slot] = Finger {
+                    active: true,
+                    id,
+                    gesture,
+                    x: 0.0,
+                    y: 0.0,
+                    px,
+                    py,
+                    surface: Surface::MixBus { index },
+                    gate_on: false,
+                };
+                self.apply_mix_bus(index, py, outbox);
+            }
+            Hit::MixPad(index) => {
+                self.fingers[slot] = Finger {
+                    active: true,
+                    id,
+                    gesture,
+                    x: 0.0,
+                    y: 0.0,
+                    px,
+                    py,
+                    surface: Surface::MixPad { index },
+                    gate_on: false,
+                };
+                self.apply_mix_pad(index, py, outbox);
+            }
             Hit::SettingsWifi => {
                 self.tap_ui(slot, id, gesture, px, py);
                 self.open_wifi_panel();
@@ -3157,6 +3188,12 @@ impl NativeModel {
             Surface::FxSlider { index } => {
                 self.apply_fx_slider(index, py, outbox);
             }
+            Surface::MixBus { index } => {
+                self.apply_mix_bus(index, py, outbox);
+            }
+            Surface::MixPad { index } => {
+                self.apply_mix_pad(index, py, outbox);
+            }
             Surface::ChordsStrum => {
                 let y = self.layout.chords_strum_touch_y(py);
                 self.fingers[slot].y = y;
@@ -3288,6 +3325,8 @@ impl NativeModel {
             | Surface::FmSlider { .. }
             | Surface::KitSlider { .. }
             | Surface::FxSlider { .. }
+            | Surface::MixBus { .. }
+            | Surface::MixPad { .. }
             | Surface::UiTap => {}
         }
     }
@@ -3354,19 +3393,14 @@ impl NativeModel {
             return;
         }
         self.phrases[index].loop_mode = !self.phrases[index].loop_mode;
+        self.send_phrase_clip(index, outbox);
+        let dir = phrases::phrases_dir_from_env();
+        let _ = phrases::save_pad(&dir, index, &self.phrases[index], self.bpm);
         let mode = if self.phrases[index].loop_mode {
             "loop"
         } else {
             "oneshot"
         };
-        outbox.clip_load(
-            index as u8,
-            self.phrases[index].length_ticks,
-            mode,
-            self.phrases[index].events.clone(),
-        );
-        let dir = phrases::phrases_dir_from_env();
-        let _ = phrases::save_pad(&dir, index, &self.phrases[index], self.bpm);
         self.status_line = format!(
             "{} → {}",
             phrases::pad_label(index),
@@ -3481,17 +3515,7 @@ impl NativeModel {
         self.phrases[index] = pad;
         let dir = phrases::phrases_dir_from_env();
         let _ = phrases::save_pad(&dir, index, &self.phrases[index], self.bpm);
-        let mode = if self.phrases[index].loop_mode {
-            "loop"
-        } else {
-            "oneshot"
-        };
-        outbox.clip_load(
-            index as u8,
-            self.phrases[index].length_ticks,
-            mode,
-            self.phrases[index].events.clone(),
-        );
+        self.send_phrase_clip(index, outbox);
         self.pads_selected = index;
         self.pads_edit = false;
         self.hide_pads_edit_chrome();
@@ -3556,12 +3580,7 @@ impl NativeModel {
         self.phrases[index] = pad;
         let dir = phrases::phrases_dir_from_env();
         let _ = phrases::save_pad(&dir, index, &self.phrases[index], self.bpm);
-        outbox.clip_load(
-            index as u8,
-            self.phrases[index].length_ticks,
-            "oneshot",
-            self.phrases[index].events.clone(),
-        );
+        self.send_phrase_clip(index, outbox);
         self.pads_selected = index;
         self.status_line = format!("{} recorded", phrases::pad_label(index));
         self.push_log(format!("pad rec {}", phrases::pad_label(index)));
@@ -3598,28 +3617,30 @@ impl NativeModel {
         if (new_gain - old).abs() < 0.001 {
             return;
         }
-        // Rescale event velocities relative to gain change.
-        let ratio = new_gain / old.max(0.01);
-        for ev in &mut self.phrases[index].events {
-            if ev.on && ev.velocity > 0 {
-                ev.velocity = ((f32::from(ev.velocity) * ratio).round() as u32).clamp(1, 127) as u8;
-            }
-        }
         self.phrases[index].gain = new_gain;
-        let mode = if self.phrases[index].loop_mode {
-            "loop"
-        } else {
-            "oneshot"
-        };
-        outbox.clip_load(
-            index as u8,
-            self.phrases[index].length_ticks,
-            mode,
-            self.phrases[index].events.clone(),
-        );
+        outbox.clip_gain(index as u8, new_gain);
         let dir = phrases::phrases_dir_from_env();
         let _ = phrases::save_pad(&dir, index, &self.phrases[index], self.bpm);
         self.status_line = format!("{} gain {:.1}", phrases::pad_label(index), new_gain);
+        self.mark_dirty();
+    }
+
+    fn send_phrase_clip(&self, index: usize, outbox: &mut Outbox) {
+        if index >= 16 {
+            return;
+        }
+        let pad = &self.phrases[index];
+        if pad.empty {
+            outbox.clip_clear(index as u8);
+            return;
+        }
+        outbox.clip_load(
+            index as u8,
+            pad.length_ticks,
+            if pad.loop_mode { "loop" } else { "oneshot" },
+            pad.events.clone(),
+        );
+        outbox.clip_gain(index as u8, pad.gain);
     }
 
     const SYNTH_PARAM_NAMES: [&'static str; 5] = ["morph", "tone", "level", "attack", "release"];
@@ -3980,6 +4001,51 @@ impl NativeModel {
                 self.status_line = format!("drums {name} {:.2}", value);
             }
         }
+        self.mark_dirty();
+    }
+
+    fn mix_slider_value(track: Rect, py: i32) -> f32 {
+        let y = 1.0 - ((py - track.y) as f32 / track.h.max(1) as f32);
+        y.clamp(0.0, 1.0)
+    }
+
+    fn apply_mix_bus(&mut self, index: usize, py: i32, outbox: &mut Outbox) {
+        let track = self.layout.mix_bus_slider(index);
+        let t = Self::mix_slider_value(track, py);
+        match index {
+            Layout::MIX_LIVE => {
+                self.synth_params[2] = t;
+                outbox.synth("level", t);
+                self.status_line = format!("LIVE {:.2}", t);
+            }
+            Layout::MIX_KIT => {
+                self.drum_level = t;
+                outbox.synth("drum_level", t);
+                self.status_line = format!("KIT {:.2}", t);
+            }
+            Layout::MIX_SEQ => {
+                let gain = (t * 2.0).clamp(0.0, 2.0);
+                self.seq_level = gain;
+                outbox.clip_gain(SEQ_CLIP_SLOT, gain);
+                self.status_line = format!("SEQ {:.2}", gain);
+            }
+            _ => return,
+        }
+        self.mark_dirty();
+    }
+
+    fn apply_mix_pad(&mut self, index: usize, py: i32, outbox: &mut Outbox) {
+        if index >= 16 || self.phrases[index].empty {
+            return;
+        }
+        let track = self.layout.mix_pad_cell(index);
+        let t = Self::mix_slider_value(track, py);
+        let gain = (t * 2.0).clamp(0.1, 2.0);
+        self.phrases[index].gain = gain;
+        outbox.clip_gain(index as u8, gain);
+        let dir = phrases::phrases_dir_from_env();
+        let _ = phrases::save_pad(&dir, index, &self.phrases[index], self.bpm);
+        self.status_line = format!("{} {:.1}", phrases::pad_label(index), gain);
         self.mark_dirty();
     }
 
@@ -4880,6 +4946,7 @@ impl NativeModel {
                 outbox.tempo(self.seq.bpm);
                 self.bpm = self.seq.bpm;
                 outbox.clip_load(SEQ_CLIP_SLOT, length_ticks, "loop", events);
+                outbox.clip_gain(SEQ_CLIP_SLOT, self.seq_level);
                 if launch {
                     outbox.clip_launch(SEQ_CLIP_SLOT, "bar");
                 }
@@ -5818,6 +5885,7 @@ impl NativeModel {
         outbox.tempo(bpm);
         let mode = if self.song_loop { "loop" } else { "oneshot" };
         outbox.clip_load(SONG_CLIP_SLOT, length_ticks, mode, events);
+        outbox.clip_gain(SONG_CLIP_SLOT, self.seq_level);
         outbox.clip_launch(SONG_CLIP_SLOT, "bar");
         self.song_playing = true;
         self.bpm = bpm.clamp(40.0, 240.0);
@@ -7408,6 +7476,144 @@ mod tests {
             "expected drum_level, got {batch:?}"
         );
         assert!(model.drum_level < 0.1);
+    }
+
+    #[test]
+    fn mix_live_sends_keys_level() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Mix);
+        let mut out = Outbox::new();
+        let track = model.layout.mix_bus_slider(Layout::MIX_LIVE);
+        model.finger_down(1, track.x + 8, track.y + 4, &mut out);
+        let batch = out.take();
+        assert!(
+            batch.iter().any(|r| matches!(
+                r,
+                Request::Synth { param, value, .. }
+                    if param == "level" && *value > 0.9
+            )),
+            "expected LIVE level, got {batch:?}"
+        );
+        assert!(model.synth_params[2] > 0.9);
+    }
+
+    #[test]
+    fn mix_kit_sends_drum_level() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Mix);
+        let mut out = Outbox::new();
+        let track = model.layout.mix_bus_slider(Layout::MIX_KIT);
+        model.finger_down(1, track.x + 8, track.y + track.h - 4, &mut out);
+        let batch = out.take();
+        assert!(
+            batch.iter().any(|r| matches!(
+                r,
+                Request::Synth { param, value, .. }
+                    if param == "drum_level" && *value < 0.1
+            )),
+            "expected KIT drum_level, got {batch:?}"
+        );
+        assert!(model.drum_level < 0.1);
+    }
+
+    #[test]
+    fn mix_seq_sends_clip_gain_on_seq_slot() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Mix);
+        let mut out = Outbox::new();
+        let track = model.layout.mix_bus_slider(Layout::MIX_SEQ);
+        model.finger_down(1, track.x + 8, track.y + 4, &mut out);
+        let batch = out.take();
+        assert!(
+            batch.iter().any(|r| matches!(
+                r,
+                Request::ClipGain { slot, value }
+                    if *slot == SEQ_CLIP_SLOT && *value > 1.8
+            )),
+            "expected SEQ clip_gain, got {batch:?}"
+        );
+        assert!(model.seq_level > 1.8);
+    }
+
+    #[test]
+    fn mix_pad_sends_clip_gain_without_reloading() {
+        let dir = std::env::temp_dir().join(format!("pidi-mix-pad-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        std::env::set_var("PIDI_PHRASES_DIR", &dir);
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Mix);
+        model.phrases[0] = phrases::PhrasePad {
+            empty: false,
+            length_ticks: 1920,
+            events: vec![WireClipEvent {
+                tick: 0,
+                on: true,
+                channel: 0,
+                note: 60,
+                velocity: 100,
+            }],
+            gain: 1.0,
+            ..phrases::PhrasePad::default()
+        };
+        model.phrases[0].empty = false;
+        let mut out = Outbox::new();
+        let cell = model.layout.mix_pad_cell(0);
+        model.finger_down(1, cell.x + 4, cell.y + 4, &mut out);
+        let batch = out.take();
+        assert!(
+            batch.iter().any(|r| matches!(
+                r,
+                Request::ClipGain { slot: 0, value } if *value > 1.5
+            )),
+            "expected pad clip_gain, got {batch:?}"
+        );
+        assert!(
+            batch.iter().all(|r| !matches!(r, Request::ClipLoad { .. })),
+            "MIX must not rewrite clip events: {batch:?}"
+        );
+        assert!(model.phrases[0].gain > 1.5);
+        assert_eq!(model.phrases[0].events[0].velocity, 100);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pads_vol_sends_clip_gain_not_clip_load() {
+        let dir = std::env::temp_dir().join(format!("pidi-mix-vol-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        std::env::set_var("PIDI_PHRASES_DIR", &dir);
+        let mut model = NativeModel::new();
+        model.pads_edit = true;
+        model.pads_selected = 0;
+        model.phrases[0] = phrases::PhrasePad {
+            empty: false,
+            length_ticks: 1920,
+            events: vec![WireClipEvent {
+                tick: 0,
+                on: true,
+                channel: 0,
+                note: 60,
+                velocity: 80,
+            }],
+            gain: 1.0,
+            ..phrases::PhrasePad::default()
+        };
+        model.phrases[0].empty = false;
+        let mut out = Outbox::new();
+        model.nudge_pad_gain(phrases::PHRASE_GAIN_STEP, &mut out);
+        let batch = out.take();
+        assert!(
+            batch.iter().any(|r| matches!(
+                r,
+                Request::ClipGain { slot: 0, value } if (*value - 1.1).abs() < 1e-4
+            )),
+            "expected clip_gain 1.1, got {batch:?}"
+        );
+        assert!(
+            batch.iter().all(|r| !matches!(r, Request::ClipLoad { .. })),
+            "V+/- must not rewrite clip events: {batch:?}"
+        );
+        assert_eq!(model.phrases[0].events[0].velocity, 80);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

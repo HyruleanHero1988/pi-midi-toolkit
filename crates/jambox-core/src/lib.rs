@@ -21,12 +21,16 @@ mod engine;
 mod fm;
 mod fx;
 mod kaoss;
+mod mix;
 mod repeat;
 mod transport;
 mod voice;
 mod wavetable;
 
-pub use clip::{Clip, ClipEvent, ClipEventKind, ClipSlot, LaunchMode, Sequencer, MAX_CLIPS};
+pub use clip::{
+    Clip, ClipEvent, ClipEventKind, ClipSlot, LaunchMode, Sequencer, MAX_CLIPS, SEQ_CLIP_SLOT,
+};
+pub use mix::MixSource;
 pub use command::{
     Command, EmitMode, FxParam, FxTarget, ScheduledCommand, SynthParam, MAX_BLOCK_COMMANDS,
 };

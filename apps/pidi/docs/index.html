@@ -157,6 +157,7 @@
     <a href="#songs">SONGS</a>
     <a href="#presets">PRESETS</a>
     <a href="#fx">FX</a>
+    <a href="#mix">MIX</a>
     <a href="#settings">SETTINGS</a>
     <a href="#log">LOG</a>
     <a href="#map">MAP</a>
@@ -171,7 +172,7 @@
       <table>
         <tr><th>PiDI</th><td>Brand. Not a button.</td></tr>
         <tr><th>&lt; BACK</th><td>Previous mode when there is history.</td></tr>
-        <tr><th>HOME</th><td>3×3 launcher for every performance mode.</td></tr>
+        <tr><th>HOME</th><td>5×3 launcher for every performance mode (twelve tiles, no scroll).</td></tr>
         <tr><th>POWER</th><td>Shutdown / reboot / SCREEN OFF / blanking timeout. Kiosk-safe — no desktop power UI.</td></tr>
         <tr><th>SYN SEQ PAD KAO CHD</th><td>Jam shortcuts. Visible while you are in those five modes.</td></tr>
       </table>
@@ -183,12 +184,14 @@
       <p class="lede">Launcher. New screens get a tile here instead of another persistent tab.</p>
       <figure>
         <img src="screens/00-home.png" alt="HOME 3x3 launcher tiles" width="800" height="480" />
-        <figcaption>00 — HOME (3×3). LOG and MAP live under SETTINGS.</figcaption>
+        <figcaption>00 — HOME (5×3). LOG and MAP live under SETTINGS.</figcaption>
       </figure>
       <table>
         <tr><th>SYNTH / DRUMS / SEQ / PADS / KAOSS / CHORDS</th><td>Performance cluster. SYN SEQ PAD KAO CHD also stay as jam tabs.</td></tr>
         <tr><th>SONGS</th><td>Play Standard MIDI Files locally and/or USB→DIN.</td></tr>
         <tr><th>PRESETS</th><td>Eight named slots for a session snapshot, plus FACTORY.</td></tr>
+        <tr><th>FX</th><td>Inserts plus keys vs kit trims.</td></tr>
+        <tr><th>MIX</th><td>LIVE / KIT / SEQ buses and per-pad clip faders.</td></tr>
         <tr><th>SETTINGS</th><td>WIFI, UPDATE, FONT, plus tiles through to LOG and MAP. Mix/insert FX live on the FX tile.</td></tr>
       </table>
     </section>
@@ -498,6 +501,22 @@
         <tr><th>DRIVE DELAY REVERB FLANGE</th><td>Insert mix. Voice flange mirrors SYNTH FLANGE; bus flange is independent global wet.</td></tr>
         <tr><th>LEVEL</th><td>Melody / keys bus. Same fader as SYNTH LEVEL. Does not duck the kit.</td></tr>
         <tr><th>DRUMS</th><td>Shared kit bus trim. Balance drums against melodies here without opening DRUM MODE.</td></tr>
+      </table>
+      <p class="note">Pad vs pad and SEQ vs live sit on the MIX page. FX stays inserts plus the two live buses.</p>
+    </section>
+
+    <section class="screen" id="mix">
+      <h2>MIX</h2>
+      <p class="lede">First mixer slice: live keys, live kit, the running sequence, and each phrase pad. Clip faders do not rewrite MIDI velocity.</p>
+      <figure>
+        <img src="screens/26-mix.png" alt="MIX screen with LIVE KIT SEQ buses and 16 pad faders" width="800" height="480" />
+        <figcaption>26 — MIX (LIVE / KIT / SEQ + pads)</figcaption>
+      </figure>
+      <table>
+        <tr><th>LIVE</th><td>Live keys (KAOSS, SYNTH, CHORDS). Same trim as FX LEVEL / SYNTH LEVEL.</td></tr>
+        <tr><th>KIT</th><td>Live drums. Same trim as FX DRUMS.</td></tr>
+        <tr><th>SEQ</th><td>The sequence / song clip (engine slot 16). Independent of pad B8.</td></tr>
+        <tr><th>A1–B8</th><td>Per-pad clip gain (0.1–2.0). Empty pads are inert. V− / V+ on PADS EDIT writes the same gain.</td></tr>
       </table>
     </section>
 

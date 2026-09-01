@@ -123,7 +123,7 @@ pub fn load_pad(path: &Path, bpm: f32) -> Option<PhrasePad> {
             on: e.on,
             channel: e.channel & 0x0f,
             note: e.note & 0x7f,
-            velocity: scale_velocity(e.velocity, gain),
+            velocity: e.velocity.min(127),
         })
         .collect();
     events.sort_by_key(|e| e.tick);
@@ -160,7 +160,7 @@ pub fn save_pad(dir: &Path, index: usize, pad: &PhrasePad, bpm: f32) -> bool {
         return false;
     }
     let bpm = bpm.max(1.0);
-    // Store unscaled velocities (divide gain back out) so gain remains editable.
+    // Velocities stay as recorded; MIX / V± send `clip_gain` instead of rewriting MIDI.
     let events: Vec<FileEvent> = pad
         .events
         .iter()
@@ -169,7 +169,7 @@ pub fn save_pad(dir: &Path, index: usize, pad: &PhrasePad, bpm: f32) -> bool {
             on: e.on,
             channel: e.channel,
             note: e.note,
-            velocity: unscale_velocity(e.velocity, pad.gain),
+            velocity: e.velocity,
         })
         .collect();
     let file = FilePhrase {
@@ -253,14 +253,6 @@ pub fn scale_velocity(vel: u8, gain: f32) -> u8 {
         .clamp(1, 127) as u8
 }
 
-fn unscale_velocity(vel: u8, gain: f32) -> u8 {
-    if vel == 0 {
-        return 0;
-    }
-    let g = gain.clamp(0.1, 2.0);
-    ((f32::from(vel) / g).round() as u32).clamp(1, 127) as u8
-}
-
 pub fn pad_label(cell: usize) -> String {
     let c = cell.min(15);
     let bank = if c < 8 { 'A' } else { 'B' };
@@ -327,6 +319,34 @@ mod tests {
         assert!(save_pad(&dir, 0, &pad, 120.0));
         let round = load_pad(&path, 120.0).unwrap();
         assert_eq!(round.events.len(), 2);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pad_gain_is_metadata_not_velocity() {
+        let dir = std::env::temp_dir().join(format!("pidi-phrase-gain-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let mut pad = PhrasePad {
+            empty: false,
+            length_ticks: 1920,
+            length_secs: 1.0,
+            events: vec![WireClipEvent {
+                tick: 0,
+                on: true,
+                channel: 0,
+                note: 60,
+                velocity: 100,
+            }],
+            gain: 2.0,
+            ..PhrasePad::default()
+        };
+        pad.empty = false;
+        assert!(save_pad(&dir, 0, &pad, 120.0));
+        let loaded = load_pad(&pad_path(&dir, 0), 120.0).unwrap();
+        assert!((loaded.gain - 2.0).abs() < 1e-6);
+        assert_eq!(loaded.events[0].velocity, 100);
+        assert_eq!(scale_velocity(64, 2.0), 127);
         let _ = fs::remove_dir_all(&dir);
     }
 
