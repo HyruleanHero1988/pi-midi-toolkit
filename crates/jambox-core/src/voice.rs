@@ -3,9 +3,9 @@
 //! Voices are grouped by the wavetable they play, because that group is also the
 //! FX insert slot: melody FX on `saw` must not wet a dry kit (see `PLAN.md`).
 
+use crate::clip::MAX_CLIPS;
 use crate::mix::MixSource;
 use crate::wavetable::{TABLE_MASK, TABLE_SIZE};
-use crate::clip::MAX_CLIPS;
 
 /// Fixed polyphony. Sized for Pi 2; the array is allocated once.
 pub const MAX_VOICES: usize = 16;
@@ -19,6 +19,12 @@ struct Voice {
     group: usize,
     /// Live keys vs a clip slot (MIX trims).
     mix: MixSource,
+    /// Clip / SEQ / song playback — isolated from the live tone knob.
+    recorded: bool,
+    /// Baked brightness for recorded voices (`1` = open / bypass).
+    tone: f32,
+    tone_lp: f32,
+    tone_bp: f32,
     phase: f64,
     amp: f32,
     target_amp: f32,
@@ -34,6 +40,10 @@ impl Voice {
             note: 0,
             group: 0,
             mix: MixSource::Live,
+            recorded: false,
+            tone: 1.0,
+            tone_lp: 0.0,
+            tone_bp: 0.0,
             phase: 0.0,
             amp: 0.0,
             target_amp: 0.0,
@@ -54,6 +64,12 @@ pub struct VoiceContext {
     /// Live-keys MIX trim. Clip voices use `clip_gains`.
     pub live_gain: f32,
     pub clip_gains: [f32; MAX_CLIPS],
+    /// Live tone knob (0 dark … 1 open). Recorded voices ignore this.
+    pub live_tone: f32,
+    pub tone_lfo_amount: f32,
+    pub tone_lfo_rate_hz: f32,
+    /// Phase at the start of this span; every live voice walks the same LFO.
+    pub tone_lfo_phase: f64,
 }
 
 /// Fixed-size voice allocator and renderer.
@@ -85,7 +101,7 @@ impl VoicePool {
 
     /// Start (or retrigger) a live note on `group`'s wavetable.
     pub fn note_on(&mut self, channel: u8, note: u8, velocity: u8, group: usize) {
-        self.note_on_mix(channel, note, velocity, group, MixSource::Live);
+        self.start_note(channel, note, velocity, group, MixSource::Live, false, 1.0);
     }
 
     pub fn note_on_mix(
@@ -96,17 +112,47 @@ impl VoicePool {
         group: usize,
         mix: MixSource,
     ) {
+        let recorded = matches!(mix, MixSource::Clip(_));
+        self.start_note(channel, note, velocity, group, mix, recorded, 1.0);
+    }
+
+    /// Start a clip / SEQ / song note. `tone` is baked brightness (1 = open).
+    pub fn note_on_recorded(
+        &mut self,
+        channel: u8,
+        note: u8,
+        velocity: u8,
+        group: usize,
+        tone: f32,
+        mix: MixSource,
+    ) {
+        self.start_note(channel, note, velocity, group, mix, true, tone);
+    }
+
+    fn start_note(
+        &mut self,
+        channel: u8,
+        note: u8,
+        velocity: u8,
+        group: usize,
+        mix: MixSource,
+        recorded: bool,
+        tone: f32,
+    ) {
         if velocity == 0 {
-            self.note_off(channel, note);
+            self.release_note(channel, note, recorded);
             return;
         }
         self.serial = self.serial.wrapping_add(1);
         let target = (velocity as f32 / 127.0) * self.voice_amp;
 
-        if let Some(slot) = self.find_playing(channel, note) {
+        if let Some(slot) = self.find_playing(channel, note, recorded) {
             let v = &mut self.voices[slot];
             v.group = group;
             v.mix = mix;
+            v.tone = tone.clamp(0.0, 1.0);
+            v.tone_lp = 0.0;
+            v.tone_bp = 0.0;
             v.phase = 0.0;
             v.amp = 0.0;
             v.target_amp = target;
@@ -122,6 +168,10 @@ impl VoicePool {
             note,
             group,
             mix,
+            recorded,
+            tone: tone.clamp(0.0, 1.0),
+            tone_lp: 0.0,
+            tone_bp: 0.0,
             phase: 0.0,
             amp: 0.0,
             target_amp: target,
@@ -131,7 +181,15 @@ impl VoicePool {
     }
 
     pub fn note_off(&mut self, channel: u8, note: u8) {
-        if let Some(slot) = self.find_playing(channel, note) {
+        self.release_note(channel, note, false);
+    }
+
+    pub fn note_off_recorded(&mut self, channel: u8, note: u8) {
+        self.release_note(channel, note, true);
+    }
+
+    fn release_note(&mut self, channel: u8, note: u8, recorded: bool) {
+        if let Some(slot) = self.find_playing(channel, note, recorded) {
             let v = &mut self.voices[slot];
             v.releasing = true;
             v.target_amp = 0.0;
@@ -153,10 +211,14 @@ impl VoicePool {
         self.voices = [Voice::silent(); MAX_VOICES];
     }
 
-    fn find_playing(&self, channel: u8, note: u8) -> Option<usize> {
-        self.voices
-            .iter()
-            .position(|v| v.active && !v.releasing && v.channel == channel && v.note == note)
+    fn find_playing(&self, channel: u8, note: u8, recorded: bool) -> Option<usize> {
+        self.voices.iter().position(|v| {
+            v.active
+                && !v.releasing
+                && v.recorded == recorded
+                && v.channel == channel
+                && v.note == note
+        })
     }
 
     fn free_slot(&self) -> Option<usize> {
@@ -201,19 +263,54 @@ impl VoicePool {
         out: &mut [f32],
         ctx: VoiceContext,
     ) -> bool {
+        let mut unused = [0.0f32; 0];
+        self.render_group_split(group, table, out, &mut unused, ctx)
+    }
+
+    /// Live voices → `live`; clip / SEQ / song voices → `recorded`.
+    ///
+    /// Recorded voices apply their baked tone here so the live keys-bus filter
+    /// never sees them. `recorded` may be empty (tests / live-only render).
+    pub fn render_group_split(
+        &mut self,
+        group: usize,
+        table: &[f32; TABLE_SIZE],
+        live: &mut [f32],
+        recorded: &mut [f32],
+        ctx: VoiceContext,
+    ) -> bool {
         let mut audible = false;
         let attack_step = linear_env_step(ctx.attack_sec, ctx.sample_rate);
         let release_step = linear_env_step(ctx.release_sec, ctx.sample_rate);
+        let n = live.len();
 
         for v in self.voices.iter_mut() {
             if !v.active || v.group != group {
                 continue;
             }
+            let dest = if v.recorded && recorded.len() >= n {
+                &mut recorded[..n]
+            } else {
+                &mut live[..n]
+            };
             audible = true;
             let hz = midi_to_hz(v.note) * ctx.pitch_mul as f64;
             let phase_inc = hz * TABLE_SIZE as f64 / ctx.sample_rate as f64;
+            let use_lfo = !v.recorded && ctx.tone_lfo_amount > 0.01;
+            let static_tone = if v.recorded {
+                v.tone
+            } else {
+                ctx.live_tone
+            };
+            let filter_tone = !use_lfo && static_tone < 0.985;
+            let mut tone_lp = v.tone_lp;
+            let mut tone_bp = v.tone_bp;
+            let mut lfo_phase = ctx.tone_lfo_phase;
+            let lfo_inc = std::f64::consts::TAU * ctx.tone_lfo_rate_hz.max(0.01) as f64
+                / ctx.sample_rate.max(8000.0) as f64;
+            let g = v.mix.gain(ctx.live_gain, &ctx.clip_gains);
 
-            for sample in out.iter_mut() {
+            for sample in dest.iter_mut() {
                 if v.target_amp > v.amp {
                     v.amp = (v.amp + attack_step * v.target_amp.max(0.05)).min(v.target_amp);
                 } else {
@@ -228,8 +325,26 @@ impl VoicePool {
                 let i0 = v.phase as usize & TABLE_MASK;
                 let i1 = (i0 + 1) & TABLE_MASK;
                 let frac = (v.phase - v.phase.floor()) as f32;
-                let s = table[i0] * (1.0 - frac) + table[i1] * frac;
-                let g = v.mix.gain(ctx.live_gain, &ctx.clip_gains);
+                let mut s = table[i0] * (1.0 - frac) + table[i1] * frac;
+                if use_lfo {
+                    lfo_phase += lfo_inc;
+                    if lfo_phase > std::f64::consts::TAU {
+                        lfo_phase %= std::f64::consts::TAU;
+                    }
+                    let lfo = 0.5 + 0.5 * lfo_phase.sin() as f32;
+                    let tone = (ctx.live_tone * (1.0 - ctx.tone_lfo_amount)
+                        + lfo * ctx.tone_lfo_amount)
+                        .clamp(0.0, 1.0);
+                    s = tone_svf_sample(s, tone, &mut tone_lp, &mut tone_bp, ctx.sample_rate);
+                } else if filter_tone {
+                    s = tone_svf_sample(
+                        s,
+                        static_tone,
+                        &mut tone_lp,
+                        &mut tone_bp,
+                        ctx.sample_rate,
+                    );
+                }
                 *sample += s * v.amp * g;
 
                 v.phase += phase_inc;
@@ -237,6 +352,8 @@ impl VoicePool {
                     v.phase -= TABLE_SIZE as f64;
                 }
             }
+            v.tone_lp = tone_lp;
+            v.tone_bp = tone_bp;
 
             if v.releasing && v.amp < 0.0005 {
                 *v = Voice::silent();
@@ -244,6 +361,31 @@ impl VoicePool {
         }
         audible
     }
+}
+
+/// Chamberlin SVF, one sample — same coefficients as the live keys-bus tone.
+pub(crate) fn tone_svf_sample(
+    input: f32,
+    tone: f32,
+    lp: &mut f32,
+    bp: &mut f32,
+    sample_rate: f32,
+) -> f32 {
+    let tone = tone.clamp(0.0, 1.0);
+    if tone >= 0.985 {
+        *lp = input;
+        *bp = 0.0;
+        return input;
+    }
+    let sr = sample_rate.max(8000.0);
+    let fc = 90.0 * (8000.0_f32 / 90.0).powf(tone);
+    let fc = fc.min(sr * 0.14);
+    let f = (2.0 * std::f32::consts::PI * fc / sr).sin();
+    let damp = 0.38 + 0.62 * tone;
+    *lp += f * *bp;
+    let hp = input - *lp - damp * *bp;
+    *bp += f * hp;
+    *lp
 }
 
 #[inline]
@@ -269,6 +411,10 @@ mod tests {
             release_sec: 0.010,
             live_gain: 1.0,
             clip_gains: [1.0; MAX_CLIPS],
+            live_tone: 1.0,
+            tone_lfo_amount: 0.0,
+            tone_lfo_rate_hz: 5.0,
+            tone_lfo_phase: 0.0,
         }
     }
 
@@ -330,6 +476,40 @@ mod tests {
         pool.note_on(0, 60, 100, 0);
         pool.note_on(0, 60, 120, 0);
         assert_eq!(pool.active_count(), 1);
+    }
+
+    #[test]
+    fn live_and_recorded_same_note_are_independent() {
+        let bank = WaveBank::with_builtins();
+        let mut pool = VoicePool::new();
+        pool.note_on(0, 60, 100, 0);
+        pool.note_on_recorded(0, 60, 100, 0, 1.0, MixSource::clip(0));
+        assert_eq!(pool.active_count(), 2);
+
+        pool.note_off_recorded(0, 60);
+        let mut live = vec![0.0f32; 2048];
+        let mut recorded = vec![0.0f32; 2048];
+        for _ in 0..64 {
+            live.iter_mut().for_each(|s| *s = 0.0);
+            recorded.iter_mut().for_each(|s| *s = 0.0);
+            pool.render_group_split(0, bank.table(0), &mut live, &mut recorded, ctx());
+        }
+        assert_eq!(pool.active_count(), 1, "clip note-off must not kill the live note");
+        let peak = live.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+        assert!(peak > 0.01, "live melody should still be sounding");
+    }
+
+    #[test]
+    fn recorded_voices_render_onto_the_recorded_bus() {
+        let bank = WaveBank::with_builtins();
+        let mut pool = VoicePool::new();
+        pool.note_on_recorded(0, 69, 127, 0, 1.0, MixSource::clip(0));
+        let mut live = vec![0.0f32; 256];
+        let mut recorded = vec![0.0f32; 256];
+        pool.render_group_split(0, bank.table(0), &mut live, &mut recorded, ctx());
+        assert!(live.iter().all(|s| *s == 0.0));
+        let peak = recorded.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+        assert!(peak > 0.01);
     }
 
     #[test]

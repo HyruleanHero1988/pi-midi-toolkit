@@ -60,6 +60,8 @@ pub enum Request {
         length_ticks: u32,
         #[serde(default)]
         mode: Option<String>,
+        #[serde(default)]
+        tone: Option<f32>,
         events: Vec<WireClipEvent>,
     },
     ClipClear {
@@ -373,6 +375,7 @@ pub enum Decoded {
         slot: u8,
         clip: Option<Box<Clip>>,
         mode: Option<LaunchMode>,
+        tone: Option<f32>,
     },
     /// Answer without touching audio.
     StatusRequest,
@@ -594,6 +597,7 @@ pub fn decode(request: Request) -> Result<Decoded, String> {
             slot,
             length_ticks,
             mode,
+            tone,
             events,
         } => {
             let events: Vec<ClipEvent> = events.into_iter().map(ClipEvent::from).collect();
@@ -601,12 +605,14 @@ pub fn decode(request: Request) -> Result<Decoded, String> {
                 slot,
                 clip: Some(Box::new(Clip::new(events, length_ticks))),
                 mode: mode.as_deref().map(parse_mode),
+                tone,
             }
         }
         Request::ClipClear { slot } => Decoded::ClipUpdate {
             slot,
             clip: None,
             mode: None,
+            tone: Some(1.0),
         },
         Request::ClipMode { slot, mode } => Decoded::Command(Command::SetClipMode {
             slot,
@@ -785,9 +791,15 @@ mod tests {
                 "events":[{"tick":0,"on":true,"channel":9,"note":36,"velocity":110}]}"#,
         );
         match d {
-            Decoded::ClipUpdate { slot, clip, mode } => {
+            Decoded::ClipUpdate {
+                slot,
+                clip,
+                mode,
+                tone,
+            } => {
                 assert_eq!(slot, 2);
                 assert_eq!(mode, Some(LaunchMode::Loop));
+                assert!(tone.is_none());
                 let clip = clip.expect("clip");
                 assert_eq!(clip.events().len(), 1);
                 assert_eq!(clip.length_ticks(), 3840);

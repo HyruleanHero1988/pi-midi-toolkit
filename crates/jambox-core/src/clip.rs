@@ -90,6 +90,8 @@ pub struct ClipSlot {
     clip: Option<Box<Clip>>,
     state: SlotState,
     mode: LaunchMode,
+    /// Brightness captured when the take was written. Live tone does not follow.
+    playback_tone: f32,
     held: [(u8, u8); MAX_SLOT_NOTES],
     held_len: usize,
 }
@@ -100,6 +102,7 @@ impl Default for ClipSlot {
             clip: None,
             state: SlotState::Idle,
             mode: LaunchMode::Loop,
+            playback_tone: 1.0,
             held: [(0, 0); MAX_SLOT_NOTES],
             held_len: 0,
         }
@@ -140,6 +143,14 @@ impl ClipSlot {
 
     pub fn set_mode(&mut self, mode: LaunchMode) {
         self.mode = mode;
+    }
+
+    pub fn playback_tone(&self) -> f32 {
+        self.playback_tone
+    }
+
+    pub fn set_playback_tone(&mut self, tone: f32) {
+        self.playback_tone = tone.clamp(0.0, 1.0);
     }
 
     pub fn is_active(&self) -> bool {

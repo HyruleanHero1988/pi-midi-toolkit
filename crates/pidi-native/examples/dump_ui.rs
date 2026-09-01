@@ -158,6 +158,28 @@ fn main() {
         let mut model = NativeModel::new();
         let mut ob = Outbox::new();
         model.set_mode(UiMode::Kaoss);
+        model.kaoss_picker = Some(KaossPicker::Octave);
+        model.kaoss_root_midi = 108;
+        model.kaoss_octaves = 1;
+        model.tick(1.0 / 60.0, &mut ob);
+        dump(&model, out.join("kaoss_octave_picker.ppm"));
+    }
+    {
+        let mut model = NativeModel::new();
+        let mut ob = Outbox::new();
+        model.set_mode(UiMode::Kaoss);
+        model.kaoss_root_midi = 108;
+        model.kaoss_octaves = 1;
+        let pad = model.layout.kaoss;
+        model.finger_down(1, pad.x + pad.w - 8, pad.y + pad.h / 2, &mut ob);
+        model.tick(1.0 / 60.0, &mut ob);
+        dump(&model, out.join("kaoss_c8_one_octave.ppm"));
+        model.finger_up(1, &mut ob);
+    }
+    {
+        let mut model = NativeModel::new();
+        let mut ob = Outbox::new();
+        model.set_mode(UiMode::Kaoss);
         model.kaoss_program = kaoss_ui::KAOSS_PROGRAMS
             .iter()
             .position(|p| p.id == "wah")

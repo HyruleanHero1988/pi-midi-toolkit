@@ -328,14 +328,14 @@
         <tr><th>HOLD</th><td>Freeze the last XY after lift (Kaossilator-style). On an FX program it also keeps the wet mix.</td></tr>
         <tr><th>BPM −1 / +1 / −5 / +5</th><td>Gate arp tempo.</td></tr>
         <tr><th>FULL</th><td>Hide the control strip so the pad fills the body. Hold still on the bottom edge (~0.7s) to leave.</td></tr>
-        <tr><th>SET</th><td>KAOSS settings (viz, color, OUT, channel).</td></tr>
+        <tr><th>SET</th><td>KAOSS settings (pad FX destination, viz, color, OUT, channel). The button shows the current pad-FX target (SET VOX / SET DRM / SET BOTH).</td></tr>
       </table>
       <p class="note">Factory MIDI matches the original Kaoss Pad: <strong>CC#12 = X</strong>, <strong>CC#13 = Y</strong>, <strong>CC#92 = pad touch</strong>. Playing while SEQ is recording captures the pad notes.</p>
     </section>
 
     <section class="screen" id="kaoss-programs">
       <h2>KAOSS programs</h2>
-      <p class="lede">PROG is two families. Note programs play the scale on X. FX programs do not start a note — they sculpt whatever is already sounding.</p>
+      <p class="lede">PROG is two families. Note programs play the scale on X. FX programs do not start a note — they sculpt the synth voice (not the drum kit).</p>
       <figure>
         <img src="screens/20-kaoss-programs.png" alt="KAOSS program picker" width="800" height="480" />
         <figcaption>20 — PROG picker (SHOW ALL). Curated set is LEAD / MORPH / VIB / FILTER / ECHO / DRIVE / FLANGE / BEND / WAH.</figcaption>
@@ -352,12 +352,12 @@
       <h3>FX programs — no pitch from the pad</h3>
       <table>
         <tr><th>FILTER</th><td>X = TONE, Y = MORPH (momentary unless HOLD).</td></tr>
-        <tr><th>ECHO</th><td>X = delay time, Y = delay mix.</td></tr>
-        <tr><th>DRIVE</th><td>X = drive, Y = reverb.</td></tr>
+        <tr><th>ECHO</th><td>X = delay time, Y = delay mix. Lands on the SET pad-FX target (voice / drums / both).</td></tr>
+        <tr><th>DRIVE</th><td>X = drive, Y = reverb. Same pad-FX target as ECHO.</td></tr>
         <tr><th>FLANGE</th><td>X = flanger rate, Y = flanger mix. Curated. Latch a note first (LEAD + HOLD), then pick FLANGE.</td></tr>
         <tr><th>SPACE / RESO / WASH / CRUSH / SWEEP / SWELL</th><td>SHOW ALL extras — delay/reverb/drive pairs. Lift restores unless HOLD is on.</td></tr>
       </table>
-      <p class="note"><strong>FILTER / FLANGE / ECHO do not play notes.</strong> If you open them on an empty pad you hear silence. Latch a sound first, then sculpt.</p>
+      <p class="note"><strong>FILTER / FLANGE / ECHO do not play notes.</strong> If you open them on an empty pad you hear silence. Latch a sound first, then sculpt. Pad FX follows SET → VOICE / DRUMS / BOTH. For <em>different</em> reverb on keys vs kit, use FX MODE sliders (TARGET: VOICE vs TARGET: DRUMS) — those inserts are independent.</p>
     </section>
 
     <section class="screen" id="kaoss-scales">
@@ -394,7 +394,8 @@
         <figcaption>15 — KAOSS settings</figcaption>
       </figure>
       <table>
-        <tr><th>WIPE FX</th><td>Zero bus/voice FX and restore tone/morph defaults.</td></tr>
+        <tr><th>VOICE / DRUMS / BOTH</th><td>Where pad FX (echo, reverb, drive, flange) lands. Default VOICE — kit stays dry. DRUMS writes the shared kit bus. BOTH writes the same XY to both inserts. Different amounts still come from FX MODE sliders.</td></tr>
+        <tr><th>WIPE FX</th><td>Zero voice + kit + leftover bus wet and restore tone/morph defaults.</td></tr>
         <tr><th>CURATED / ALL SCALES</th><td>Short vs factory PROG and SCALE lists.</td></tr>
         <tr><th>AXES / GRID</th><td>X/Y labels and grid lines on the pad.</td></tr>
         <tr><th>PAD VIZ</th><td>CELLS (LED matrix) or GLOW (soft bloom).</td></tr>

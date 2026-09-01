@@ -321,8 +321,18 @@ pub fn handle_line(
                 }
             }
         }
-        Ok(Decoded::ClipUpdate { slot, clip, mode }) => {
-            if control.send_clip(ClipUpdate { slot, clip, mode }) {
+        Ok(Decoded::ClipUpdate {
+            slot,
+            clip,
+            mode,
+            tone,
+        }) => {
+            if control.send_clip(ClipUpdate {
+                slot,
+                clip,
+                mode,
+                tone,
+            }) {
                 Response::Ok
             } else {
                 cache.dropped_commands += 1;

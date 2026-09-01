@@ -89,7 +89,8 @@ fn apply_tone_lowpass(buf: &mut [f32], tone: f32, lp: &mut f32, bp: &mut f32, sa
 
 /// Same SVF as [`apply_tone_lowpass`], with a per-sample sine on cutoff.
 ///
-/// `amount` 0 = the sticky tone knob; 1 = the LFO owns brightness (0..1).
+/// Live WAH now runs per voice; this helper stays as the coefficient reference.
+#[allow(dead_code)]
 fn apply_tone_lowpass_lfo(
     buf: &mut [f32],
     base_tone: f32,
@@ -238,8 +239,6 @@ pub struct JamboxEngine {
     tone_lfo_rate_hz: f32,
     tone_lfo_phase: f64,
     bend_semis: f32,
-    tone_lp: f32,
-    tone_bp: f32,
     clip_emit: EmitMode,
     kaoss_emit: EmitMode,
     status: EngineStatus,
@@ -306,8 +305,6 @@ impl JamboxEngine {
             tone_lfo_rate_hz: tone_lfo_hz_from_unit(0.5),
             tone_lfo_phase: 0.0,
             bend_semis: 0.0,
-            tone_lp: 0.0,
-            tone_bp: 0.0,
             clip_emit: EmitMode::Both,
             kaoss_emit: EmitMode::Local,
             status: EngineStatus::default(),
@@ -435,10 +432,10 @@ impl JamboxEngine {
                         velocity,
                     } => (
                         Command::ClipNoteOn {
-                            slot: ev.slot as u8,
                             channel,
                             note,
                             velocity,
+                            slot: ev.slot as u8,
                         },
                         MidiEvent::NoteOn {
                             channel,
@@ -447,7 +444,7 @@ impl JamboxEngine {
                         },
                     ),
                     ClipEventKind::NoteOff { channel, note } => (
-                        Command::NoteOff { channel, note },
+                        Command::ClipNoteOff { channel, note },
                         MidiEvent::NoteOff {
                             channel,
                             note,
@@ -563,8 +560,6 @@ impl JamboxEngine {
             tone_lfo_rate_hz,
             tone_lfo_phase,
             bend_semis,
-            tone_lp,
-            tone_bp,
             ..
         } = self;
 
@@ -592,11 +587,23 @@ impl JamboxEngine {
             release_sec: *release_sec,
             live_gain: *level,
             clip_gains: *clip_gain,
+            live_tone: *tone,
+            tone_lfo_amount: *tone_lfo_amount,
+            tone_lfo_rate_hz: *tone_lfo_rate_hz,
+            tone_lfo_phase: *tone_lfo_phase,
         };
+        if *tone_lfo_amount > 0.01 {
+            *tone_lfo_phase +=
+                std::f64::consts::TAU * *tone_lfo_rate_hz as f64 * n as f64 / sr as f64;
+            if *tone_lfo_phase > std::f64::consts::TAU {
+                *tone_lfo_phase %= std::f64::consts::TAU;
+            }
+        }
 
         drums.set_mix_gains(*drum_level, *clip_gain);
 
-        // Keys: one FX insert per wavetable group.
+        // Keys: one FX insert per wavetable group. Live tone is applied per
+        // voice so a pad / SEQ layer keeps the brightness it was written with.
         let mut groups = [0usize; MAX_VOICES];
         let group_count = voices.active_groups(&mut groups);
         for &group in groups.iter().take(group_count) {
@@ -615,28 +622,10 @@ impl JamboxEngine {
 
         if *fm_enabled || fm.active_count() > 0 {
             group_buf[..n].iter_mut().for_each(|s| *s = 0.0);
-            fm.render(&mut group_buf[..n], sr, pitch_mul);
-            let fm_g = *level;
+            fm.render_split(&mut group_buf[..n], &mut [], ctx);
             for i in 0..n {
-                key_bus[i] += group_buf[i] * fm_g;
+                key_bus[i] += group_buf[i];
             }
-        }
-
-        // Tone (brightness) is a keys-only resonant lowpass; drums have their own tone macro.
-        // Kaoss WAH overlays a sine on cutoff without rewriting the sticky tone knob.
-        if *tone_lfo_amount > 0.01 {
-            apply_tone_lowpass_lfo(
-                &mut key_bus[..n],
-                *tone,
-                *tone_lfo_amount,
-                *tone_lfo_rate_hz,
-                tone_lfo_phase,
-                tone_lp,
-                tone_bp,
-                sr,
-            );
-        } else {
-            apply_tone_lowpass(&mut key_bus[..n], *tone, tone_lp, tone_bp, sr);
         }
 
         // Drums: per-model insert, then the shared kit bus.
@@ -687,16 +676,42 @@ impl JamboxEngine {
                 note,
                 velocity,
             } => self.sound_on(channel, note, velocity, MixSource::Live),
-            Command::ClipNoteOn {
-                slot,
-                channel,
-                note,
-                velocity,
-            } => self.sound_on(channel, note, velocity, MixSource::clip(slot as usize)),
             Command::NoteOff { channel, note } => {
                 if channel != DRUM_CHANNEL {
                     self.voices.note_off(channel, note);
                     self.fm.note_off(channel, note);
+                }
+            }
+            Command::ClipNoteOn {
+                channel,
+                note,
+                velocity,
+                slot,
+            } => {
+                let mix = MixSource::clip(slot as usize);
+                let tone = self
+                    .sequencer
+                    .slot(slot as usize)
+                    .map(|s| s.playback_tone())
+                    .unwrap_or(1.0);
+                if velocity == 0 {
+                    self.voices.note_off_recorded(channel, note);
+                    self.fm.note_off_recorded(channel, note);
+                } else if channel == DRUM_CHANNEL {
+                    self.drums
+                        .trigger_mix(drum_model_for_note(note), velocity, mix);
+                } else if self.fm_enabled {
+                    self.fm.note_on_recorded(channel, note, velocity, tone);
+                } else {
+                    let group = self.bank.nearer_index();
+                    self.voices
+                        .note_on_recorded(channel, note, velocity, group, tone, mix);
+                }
+            }
+            Command::ClipNoteOff { channel, note } => {
+                if channel != DRUM_CHANNEL {
+                    self.voices.note_off_recorded(channel, note);
+                    self.fm.note_off_recorded(channel, note);
                 }
             }
             Command::AllNotesOff => {
@@ -764,7 +779,8 @@ impl JamboxEngine {
                 let n = self.sequencer.stop_all(&mut flush);
                 for ev in flush.iter().take(n) {
                     if let ClipEventKind::NoteOff { channel, note } = ev.kind {
-                        self.voices.note_off(channel, note);
+                        self.voices.note_off_recorded(channel, note);
+                        self.fm.note_off_recorded(channel, note);
                     }
                 }
             }
@@ -1877,5 +1893,161 @@ mod tests {
         );
         assert!((e.drum_macros_for(DrumModel::Kick).pitch - 0.1).abs() < 1e-6);
         assert!((e.drum_macros_for(DrumModel::Snare).pitch - 0.1).abs() < 1e-6);
+    }
+
+    fn energy(buf: &[f32]) -> f32 {
+        buf.iter().map(|s| s * s).sum()
+    }
+
+    fn launch_held_clip(e: &mut JamboxEngine, note: u8, tone: f32) {
+        let clip = Clip::new(
+            vec![ClipEvent {
+                tick: 0,
+                kind: ClipEventKind::NoteOn {
+                    channel: 0,
+                    note,
+                    velocity: 120,
+                },
+            }],
+            PPQ * 8,
+        );
+        let slot = e.sequencer_mut().slot_mut(0).unwrap();
+        slot.set_clip(Some(clip));
+        slot.set_playback_tone(tone);
+        apply_now(
+            e,
+            Command::LaunchClip {
+                slot: 0,
+                quantize: Quantize::Off,
+            },
+        );
+    }
+
+    #[test]
+    fn live_tone_knob_does_not_rewrite_a_clip_loop() {
+        let mut clip_only = engine();
+        launch_held_clip(&mut clip_only, 72, 1.0);
+        apply_now(
+            &mut clip_only,
+            Command::SetSynth {
+                param: SynthParam::Tone,
+                value: 1.0,
+            },
+        );
+        let mut bright = vec![0.0f32; 2048];
+        let mut midi = MidiOutSink::new();
+        clip_only.render(&mut bright, &[], &mut midi);
+        apply_now(
+            &mut clip_only,
+            Command::SetSynth {
+                param: SynthParam::Tone,
+                value: 0.0,
+            },
+        );
+        let mut dark = vec![0.0f32; 2048];
+        clip_only.render(&mut dark, &[], &mut midi);
+        let bright_e = energy(&bright);
+        let dark_e = energy(&dark);
+        assert!(bright_e > 0.1, "clip should be audible, e={bright_e}");
+        let ratio = dark_e / bright_e.max(1e-9);
+        assert!(
+            ratio > 0.7 && ratio < 1.4,
+            "live tone must not darken a pad/SEQ loop, ratio={ratio}"
+        );
+    }
+
+    #[test]
+    fn live_melody_still_follows_the_tone_knob() {
+        let mut bright = engine();
+        let mut dark = engine();
+        for (e, tone) in [(&mut bright, 1.0), (&mut dark, 0.0)] {
+            apply_now(
+                e,
+                Command::SetSynth {
+                    param: SynthParam::Tone,
+                    value: tone,
+                },
+            );
+            apply_now(
+                e,
+                Command::NoteOn {
+                    channel: 0,
+                    note: 72,
+                    velocity: 127,
+                },
+            );
+        }
+        let mut bright_buf = vec![0.0f32; 2048];
+        let mut dark_buf = vec![0.0f32; 2048];
+        let mut midi = MidiOutSink::new();
+        bright.render(&mut bright_buf, &[], &mut midi);
+        dark.render(&mut dark_buf, &[], &mut midi);
+        let bright_e = energy(&bright_buf);
+        let dark_e = energy(&dark_buf);
+        assert!(
+            dark_e < bright_e * 0.55,
+            "live melody should darken with tone, bright={bright_e} dark={dark_e}"
+        );
+    }
+
+    #[test]
+    fn clip_note_off_does_not_kill_a_live_melody_on_the_same_key() {
+        let mut e = engine();
+        launch_held_clip(&mut e, 60, 1.0);
+        apply_now(
+            &mut e,
+            Command::NoteOn {
+                channel: 0,
+                note: 60,
+                velocity: 127,
+            },
+        );
+        let mut midi = MidiOutSink::new();
+        let mut out = vec![0.0f32; 512];
+        e.render(&mut out, &[], &mut midi);
+        assert!(e.status().active_voices >= 2);
+
+        apply_now(&mut e, Command::ClipNoteOff { channel: 0, note: 60 });
+        for _ in 0..64 {
+            out.iter_mut().for_each(|s| *s = 0.0);
+            e.render(&mut out, &[], &mut midi);
+        }
+        assert_eq!(
+            e.status().active_voices, 1,
+            "live melody should keep sounding after the pad note ends"
+        );
+        assert!(peak(&out) > 0.01);
+    }
+
+    #[test]
+    fn baked_clip_tone_stays_dark_when_live_tone_opens() {
+        let mut e = engine();
+        launch_held_clip(&mut e, 84, 0.0);
+        apply_now(
+            &mut e,
+            Command::SetSynth {
+                param: SynthParam::Tone,
+                value: 1.0,
+            },
+        );
+        let mut baked_dark = vec![0.0f32; 2048];
+        let mut midi = MidiOutSink::new();
+        e.render(&mut baked_dark, &[], &mut midi);
+
+        let mut open = engine();
+        launch_held_clip(&mut open, 84, 1.0);
+        apply_now(
+            &mut open,
+            Command::SetSynth {
+                param: SynthParam::Tone,
+                value: 1.0,
+            },
+        );
+        let mut baked_open = vec![0.0f32; 2048];
+        open.render(&mut baked_open, &[], &mut midi);
+        assert!(
+            energy(&baked_dark) < energy(&baked_open) * 0.55,
+            "a pad written dark should stay darker than an open take"
+        );
     }
 }
