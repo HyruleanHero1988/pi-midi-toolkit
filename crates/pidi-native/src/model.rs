@@ -28,7 +28,7 @@ use jambox_protocol::{
 };
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, TryRecvError};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 pub const LED_COLS: usize = 12;
 pub const LED_ROWS: usize = 7;
@@ -108,6 +108,25 @@ impl RepeatDivisionChoice {
             Self::EighthTriplet => Some("1/8T"),
             Self::Sixteenth => Some("1/16"),
             Self::Triple => Some("TRIP"),
+        }
+    }
+
+    /// Seconds between hold-to-repeat hits at `bpm`.
+    pub fn interval_secs(self, bpm: f32) -> Option<f64> {
+        if !self.is_on() {
+            return None;
+        }
+        let ticks = self.as_wire_ticks();
+        Some(ticks as f64 / f64::from(jambox_core::PPQ) * 60.0 / f64::from(bpm.max(1.0)))
+    }
+
+    fn as_wire_ticks(self) -> u64 {
+        match self {
+            Self::Off | Self::Quarter => jambox_core::PPQ as u64,
+            Self::Eighth => jambox_core::PPQ as u64 / 2,
+            Self::EighthTriplet => jambox_core::PPQ as u64 / 3,
+            Self::Sixteenth => jambox_core::PPQ as u64 / 4,
+            Self::Triple => jambox_core::PPQ as u64 * 2 / 3,
         }
     }
 }
@@ -335,6 +354,8 @@ pub struct NativeModel {
     /// Per-cell touch envelope (CELLS viz) — fades in fast, out slow.
     cell_amp: [[f32; LED_COLS]; LED_ROWS],
     fingers: [Finger; MAX_FINGERS],
+    /// Next SEQ / pad-REC capture instant for a held note-repeat drum.
+    repeat_due: [Option<Instant>; MAX_FINGERS],
     next_gesture: u32,
     cells: [[u32; LED_COLS]; LED_ROWS],
     phrases_loaded: bool,
@@ -505,6 +526,7 @@ impl NativeModel {
             kaoss_ripples: Vec::new(),
             cell_amp: [[0.0; LED_COLS]; LED_ROWS],
             fingers: [Finger::silent(); MAX_FINGERS],
+            repeat_due: [None; MAX_FINGERS],
             next_gesture: 1,
             cells: [[0; LED_COLS]; LED_ROWS],
             phrases_loaded: false,
@@ -986,6 +1008,7 @@ impl NativeModel {
         }
         self.tick_kaoss_gate(outbox);
         self.tick_chords_combo_grace(dt, outbox);
+        self.capture_held_repeats_at(Instant::now());
         self.tick_screensaver(dt);
         self.poll_host_job();
         self.poll_update_job();
@@ -1977,6 +2000,7 @@ impl NativeModel {
                 }
                 self.seq.push_note(true, DRUM_CHANNEL, note, 110);
                 self.push_pad_rec(true, DRUM_CHANNEL, note, 110);
+                self.arm_repeat_capture(slot, Instant::now());
             }
             Hit::KitNoteRepeat => {
                 self.tap_ui(slot, id, gesture, px, py);
@@ -3253,6 +3277,7 @@ impl NativeModel {
                 }
                 self.seq.push_note(false, DRUM_CHANNEL, note, 0);
                 self.push_pad_rec(false, DRUM_CHANNEL, note, 0);
+                self.repeat_due[slot] = None;
             }
             Surface::SynthKey { note } => {
                 // Finger already cleared above; remaining holders keep the note.
@@ -3580,14 +3605,21 @@ impl NativeModel {
     }
 
     fn push_pad_rec(&mut self, on: bool, channel: u8, note: u8, velocity: u8) {
-        if self.pads_recording.is_none() {
-            return;
-        }
         let Some(started) = self.pad_rec_started else {
             return;
         };
+        self.push_pad_rec_at(on, channel, note, velocity, started.elapsed().as_secs_f64());
+    }
+
+    fn push_pad_rec_at(&mut self, on: bool, channel: u8, note: u8, velocity: u8, t: f64) {
+        if self.pads_recording.is_none() {
+            return;
+        }
+        if self.pad_rec_started.is_none() {
+            return;
+        }
         self.pad_rec_events.push(PadRecEvent {
-            t: started.elapsed().as_secs_f64(),
+            t: t.max(0.0),
             on,
             ch: channel & 0x0f,
             note: note & 0x7f,
@@ -3828,6 +3860,116 @@ impl NativeModel {
 
     pub fn drum_repeat_for_note(&self, note: u8) -> RepeatDivisionChoice {
         self.drum_repeat[drum_model_for_note(note).index()]
+    }
+
+    fn recording_origin(&self) -> Option<Instant> {
+        if self.seq.is_recording() {
+            self.seq.rec_origin()
+        } else if self.pads_recording.is_some() {
+            self.pad_rec_started
+        } else {
+            None
+        }
+    }
+
+    fn record_bpm(&self) -> f32 {
+        if self.seq.is_recording() {
+            self.seq.bpm
+        } else {
+            self.bpm
+        }
+    }
+
+    fn arm_repeat_capture(&mut self, slot: usize, now: Instant) {
+        self.repeat_due[slot] = None;
+        let Some(origin) = self.recording_origin() else {
+            return;
+        };
+        let Surface::Drum {
+            note,
+            repeat: true,
+        } = self.fingers[slot].surface
+        else {
+            return;
+        };
+        let Some(interval) = self.drum_repeat_for_note(note).interval_secs(self.record_bpm()) else {
+            return;
+        };
+        if interval <= 0.0 {
+            return;
+        }
+        let t = now.saturating_duration_since(origin).as_secs_f64();
+        let next = (t / interval).floor() * interval + interval;
+        self.repeat_due[slot] = Some(origin + Duration::from_secs_f64(next.max(0.0)));
+    }
+
+    fn record_repeat_hit(&mut self, note: u8, at: Instant) {
+        if self.seq.is_recording() {
+            if let Some(origin) = self.seq.rec_origin() {
+                let t = at.saturating_duration_since(origin).as_secs_f64();
+                self.seq.push_note_at(false, DRUM_CHANNEL, note, 0, t);
+                self.seq.push_note_at(true, DRUM_CHANNEL, note, 110, t);
+            }
+        }
+        if self.pads_recording.is_some() {
+            if let Some(origin) = self.pad_rec_started {
+                let t = at.saturating_duration_since(origin).as_secs_f64();
+                self.push_pad_rec_at(false, DRUM_CHANNEL, note, 0, t);
+                self.push_pad_rec_at(true, DRUM_CHANNEL, note, 110, t);
+            }
+        }
+    }
+
+    fn capture_held_repeats_at(&mut self, now: Instant) {
+        if !self.seq.is_recording() && self.pads_recording.is_none() {
+            return;
+        }
+        let Some(grid_origin) = self.recording_origin() else {
+            return;
+        };
+        let bpm = self.record_bpm();
+        let mut hits = Vec::new();
+        for slot in 0..MAX_FINGERS {
+            if !self.fingers[slot].active {
+                self.repeat_due[slot] = None;
+                continue;
+            }
+            let Surface::Drum { note, repeat } = self.fingers[slot].surface else {
+                self.repeat_due[slot] = None;
+                continue;
+            };
+            if !repeat {
+                self.repeat_due[slot] = None;
+                continue;
+            }
+            let Some(interval) = self.drum_repeat_for_note(note).interval_secs(bpm) else {
+                self.repeat_due[slot] = None;
+                continue;
+            };
+            if interval <= 0.0 {
+                self.repeat_due[slot] = None;
+                continue;
+            }
+            if self.repeat_due[slot].is_none() {
+                let t = now.saturating_duration_since(grid_origin).as_secs_f64();
+                let next = (t / interval).floor() * interval + interval;
+                self.repeat_due[slot] = Some(grid_origin + Duration::from_secs_f64(next.max(0.0)));
+            }
+            let mut due = match self.repeat_due[slot] {
+                Some(due) => due,
+                None => continue,
+            };
+            let mut n = 0u32;
+            while due <= now && n < 32 {
+                hits.push((note, due));
+                due += Duration::from_secs_f64(interval);
+                n += 1;
+            }
+            self.repeat_due[slot] = Some(due);
+        }
+        for (note, due) in hits {
+            self.record_repeat_hit(note, due);
+        }
     }
 
     pub fn edit_drum_repeat(&self) -> RepeatDivisionChoice {
@@ -7001,6 +7143,110 @@ mod tests {
             .iter()
             .all(|d| *d == RepeatDivisionChoice::Sixteenth));
         assert_eq!(model.note_repeat_button_label(), "NOTE REPEAT: 1/16");
+    }
+
+    #[test]
+    fn note_repeat_interval_matches_musical_division() {
+        assert!((RepeatDivisionChoice::Eighth.interval_secs(120.0).unwrap() - 0.25).abs() < 1e-9);
+        assert!((RepeatDivisionChoice::Sixteenth.interval_secs(120.0).unwrap() - 0.125).abs() < 1e-9);
+        assert!((RepeatDivisionChoice::Quarter.interval_secs(120.0).unwrap() - 0.5).abs() < 1e-9);
+        assert!(RepeatDivisionChoice::Off.interval_secs(120.0).is_none());
+    }
+
+    #[test]
+    fn note_repeat_drums_record_into_seq() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Drums);
+        model.bpm = 120.0;
+        model.seq.bpm = 120.0;
+        model.drum_repeat[jambox_core::DrumModel::Kick.index()] = RepeatDivisionChoice::Eighth;
+        assert!(matches!(
+            model.seq.toggle_record(),
+            crate::seq::SeqAction::Stop
+        ));
+        let origin = model.seq.rec_origin().expect("take clock");
+        let mut out = Outbox::new();
+        let kick = model.layout.kit_pad_cell(4);
+        model.finger_down(1, kick.x + 4, kick.y + 4, &mut out);
+        assert_eq!(model.seq.recorded_on_notes(), vec![36]);
+
+        model.capture_held_repeats_at(origin + Duration::from_millis(260));
+        model.capture_held_repeats_at(origin + Duration::from_millis(510));
+        let ons = model.seq.recorded_on_notes();
+        assert!(
+            ons.iter().filter(|n| **n == 36).count() >= 3,
+            "held 1/8 note-repeat should land later hits in the take, got {ons:?}"
+        );
+        let times = model.seq.recorded_on_times();
+        assert!(
+            times.windows(2).any(|w| (w[1] - w[0] - 0.25).abs() < 0.05),
+            "repeat hits should sit on the 1/8 grid, got {times:?}"
+        );
+
+        model.finger_up(1, &mut out);
+        match model.seq.toggle_record() {
+            crate::seq::SeqAction::Upload { events, .. } => {
+                let kick_ons = events.iter().filter(|e| e.on && e.note == 36).count();
+                assert!(
+                    kick_ons >= 3,
+                    "uploaded backbone should keep the repeated kicks, got {events:?}"
+                );
+            }
+            _ => panic!("expected seq upload after repeat take"),
+        }
+    }
+
+    #[test]
+    fn one_shot_drum_does_not_invent_repeat_hits_while_held() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Drums);
+        model.seq.bpm = 120.0;
+        assert!(matches!(
+            model.seq.toggle_record(),
+            crate::seq::SeqAction::Stop
+        ));
+        let origin = model.seq.rec_origin().expect("take clock");
+        let mut out = Outbox::new();
+        let kick = model.layout.kit_pad_cell(4);
+        model.finger_down(1, kick.x + 4, kick.y + 4, &mut out);
+        model.capture_held_repeats_at(origin + Duration::from_millis(510));
+        assert_eq!(model.seq.recorded_on_notes(), vec![36]);
+    }
+
+    #[test]
+    fn note_repeat_drums_record_into_pad_rec() {
+        let mut model = NativeModel::new();
+        model.pads_edit = true;
+        model.pads_selected = 0;
+        model.bpm = 120.0;
+        model.drum_repeat[jambox_core::DrumModel::Kick.index()] = RepeatDivisionChoice::Eighth;
+        let mut out = Outbox::new();
+        model.set_mode(UiMode::Pads);
+        let rec = model.layout.pads_rec;
+        model.finger_down(1, rec.x + 4, rec.y + 4, &mut out);
+        model.finger_up(1, &mut out);
+        assert!(model.pads_recording.is_some());
+        let origin = model.pad_rec_started.expect("pad rec clock");
+        model.set_mode(UiMode::Drums);
+        let kick = model.layout.kit_pad_cell(4);
+        model.finger_down(2, kick.x + 4, kick.y + 4, &mut out);
+        model.capture_held_repeats_at(origin + Duration::from_millis(260));
+        model.capture_held_repeats_at(origin + Duration::from_millis(510));
+        model.finger_up(2, &mut out);
+        model.set_mode(UiMode::Pads);
+        model.pads_edit = true;
+        model.finger_down(3, rec.x + 4, rec.y + 4, &mut out);
+        model.finger_up(3, &mut out);
+        let ons: Vec<u8> = model.phrases[0]
+            .events
+            .iter()
+            .filter(|e| e.on)
+            .map(|e| e.note)
+            .collect();
+        assert!(
+            ons.iter().filter(|n| **n == 36).count() >= 3,
+            "pad clip should capture note-repeat kicks, got {ons:?}"
+        );
     }
 
     #[test]
