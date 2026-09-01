@@ -46,6 +46,16 @@ fn main() {
         dump(&model, out.join(format!("{name}.ppm")));
     }
 
+    {
+        let mut model = NativeModel::new();
+        let mut ob = Outbox::new();
+        model.set_mode(UiMode::Seq);
+        model.seq.cue_beep = true;
+        model.seq.status = "BEEP on — clave marks loop start".into();
+        model.tick(1.0 / 60.0, &mut ob);
+        dump(&model, out.join("seq_beep_on.ppm"));
+    }
+
     // Smooth font smoke dumps (home + settings are densest labels).
     for (name, mode) in [
         ("home", UiMode::Home),

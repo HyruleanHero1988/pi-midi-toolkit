@@ -185,6 +185,9 @@ pub struct SessionState {
     /// sessions used 0 = PINK — migrated on load when style was `"mono"`.
     #[serde(default)]
     pub kaoss_mono_color: usize,
+    /// SEQ loop-start clave click (playback only).
+    #[serde(default)]
+    pub seq_cue_beep: bool,
 }
 
 fn default_kaoss_root_midi() -> u8 {
@@ -252,6 +255,7 @@ impl Default for SessionState {
             screensaver_sec: crate::screensaver::DEFAULT_TIMEOUT_SEC,
             kaoss_viz_style: default_kaoss_viz_style(),
             kaoss_mono_color: 0,
+            seq_cue_beep: false,
         }
     }
 }
@@ -309,7 +313,17 @@ mod tests {
         assert_eq!(s.song_out, OutMode::Both);
         assert_eq!(s.kaoss_out, OutMode::Local);
         assert_eq!(s.font_style, FontStyle::Retro);
+        assert!(!s.seq_cue_beep);
         assert_eq!(s.kaoss_fx_target, KaossFxTarget::Voice);
+    }
+
+    #[test]
+    fn session_roundtrip_includes_seq_cue_beep() {
+        let mut s = SessionState::default();
+        s.seq_cue_beep = true;
+        let json = serde_json::to_string(&s).unwrap();
+        let back: SessionState = serde_json::from_str(&json).unwrap();
+        assert!(back.seq_cue_beep);
     }
 
     #[test]

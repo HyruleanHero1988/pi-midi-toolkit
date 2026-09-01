@@ -217,6 +217,7 @@ The backbone is the only take that sets length; everything after it is measured 
 
 - **LEN ×2 / ÷2** grows or shrinks the sequence in whole cycles. The groove tiles underneath, so a doubled sequence lets you overdub a fill that only happens the second time around. ÷2 refuses to cut a layer that is longer than the target.
 - **OVERDUB: WRAP** (default) folds a long take back onto the same cycle, the way a drum machine does. **OVERDUB: EXTEND** instead stretches the sequence to as many whole backbone cycles as the take needs (up to 8).
+- **BEEP** (off by default) adds a clave click at the start of each loop so an even backbone still tells you where 1 is. It is playback-only — **SAVE SEQ** and **→ PAD** do not record it.
 - Layers are a stack, not one flat list, so UNDO works layer by layer. **SONGS → SAVE SEQ** exports the flattened result as `.mid`.
 - **→ PAD** copies the flattened sequence onto a phrase cell as a **LOOP**. Tap it, then tap a square or hit the matching **MPK drum pad**. PLAY view comes up so that same pad now launches the clip.
 

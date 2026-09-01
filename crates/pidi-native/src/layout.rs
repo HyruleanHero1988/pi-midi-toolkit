@@ -136,6 +136,7 @@ pub enum Hit {
     SeqLenDouble,
     SeqLenHalve,
     SeqExtend,
+    SeqCue,
     SeqStop,
     SeqClear,
     SeqBpmUp,
@@ -295,6 +296,7 @@ pub struct Layout {
     pub seq_len_double: Rect,
     pub seq_len_halve: Rect,
     pub seq_extend: Rect,
+    pub seq_cue: Rect,
     pub seq_stop: Rect,
     pub seq_clear: Rect,
     pub seq_to_pad: Rect,
@@ -855,7 +857,13 @@ impl Layout {
             seq_extend: Rect {
                 x: 364,
                 y: HUD_H + 202,
-                w: 424,
+                w: 220,
+                h: 44,
+            },
+            seq_cue: Rect {
+                x: 592,
+                y: HUD_H + 202,
+                w: 196,
                 h: 44,
             },
             seq_stop: Rect {
@@ -2810,6 +2818,9 @@ impl Layout {
         if self.seq_extend.contains(px, py) {
             return Hit::SeqExtend;
         }
+        if self.seq_cue.contains(px, py) {
+            return Hit::SeqCue;
+        }
         if self.seq_stop.contains(px, py) {
             return Hit::SeqStop;
         }
@@ -3187,5 +3198,28 @@ mod tests {
             }
             other => panic!("expected strum on octave label, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn seq_beep_and_wrap_do_not_overlap() {
+        let layout = Layout::new();
+        assert_eq!(
+            layout.hit(UiMode::Seq, layout.seq_cue.x + 4, layout.seq_cue.y + 4),
+            Hit::SeqCue
+        );
+        assert_eq!(
+            layout.hit(
+                UiMode::Seq,
+                layout.seq_extend.x + 4,
+                layout.seq_extend.y + 4
+            ),
+            Hit::SeqExtend
+        );
+        assert!(
+            layout.seq_extend.x + layout.seq_extend.w <= layout.seq_cue.x,
+            "WRAP and BEEP must sit side by side"
+        );
+        assert_on_screen("seq wrap", layout.seq_extend);
+        assert_on_screen("seq beep", layout.seq_cue);
     }
 }
