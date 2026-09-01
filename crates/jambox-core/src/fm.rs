@@ -8,7 +8,7 @@
 //! Bounded for the Pi 2: 8 voices, sine table lookup, no allocation after
 //! [`FmSynth::new`].
 
-use crate::voice::midi_to_hz;
+use crate::voice::{midi_to_hz, tone_svf_sample, VoiceContext};
 
 const SINE_SIZE: usize = 2048;
 const SINE_MASK: usize = SINE_SIZE - 1;
@@ -291,6 +291,10 @@ struct FmVoice {
     active: bool,
     channel: u8,
     note: u8,
+    recorded: bool,
+    tone: f32,
+    tone_lp: f32,
+    tone_bp: f32,
     phase: [f32; FM_OP_COUNT],
     amp: [f32; FM_OP_COUNT],
     peaked: [bool; FM_OP_COUNT],
@@ -306,6 +310,10 @@ impl FmVoice {
             active: false,
             channel: 0,
             note: 0,
+            recorded: false,
+            tone: 1.0,
+            tone_lp: 0.0,
+            tone_bp: 0.0,
             phase: [0.0; FM_OP_COUNT],
             amp: [0.0; FM_OP_COUNT],
             peaked: [false; FM_OP_COUNT],
@@ -417,16 +425,27 @@ impl FmSynth {
     }
 
     pub fn note_on(&mut self, channel: u8, note: u8, velocity: u8) {
+        self.start_note(channel, note, velocity, false, 1.0);
+    }
+
+    pub fn note_on_recorded(&mut self, channel: u8, note: u8, velocity: u8, tone: f32) {
+        self.start_note(channel, note, velocity, true, tone);
+    }
+
+    fn start_note(&mut self, channel: u8, note: u8, velocity: u8, recorded: bool, tone: f32) {
         if velocity == 0 {
-            self.note_off(channel, note);
+            self.release_note(channel, note, recorded);
             return;
         }
         self.serial = self.serial.wrapping_add(1);
         let vel = (velocity as f32 / 127.0).clamp(0.05, 1.0);
         let target = vel;
 
-        if let Some(slot) = self.find_playing(channel, note) {
+        if let Some(slot) = self.find_playing(channel, note, recorded) {
             let v = &mut self.voices[slot];
+            v.tone = tone.clamp(0.0, 1.0);
+            v.tone_lp = 0.0;
+            v.tone_bp = 0.0;
             v.phase = [0.0; FM_OP_COUNT];
             v.amp = [0.0; FM_OP_COUNT];
             v.peaked = [false; FM_OP_COUNT];
@@ -442,6 +461,10 @@ impl FmSynth {
             active: true,
             channel,
             note,
+            recorded,
+            tone: tone.clamp(0.0, 1.0),
+            tone_lp: 0.0,
+            tone_bp: 0.0,
             phase: [0.0; FM_OP_COUNT],
             amp: [0.0; FM_OP_COUNT],
             peaked: [false; FM_OP_COUNT],
@@ -453,7 +476,15 @@ impl FmSynth {
     }
 
     pub fn note_off(&mut self, channel: u8, note: u8) {
-        if let Some(slot) = self.find_playing(channel, note) {
+        self.release_note(channel, note, false);
+    }
+
+    pub fn note_off_recorded(&mut self, channel: u8, note: u8) {
+        self.release_note(channel, note, true);
+    }
+
+    fn release_note(&mut self, channel: u8, note: u8, recorded: bool) {
+        if let Some(slot) = self.find_playing(channel, note, recorded) {
             let v = &mut self.voices[slot];
             v.releasing = true;
             v.target = 0.0;
@@ -474,6 +505,24 @@ impl FmSynth {
     }
 
     pub fn render(&mut self, out: &mut [f32], sample_rate: f32, pitch_mul: f32) {
+        let mut unused = [0.0f32; 0];
+        let ctx = VoiceContext {
+            sample_rate,
+            pitch_mul,
+            attack_sec: 0.0,
+            release_sec: 0.0,
+            live_tone: 1.0,
+            tone_lfo_amount: 0.0,
+            tone_lfo_rate_hz: 5.0,
+            tone_lfo_phase: 0.0,
+        };
+        self.render_split(out, &mut unused, ctx);
+    }
+
+    /// Live FM → `live`; clip / SEQ / song FM → `recorded` (or into `live` if empty).
+    pub fn render_split(&mut self, live: &mut [f32], recorded: &mut [f32], ctx: VoiceContext) {
+        let sample_rate = ctx.sample_rate;
+        let pitch_mul = ctx.pitch_mul;
         let sr = sample_rate.max(8000.0);
         let patch = self.patch;
         let mut atk = [0.0f32; FM_OP_COUNT];
@@ -489,18 +538,32 @@ impl FmSynth {
             inc_ratio[i] = clang_ratio(patch.ops[i].ratio);
         }
         let size = SINE_SIZE as f32;
+        let n = live.len();
 
         for v in self.voices.iter_mut() {
             if !v.active {
                 continue;
             }
+            let dest = if v.recorded && recorded.len() >= n {
+                &mut recorded[..n]
+            } else {
+                &mut live[..n]
+            };
             let hz = midi_to_hz(v.note) * pitch_mul.max(0.01) as f64;
             let mut inc = [0.0f32; FM_OP_COUNT];
             for i in 0..FM_OP_COUNT {
                 inc[i] = (hz * inc_ratio[i] as f64 * SINE_SIZE as f64 / sr as f64) as f32;
             }
+            let use_lfo = !v.recorded && ctx.tone_lfo_amount > 0.01;
+            let static_tone = if v.recorded { v.tone } else { ctx.live_tone };
+            let filter_tone = !use_lfo && static_tone < 0.985;
+            let mut tone_lp = v.tone_lp;
+            let mut tone_bp = v.tone_bp;
+            let mut lfo_phase = ctx.tone_lfo_phase;
+            let lfo_inc = std::f64::consts::TAU * ctx.tone_lfo_rate_hz.max(0.01) as f64
+                / ctx.sample_rate.max(8000.0) as f64;
 
-            for sample in out.iter_mut() {
+            for sample in dest.iter_mut() {
                 let mut mix = 0.0f32;
                 let prev = v.last;
                 for i in 0..FM_OP_COUNT {
@@ -524,8 +587,29 @@ impl FmSynth {
                         v.phase[i] -= size * (v.phase[i] / size).floor();
                     }
                 }
+                if use_lfo {
+                    lfo_phase += lfo_inc;
+                    if lfo_phase > std::f64::consts::TAU {
+                        lfo_phase %= std::f64::consts::TAU;
+                    }
+                    let lfo = 0.5 + 0.5 * lfo_phase.sin() as f32;
+                    let tone = (ctx.live_tone * (1.0 - ctx.tone_lfo_amount)
+                        + lfo * ctx.tone_lfo_amount)
+                        .clamp(0.0, 1.0);
+                    mix = tone_svf_sample(mix, tone, &mut tone_lp, &mut tone_bp, sample_rate);
+                } else if filter_tone {
+                    mix = tone_svf_sample(
+                        mix,
+                        static_tone,
+                        &mut tone_lp,
+                        &mut tone_bp,
+                        sample_rate,
+                    );
+                }
                 *sample += mix * VOICE_AMP;
             }
+            v.tone_lp = tone_lp;
+            v.tone_bp = tone_bp;
 
             if v.releasing && v.amp.iter().all(|a| *a < 0.0008) {
                 *v = FmVoice::silent();
@@ -566,10 +650,14 @@ impl FmSynth {
         }
     }
 
-    fn find_playing(&self, channel: u8, note: u8) -> Option<usize> {
-        self.voices
-            .iter()
-            .position(|v| v.active && !v.releasing && v.channel == channel && v.note == note)
+    fn find_playing(&self, channel: u8, note: u8, recorded: bool) -> Option<usize> {
+        self.voices.iter().position(|v| {
+            v.active
+                && !v.releasing
+                && v.recorded == recorded
+                && v.channel == channel
+                && v.note == note
+        })
     }
 
     fn free_slot(&self) -> Option<usize> {

@@ -78,9 +78,12 @@ cargo run -p pidi-native -- --tcp --control 127.0.0.1:17890 --display dummy --fr
 ## Pi appliance
 
 OTA: SET → UPDATE overlays `master`, then copies committed
-`dist/armv7/{midi-engine,jambox-engine,pidi-native}` onto `bin/` and
-restarts the units. After crate changes land on `master`, CI rebuilds
-those ELFs and commits them (see `.github/workflows/build-pi-bins.yml`).
+`dist/armv7/{midi-engine,jambox-engine,pidi-native}` onto `bin/`.
+Audio engines restart; the kiosk stays on the panel and re-execs itself
+if `pidi-native` was replaced (never `systemctl stop` / `pkill` the UI —
+that blanks KMSDRM and kills the installer). After crate changes land on
+`master`, CI rebuilds those ELFs and commits them (see
+`.github/workflows/build-pi-bins.yml`).
 
 Manual cross-build (WSL Ubuntu 22.04 / Debian, or a cloud-agent VM):
 

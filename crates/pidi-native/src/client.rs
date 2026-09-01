@@ -150,11 +150,13 @@ impl Outbox {
         length_ticks: u32,
         mode: &str,
         events: Vec<WireClipEvent>,
+        tone: f32,
     ) {
         self.reliable.push_back(Request::ClipLoad {
             slot,
             length_ticks,
             mode: Some(mode.to_string()),
+            tone: Some(tone.clamp(0.0, 1.0)),
             events,
         });
     }

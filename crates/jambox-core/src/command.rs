@@ -94,6 +94,18 @@ pub enum Command {
         channel: u8,
         note: u8,
     },
+    /// Phrase / SEQ / song playback. Lives on a separate keys bus so the live
+    /// tone knob cannot rewrite a pad or an already-recorded layer.
+    ClipNoteOn {
+        channel: u8,
+        note: u8,
+        velocity: u8,
+        slot: u8,
+    },
+    ClipNoteOff {
+        channel: u8,
+        note: u8,
+    },
     /// Release everything with its normal tail.
     AllNotesOff,
     /// Hard stop: kill voices, clips, and FX tails.

@@ -6,7 +6,9 @@ is behind, installs the **whole repo** the same way SSH deploy does:
 
 * kiosk (``apps/pidi``)
 * crates, deploy scripts, shipped presets
-* restart ``midi-engine`` / ``jambox-engine`` / ``pidi-native`` when those units exist
+* restart ``midi-engine`` / ``jambox-engine`` when those units exist
+* never stop or ``pkill`` ``pidi-native`` (that blanks the TFT and kills
+  this installer). The kiosk re-execs itself after ``RELOAD_KIOSK=1``.
 
 Two layouts are supported:
 
@@ -88,6 +90,12 @@ KEEP_KIOSK = frozenset(
 )
 KEEP_NAMES = KEEP_KIOSK  # alias used by tests / kiosk-only overlay
 PI_ENGINE_BINS = ("midi-engine", "jambox-engine", "pidi-native")
+# Stop/restart these during OTA. Never include the kiosk — SET→UPDATE runs
+# as a child of pidi-native, so stopping that unit (or `pkill -x pidi-native`)
+# kills the installer and leaves KMSDRM black until a power cycle.
+OTA_STOP_UNITS = ("midi-engine", "jambox-engine")
+KIOSK_BIN = "pidi-native"
+RELOAD_KIOSK_MARK = "RELOAD_KIOSK=1"
 STAGED_BIN_DIR = pathlib.Path("dist") / "armv7"
 # Paths under the kiosk root that count as the ``ui`` component digest.
 # ``requirements.txt`` is hashed separately so pip can be skipped alone.
@@ -760,15 +768,22 @@ def check_for_update(install: pathlib.Path = HERE) -> UpdateCheck:
             error=str(exc),
             message=str(exc),
         )
+    pending_engines = pending_engine_installs(repo_root_for(install))
     if not local.sha:
         available = True
         message = f"No local version stamp — remote {branch} is {remote.short}"
-    elif local.sha == remote.sha:
-        available = False
-        message = f"Already on {branch} {local.short}"
-    else:
+    elif local.sha != remote.sha:
         available = True
         message = f"Update available: {local.short} → {remote.short} ({branch})"
+    elif pending_engines:
+        available = True
+        message = (
+            f"Already on {branch} {local.short}, but live bin/ is stale "
+            f"({', '.join(pending_engines)}) — tap UPDATE to install"
+        )
+    else:
+        available = False
+        message = f"Already on {branch} {local.short}"
     return UpdateCheck(
         local=local,
         remote=remote,
@@ -892,22 +907,40 @@ def _systemctl(action: str, unit: str) -> None:
         pass
 
 
-def _stop_engines(progress: ProgressCb = _noop_progress) -> None:
-    """Stop live engines so ``bin/`` can be replaced without ETXTBSY.
+def pending_engine_installs(repo_root: pathlib.Path) -> List[str]:
+    """Staged ``dist/armv7`` engines that differ from live ``bin/`` (or are missing)."""
+    src_dir = repo_root / STAGED_BIN_DIR
+    dest_dir = repo_root / "bin"
+    if not src_dir.is_dir():
+        return []
+    pending: List[str] = []
+    for name in PI_ENGINE_BINS:
+        src = src_dir / name
+        if not src.is_file():
+            continue
+        dest = dest_dir / name
+        if not _files_identical(src, dest):
+            pending.append(name)
+    return pending
 
-    Handles both systemd units and kiosk-spawned children (``MIDI_TONE_SPAWN``).
+
+def _stop_engines(progress: ProgressCb = _noop_progress) -> None:
+    """Stop audio engines so ``bin/`` can be replaced without ETXTBSY.
+
+    Never stops ``pidi-native``. This installer is a child of that unit;
+    ``systemctl stop`` / ``pkill -x pidi-native`` kills us and blanks the TFT
+    (explicit stop also disables ``Restart=`` until someone starts it again).
     """
     if os.name == "nt":
         return
     stopped = False
-    # Kiosk first so it is not talking to an engine we are about to replace.
-    for unit in reversed(PI_ENGINE_BINS):
+    for unit in OTA_STOP_UNITS:
         if not _engine_unit_enabled(unit):
             continue
         progress(f"Stopping {unit}…")
         _systemctl("stop", unit)
         stopped = True
-    for name in PI_ENGINE_BINS:
+    for name in OTA_STOP_UNITS:
         try:
             result = subprocess.run(
                 ["pkill", "-x", name],
@@ -969,16 +1002,14 @@ def install_pi_binaries(
     if not src_dir.is_dir():
         progress("No dist/armv7 engines in this build — leaving existing bin/.")
         return []
-    pending: List[str] = []
+    pending = pending_engine_installs(repo_root)
     for name in PI_ENGINE_BINS:
         src = src_dir / name
+        dest = dest_dir / name
         if not src.is_file():
             continue
-        dest = dest_dir / name
-        if _files_identical(src, dest):
+        if name not in pending:
             progress(f"{name} unchanged — skip")
-            continue
-        pending.append(name)
     if not pending:
         progress("Engines unchanged — leaving bin/")
         return []
@@ -1007,12 +1038,14 @@ def _ensure_active_preset(repo_root: pathlib.Path) -> None:
 
 
 def _restart_engines(progress: ProgressCb) -> None:
-    """Restart mapper / jambox / native kiosk units if this box has them.
+    """Restart mapper / jambox units if this box has them.
 
-    Engines first, then ``pidi-native``. Fails soft: kiosk sudoers
-    may only allow poweroff/reboot, and a unit may not be installed yet.
+    Does **not** restart ``pidi-native``. The kiosk reloads itself after
+    ``RELOAD_KIOSK=1`` (in-process exec) so we never ``systemctl stop`` the
+    process that is applying the update. Fails soft: kiosk sudoers may only
+    allow poweroff/reboot, and a unit may not be installed yet.
     """
-    for unit in PI_ENGINE_BINS:
+    for unit in OTA_STOP_UNITS:
         if not _engine_unit_enabled(unit):
             continue
         progress(f"Restarting {unit}…")
@@ -1251,9 +1284,31 @@ def apply_update(
     prior = _capture_prior_components(install, dest_root)
     local = local_version(install)
     if local.sha and local.sha == remote.sha:
+        pending = pending_engine_installs(dest_root)
+        if not pending:
+            remote.components = compute_component_digests(dest_root, install=install)
+            write_version_file(install, remote)
+            log("Already on latest.")
+            return remote
+        log(
+            f"Git already {remote.short} — installing stale "
+            f"{'+'.join(pending)} onto bin/"
+        )
+        installed = install_pi_binaries(dest_root, log)
+        if installed:
+            _restart_engines(log)
         remote.components = compute_component_digests(dest_root, install=install)
         write_version_file(install, remote)
-        log("Already on latest.")
+        try:
+            write_version_file(dest_root / MIDI_TONE_REL, remote)
+        except OSError:
+            pass
+        if KIOSK_BIN in installed:
+            log(RELOAD_KIOSK_MARK)
+        summary = (
+            f"updated {'+'.join(installed)}" if installed else "engines already matched"
+        )
+        log(f"Installed {branch} {remote.short} ({summary}; git already current)")
         return remote
 
     git = git_root(dest_root) or git_root(install)
@@ -1303,11 +1358,14 @@ def apply_update(
         log("Requirements unchanged — skipping pip")
         skipped.append("requirements")
 
-    if new.engines != prior.engines:
+    pending = pending_engine_installs(dest_root)
+    if new.engines != prior.engines or pending:
         installed = install_pi_binaries(dest_root, log)
         if installed:
             _restart_engines(log)
             changed.append("engines")
+            if KIOSK_BIN in installed:
+                log(RELOAD_KIOSK_MARK)
         else:
             # Digests differed (e.g. missing stamp) but live files already match.
             log("Engines already match staged binaries — skip restart")

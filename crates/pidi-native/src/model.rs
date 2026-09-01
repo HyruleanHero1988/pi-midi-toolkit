@@ -220,7 +220,7 @@ pub struct NativeModel {
     kit_wave_dirty: bool,
     pub kaoss_scale_index: u8,
     pub kaoss_key: u8,
-    /// Left-edge MIDI of the pad window (C1..C5 typically).
+    /// Left-edge MIDI of the pad window (C1..C8).
     pub kaoss_root_midi: u8,
     pub kaoss_octaves: u8,
     pub kaoss_full: bool,
@@ -233,6 +233,7 @@ pub struct NativeModel {
     pub kaoss_channel: u8,
     pub kaoss_settings_open: bool,
     pub kaoss_settings_scroll: i32,
+    pub kaoss_fx_target: session::KaossFxTarget,
     /// Drill-down pad color picker (opened from KAOSS settings COLOR).
     pub kaoss_color_picker_open: bool,
     pub kaoss_show_axis_labels: bool,
@@ -287,6 +288,9 @@ pub struct NativeModel {
     pub update_confirming: bool,
     update_job: Option<std::sync::mpsc::Receiver<host::UpdateCheckResult>>,
     update_job_kind: Option<host::UpdateJobKind>,
+    /// Seconds left before an in-process kiosk reload after a successful OTA.
+    pub reload_ui_in: Option<f32>,
+    request_reexec: bool,
     /// SET → WIFI scan/join panel.
     pub wifi_panel_open: bool,
     pub wifi_busy: bool,
@@ -415,6 +419,7 @@ impl NativeModel {
             kaoss_channel: 0,
             kaoss_settings_open: false,
             kaoss_settings_scroll: 0,
+            kaoss_fx_target: session::KaossFxTarget::Voice,
             kaoss_color_picker_open: false,
             kaoss_show_axis_labels: true,
             kaoss_show_grid_lines: true,
@@ -465,6 +470,8 @@ impl NativeModel {
             update_confirming: false,
             update_job: None,
             update_job_kind: None,
+            reload_ui_in: None,
+            request_reexec: false,
             wifi_panel_open: false,
             wifi_busy: false,
             wifi_status: String::new(),
@@ -589,6 +596,7 @@ impl NativeModel {
                 pad.length_ticks,
                 if pad.loop_mode { "loop" } else { "oneshot" },
                 pad.events.clone(),
+                pad.tone,
             );
         }
         self.status_line = format!("phrases {}/16 from {}", n, dir.display());
@@ -982,6 +990,7 @@ impl NativeModel {
         self.poll_host_job();
         self.poll_update_job();
         self.poll_wifi_job();
+        self.tick_ota_reload(dt);
         if self.mode == UiMode::Drums && self.kit_edit_open && self.kit_wave_dirty {
             self.rebuild_kit_wave();
         }
@@ -1370,7 +1379,8 @@ impl NativeModel {
             }
             self.update_confirming = true;
             self.update_status = format!(
-                "{}\n\nThis deploys new code from GitHub, then restarts.\n\
+                "{}\n\nThis deploys new code from GitHub.\n\
+                 The screen stays on; the kiosk reloads itself when ready.\n\
                  Phrases, songs, presets, and settings.json are kept.\n\
                  Tap INSTALL NOW to continue, or CANCEL (CHECK).",
                 host::update_local_status()
@@ -1381,7 +1391,9 @@ impl NativeModel {
         }
         self.update_confirming = false;
         self.update_busy = true;
-        self.update_status = "Starting install…\n(UI stays responsive; engines restart when done.)".into();
+        self.update_status =
+            "Starting install…\n(Screen stays on — do not unplug. Engines restart when done.)"
+                .into();
         self.update_job_kind = Some(host::UpdateJobKind::Apply);
         self.update_job = Some(host::spawn_update_job(host::UpdateJobKind::Apply));
         self.status_line = "INSTALL…".into();
@@ -1438,10 +1450,31 @@ impl NativeModel {
                 } else {
                     "INSTALL failed".into()
                 };
+                if result.ok && result.reload_kiosk {
+                    self.reload_ui_in = Some(1.6);
+                }
             }
             None => {}
         }
         self.mark_dirty();
+    }
+
+    fn tick_ota_reload(&mut self, dt: f32) {
+        let Some(left) = self.reload_ui_in.as_mut() else {
+            return;
+        };
+        *left -= dt;
+        if *left > 0.0 {
+            return;
+        }
+        self.reload_ui_in = None;
+        self.request_reexec = true;
+    }
+
+    /// After a successful OTA that replaced `pidi-native`, the main loop
+    /// drops KMSDRM and execs the new binary. False on dummy/`--frames` tests.
+    pub fn take_reexec(&mut self) -> bool {
+        std::mem::take(&mut self.request_reexec)
     }
 
     fn show_screensaver(&mut self) {
@@ -1509,6 +1542,7 @@ impl NativeModel {
             s.kaoss_gate % kaoss_ui::GATE_PATTERNS.len()
         };
         self.kaoss_hold = s.kaoss_hold;
+        self.kaoss_fx_target = s.kaoss_fx_target;
         self.kaoss_show_all = s.kaoss_show_all;
         self.kaoss_channel = s.kaoss_channel & 0x0f;
         self.fx_bus = [
@@ -1590,6 +1624,7 @@ impl NativeModel {
             kaoss_program: self.kaoss_program,
             kaoss_gate: self.kaoss_gate,
             kaoss_hold: self.kaoss_hold,
+            kaoss_fx_target: self.kaoss_fx_target,
             fx_bus: [self.fx_bus[0], self.fx_bus[1], self.fx_bus[2]],
             fx_flanger: self.fx_voice[3],
             fx_bus_flanger: self.fx_bus[3],
@@ -1723,6 +1758,7 @@ impl NativeModel {
                 | Hit::KaossChannel
                 | Hit::KaossSettings
                 | Hit::KaossWipeFx
+                | Hit::KaossFxDest(_)
                 | Hit::KaossViz
                 | Hit::KaossOut
                 | Hit::Drum { .. }
@@ -2418,6 +2454,13 @@ impl NativeModel {
             Hit::KaossWipeFx => {
                 self.tap_ui(slot, id, gesture, px, py);
                 self.wipe_kaoss_fx(outbox);
+            }
+            Hit::KaossFxDest(index) => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.kaoss_fx_target = session::KaossFxTarget::ALL
+                    [index as usize % session::KaossFxTarget::ALL.len()];
+                self.status_line = format!("kaoss FX → {}", self.kaoss_fx_target.label());
+                self.mark_dirty();
             }
             Hit::KaossChannel => {
                 self.tap_ui(slot, id, gesture, px, py);
@@ -3346,6 +3389,7 @@ impl NativeModel {
             self.phrases[index].length_ticks,
             mode,
             self.phrases[index].events.clone(),
+            self.phrases[index].tone,
         );
         let dir = phrases::phrases_dir_from_env();
         let _ = phrases::save_pad(&dir, index, &self.phrases[index], self.bpm);
@@ -3459,7 +3503,8 @@ impl NativeModel {
             self.status_line = "SEQ empty".into();
             return;
         };
-        let pad = phrases::from_wire(events, length_ticks, self.seq.bpm, true);
+        let mut pad = phrases::from_wire(events, length_ticks, self.seq.bpm, true);
+        pad.tone = self.seq.baked_tone.unwrap_or(self.synth_params[1].clamp(0.0, 1.0));
         self.phrases[index] = pad;
         let dir = phrases::phrases_dir_from_env();
         let _ = phrases::save_pad(&dir, index, &self.phrases[index], self.bpm);
@@ -3473,6 +3518,7 @@ impl NativeModel {
             self.phrases[index].length_ticks,
             mode,
             self.phrases[index].events.clone(),
+            self.phrases[index].tone,
         );
         self.pads_selected = index;
         self.pads_edit = false;
@@ -3534,7 +3580,8 @@ impl NativeModel {
                 velocity: e.velocity,
             })
             .collect();
-        let pad = phrases::from_wire(wire, length_ticks.max(1), self.bpm, false);
+        let mut pad = phrases::from_wire(wire, length_ticks.max(1), self.bpm, false);
+        pad.tone = self.synth_params[1].clamp(0.0, 1.0);
         self.phrases[index] = pad;
         let dir = phrases::phrases_dir_from_env();
         let _ = phrases::save_pad(&dir, index, &self.phrases[index], self.bpm);
@@ -3543,6 +3590,7 @@ impl NativeModel {
             self.phrases[index].length_ticks,
             "oneshot",
             self.phrases[index].events.clone(),
+            self.phrases[index].tone,
         );
         self.pads_selected = index;
         self.status_line = format!("{} recorded", phrases::pad_label(index));
@@ -3598,6 +3646,7 @@ impl NativeModel {
             self.phrases[index].length_ticks,
             mode,
             self.phrases[index].events.clone(),
+            self.phrases[index].tone,
         );
         let dir = phrases::phrases_dir_from_env();
         let _ = phrases::save_pad(&dir, index, &self.phrases[index], self.bpm);
@@ -4753,15 +4802,8 @@ impl NativeModel {
 
     fn apply_named_param(&mut self, name: &str, value: f32, outbox: &mut Outbox) {
         let v = value.clamp(0.0, 1.0);
-        if Self::is_voice_fx_param(name) {
-            if name == "flanger_mix" {
-                self.fx_voice[3] = v;
-            }
-            self.push_voice_fx(name, v, outbox);
-            return;
-        }
-        if Self::is_bus_param(name) {
-            outbox.fx_bus(name, v);
+        if Self::is_pad_fx_param(name) {
+            self.push_kaoss_fx(name, v, outbox);
             return;
         }
         outbox.synth(name, v);
@@ -4770,6 +4812,21 @@ impl NativeModel {
             if i == 0 {
                 self.sync_wave_bank();
             }
+        }
+    }
+
+    fn push_kaoss_fx(&mut self, name: &str, value: f32, outbox: &mut Outbox) {
+        if self.kaoss_fx_target.includes_voice() {
+            if let Some(i) = Self::voice_fx_slider_index(name) {
+                self.fx_voice[i] = value;
+            }
+            self.push_voice_fx(name, value, outbox);
+        }
+        if self.kaoss_fx_target.includes_drums() {
+            if let Some(i) = Self::voice_fx_slider_index(name) {
+                self.fx_drum[i] = value;
+            }
+            outbox.fx_drum_group(name, value);
         }
     }
 
@@ -4819,14 +4876,31 @@ impl NativeModel {
         }
     }
 
-    fn is_bus_param(name: &str) -> bool {
-        matches!(name, "drive" | "delay_mix" | "reverb_mix" | "delay_time")
+    fn voice_fx_slider_index(name: &str) -> Option<usize> {
+        match name {
+            "drive" => Some(0),
+            "delay_mix" => Some(1),
+            "reverb_mix" => Some(2),
+            "flanger_mix" => Some(3),
+            _ => None,
+        }
     }
 
-    fn is_voice_fx_param(name: &str) -> bool {
+    /// Pad XY FX (echo / reverb / drive / flange). Destination is SET → PAD FX
+    /// (voice insert, kit-group insert, or both). Master-bus wet is FX MODE → BUS.
+    fn is_pad_fx_param(name: &str) -> bool {
         matches!(
             name,
-            "flanger_mix" | "flanger_rate" | "flanger_depth" | "flanger_fb"
+            "drive"
+                | "delay_mix"
+                | "delay_time"
+                | "delay_fb"
+                | "reverb_mix"
+                | "reverb_size"
+                | "flanger_mix"
+                | "flanger_rate"
+                | "flanger_depth"
+                | "flanger_fb"
         )
     }
 
@@ -4847,7 +4921,16 @@ impl NativeModel {
             } => {
                 outbox.tempo(self.seq.bpm);
                 self.bpm = self.seq.bpm;
-                outbox.clip_load(SEQ_CLIP_SLOT, length_ticks, "loop", events);
+                if self.seq.baked_tone.is_none() && self.seq.layer_count() >= 1 {
+                    self.seq.baked_tone = Some(self.synth_params[1].clamp(0.0, 1.0));
+                }
+                outbox.clip_load(
+                    SEQ_CLIP_SLOT,
+                    length_ticks,
+                    "loop",
+                    events,
+                    self.seq.baked_tone.unwrap_or(1.0),
+                );
                 if launch {
                     outbox.clip_launch(SEQ_CLIP_SLOT, "bar");
                 }
@@ -5654,12 +5737,27 @@ impl NativeModel {
     }
 
     fn wipe_kaoss_fx(&mut self, outbox: &mut Outbox) {
+        self.fx_voice = [0.0, 0.0, 0.0, 0.0];
+        self.fx_drum = [0.0, 0.0, 0.0, 0.0];
+        for name in [
+            "drive",
+            "delay_mix",
+            "delay_time",
+            "delay_fb",
+            "reverb_mix",
+            "reverb_size",
+            "flanger_mix",
+            "flanger_rate",
+        ] {
+            self.push_voice_fx(name, 0.0, outbox);
+            outbox.fx_drum_group(name, 0.0);
+        }
+        // Also dry the master bus so leftover pad wet from the old mix-bus
+        // routing (echo/reverb used to smear drums) is gone in one tap.
         self.fx_bus = [0.0, 0.0, 0.0, 0.0];
-        self.fx_voice[3] = 0.0;
         for name in Self::FX_PARAM_NAMES {
             outbox.fx_bus(name, 0.0);
         }
-        self.push_voice_fx("flanger_mix", 0.0, outbox);
         let defaults = session::SessionState::default();
         self.synth_params[0] = defaults.morph;
         self.synth_params[1] = defaults.tone;
@@ -5783,7 +5881,7 @@ impl NativeModel {
         };
         outbox.tempo(bpm);
         let mode = if self.song_loop { "loop" } else { "oneshot" };
-        outbox.clip_load(SONG_CLIP_SLOT, length_ticks, mode, events);
+        outbox.clip_load(SONG_CLIP_SLOT, length_ticks, mode, events, 1.0);
         outbox.clip_launch(SONG_CLIP_SLOT, "bar");
         self.song_playing = true;
         self.bpm = bpm.clamp(40.0, 240.0);
@@ -5982,6 +6080,25 @@ mod tests {
                 (left as i32 / 12) - 1
             )
         );
+    }
+
+    #[test]
+    fn octave_picker_allows_c8_one_octave() {
+        let mut model = NativeModel::new();
+        let mut out = Outbox::new();
+        model.kaoss_picker = Some(KaossPicker::Octave);
+        model.apply_kaoss_picker(7, &mut out); // C8
+        assert_eq!(model.kaoss_root_midi, 108);
+        assert_eq!(kaoss_ui::midi_note_label(model.kaoss_root_midi), "C8");
+        model.kaoss_picker = Some(KaossPicker::Octave);
+        model.apply_kaoss_picker(8, &mut out); // 1 OCT
+        assert_eq!(model.kaoss_octaves, 1);
+        assert_eq!(model.kaoss_note_at(0.0), 108);
+        assert_eq!(model.kaoss_note_at(1.0), 120);
+        model.nudge_kaoss_root_octave(1, &mut out);
+        assert_eq!(model.kaoss_root_midi, 108, "C8 is the top start");
+        model.nudge_kaoss_root_octave(-1, &mut out);
+        assert_eq!(model.kaoss_root_midi, 96);
     }
 
     #[test]
@@ -6472,6 +6589,206 @@ mod tests {
         )));
     }
 
+    fn select_kaoss_program(model: &mut NativeModel, id: &str) {
+        model.kaoss_program = kaoss_ui::KAOSS_PROGRAMS
+            .iter()
+            .position(|p| p.id == id)
+            .unwrap_or_else(|| panic!("missing kaoss program {id}"));
+    }
+
+    fn assert_voice_fx(batch: &[Request], index: u16, param: &str) {
+        assert!(
+            batch.iter().any(|r| matches!(
+                r,
+                Request::Fx {
+                    target: jambox_protocol::FxTargetSpec::Voice { index: i },
+                    param: p,
+                    ..
+                } if *i == index && p == param
+            )),
+            "expected voice {index} {param}, got {batch:?}"
+        );
+    }
+
+    fn assert_no_bus_fx(batch: &[Request]) {
+        assert!(
+            batch.iter().all(|r| !matches!(
+                r,
+                Request::Fx {
+                    target: jambox_protocol::FxTargetSpec::Bus,
+                    ..
+                }
+            )),
+            "Kaoss pad FX must not wet the master bus: {batch:?}"
+        );
+    }
+
+    fn assert_drum_group_fx(batch: &[Request], param: &str) {
+        assert!(
+            batch.iter().any(|r| matches!(
+                r,
+                Request::Fx {
+                    target: jambox_protocol::FxTargetSpec::DrumGroup,
+                    param: p,
+                    ..
+                } if p == param
+            )),
+            "expected drum group {param}, got {batch:?}"
+        );
+    }
+
+    fn assert_no_voice_fx(batch: &[Request]) {
+        assert!(
+            batch.iter().all(|r| !matches!(
+                r,
+                Request::Fx {
+                    target: jambox_protocol::FxTargetSpec::Voice { .. },
+                    ..
+                }
+            )),
+            "expected no voice FX: {batch:?}"
+        );
+    }
+
+    fn assert_no_drum_group_fx(batch: &[Request]) {
+        assert!(
+            batch.iter().all(|r| !matches!(
+                r,
+                Request::Fx {
+                    target: jambox_protocol::FxTargetSpec::DrumGroup,
+                    ..
+                }
+            )),
+            "expected no drum-group FX: {batch:?}"
+        );
+    }
+
+    #[test]
+    fn kaoss_echo_sends_voice_delay_not_bus() {
+        let mut model = NativeModel::new();
+        select_kaoss_program(&mut model, "echo");
+        model.morph_a = 2;
+        model.morph_b = 5;
+        let mut out = Outbox::new();
+        let k = model.layout.kaoss;
+        // Top-right: high delay time (X) and high delay mix (Y).
+        model.finger_down(1, k.x + k.w - 8, k.y + 4, &mut out);
+        let batch = out.take();
+        assert_voice_fx(&batch, 2, "delay_mix");
+        assert_voice_fx(&batch, 5, "delay_mix");
+        assert_voice_fx(&batch, 2, "delay_time");
+        assert_no_bus_fx(&batch);
+        assert_no_drum_group_fx(&batch);
+        assert!(model.fx_voice[1] > 0.5, "Y should raise voice delay mix");
+    }
+
+    #[test]
+    fn kaoss_echo_drums_sends_kit_group_not_voice() {
+        let mut model = NativeModel::new();
+        select_kaoss_program(&mut model, "echo");
+        model.kaoss_fx_target = session::KaossFxTarget::Drums;
+        model.morph_a = 2;
+        model.morph_b = 5;
+        let mut out = Outbox::new();
+        let k = model.layout.kaoss;
+        model.finger_down(1, k.x + k.w - 8, k.y + 4, &mut out);
+        let batch = out.take();
+        assert_drum_group_fx(&batch, "delay_mix");
+        assert_drum_group_fx(&batch, "delay_time");
+        assert_no_voice_fx(&batch);
+        assert_no_bus_fx(&batch);
+        assert!(model.fx_drum[1] > 0.5, "Y should raise kit delay mix");
+    }
+
+    #[test]
+    fn kaoss_echo_both_sends_voice_and_kit_group() {
+        let mut model = NativeModel::new();
+        select_kaoss_program(&mut model, "space");
+        model.kaoss_fx_target = session::KaossFxTarget::Both;
+        model.morph_a = 1;
+        model.morph_b = 1;
+        let mut out = Outbox::new();
+        let k = model.layout.kaoss;
+        model.finger_down(1, k.x + k.w / 2, k.y + 4, &mut out);
+        let batch = out.take();
+        assert_voice_fx(&batch, 1, "reverb_mix");
+        assert_drum_group_fx(&batch, "reverb_mix");
+        assert_no_bus_fx(&batch);
+        assert!(model.fx_voice[2] > 0.5);
+        assert!(model.fx_drum[2] > 0.5);
+    }
+
+    #[test]
+    fn kaoss_set_fx_dest_selects_drums() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Kaoss);
+        model.kaoss_settings_open = true;
+        assert_eq!(model.kaoss_fx_target, session::KaossFxTarget::Voice);
+        let mut out = Outbox::new();
+        let cell = model
+            .layout
+            .kaoss_settings_third_row(Layout::KAOSS_SET_FX_Y, 0, 1, 48);
+        model.finger_down(1, cell.x + 4, cell.y + 4, &mut out);
+        model.finger_up(1, &mut out);
+        assert_eq!(model.kaoss_fx_target, session::KaossFxTarget::Drums);
+    }
+
+    #[test]
+    fn kaoss_space_sends_voice_reverb_not_bus() {
+        let mut model = NativeModel::new();
+        select_kaoss_program(&mut model, "space");
+        model.morph_a = 1;
+        model.morph_b = 1;
+        let mut out = Outbox::new();
+        let k = model.layout.kaoss;
+        model.finger_down(1, k.x + k.w / 2, k.y + 4, &mut out);
+        let batch = out.take();
+        assert_voice_fx(&batch, 1, "reverb_mix");
+        assert_voice_fx(&batch, 1, "delay_mix");
+        assert_no_bus_fx(&batch);
+        assert!(model.fx_voice[2] > 0.5, "Y should raise voice reverb mix");
+    }
+
+    #[test]
+    fn kaoss_wipe_fx_clears_voice_delay_and_reverb() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Kaoss);
+        model.kaoss_settings_open = true;
+        model.fx_voice = [0.4, 0.8, 0.6, 0.5];
+        model.fx_drum = [0.2, 0.9, 0.7, 0.1];
+        model.fx_bus = [0.3, 0.7, 0.5, 0.2];
+        let mut out = Outbox::new();
+        model.wipe_kaoss_fx(&mut out);
+        assert!(model.fx_voice.iter().all(|v| *v == 0.0));
+        assert!(model.fx_drum.iter().all(|v| *v == 0.0));
+        assert!(model.fx_bus.iter().all(|v| *v == 0.0));
+        let batch = out.take();
+        assert!(batch.iter().any(|r| matches!(
+            r,
+            Request::Fx {
+                target: jambox_protocol::FxTargetSpec::Voice { .. },
+                param,
+                value,
+            } if param == "delay_mix" && *value == 0.0
+        )));
+        assert!(batch.iter().any(|r| matches!(
+            r,
+            Request::Fx {
+                target: jambox_protocol::FxTargetSpec::Voice { .. },
+                param,
+                value,
+            } if param == "reverb_mix" && *value == 0.0
+        )));
+        assert!(batch.iter().any(|r| matches!(
+            r,
+            Request::Fx {
+                target: jambox_protocol::FxTargetSpec::DrumGroup,
+                param,
+                value,
+            } if param == "delay_mix" && *value == 0.0
+        )));
+    }
+
     #[test]
     fn drum_macro_emits_kit_param() {
         let mut model = NativeModel::new();
@@ -6749,8 +7066,9 @@ mod tests {
             "UPDATE tap blocked for {:?}",
             start.elapsed()
         );
-        assert_eq!(model.host_busy(), Some(HostTask::UpdateCheck));
-        assert!(model.status_line.to_ascii_lowercase().contains("check"));
+        assert!(model.update_panel_open);
+        assert_eq!(model.host_busy(), None);
+        assert!(!model.update_busy);
         let home = model.layout.nav_home();
         model.finger_down(2, home.x + 4, home.y + 4, &mut out);
         assert_eq!(model.mode, UiMode::Home);
@@ -7237,6 +7555,53 @@ mod tests {
     }
 
     #[test]
+    fn successful_native_ota_schedules_kiosk_reload() {
+        let mut model = NativeModel::new();
+        let (tx, rx) = std::sync::mpsc::channel();
+        model.update_job = Some(rx);
+        model.update_job_kind = Some(host::UpdateJobKind::Apply);
+        model.update_busy = true;
+        tx.send(host::UpdateCheckResult {
+            status: "Installed master abc1234\nReloading kiosk…".into(),
+            lines: vec!["Installed pidi-native → bin/".into()],
+            available: false,
+            ok: true,
+            reload_kiosk: true,
+        })
+        .unwrap();
+        let mut out = Outbox::new();
+        model.tick(0.0, &mut out);
+        assert_eq!(model.status_line, "installed");
+        assert!(model.reload_ui_in.is_some());
+        assert!(!model.take_reexec());
+        model.tick(2.0, &mut out);
+        assert!(model.take_reexec(), "countdown should request reexec");
+        assert!(model.reload_ui_in.is_none());
+    }
+
+    #[test]
+    fn failed_ota_does_not_reexec() {
+        let mut model = NativeModel::new();
+        let (tx, rx) = std::sync::mpsc::channel();
+        model.update_job = Some(rx);
+        model.update_job_kind = Some(host::UpdateJobKind::Apply);
+        model.update_busy = true;
+        tx.send(host::UpdateCheckResult {
+            status: "INSTALL failed (exit 1): network error".into(),
+            lines: vec![],
+            available: false,
+            ok: false,
+            reload_kiosk: false,
+        })
+        .unwrap();
+        let mut out = Outbox::new();
+        model.tick(0.0, &mut out);
+        assert_eq!(model.status_line, "INSTALL failed");
+        model.tick(2.0, &mut out);
+        assert!(!model.take_reexec());
+    }
+
+    #[test]
     fn synth_flange_slider_sends_voice_flanger_mix() {
         let mut model = NativeModel::new();
         model.set_mode(UiMode::Synth);
@@ -7324,6 +7689,63 @@ mod tests {
         model.finger_up(2, &mut out);
         assert!(model.wifi_kb_open, "secured net should open password keyboard");
         assert_eq!(model.wifi_kb_ssid, "TestNet");
+    }
+
+    fn wifi_kb_key_rect(model: &NativeModel, want: &str) -> crate::layout::Rect {
+        let rows = if model.wifi_kb_sym {
+            crate::wifi::keyboard_sym_rows()
+        } else {
+            crate::wifi::keyboard_abc_rows(model.wifi_kb_shift)
+        };
+        for (ri, row) in rows.iter().enumerate() {
+            let mut col = 0i32;
+            for (_label, action, span) in row {
+                if *action == want {
+                    return model.layout.wifi_kb_key(ri, col, *span);
+                }
+                col += i32::from(*span);
+            }
+        }
+        panic!("missing keyboard action {want}");
+    }
+
+    fn tap_wifi_key(model: &mut NativeModel, out: &mut Outbox, id: i32, action: &str) {
+        let key = wifi_kb_key_rect(model, action);
+        model.finger_down(id, key.x + 4, key.y + 4, out);
+        model.finger_up(id, out);
+    }
+
+    #[test]
+    fn wifi_keyboard_plus_inserts_and_del_backspaces() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Settings);
+        model.wifi_networks.push(crate::wifi::WifiNetwork {
+            ssid: "TestNet".into(),
+            signal: 70,
+            security: "WPA2".into(),
+            in_use: false,
+        });
+        let mut out = Outbox::new();
+        let btn = model.layout.settings_wifi;
+        model.finger_down(1, btn.x + 4, btn.y + 4, &mut out);
+        model.finger_up(1, &mut out);
+        let row = model.layout.wifi_row(0);
+        model.finger_down(2, row.x + 4, row.y + 4, &mut out);
+        model.finger_up(2, &mut out);
+        assert!(model.wifi_kb_open);
+
+        tap_wifi_key(&mut model, &mut out, 3, "a");
+        tap_wifi_key(&mut model, &mut out, 4, "b");
+        assert_eq!(model.wifi_kb_text, "ab");
+
+        tap_wifi_key(&mut model, &mut out, 5, "back");
+        assert_eq!(model.wifi_kb_text, "a", "DEL must delete, not insert '+'");
+
+        tap_wifi_key(&mut model, &mut out, 6, "sym");
+        tap_wifi_key(&mut model, &mut out, 7, "+");
+        assert_eq!(model.wifi_kb_text, "a+");
+        tap_wifi_key(&mut model, &mut out, 8, "back");
+        assert_eq!(model.wifi_kb_text, "a");
     }
 
     #[test]

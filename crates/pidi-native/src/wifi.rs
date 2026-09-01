@@ -237,13 +237,14 @@ pub fn keyboard_abc_rows(shift: bool) -> Vec<Vec<KeySpec>> {
             ("9", "9", 1),
             ("0", "0", 1),
             ("-", "-", 1),
-            ("⌫", "back", 1),
+            // ASCII labels only — the 5×7 font truncates `⌫` (U+232B) to '+'.
+            ("DEL", "back", 1),
         ],
         row2,
         row3,
         row4,
         vec![
-            ("⇧", "shift", 2),
+            ("SHIFT", "shift", 2),
             ("#+=", "sym", 2),
             ("Space", "space", 5),
             ("OK", "ok", 3),
@@ -265,7 +266,7 @@ pub fn keyboard_sym_rows() -> Vec<Vec<KeySpec>> {
             ("9", "9", 1),
             ("0", "0", 1),
             ("_", "_", 1),
-            ("⌫", "back", 1),
+            ("DEL", "back", 1),
         ],
         vec![
             ("!", "!", 1),
@@ -327,33 +328,66 @@ yes:HomeNet:80:WPA2
         assert_eq!(weird.signal, 10);
     }
 
-    #[test]
-    fn keyboard_has_common_wifi_punctuation() {
-        let mut chars = std::collections::HashSet::new();
+    fn all_keys() -> Vec<KeySpec> {
+        let mut keys = Vec::new();
         for shift in [false, true] {
             for row in keyboard_abc_rows(shift) {
-                for (_l, action, _) in row {
-                    if !matches!(
-                        action,
-                        "shift" | "sym" | "abc" | "back" | "space" | "ok" | "pad"
-                    ) {
-                        chars.insert(action);
-                    }
-                }
+                keys.extend(row);
             }
         }
         for row in keyboard_sym_rows() {
-            for (_l, action, _) in row {
-                if !matches!(
-                    action,
-                    "shift" | "sym" | "abc" | "back" | "space" | "ok" | "pad"
-                ) {
-                    chars.insert(action);
-                }
+            keys.extend(row);
+        }
+        keys
+    }
+
+    #[test]
+    fn keyboard_has_common_wifi_punctuation() {
+        let mut chars = std::collections::HashSet::new();
+        for (_l, action, _) in all_keys() {
+            if !matches!(
+                action,
+                "shift" | "sym" | "abc" | "back" | "space" | "ok" | "pad"
+            ) {
+                chars.insert(action);
             }
         }
-        for need in ["@", "-", "_", "!", "?", ".", ",", "#"] {
+        for need in ["@", "-", "_", "!", "?", ".", ",", "#", "+", "="] {
             assert!(chars.contains(need), "missing {need}");
+        }
+    }
+
+    #[test]
+    fn backspace_is_not_plus_and_plus_is_its_own_key() {
+        let mut saw_back = false;
+        let mut saw_plus = false;
+        for (label, action, _) in all_keys() {
+            if action == "back" {
+                saw_back = true;
+                assert_ne!(label, "+", "backspace must not be labeled '+'");
+                assert!(
+                    label.chars().all(|c| c.is_ascii() && c.is_ascii_graphic()),
+                    "backspace label {label:?} must be 5x7-font-safe ASCII"
+                );
+            }
+            if action == "+" {
+                saw_plus = true;
+                assert_eq!(label, "+");
+            }
+        }
+        assert!(saw_back, "keyboard must have a backspace key");
+        assert!(saw_plus, "keyboard must have a plus key");
+    }
+
+    #[test]
+    fn keyboard_labels_fit_retro_font() {
+        for (label, _action, _) in all_keys() {
+            for ch in label.chars() {
+                assert!(
+                    ch.is_ascii() && (ch.is_ascii_graphic() || ch == ' '),
+                    "label {label:?} uses {ch:?}, which the 5x7 font cannot draw"
+                );
+            }
         }
     }
 }

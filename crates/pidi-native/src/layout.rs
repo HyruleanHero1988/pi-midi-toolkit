@@ -111,6 +111,8 @@ pub enum Hit {
     KaossChannel,
     KaossSettings,
     KaossWipeFx,
+    /// KAOSS SET pad-FX destination: 0 = voice, 1 = drums, 2 = both.
+    KaossFxDest(u8),
     KaossViz,
     KaossOut,
     KaossAxes,
@@ -1526,9 +1528,19 @@ impl Layout {
     }
 
     /// Scrollable KAOSS settings panel (Tk ⚙ overlay).
+    pub const KAOSS_SET_WIPE_Y: i32 = 52;
+    pub const KAOSS_SET_FX_Y: i32 = 108;
+    pub const KAOSS_SET_SHOW_ALL_Y: i32 = 164;
+    pub const KAOSS_SET_AXES_Y: i32 = 220;
+    pub const KAOSS_SET_VIZ_Y: i32 = 288;
+    pub const KAOSS_SET_COLOR_Y: i32 = 344;
+    pub const KAOSS_SET_GRID_Y: i32 = 412;
+    pub const KAOSS_SET_OUT_Y: i32 = 480;
+    pub const KAOSS_SET_CHANNEL_Y: i32 = 552;
+
     pub fn kaoss_settings_content_h(&self) -> i32 {
-        // OUT row + 16 MIDI channel cells (4×4 grid).
-        496 + 4 * 44 + 8
+        // Channel grid sits under the MIDI-channel label.
+        Self::KAOSS_SET_CHANNEL_Y + 4 * 44 + 8
     }
 
     pub fn kaoss_settings_max_scroll(&self) -> i32 {
@@ -1623,40 +1635,57 @@ impl Layout {
     }
 
     pub fn hit_kaoss_settings(&self, px: i32, py: i32, scroll: i32) -> Hit {
-        if self.kaoss_settings_row(52, scroll, 48).contains(px, py) {
+        if self
+            .kaoss_settings_row(Self::KAOSS_SET_WIPE_Y, scroll, 48)
+            .contains(px, py)
+        {
             return Hit::KaossWipeFx;
         }
-        if self.kaoss_settings_row(108, scroll, 48).contains(px, py) {
+        for i in 0..3u8 {
+            if self
+                .kaoss_settings_third_row(Self::KAOSS_SET_FX_Y, scroll, i as usize, 48)
+                .contains(px, py)
+            {
+                return Hit::KaossFxDest(i);
+            }
+        }
+        if self
+            .kaoss_settings_row(Self::KAOSS_SET_SHOW_ALL_Y, scroll, 48)
+            .contains(px, py)
+        {
             return Hit::KaossShowAll;
         }
         if self
-            .kaoss_settings_half_row(164, scroll, true, 48)
+            .kaoss_settings_half_row(Self::KAOSS_SET_AXES_Y, scroll, true, 48)
             .contains(px, py)
         {
             return Hit::KaossAxes;
         }
         if self
-            .kaoss_settings_half_row(164, scroll, false, 48)
+            .kaoss_settings_half_row(Self::KAOSS_SET_AXES_Y, scroll, false, 48)
             .contains(px, py)
         {
             return Hit::KaossGridLines;
         }
         if self
-            .kaoss_settings_half_row(232, scroll, true, 48)
+            .kaoss_settings_half_row(Self::KAOSS_SET_VIZ_Y, scroll, true, 48)
             .contains(px, py)
         {
             return Hit::KaossVizCells;
         }
         if self
-            .kaoss_settings_half_row(232, scroll, false, 48)
+            .kaoss_settings_half_row(Self::KAOSS_SET_VIZ_Y, scroll, false, 48)
             .contains(px, py)
         {
             return Hit::KaossVizGlow;
         }
-        if self.kaoss_settings_row(288, scroll, 48).contains(px, py) {
+        if self
+            .kaoss_settings_row(Self::KAOSS_SET_COLOR_Y, scroll, 48)
+            .contains(px, py)
+        {
             return Hit::KaossColor;
         }
-        let grid_row = self.kaoss_settings_row(356, scroll, 48);
+        let grid_row = self.kaoss_settings_row(Self::KAOSS_SET_GRID_Y, scroll, 48);
         let third = (grid_row.w - 16) / 3;
         let minus = Rect {
             x: grid_row.x,
@@ -1676,12 +1705,11 @@ impl Layout {
         if plus.contains(px, py) {
             return Hit::KaossGridWidthUp;
         }
-        let out_y = 424;
         for i in 0..3 {
             let cell_w = (self.content.w - 16) / 3;
             let r = Rect {
                 x: self.content.x + 8 + i * cell_w + 2,
-                y: self.content.y + out_y - scroll + 2,
+                y: self.content.y + Self::KAOSS_SET_OUT_Y - scroll + 2,
                 w: cell_w - 4,
                 h: 44,
             };
@@ -1691,7 +1719,7 @@ impl Layout {
         }
         for ch in 0..16 {
             if self
-                .kaoss_settings_channel(ch, 496, scroll)
+                .kaoss_settings_channel(ch, Self::KAOSS_SET_CHANNEL_Y, scroll)
                 .contains(px, py)
             {
                 return Hit::KaossChannelPick(ch as u8);

@@ -243,8 +243,8 @@ pub const GATE_PATTERNS: &[GatePattern] = &[
 ];
 
 pub const OCTAVE_LABELS: [&str; 4] = ["1 OCT", "2 OCT", "3 OCT", "4 OCT"];
-/// Left-edge C of the pad (Kaossilator-style). C1 .. C5.
-pub const ROOT_OCTAVE_MIDI: [u8; 5] = [24, 36, 48, 60, 72];
+/// Left-edge C of the pad. C1 .. C8, paired with a 1..4 octave width.
+pub const ROOT_OCTAVE_MIDI: [u8; 8] = [24, 36, 48, 60, 72, 84, 96, 108];
 
 pub fn midi_note_label(midi: u8) -> String {
     let name = jambox_core::NOTE_NAMES[(midi % 12) as usize];
@@ -342,7 +342,7 @@ pub fn picker_count(kind: KaossPicker, show_all: bool) -> usize {
         KaossPicker::Program => program_count(show_all),
         KaossPicker::Scale => scale_count(show_all),
         KaossPicker::Key => 12,
-        // Start C1..C5, then width 1..4 OCT (Tk "OCTAVE — start + width").
+        // Start C1..C8, then width 1..4 OCT.
         KaossPicker::Octave => ROOT_OCTAVE_MIDI.len() + OCTAVE_LABELS.len(),
         KaossPicker::Gate => GATE_PATTERNS.len(),
     }
@@ -432,13 +432,19 @@ mod tests {
 
     #[test]
     fn octave_picker_lists_starts_and_widths() {
-        assert_eq!(picker_count(KaossPicker::Octave, false), 9);
+        assert_eq!(picker_count(KaossPicker::Octave, false), 12);
         assert_eq!(picker_label(KaossPicker::Octave, 0, false), "C1");
         assert_eq!(picker_label(KaossPicker::Octave, 2, false), "C3");
-        assert_eq!(picker_label(KaossPicker::Octave, 5, false), "1 OCT");
-        assert_eq!(picker_label(KaossPicker::Octave, 8, false), "4 OCT");
+        assert_eq!(picker_label(KaossPicker::Octave, 7, false), "C8");
+        assert_eq!(picker_label(KaossPicker::Octave, 8, false), "1 OCT");
+        assert_eq!(picker_label(KaossPicker::Octave, 11, false), "4 OCT");
         assert_eq!(root_octave_index(48), 2);
+        assert_eq!(root_octave_index(108), 7);
         assert_eq!(midi_note_label(60), "C4");
+        assert_eq!(midi_note_label(108), "C8");
+        assert_eq!(clamp_root_midi(12), 24);
+        assert_eq!(clamp_root_midi(108), 108);
+        assert_eq!(clamp_root_midi(120), 108);
     }
 
     #[test]

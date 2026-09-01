@@ -31,6 +31,9 @@ pub struct ClipUpdate {
     pub slot: u8,
     pub clip: Option<Box<Clip>>,
     pub mode: Option<LaunchMode>,
+    /// Baked brightness for this take. `None` leaves the slot's tone alone
+    /// (clear still resets to open).
+    pub tone: Option<f32>,
 }
 
 /// Musical snapshot plus the host callback counters (not DSP state).
@@ -193,6 +196,7 @@ mod tests {
             slot: 0,
             clip: Some(clip),
             mode: None,
+            tone: None,
         });
         let update = audio.clips.pop().unwrap();
         audio.garbage.push(update.clip.unwrap()).unwrap();

@@ -14,7 +14,9 @@ ExecStart=/home/pi/pi-midi-toolkit/bin/pidi-native \
   --control /tmp/jambox.sock \
   --display sdl \
   --touch auto
-Restart=on-failure
+# always: recover a black TFT if the process is killed (pkill / crash).
+# Explicit `systemctl stop` still stays down. OTA must never stop this unit.
+Restart=always
 RestartSec=2
 Environment=RUST_LOG=info
 Environment=SDL_VIDEODRIVER=kmsdrm

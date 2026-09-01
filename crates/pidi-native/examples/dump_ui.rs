@@ -167,6 +167,28 @@ fn main() {
         let mut model = NativeModel::new();
         let mut ob = Outbox::new();
         model.set_mode(UiMode::Kaoss);
+        model.kaoss_picker = Some(KaossPicker::Octave);
+        model.kaoss_root_midi = 108;
+        model.kaoss_octaves = 1;
+        model.tick(1.0 / 60.0, &mut ob);
+        dump(&model, out.join("kaoss_octave_picker.ppm"));
+    }
+    {
+        let mut model = NativeModel::new();
+        let mut ob = Outbox::new();
+        model.set_mode(UiMode::Kaoss);
+        model.kaoss_root_midi = 108;
+        model.kaoss_octaves = 1;
+        let pad = model.layout.kaoss;
+        model.finger_down(1, pad.x + pad.w - 8, pad.y + pad.h / 2, &mut ob);
+        model.tick(1.0 / 60.0, &mut ob);
+        dump(&model, out.join("kaoss_c8_one_octave.ppm"));
+        model.finger_up(1, &mut ob);
+    }
+    {
+        let mut model = NativeModel::new();
+        let mut ob = Outbox::new();
+        model.set_mode(UiMode::Kaoss);
         model.kaoss_program = kaoss_ui::KAOSS_PROGRAMS
             .iter()
             .position(|p| p.id == "wah")
@@ -190,5 +212,36 @@ fn main() {
         model.kaoss_show_all = false;
         model.tick(1.0 / 60.0, &mut ob);
         dump(&model, out.join("kaoss_programs.ppm"));
+    }
+    {
+        let mut model = NativeModel::new();
+        let mut ob = Outbox::new();
+        model.set_mode(UiMode::Settings);
+        let b = model.layout.settings_update;
+        model.finger_down(1, b.x + 4, b.y + 4, &mut ob);
+        model.finger_up(1, &mut ob);
+        model.update_available = true;
+        model.update_confirming = true;
+        model.update_status = "Running: abc1234 (master)\n\n\
+            This deploys new code from GitHub.\n\
+            The screen stays on; the kiosk reloads itself when ready.\n\
+            Phrases, songs, presets, and settings.json are kept.\n\
+            Tap INSTALL NOW to continue, or CANCEL (CHECK)."
+            .into();
+        model.tick(1.0 / 60.0, &mut ob);
+        dump(&model, out.join("update_confirm.ppm"));
+    }
+    {
+        let mut model = NativeModel::new();
+        let mut ob = Outbox::new();
+        model.set_mode(UiMode::Settings);
+        let b = model.layout.settings_update;
+        model.finger_down(1, b.x + 4, b.y + 4, &mut ob);
+        model.finger_up(1, &mut ob);
+        model.update_status = "Installed master abc1234 (updated engines)\n\
+            Reloading kiosk..."
+            .into();
+        model.tick(1.0 / 60.0, &mut ob);
+        dump(&model, out.join("update_reloading.ppm"));
     }
 }

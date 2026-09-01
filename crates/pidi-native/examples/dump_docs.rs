@@ -278,4 +278,25 @@ fn main() {
         tick_n(&mut model, &mut ob, 2);
         dump(&model, &out, "22-chords-key");
     }
+    {
+        let (mut model, mut ob) = fresh();
+        model.set_mode(UiMode::Settings);
+        model.wifi_kb_open = true;
+        model.wifi_kb_ssid = "Cafe".into();
+        model.wifi_kb_text = "ab".into();
+        model.wifi_kb_show = true;
+        tick_n(&mut model, &mut ob, 2);
+        dump(&model, &out, "23-wifi-keyboard");
+    }
+    {
+        let (mut model, mut ob) = fresh();
+        model.set_mode(UiMode::Settings);
+        model.wifi_kb_open = true;
+        model.wifi_kb_ssid = "Cafe".into();
+        model.wifi_kb_text = "a+".into();
+        model.wifi_kb_show = true;
+        model.wifi_kb_sym = true;
+        tick_n(&mut model, &mut ob, 2);
+        dump(&model, &out, "24-wifi-keyboard-symbols");
+    }
 }
