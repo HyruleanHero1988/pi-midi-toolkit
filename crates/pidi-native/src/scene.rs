@@ -364,8 +364,13 @@ fn draw_update_panel(scene: &mut Scene, model: &NativeModel) {
     // Status body — wrap by drawing lines.
     let mut y = layout.content.y + 72;
     for line in model.update_status.lines().take(12) {
-        let color = if line.contains("available") || line.contains("UPDATE available") {
+        let color = if line.contains("available")
+            || line.contains("UPDATE available")
+            || line.contains("Reloading")
+        {
             0xb8bb26
+        } else if line.contains("stale") || line.contains("INSTALL failed") {
+            0xfb4934
         } else if line.starts_with("Running:") {
             0xfabd2f
         } else {
@@ -822,8 +827,13 @@ fn draw_kaoss(scene: &mut Scene, model: &NativeModel) {
             0xffffff,
             2,
         );
-        scene.button(layout.kaoss_settings_btn, 0x504945);
-        scene.text_centered(layout.kaoss_settings_btn, "SET", 0xffffff, 2);
+        scene.button(layout.kaoss_settings_btn, model.kaoss_fx_target.color());
+        scene.text_centered(
+            layout.kaoss_settings_btn,
+            model.kaoss_fx_target.set_label(),
+            0xffffff,
+            2,
+        );
     }
 
     if layout.kaoss_full.w > 0 && layout.kaoss_gate.w == 0 {
@@ -839,11 +849,18 @@ fn draw_kaoss_settings(scene: &mut Scene, model: &NativeModel) {
     scene.text(c.x + 8, c.y + 8 - scroll, "KAOSS settings", 0xfbf1c7);
     scene.text(c.x + c.w - 80, c.y + 8 - scroll, "SCROLL", 0xa89984);
 
-    let wipe = layout.kaoss_settings_row(52, scroll, 48);
+    let wipe = layout.kaoss_settings_row(Layout::KAOSS_SET_WIPE_Y, scroll, 48);
     scene.button(wipe, 0x9d0006);
     scene.text_centered(wipe, "WIPE FX", 0xffffff, 2);
 
-    let show_all = layout.kaoss_settings_row(108, scroll, 48);
+    for (i, dest) in crate::session::KaossFxTarget::ALL.iter().enumerate() {
+        let cell = layout.kaoss_settings_third_row(Layout::KAOSS_SET_FX_Y, scroll, i, 48);
+        let on = *dest == model.kaoss_fx_target;
+        scene.button(cell, if on { dest.color() } else { 0x3c3836 });
+        scene.text_centered(cell, dest.label(), 0xffffff, 2);
+    }
+
+    let show_all = layout.kaoss_settings_row(Layout::KAOSS_SET_SHOW_ALL_Y, scroll, 48);
     scene.button(
         show_all,
         if model.kaoss_show_all {
@@ -863,7 +880,7 @@ fn draw_kaoss_settings(scene: &mut Scene, model: &NativeModel) {
         2,
     );
 
-    let axes = layout.kaoss_settings_half_row(164, scroll, true, 48);
+    let axes = layout.kaoss_settings_half_row(Layout::KAOSS_SET_AXES_Y, scroll, true, 48);
     scene.button(
         axes,
         if model.kaoss_show_axis_labels {
@@ -883,7 +900,7 @@ fn draw_kaoss_settings(scene: &mut Scene, model: &NativeModel) {
         2,
     );
 
-    let grid = layout.kaoss_settings_half_row(164, scroll, false, 48);
+    let grid = layout.kaoss_settings_half_row(Layout::KAOSS_SET_AXES_Y, scroll, false, 48);
     scene.button(
         grid,
         if model.kaoss_show_grid_lines {
@@ -903,8 +920,13 @@ fn draw_kaoss_settings(scene: &mut Scene, model: &NativeModel) {
         2,
     );
 
-    scene.text(c.x + 8, c.y + 216 - scroll, "PAD VIZ", 0xa89984);
-    let cells = layout.kaoss_settings_half_row(232, scroll, true, 48);
+    scene.text(
+        c.x + 8,
+        c.y + Layout::KAOSS_SET_VIZ_Y - 16 - scroll,
+        "PAD VIZ",
+        0xa89984,
+    );
+    let cells = layout.kaoss_settings_half_row(Layout::KAOSS_SET_VIZ_Y, scroll, true, 48);
     scene.button(
         cells,
         if model.kaoss_viz_style.is_cells() {
@@ -914,7 +936,7 @@ fn draw_kaoss_settings(scene: &mut Scene, model: &NativeModel) {
         },
     );
     scene.text_centered(cells, "CELLS", 0xffffff, 2);
-    let glow = layout.kaoss_settings_half_row(232, scroll, false, 48);
+    let glow = layout.kaoss_settings_half_row(Layout::KAOSS_SET_VIZ_Y, scroll, false, 48);
     scene.button(
         glow,
         if model.kaoss_viz_style.is_glow() {
@@ -925,7 +947,7 @@ fn draw_kaoss_settings(scene: &mut Scene, model: &NativeModel) {
     );
     scene.text_centered(glow, "GLOW", 0xffffff, 2);
 
-    let color_btn = layout.kaoss_settings_row(288, scroll, 48);
+    let color_btn = layout.kaoss_settings_row(Layout::KAOSS_SET_COLOR_Y, scroll, 48);
     let color_label = kaoss_viz::pad_color_label(model.kaoss_mono_color);
     let swatch = if kaoss_viz::pad_color_is_rainbow(model.kaoss_mono_color) {
         0xb16286
@@ -936,8 +958,13 @@ fn draw_kaoss_settings(scene: &mut Scene, model: &NativeModel) {
     scene.button(color_btn, swatch);
     scene.text_centered(color_btn, &format!("COLOR · {color_label}"), 0xffffff, 2);
 
-    scene.text(c.x + 8, c.y + 340 - scroll, "GRID LINES", 0xa89984);
-    let grid_row = layout.kaoss_settings_row(356, scroll, 48);
+    scene.text(
+        c.x + 8,
+        c.y + Layout::KAOSS_SET_GRID_Y - 16 - scroll,
+        "GRID LINES",
+        0xa89984,
+    );
+    let grid_row = layout.kaoss_settings_row(Layout::KAOSS_SET_GRID_Y, scroll, 48);
     let third = (grid_row.w - 16) / 3;
     let minus = Rect {
         x: grid_row.x,
@@ -969,7 +996,12 @@ fn draw_kaoss_settings(scene: &mut Scene, model: &NativeModel) {
     scene.button(plus, 0x3c3836);
     scene.text_centered(plus, "+", 0xffffff, 2);
 
-    scene.text(c.x + 8, c.y + 408 - scroll, "OUT", 0xa89984);
+    scene.text(
+        c.x + 8,
+        c.y + Layout::KAOSS_SET_OUT_Y - 16 - scroll,
+        "OUT",
+        0xa89984,
+    );
     for (i, mode) in [
         crate::session::OutMode::Local,
         crate::session::OutMode::Usb,
@@ -981,7 +1013,7 @@ fn draw_kaoss_settings(scene: &mut Scene, model: &NativeModel) {
         let cell_w = (c.w - 16) / 3;
         let r = Rect {
             x: c.x + 8 + i as i32 * cell_w + 2,
-            y: c.y + 424 - scroll + 2,
+            y: c.y + Layout::KAOSS_SET_OUT_Y - scroll + 2,
             w: cell_w - 4,
             h: 44,
         };
@@ -990,9 +1022,14 @@ fn draw_kaoss_settings(scene: &mut Scene, model: &NativeModel) {
         scene.text_centered(r, mode.short_label(), 0xffffff, 2);
     }
 
-    scene.text(c.x + 8, c.y + 480 - scroll, "MIDI channel", 0xa89984);
+    scene.text(
+        c.x + 8,
+        c.y + Layout::KAOSS_SET_CHANNEL_Y - 16 - scroll,
+        "MIDI channel",
+        0xa89984,
+    );
     for ch in 0..16 {
-        let cell = layout.kaoss_settings_channel(ch, 496, scroll);
+        let cell = layout.kaoss_settings_channel(ch, Layout::KAOSS_SET_CHANNEL_Y, scroll);
         let on = ch as u8 == model.kaoss_channel;
         scene.button(cell, if on { 0x458588 } else { 0x3c3836 });
         scene.text_centered(cell, &format!("{}", ch + 1), 0xffffff, 2);
@@ -1145,11 +1182,7 @@ fn draw_kaoss_grid(
         let notes = jambox_core::scale_notes(
             scale.degrees,
             model.kaoss_key,
-            match model.kaoss_octaves {
-                1 | 2 => 48,
-                3 => 36,
-                _ => 24,
-            },
+            kaoss_ui::clamp_root_midi(model.kaoss_root_midi),
             model.kaoss_octaves,
         );
         let n = notes
@@ -2796,6 +2829,31 @@ mod tests {
             .count();
         assert!(vert >= 8, "expected scale-note vertical lines, got {vert}");
         assert_eq!(horiz, 3, "expected Y guides at 25/50/75%, got {horiz}");
+    }
+
+    #[test]
+    fn c8_one_octave_grid_uses_the_selected_start() {
+        let mut model = NativeModel::new();
+        model.kaoss_root_midi = 108;
+        model.kaoss_octaves = 1;
+        let scene = build(&model);
+        let pad = model.layout.kaoss;
+        let vert = scene
+            .color
+            .iter()
+            .filter(|q| {
+                q.w <= 8.0
+                    && q.h >= (pad.h as f32) * 0.9
+                    && q.x >= pad.x as f32 - 4.0
+                    && q.x <= (pad.x + pad.w) as f32 + 4.0
+                    && q.y >= pad.y as f32 - 2.0
+            })
+            .count();
+        // Ionian C8..C9 is 8 notes → 9 cell edges.
+        assert!(
+            (8..=12).contains(&vert),
+            "C8 × 1 OCT should draw one-octave scale lines, got {vert}"
+        );
     }
 
     #[test]

@@ -24,6 +24,8 @@ pub struct PhrasePad {
     pub morph: f32,
     pub out_channel: i8, // -1 = as recorded
     pub local_synth: bool,
+    /// Brightness captured when the take was written. Live tone does not follow.
+    pub tone: f32,
 }
 
 impl Default for PhrasePad {
@@ -41,6 +43,7 @@ impl Default for PhrasePad {
             morph: 0.5,
             out_channel: -1,
             local_synth: true,
+            tone: 1.0,
         }
     }
 }
@@ -67,6 +70,8 @@ struct FilePhrase {
     local_synth: bool,
     #[serde(default = "gain_default")]
     gain: f32,
+    #[serde(default = "tone_default")]
+    tone: f32,
     #[serde(default)]
     events: Vec<FileEvent>,
 }
@@ -81,6 +86,9 @@ fn true_default() -> bool {
     true
 }
 fn gain_default() -> f32 {
+    1.0
+}
+fn tone_default() -> f32 {
     1.0
 }
 
@@ -151,6 +159,7 @@ pub fn load_pad(path: &Path, bpm: f32) -> Option<PhrasePad> {
         morph: file.morph.clamp(0.0, 1.0),
         out_channel: file.out_channel.clamp(-1, 15),
         local_synth: file.local_synth,
+        tone: file.tone.clamp(0.0, 1.0),
     })
 }
 
@@ -195,6 +204,7 @@ pub fn save_pad(dir: &Path, index: usize, pad: &PhrasePad, bpm: f32) -> bool {
         out_channel: pad.out_channel,
         local_synth: pad.local_synth,
         gain: pad.gain.clamp(0.1, 2.0),
+        tone: pad.tone.clamp(0.0, 1.0),
         events,
     };
     let path = pad_path(dir, index);
@@ -346,5 +356,29 @@ mod tests {
         );
         assert!((pad.length_secs - 1.0).abs() < 0.001);
         assert!(pad.loop_mode);
+    }
+
+    #[test]
+    fn pad_tone_round_trips() {
+        let dir = std::env::temp_dir().join(format!("pidi-phrase-tone-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let mut pad = from_wire(
+            vec![WireClipEvent {
+                tick: 0,
+                on: true,
+                channel: 0,
+                note: 36,
+                velocity: 100,
+            }],
+            1920,
+            120.0,
+            true,
+        );
+        pad.tone = 0.25;
+        assert!(save_pad(&dir, 0, &pad, 120.0));
+        let loaded = load_pad(&pad_path(&dir, 0), 120.0).unwrap();
+        assert!((loaded.tone - 0.25).abs() < 1e-6);
+        let _ = fs::remove_dir_all(&dir);
     }
 }

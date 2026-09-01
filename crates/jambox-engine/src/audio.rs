@@ -690,6 +690,11 @@ fn drain(state: &mut RenderState) {
             if let Some(mode) = update.mode {
                 slot.set_mode(mode);
             }
+            if let Some(tone) = update.tone {
+                slot.set_playback_tone(tone);
+            } else if update.clip.is_none() {
+                slot.set_playback_tone(1.0);
+            }
             if let Some(previous) = slot.swap_boxed(update.clip) {
                 let _ = state.audio.garbage.push(previous);
             }

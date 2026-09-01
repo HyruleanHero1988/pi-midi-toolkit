@@ -244,6 +244,8 @@ pub struct SeqModel {
     pub status: String,
     pub layer_line: String,
     pub extend_mode: bool,
+    /// Brightness captured on the backbone take. Later overdubs don't rewrite it.
+    pub baked_tone: Option<f32>,
     sequence: Sequence,
     take: Vec<RecEvent>,
     take_started: Option<std::time::Instant>,
@@ -263,6 +265,7 @@ impl SeqModel {
             status: "REC a backbone groove, then overdub layers".into(),
             layer_line: "no layers".into(),
             extend_mode: false,
+            baked_tone: None,
             sequence: Sequence::default(),
             take: Vec::new(),
             take_started: None,
@@ -580,6 +583,7 @@ impl SeqModel {
         self.sequence.clear();
         self.take.clear();
         self.take_started = None;
+        self.baked_tone = None;
         self.state = SeqState::Empty;
         self.refresh_lines();
         SeqAction::Clear

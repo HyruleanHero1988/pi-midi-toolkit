@@ -125,16 +125,24 @@ const FONT: [&[u8; 5]; 64] = [
     &[0x40, 0x40, 0x40, 0x40, 0x40], // _
 ];
 
-pub fn glyph(ch: char) -> &'static [u8; 5] {
-    let mut c = ch as u8;
-    if c >= b'a' && c <= b'z' {
-        c -= 32;
+/// Atlas slot for ASCII 32..95, or `None` if the 5×7 font cannot draw `ch`.
+///
+/// Must use `u32` (not `char as u8`): U+232B ERASE TO THE LEFT (`⌫`) has
+/// low byte 0x2B, which is `'+'`.
+fn font_index(ch: char) -> Option<usize> {
+    let mut code = ch as u32;
+    if (b'a' as u32..=b'z' as u32).contains(&code) {
+        code -= 32;
     }
-    if (32..96).contains(&c) {
-        FONT[(c - 32) as usize]
+    if (32..96).contains(&code) {
+        Some((code - 32) as usize)
     } else {
-        FONT[0]
+        None
     }
+}
+
+pub fn glyph(ch: char) -> &'static [u8; 5] {
+    font_index(ch).map(|i| FONT[i]).unwrap_or(FONT[0])
 }
 
 pub const ATLAS_COLS: u32 = 16;
@@ -174,14 +182,7 @@ pub fn atlas_rgba() -> (u32, u32, Vec<u8>) {
 }
 
 pub fn glyph_uv(ch: char) -> (f32, f32, f32, f32) {
-    let mut c = ch as u8;
-    if (b'a'..=b'z').contains(&c) {
-        c -= 32;
-    }
-    if !(32..96).contains(&c) {
-        c = b' ';
-    }
-    let i = (c - 32) as u32;
+    let i = font_index(ch).unwrap_or(0) as u32;
     let col = i % ATLAS_COLS;
     let row = i / ATLAS_COLS;
     let (w, h) = atlas_size();
@@ -214,5 +215,14 @@ mod tests {
         let (w, h, data) = atlas_rgba();
         assert_eq!((w, h), (128, 32));
         assert!(data.chunks(4).any(|p| p[3] > 0));
+    }
+
+    #[test]
+    fn unicode_erase_does_not_alias_to_plus() {
+        // U+232B's low byte is 0x2B ('+'). Truncating char→u8 used to draw '+'
+        // for the backspace key.
+        assert_ne!(glyph('⌫'), glyph('+'));
+        assert_eq!(glyph('⌫'), glyph(' '));
+        assert_ne!(glyph_uv('⌫'), glyph_uv('+'));
     }
 }

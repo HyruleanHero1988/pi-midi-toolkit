@@ -38,5 +38,5 @@ pub use font::FontStyle;
 pub use layout::{Hit, Layout, Surface};
 pub use mode::UiMode;
 pub use model::{NativeModel, RepeatDivisionChoice};
-pub use session::OutMode;
+pub use session::{KaossFxTarget, OutMode};
 pub use render::{Frame, SCREEN_H, SCREEN_W};
