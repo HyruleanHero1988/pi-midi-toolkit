@@ -1,5 +1,9 @@
 # pi-midi-toolkit
 
+> **Python kiosk archive.** This branch freezes the Tk PiDI kiosk at
+> [`apps/pidi`](apps/pidi). See [`ARCHIVE.md`](ARCHIVE.md). New kiosk work
+> does not land here.
+
 Raspberry Pi **MIDI appliance**: one kiosk UI for local soft-synth play **and**
 low-latency MIDI thru/remap to a hardware synth. **Not** related to play-my-synth.
 
