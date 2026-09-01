@@ -92,6 +92,9 @@ pub enum Request {
         length_ticks: u32,
         #[serde(default)]
         mode: Option<String>,
+        /// Brightness captured when the take was written. Live tone does not follow.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tone: Option<f32>,
         events: Vec<WireClipEvent>,
     },
     ClipClear {

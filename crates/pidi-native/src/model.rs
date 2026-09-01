@@ -596,6 +596,7 @@ impl NativeModel {
                 pad.length_ticks,
                 if pad.loop_mode { "loop" } else { "oneshot" },
                 pad.events.clone(),
+                pad.tone,
             );
         }
         self.status_line = format!("phrases {}/16 from {}", n, dir.display());
@@ -3370,6 +3371,7 @@ impl NativeModel {
             self.phrases[index].length_ticks,
             mode,
             self.phrases[index].events.clone(),
+            self.phrases[index].tone,
         );
         let dir = phrases::phrases_dir_from_env();
         let _ = phrases::save_pad(&dir, index, &self.phrases[index], self.bpm);
@@ -3483,7 +3485,8 @@ impl NativeModel {
             self.status_line = "SEQ empty".into();
             return;
         };
-        let pad = phrases::from_wire(events, length_ticks, self.seq.bpm, true);
+        let mut pad = phrases::from_wire(events, length_ticks, self.seq.bpm, true);
+        pad.tone = self.seq.baked_tone.unwrap_or(self.synth_params[1].clamp(0.0, 1.0));
         self.phrases[index] = pad;
         let dir = phrases::phrases_dir_from_env();
         let _ = phrases::save_pad(&dir, index, &self.phrases[index], self.bpm);
@@ -3497,6 +3500,7 @@ impl NativeModel {
             self.phrases[index].length_ticks,
             mode,
             self.phrases[index].events.clone(),
+            self.phrases[index].tone,
         );
         self.pads_selected = index;
         self.pads_edit = false;
@@ -3558,7 +3562,8 @@ impl NativeModel {
                 velocity: e.velocity,
             })
             .collect();
-        let pad = phrases::from_wire(wire, length_ticks.max(1), self.bpm, false);
+        let mut pad = phrases::from_wire(wire, length_ticks.max(1), self.bpm, false);
+        pad.tone = self.synth_params[1].clamp(0.0, 1.0);
         self.phrases[index] = pad;
         let dir = phrases::phrases_dir_from_env();
         let _ = phrases::save_pad(&dir, index, &self.phrases[index], self.bpm);
@@ -3567,6 +3572,7 @@ impl NativeModel {
             self.phrases[index].length_ticks,
             "oneshot",
             self.phrases[index].events.clone(),
+            self.phrases[index].tone,
         );
         self.pads_selected = index;
         self.status_line = format!("{} recorded", phrases::pad_label(index));
@@ -3622,6 +3628,7 @@ impl NativeModel {
             self.phrases[index].length_ticks,
             mode,
             self.phrases[index].events.clone(),
+            self.phrases[index].tone,
         );
         let dir = phrases::phrases_dir_from_env();
         let _ = phrases::save_pad(&dir, index, &self.phrases[index], self.bpm);
@@ -4896,7 +4903,16 @@ impl NativeModel {
             } => {
                 outbox.tempo(self.seq.bpm);
                 self.bpm = self.seq.bpm;
-                outbox.clip_load(SEQ_CLIP_SLOT, length_ticks, "loop", events);
+                if self.seq.baked_tone.is_none() && self.seq.layer_count() >= 1 {
+                    self.seq.baked_tone = Some(self.synth_params[1].clamp(0.0, 1.0));
+                }
+                outbox.clip_load(
+                    SEQ_CLIP_SLOT,
+                    length_ticks,
+                    "loop",
+                    events,
+                    self.seq.baked_tone.unwrap_or(1.0),
+                );
                 if launch {
                     outbox.clip_launch(SEQ_CLIP_SLOT, "bar");
                 }
@@ -5847,7 +5863,7 @@ impl NativeModel {
         };
         outbox.tempo(bpm);
         let mode = if self.song_loop { "loop" } else { "oneshot" };
-        outbox.clip_load(SONG_CLIP_SLOT, length_ticks, mode, events);
+        outbox.clip_load(SONG_CLIP_SLOT, length_ticks, mode, events, 1.0);
         outbox.clip_launch(SONG_CLIP_SLOT, "bar");
         self.song_playing = true;
         self.bpm = bpm.clamp(40.0, 240.0);
