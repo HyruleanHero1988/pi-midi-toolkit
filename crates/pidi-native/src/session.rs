@@ -130,7 +130,7 @@ pub struct SessionState {
     pub synth_octave: i8,
     pub kaoss_scale_index: u8,
     pub kaoss_key: u8,
-    /// Left-edge MIDI note of the Kaoss pad (C1..C5).
+    /// Left-edge MIDI note of the Kaoss pad (C1..C8).
     #[serde(default = "default_kaoss_root_midi")]
     pub kaoss_root_midi: u8,
     pub kaoss_octaves: u8,
