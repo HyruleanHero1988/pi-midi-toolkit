@@ -7,8 +7,10 @@
 
 use crate::transport::{Quantize, Transport};
 
-/// Phrase pad grid (MPK Bank A + Bank B).
-pub const MAX_CLIPS: usize = 16;
+/// Phrase pads 0..15, then SEQ/songs on [`SEQ_CLIP_SLOT`].
+pub const MAX_CLIPS: usize = 17;
+/// Dedicated engine slot so SEQ does not overwrite phrase pad B8.
+pub const SEQ_CLIP_SLOT: u8 = 16;
 /// Notes one clip may hold open at once (for clean stop / note-off flush).
 const MAX_SLOT_NOTES: usize = 24;
 
@@ -669,5 +671,15 @@ mod tests {
         let cleared = slot.swap_boxed(None).expect("second clip");
         assert!(!cleared.is_empty());
         assert!(slot.clip().is_none());
+    }
+
+    #[test]
+    fn seq_lives_past_the_sixteen_phrase_pads() {
+        assert_eq!(MAX_CLIPS, 17);
+        assert_eq!(SEQ_CLIP_SLOT as usize, 16);
+        let seq = Sequencer::new();
+        assert!(seq.slot(15).is_some());
+        assert!(seq.slot(SEQ_CLIP_SLOT as usize).is_some());
+        assert!(seq.slot(MAX_CLIPS).is_none());
     }
 }

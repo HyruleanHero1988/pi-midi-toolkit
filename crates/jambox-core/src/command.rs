@@ -95,7 +95,8 @@ pub enum Command {
         note: u8,
     },
     /// Phrase / SEQ / song playback. Lives on a separate keys bus so the live
-    /// tone knob cannot rewrite a pad or an already-recorded layer.
+    /// tone knob cannot rewrite a pad or an already-recorded layer. MIX trims
+    /// this slot independently of live keys.
     ClipNoteOn {
         channel: u8,
         note: u8,
@@ -147,6 +148,10 @@ pub enum Command {
     SetClipMode {
         slot: u8,
         mode: LaunchMode,
+    },
+    SetClipGain {
+        slot: u8,
+        value: f32,
     },
     StartRepeat {
         owner: u32,

@@ -292,6 +292,7 @@ pub fn build(model: &NativeModel) -> Scene {
             UiMode::Map => draw_map(&mut scene, model),
             UiMode::Settings => draw_settings(&mut scene, model),
             UiMode::Fx => draw_fx(&mut scene, model),
+            UiMode::Mix => draw_mix(&mut scene, model),
             UiMode::Log => draw_log(&mut scene, model),
             UiMode::Chords => draw_chords(&mut scene, model),
         }
@@ -653,6 +654,13 @@ fn chrome_status(model: &NativeModel) -> String {
         UiMode::Fx => {
             if model.status_line.is_empty() {
                 "FX".into()
+            } else {
+                model.status_line.chars().take(24).collect()
+            }
+        }
+        UiMode::Mix => {
+            if model.status_line.is_empty() {
+                "MIX".into()
             } else {
                 model.status_line.chars().take(24).collect()
             }
@@ -2648,29 +2656,92 @@ fn draw_fx(scene: &mut Scene, model: &NativeModel) {
         0xffffff,
         2,
     );
-    const LABELS: [&str; 4] = ["DRIVE", "DELAY", "REVERB", "FLANGE"];
-    let values = match model.fx_target {
+    const LABELS: [&str; Layout::FX_SLIDER_COUNT] =
+        ["DRIVE", "DELAY", "REVERB", "FLANGE", "LEVEL", "DRUMS"];
+    let inserts = match model.fx_target {
         crate::model::FxEditTarget::Bus => &model.fx_bus,
         crate::model::FxEditTarget::Voice => &model.fx_voice,
         crate::model::FxEditTarget::DrumGroup => &model.fx_drum,
     };
-    let fill_color = match model.fx_target {
+    let insert_color = match model.fx_target {
         crate::model::FxEditTarget::Bus => 0x458588,
         crate::model::FxEditTarget::Voice => 0xb16286,
         crate::model::FxEditTarget::DrumGroup => 0xd79921,
     };
-    for index in 0..4 {
+    for index in 0..Layout::FX_SLIDER_COUNT {
         let track = layout.settings_fx_slider(index);
         scene.fill_rect(track, 0x20202c);
         scene.text(track.x + 4, track.y - 18, LABELS[index], 0xc0c0d0);
-        let fill_h = (track.h as f32 * values[index]) as i32;
+        let value = if index == Layout::FX_KEYS_LEVEL {
+            model.synth_params[2]
+        } else if index == Layout::FX_DRUMS_LEVEL {
+            model.drum_level
+        } else {
+            inserts[index]
+        };
+        let fill_h = (track.h as f32 * value) as i32;
         let fill = Rect {
             x: track.x + 4,
             y: track.y + track.h - fill_h,
             w: track.w - 8,
             h: fill_h,
         };
+        let fill_color = if index == Layout::FX_KEYS_LEVEL {
+            0x689d6a
+        } else if index == Layout::FX_DRUMS_LEVEL {
+            0xd79921
+        } else {
+            insert_color
+        };
         scene.fill_rect(fill, fill_color);
+    }
+}
+
+fn draw_mix(scene: &mut Scene, model: &NativeModel) {
+    let layout = model.layout;
+    scene.text_scaled(layout.content.x + 12, layout.content.y + 8, "MIX", 0xfbf1c7, 2);
+    const BUS: [(&str, u32); 3] = [
+        ("LIVE", 0x689d6a),
+        ("KIT", 0xd79921),
+        ("SEQ", 0xb16286),
+    ];
+    let bus_values = [
+        model.synth_params[2],
+        model.drum_level,
+        (model.seq_level / 2.0).clamp(0.0, 1.0),
+    ];
+    for index in 0..Layout::MIX_BUS_COUNT {
+        let track = layout.mix_bus_slider(index);
+        scene.fill_rect(track, 0x20202c);
+        scene.text(track.x + 4, track.y - 18, BUS[index].0, 0xc0c0d0);
+        let fill_h = (track.h as f32 * bus_values[index]) as i32;
+        let fill = Rect {
+            x: track.x + 4,
+            y: track.y + track.h - fill_h,
+            w: track.w - 8,
+            h: fill_h,
+        };
+        scene.fill_rect(fill, BUS[index].1);
+    }
+    scene.text_scaled(layout.content.x + 240, layout.content.y + 8, "PADS", 0xfbf1c7, 2);
+    for index in 0..16 {
+        let cell = layout.mix_pad_cell(index);
+        let pad = &model.phrases[index];
+        scene.fill_rect(cell, if pad.empty { 0x1a1a22 } else { 0x20202c });
+        let label = phrases::pad_label(index);
+        scene.text(cell.x + 4, cell.y + 4, &label, if pad.empty { 0x665c54 } else { 0xc0c0d0 });
+        if pad.empty {
+            continue;
+        }
+        let fill_t = (pad.gain / 2.0).clamp(0.0, 1.0);
+        let fill_h = ((cell.h - 18) as f32 * fill_t) as i32;
+        let fill = Rect {
+            x: cell.x + 6,
+            y: cell.y + cell.h - fill_h - 4,
+            w: cell.w - 12,
+            h: fill_h,
+        };
+        scene.fill_rect(fill, 0xd79921);
     }
 }
 

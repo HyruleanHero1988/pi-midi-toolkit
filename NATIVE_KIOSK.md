@@ -21,7 +21,7 @@ runtime.
 | Mode | Status |
 |---|---|
 | KAOSS + drums | Full-width pad (Tk layout); axes/cursor; scale/key/oct/gate pickers, HOLD, FULL PAD, CELLS/GLOW, trail/ripples, WIPE FX, CH, OUT; Kaoss CC#12/13/92 when OUT is USB/BOTH. On-screen drums live on SEQ. |
-| Nav shell / HOME | Top chrome (PiDI / HOME / POWER / jam tabs); Home 3×3 `HOME_TILES` |
+| Nav shell / HOME | Top chrome (PiDI / HOME / POWER / jam tabs); Home 5×3 `HOME_TILES` (twelve tiles, no scroll) |
 | PADS | Launch/stop from `phrases/pad-XX.json`; PLAY/EDIT; REC/TRIG/MODE/CLEAR; SEQ→PAD; OUT cycle |
 | SYNTH | Morph A/B wave pick, tone/level/atk/rel, vibrato, scope, kit macros, C4–B4 keys, **SAVE AS** (bake morph→`user-wavetables/` + `.fx.json`); Settings **FLANGE** insert on voice/bus |
 | SEQ | Backbone REC → engine loop clip; KEEP/DROP/UNDO; len×2/÷2/EXTEND; →PAD; PLAY/STOP/CLEAR/BPM. Top-chrome **REC/STOP** arms recording from any mode. Armed REC also captures SYNTH keys, drums, CHORDS, KAOSS notes, and incoming MIDI. First take auto-trims leading/trailing dead air (Tk parity). |
@@ -29,7 +29,8 @@ runtime.
 | SONGS | List `songs/*.mid`, SMF→clip PLAY/STOP/LOOP, SAVE SEQ, OUT cycle |
 | PRESETS | 8 slots save/load synth params to `user-presets/` |
 | MAP | Thru status; THRU ON / OFF / REFRESH PORTS → `midi-engine` (Linux appliance; Windows host explains Pi-only) |
-| FX | BUS / VOICE / DRUMS target; DRIVE / DELAY / REVERB / **FLANGE** (bus = global wet; voice mirrors SYNTH FLANGE) |
+| FX | BUS / VOICE / DRUMS insert target; DRIVE / DELAY / REVERB / **FLANGE**; always-on **LEVEL** (keys) and **DRUMS** mix trims |
+| MIX | **LIVE** / **KIT** / **SEQ** buses plus 16 pad faders. LIVE/KIT share FX LEVEL/DRUMS. Pads and SEQ use engine `clip_gain` (does not rewrite MIDI velocity). SEQ/songs share slot 16 so B8 is a free pad. |
 | SETTINGS | Appliance hub: Panic, notes-off, **AUDIO**, **WIFI**, **UPDATE**, FONT, LOG, MAP |
 | LOG | Engine counters + recent action lines |
 | Session | Autosave `settings.json` (synth/kaoss/tempo/OUT prefs) |
