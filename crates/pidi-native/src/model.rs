@@ -233,6 +233,7 @@ pub struct NativeModel {
     pub kaoss_channel: u8,
     pub kaoss_settings_open: bool,
     pub kaoss_settings_scroll: i32,
+    pub kaoss_fx_target: session::KaossFxTarget,
     /// Drill-down pad color picker (opened from KAOSS settings COLOR).
     pub kaoss_color_picker_open: bool,
     pub kaoss_show_axis_labels: bool,
@@ -418,6 +419,7 @@ impl NativeModel {
             kaoss_channel: 0,
             kaoss_settings_open: false,
             kaoss_settings_scroll: 0,
+            kaoss_fx_target: session::KaossFxTarget::Voice,
             kaoss_color_picker_open: false,
             kaoss_show_axis_labels: true,
             kaoss_show_grid_lines: true,
@@ -1538,6 +1540,7 @@ impl NativeModel {
             s.kaoss_gate % kaoss_ui::GATE_PATTERNS.len()
         };
         self.kaoss_hold = s.kaoss_hold;
+        self.kaoss_fx_target = s.kaoss_fx_target;
         self.kaoss_show_all = s.kaoss_show_all;
         self.kaoss_channel = s.kaoss_channel & 0x0f;
         self.fx_bus = [
@@ -1619,6 +1622,7 @@ impl NativeModel {
             kaoss_program: self.kaoss_program,
             kaoss_gate: self.kaoss_gate,
             kaoss_hold: self.kaoss_hold,
+            kaoss_fx_target: self.kaoss_fx_target,
             fx_bus: [self.fx_bus[0], self.fx_bus[1], self.fx_bus[2]],
             fx_flanger: self.fx_voice[3],
             fx_bus_flanger: self.fx_bus[3],
@@ -1751,6 +1755,7 @@ impl NativeModel {
                 | Hit::KaossChannel
                 | Hit::KaossSettings
                 | Hit::KaossWipeFx
+                | Hit::KaossFxDest(_)
                 | Hit::KaossViz
                 | Hit::KaossOut
                 | Hit::Drum { .. }
@@ -2446,6 +2451,13 @@ impl NativeModel {
             Hit::KaossWipeFx => {
                 self.tap_ui(slot, id, gesture, px, py);
                 self.wipe_kaoss_fx(outbox);
+            }
+            Hit::KaossFxDest(index) => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.kaoss_fx_target = session::KaossFxTarget::ALL
+                    [index as usize % session::KaossFxTarget::ALL.len()];
+                self.status_line = format!("kaoss FX → {}", self.kaoss_fx_target.label());
+                self.mark_dirty();
             }
             Hit::KaossChannel => {
                 self.tap_ui(slot, id, gesture, px, py);
@@ -4765,15 +4777,8 @@ impl NativeModel {
 
     fn apply_named_param(&mut self, name: &str, value: f32, outbox: &mut Outbox) {
         let v = value.clamp(0.0, 1.0);
-        if Self::is_voice_fx_param(name) {
-            if name == "flanger_mix" {
-                self.fx_voice[3] = v;
-            }
-            self.push_voice_fx(name, v, outbox);
-            return;
-        }
-        if Self::is_bus_param(name) {
-            outbox.fx_bus(name, v);
+        if Self::is_pad_fx_param(name) {
+            self.push_kaoss_fx(name, v, outbox);
             return;
         }
         outbox.synth(name, v);
@@ -4782,6 +4787,21 @@ impl NativeModel {
             if i == 0 {
                 self.sync_wave_bank();
             }
+        }
+    }
+
+    fn push_kaoss_fx(&mut self, name: &str, value: f32, outbox: &mut Outbox) {
+        if self.kaoss_fx_target.includes_voice() {
+            if let Some(i) = Self::voice_fx_slider_index(name) {
+                self.fx_voice[i] = value;
+            }
+            self.push_voice_fx(name, value, outbox);
+        }
+        if self.kaoss_fx_target.includes_drums() {
+            if let Some(i) = Self::voice_fx_slider_index(name) {
+                self.fx_drum[i] = value;
+            }
+            outbox.fx_drum_group(name, value);
         }
     }
 
@@ -4831,14 +4851,31 @@ impl NativeModel {
         }
     }
 
-    fn is_bus_param(name: &str) -> bool {
-        matches!(name, "drive" | "delay_mix" | "reverb_mix" | "delay_time")
+    fn voice_fx_slider_index(name: &str) -> Option<usize> {
+        match name {
+            "drive" => Some(0),
+            "delay_mix" => Some(1),
+            "reverb_mix" => Some(2),
+            "flanger_mix" => Some(3),
+            _ => None,
+        }
     }
 
-    fn is_voice_fx_param(name: &str) -> bool {
+    /// Pad XY FX (echo / reverb / drive / flange). Destination is SET → PAD FX
+    /// (voice insert, kit-group insert, or both). Master-bus wet is FX MODE → BUS.
+    fn is_pad_fx_param(name: &str) -> bool {
         matches!(
             name,
-            "flanger_mix" | "flanger_rate" | "flanger_depth" | "flanger_fb"
+            "drive"
+                | "delay_mix"
+                | "delay_time"
+                | "delay_fb"
+                | "reverb_mix"
+                | "reverb_size"
+                | "flanger_mix"
+                | "flanger_rate"
+                | "flanger_depth"
+                | "flanger_fb"
         )
     }
 
@@ -5666,12 +5703,27 @@ impl NativeModel {
     }
 
     fn wipe_kaoss_fx(&mut self, outbox: &mut Outbox) {
+        self.fx_voice = [0.0, 0.0, 0.0, 0.0];
+        self.fx_drum = [0.0, 0.0, 0.0, 0.0];
+        for name in [
+            "drive",
+            "delay_mix",
+            "delay_time",
+            "delay_fb",
+            "reverb_mix",
+            "reverb_size",
+            "flanger_mix",
+            "flanger_rate",
+        ] {
+            self.push_voice_fx(name, 0.0, outbox);
+            outbox.fx_drum_group(name, 0.0);
+        }
+        // Also dry the master bus so leftover pad wet from the old mix-bus
+        // routing (echo/reverb used to smear drums) is gone in one tap.
         self.fx_bus = [0.0, 0.0, 0.0, 0.0];
-        self.fx_voice[3] = 0.0;
         for name in Self::FX_PARAM_NAMES {
             outbox.fx_bus(name, 0.0);
         }
-        self.push_voice_fx("flanger_mix", 0.0, outbox);
         let defaults = session::SessionState::default();
         self.synth_params[0] = defaults.morph;
         self.synth_params[1] = defaults.tone;
@@ -6481,6 +6533,206 @@ mod tests {
                 param,
                 ..
             } if param == "drive"
+        )));
+    }
+
+    fn select_kaoss_program(model: &mut NativeModel, id: &str) {
+        model.kaoss_program = kaoss_ui::KAOSS_PROGRAMS
+            .iter()
+            .position(|p| p.id == id)
+            .unwrap_or_else(|| panic!("missing kaoss program {id}"));
+    }
+
+    fn assert_voice_fx(batch: &[Request], index: u16, param: &str) {
+        assert!(
+            batch.iter().any(|r| matches!(
+                r,
+                Request::Fx {
+                    target: jambox_protocol::FxTargetSpec::Voice { index: i },
+                    param: p,
+                    ..
+                } if *i == index && p == param
+            )),
+            "expected voice {index} {param}, got {batch:?}"
+        );
+    }
+
+    fn assert_no_bus_fx(batch: &[Request]) {
+        assert!(
+            batch.iter().all(|r| !matches!(
+                r,
+                Request::Fx {
+                    target: jambox_protocol::FxTargetSpec::Bus,
+                    ..
+                }
+            )),
+            "Kaoss pad FX must not wet the master bus: {batch:?}"
+        );
+    }
+
+    fn assert_drum_group_fx(batch: &[Request], param: &str) {
+        assert!(
+            batch.iter().any(|r| matches!(
+                r,
+                Request::Fx {
+                    target: jambox_protocol::FxTargetSpec::DrumGroup,
+                    param: p,
+                    ..
+                } if p == param
+            )),
+            "expected drum group {param}, got {batch:?}"
+        );
+    }
+
+    fn assert_no_voice_fx(batch: &[Request]) {
+        assert!(
+            batch.iter().all(|r| !matches!(
+                r,
+                Request::Fx {
+                    target: jambox_protocol::FxTargetSpec::Voice { .. },
+                    ..
+                }
+            )),
+            "expected no voice FX: {batch:?}"
+        );
+    }
+
+    fn assert_no_drum_group_fx(batch: &[Request]) {
+        assert!(
+            batch.iter().all(|r| !matches!(
+                r,
+                Request::Fx {
+                    target: jambox_protocol::FxTargetSpec::DrumGroup,
+                    ..
+                }
+            )),
+            "expected no drum-group FX: {batch:?}"
+        );
+    }
+
+    #[test]
+    fn kaoss_echo_sends_voice_delay_not_bus() {
+        let mut model = NativeModel::new();
+        select_kaoss_program(&mut model, "echo");
+        model.morph_a = 2;
+        model.morph_b = 5;
+        let mut out = Outbox::new();
+        let k = model.layout.kaoss;
+        // Top-right: high delay time (X) and high delay mix (Y).
+        model.finger_down(1, k.x + k.w - 8, k.y + 4, &mut out);
+        let batch = out.take();
+        assert_voice_fx(&batch, 2, "delay_mix");
+        assert_voice_fx(&batch, 5, "delay_mix");
+        assert_voice_fx(&batch, 2, "delay_time");
+        assert_no_bus_fx(&batch);
+        assert_no_drum_group_fx(&batch);
+        assert!(model.fx_voice[1] > 0.5, "Y should raise voice delay mix");
+    }
+
+    #[test]
+    fn kaoss_echo_drums_sends_kit_group_not_voice() {
+        let mut model = NativeModel::new();
+        select_kaoss_program(&mut model, "echo");
+        model.kaoss_fx_target = session::KaossFxTarget::Drums;
+        model.morph_a = 2;
+        model.morph_b = 5;
+        let mut out = Outbox::new();
+        let k = model.layout.kaoss;
+        model.finger_down(1, k.x + k.w - 8, k.y + 4, &mut out);
+        let batch = out.take();
+        assert_drum_group_fx(&batch, "delay_mix");
+        assert_drum_group_fx(&batch, "delay_time");
+        assert_no_voice_fx(&batch);
+        assert_no_bus_fx(&batch);
+        assert!(model.fx_drum[1] > 0.5, "Y should raise kit delay mix");
+    }
+
+    #[test]
+    fn kaoss_echo_both_sends_voice_and_kit_group() {
+        let mut model = NativeModel::new();
+        select_kaoss_program(&mut model, "space");
+        model.kaoss_fx_target = session::KaossFxTarget::Both;
+        model.morph_a = 1;
+        model.morph_b = 1;
+        let mut out = Outbox::new();
+        let k = model.layout.kaoss;
+        model.finger_down(1, k.x + k.w / 2, k.y + 4, &mut out);
+        let batch = out.take();
+        assert_voice_fx(&batch, 1, "reverb_mix");
+        assert_drum_group_fx(&batch, "reverb_mix");
+        assert_no_bus_fx(&batch);
+        assert!(model.fx_voice[2] > 0.5);
+        assert!(model.fx_drum[2] > 0.5);
+    }
+
+    #[test]
+    fn kaoss_set_fx_dest_selects_drums() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Kaoss);
+        model.kaoss_settings_open = true;
+        assert_eq!(model.kaoss_fx_target, session::KaossFxTarget::Voice);
+        let mut out = Outbox::new();
+        let cell = model
+            .layout
+            .kaoss_settings_third_row(Layout::KAOSS_SET_FX_Y, 0, 1, 48);
+        model.finger_down(1, cell.x + 4, cell.y + 4, &mut out);
+        model.finger_up(1, &mut out);
+        assert_eq!(model.kaoss_fx_target, session::KaossFxTarget::Drums);
+    }
+
+    #[test]
+    fn kaoss_space_sends_voice_reverb_not_bus() {
+        let mut model = NativeModel::new();
+        select_kaoss_program(&mut model, "space");
+        model.morph_a = 1;
+        model.morph_b = 1;
+        let mut out = Outbox::new();
+        let k = model.layout.kaoss;
+        model.finger_down(1, k.x + k.w / 2, k.y + 4, &mut out);
+        let batch = out.take();
+        assert_voice_fx(&batch, 1, "reverb_mix");
+        assert_voice_fx(&batch, 1, "delay_mix");
+        assert_no_bus_fx(&batch);
+        assert!(model.fx_voice[2] > 0.5, "Y should raise voice reverb mix");
+    }
+
+    #[test]
+    fn kaoss_wipe_fx_clears_voice_delay_and_reverb() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Kaoss);
+        model.kaoss_settings_open = true;
+        model.fx_voice = [0.4, 0.8, 0.6, 0.5];
+        model.fx_drum = [0.2, 0.9, 0.7, 0.1];
+        model.fx_bus = [0.3, 0.7, 0.5, 0.2];
+        let mut out = Outbox::new();
+        model.wipe_kaoss_fx(&mut out);
+        assert!(model.fx_voice.iter().all(|v| *v == 0.0));
+        assert!(model.fx_drum.iter().all(|v| *v == 0.0));
+        assert!(model.fx_bus.iter().all(|v| *v == 0.0));
+        let batch = out.take();
+        assert!(batch.iter().any(|r| matches!(
+            r,
+            Request::Fx {
+                target: jambox_protocol::FxTargetSpec::Voice { .. },
+                param,
+                value,
+            } if param == "delay_mix" && *value == 0.0
+        )));
+        assert!(batch.iter().any(|r| matches!(
+            r,
+            Request::Fx {
+                target: jambox_protocol::FxTargetSpec::Voice { .. },
+                param,
+                value,
+            } if param == "reverb_mix" && *value == 0.0
+        )));
+        assert!(batch.iter().any(|r| matches!(
+            r,
+            Request::Fx {
+                target: jambox_protocol::FxTargetSpec::DrumGroup,
+                param,
+                value,
+            } if param == "delay_mix" && *value == 0.0
         )));
     }
 
