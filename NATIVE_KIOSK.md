@@ -36,6 +36,11 @@ runtime.
 
 ## Appliance-oriented hooks
 
+Map, WIFI, and UPDATE call host tools when present (`midi-engine`, `nmcli`,
+`python3 apps/pidi/pidi/updater.py`). On a Windows host they report that those
+actions belong on the Pi. Bin deploy remains `deploy/build-pi-bins.sh` /
+`deploy/deploy.sh`.
+
 ## User data (do not wipe)
 
 All user-editable appliance content lives under one XDG-style root:
@@ -54,11 +59,6 @@ ${PIDI_DATA_ROOT:-${XDG_DATA_HOME:-$HOME/.local/share}/pidi}/
 Code, factory wavetables, and engines stay in `PIDI_REPO_ROOT` (the git tree).
 SET→UPDATE must never touch the data root. Migrate an existing lab box with
 `./deploy/migrate-user-data.sh`.
-
-Map, WIFI, and UPDATE call host tools when present (`midi-engine`, `nmcli`,
-`python3 apps/pidi/pidi/updater.py`). On a Windows host they report that those
-actions belong on the Pi. Bin deploy remains `deploy/build-pi-bins.sh` /
-`deploy/deploy.sh`.
 
 ## Remaining non-parity (vs Tk)
 
