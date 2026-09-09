@@ -86,6 +86,11 @@ fn main() {
     info!(
         display = presenter.name(),
         input = if sdl_touch { "sdl" } else { input.name() },
+        data_root = ?std::env::var("PIDI_DATA_ROOT").ok(),
+        phrases = %pidi_native::phrases::phrases_dir_from_env().display(),
+        songs = %pidi_native::songs::songs_dir_from_env().display(),
+        presets = %pidi_native::presets::presets_dir_from_env().display(),
+        settings = %pidi_native::session::session_path_from_env().display(),
         "pidi-native: starting"
     );
 

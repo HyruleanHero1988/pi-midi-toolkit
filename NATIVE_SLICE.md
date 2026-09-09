@@ -56,21 +56,6 @@ sudo systemctl restart pidi-native
 
 The unit sets `SDL_VIDEODRIVER=kmsdrm` and `SDL_AUDIODRIVER=dummy`.
 
-### Restore the Tk kiosk later
-
-The native slice and LightDM cannot share the panel. To go back to the
-Python PiDI / midi-tone kiosk (lab user `ray`):
-
-```bash
-sudo systemctl stop pidi-native
-sudo systemctl disable pidi-native   # optional: don't autostart the slice
-sudo systemctl unmask lightdm
-sudo systemctl enable --now lightdm
-```
-
-Leave `jambox-engine` running — the Tk kiosk talks to the same control socket.
-If LightDM was only stopped (not masked), `enable --now` is enough; skip `unmask`.
-
 ## Binaries
 
 - `jambox-engine` — audio, MIDI, protocol v1 (`hello` / `touch` / `repeat` / `status`)
