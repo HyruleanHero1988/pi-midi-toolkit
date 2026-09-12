@@ -84,9 +84,9 @@ pub fn format_fanout_targets(bits: u16, in_channel: u8) -> Option<String> {
         }
     }
     if parts.len() > 4 {
-        Some(format!("{} +{}", parts[..3].join(" "), parts.len() - 3))
+        Some(format!("{},+{}", parts[..3].join(","), parts.len() - 3))
     } else {
-        Some(parts.join(" "))
+        Some(parts.join(","))
     }
 }
 
@@ -315,7 +315,7 @@ mod tests {
         assert_eq!(format_fanout_targets(0, 0), None);
         assert_eq!(toggle_fanout_bit(0, 0, 5), 1 << 5);
         bits[0] = toggle_fanout_bit(bits[0], 0, 6);
-        assert_eq!(format_fanout_targets(bits[0], 0).as_deref(), Some("6 7"));
+        assert_eq!(format_fanout_targets(bits[0], 0).as_deref(), Some("6,7"));
         bits[0] = toggle_fanout_bit(bits[0], 0, 5);
         bits[0] = toggle_fanout_bit(bits[0], 0, 6);
         assert_eq!(bits[0], 0);

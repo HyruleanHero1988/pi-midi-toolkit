@@ -2628,7 +2628,7 @@ fn draw_map(scene: &mut Scene, model: &NativeModel) {
     scene.text(
         layout.content.x + 80,
         layout.content.y + 12,
-        "tap in  ·  remap to any out",
+        "tap in  ·  pick outs",
         0x83a598,
     );
     for index in 0..16u8 {
