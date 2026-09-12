@@ -34,6 +34,7 @@ fn main() {
         ("songs", UiMode::Songs),
         ("presets", UiMode::Presets),
         ("fm", UiMode::Fm),
+        ("mix", UiMode::Mix),
         ("settings", UiMode::Settings),
         ("log", UiMode::Log),
         ("map", UiMode::Map),

@@ -4,6 +4,9 @@
 //! inside the Pi 2 budget. Envelopes advance by a per-block multiplier rather than
 //! calling `exp` per sample.
 
+use crate::clip::MAX_CLIPS;
+use crate::mix::MixSource;
+
 /// Number of distinct drum models in the kit.
 pub const DRUM_MODEL_COUNT: usize = 16;
 /// Simultaneous drum hits (full MPK Bank A+B).
@@ -132,6 +135,7 @@ struct Hit {
     elapsed: f32,
     body_amp: f32,
     age: u64,
+    mix: MixSource,
 }
 
 impl Hit {
@@ -153,6 +157,7 @@ impl Hit {
             elapsed: 0.0,
             body_amp: 0.38,
             age: 0,
+            mix: MixSource::Live,
         }
     }
 }
@@ -164,6 +169,8 @@ pub struct DrumKit {
     rng: u32,
     serial: u64,
     sample_rate: f32,
+    mix_live: f32,
+    mix_clips: [f32; MAX_CLIPS],
 }
 
 impl DrumKit {
@@ -174,11 +181,18 @@ impl DrumKit {
             rng: 0x1234_5678,
             serial: 0,
             sample_rate: sample_rate.max(8000.0),
+            mix_live: 1.0,
+            mix_clips: [1.0; MAX_CLIPS],
         }
     }
 
     pub fn set_sample_rate(&mut self, sample_rate: f32) {
         self.sample_rate = sample_rate.max(8000.0);
+    }
+
+    pub fn set_mix_gains(&mut self, live: f32, clips: [f32; MAX_CLIPS]) {
+        self.mix_live = live.clamp(0.0, 2.0);
+        self.mix_clips = clips;
     }
 
     /// Macros for model 0. MIDI knobs / ALL DRUMS still treat the kit as one bus.
@@ -226,6 +240,10 @@ impl DrumKit {
 
     /// Trigger a pad. Voice-steals the oldest hit when the kit is full.
     pub fn trigger(&mut self, model: DrumModel, velocity: u8) {
+        self.trigger_mix(model, velocity, MixSource::Live);
+    }
+
+    pub fn trigger_mix(&mut self, model: DrumModel, velocity: u8, mix: MixSource) {
         self.serial = self.serial.wrapping_add(1);
         let slot = self
             .hits
@@ -244,6 +262,7 @@ impl DrumKit {
             noise_env: 1.0,
             click_env: 1.0,
             age: self.serial,
+            mix,
             ..Hit::silent()
         };
 
@@ -407,6 +426,7 @@ impl DrumKit {
             let click_coef = decay_coef(0.0035, sr);
             let freq_coef = decay_coef(hit.freq_tau, sr);
             let vel = hit.velocity;
+            let mix_g = hit.mix.gain(self.mix_live, &self.mix_clips);
 
             for sample in out.iter_mut() {
                 let white = self.next_noise();
@@ -506,7 +526,7 @@ impl DrumKit {
                     }
                 };
 
-                *sample += value;
+                *sample += value * mix_g;
 
                 hit.body_env *= body_coef;
                 hit.noise_env *= noise_coef;

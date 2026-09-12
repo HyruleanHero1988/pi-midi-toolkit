@@ -165,6 +165,13 @@ impl Outbox {
         self.reliable.push_back(Request::ClipClear { slot });
     }
 
+    pub fn clip_gain(&mut self, slot: u8, value: f32) {
+        self.reliable.push_back(Request::ClipGain {
+            slot,
+            value: value.clamp(0.0, 2.0),
+        });
+    }
+
     pub fn clip_launch(&mut self, slot: u8, quantize: &str) {
         self.reliable.push_back(Request::ClipLaunch {
             slot,

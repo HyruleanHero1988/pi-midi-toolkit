@@ -8,7 +8,8 @@ use jambox_protocol::WireClipEvent;
 
 use crate::phrases::{seconds_to_ticks, PPQ};
 
-pub const SEQ_CLIP_SLOT: u8 = 15;
+/// SEQ / songs share the clip slot after the 16 phrase pads.
+pub use jambox_core::SEQ_CLIP_SLOT;
 pub const MAX_CYCLES: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
