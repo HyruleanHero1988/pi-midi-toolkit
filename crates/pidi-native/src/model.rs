@@ -24,7 +24,8 @@ use jambox_core::{
     DrumModel, DRUM_MODEL_COUNT, DRUM_PREVIEW_SAMPLES, DRUM_PREVIEW_SR,
 };
 use jambox_protocol::{
-    MidiNotice, RepeatDivision, RepeatPhase, StatusReply, TouchPhase, WireClipEvent,
+    MidiNotice, MidiPortsReply, RepeatDivision, RepeatPhase, StatusReply, TouchPhase,
+    WireClipEvent,
 };
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, TryRecvError};
@@ -280,6 +281,13 @@ pub struct NativeModel {
     pub fx_drum: [f32; 4],
     pub fx_target: FxEditTarget,
     pub log_lines: Vec<String>,
+    pub midi_in_filter: String,
+    pub midi_out_filter: String,
+    pub midi_in_connected: String,
+    pub midi_out_connected: String,
+    pub midi_inputs: Vec<String>,
+    pub midi_outputs: Vec<String>,
+    pub last_midi_activity: String,
     pub pads_out: OutMode,
     pub song_out: OutMode,
     pub kaoss_out: OutMode,
@@ -467,6 +475,13 @@ impl NativeModel {
             fx_drum: [0.0, 0.0, 0.0, 0.0],
             fx_target: FxEditTarget::Bus,
             log_lines: Vec::new(),
+            midi_in_filter: String::new(),
+            midi_out_filter: String::new(),
+            midi_in_connected: String::new(),
+            midi_out_connected: String::new(),
+            midi_inputs: Vec::new(),
+            midi_outputs: Vec::new(),
+            last_midi_activity: String::new(),
             pads_out: OutMode::Both,
             song_out: OutMode::Both,
             kaoss_out: OutMode::Local,
@@ -686,6 +701,9 @@ impl NativeModel {
         self.sync_melody_engine(outbox);
         if mode == UiMode::Fm {
             self.status_line = format!("FM · {}", jambox_core::fm_recipe(self.fm_recipe).title);
+        }
+        if mode == UiMode::Map {
+            outbox.midi_ports();
         }
     }
 
@@ -1590,6 +1608,14 @@ impl NativeModel {
         if s.screensaver_sec >= 0.0 && std::env::var("MIDI_TONE_SCREENSAVER_SEC").is_err() {
             self.screensaver.timeout_sec = s.screensaver_sec;
         }
+        self.midi_in_filter = s.midi_in.clone();
+        self.midi_out_filter = s.midi_out.clone();
+        outbox.midi_select(
+            Some(self.midi_in_filter.clone()),
+            Some(self.midi_out_filter.clone()),
+        );
+        outbox.midi_ports();
+        self.write_midi_ports_file();
         outbox.emit_mode("clips", self.pads_out.wire());
         outbox.emit_mode("kaoss", self.kaoss_out.wire());
         outbox.tempo(self.bpm);
@@ -1667,6 +1693,8 @@ impl NativeModel {
             screensaver_sec: self.screensaver.timeout_sec,
             kaoss_viz_style: self.kaoss_viz_style.wire().into(),
             kaoss_mono_color: self.kaoss_mono_color,
+            midi_in: self.midi_in_filter.clone(),
+            midi_out: self.midi_out_filter.clone(),
         }
     }
 
@@ -1692,6 +1720,8 @@ impl NativeModel {
             if vel > 0 {
                 self.seq.push_note(true, notice.channel, note, vel);
                 self.push_pad_rec(true, notice.channel, note, vel);
+                self.last_midi_activity =
+                    format!("IN  ch{} n{} v{}", notice.channel + 1, note, vel);
                 self.push_log(format!("midi on ch{} n{} v{}", notice.channel, note, vel));
             } else {
                 self.seq.push_note(false, notice.channel, note, 0);
@@ -1702,7 +1732,98 @@ impl NativeModel {
             self.seq.push_note(false, notice.channel, note, 0);
             self.push_pad_rec(false, notice.channel, note, 0);
             self.push_log(format!("midi off ch{} n{}", notice.channel, note));
+        } else if kind == "control_change" || kind == "cc" {
+            self.last_midi_activity = format!(
+                "IN  ch{} cc{} v{}",
+                notice.channel + 1,
+                notice.control.unwrap_or(0),
+                notice.value.unwrap_or(0)
+            );
         }
+    }
+
+    pub fn apply_midi_ports(&mut self, ports: &MidiPortsReply) {
+        if !ports.inputs.is_empty() || !ports.outputs.is_empty() {
+            self.midi_inputs = ports.inputs.clone();
+            self.midi_outputs = ports.outputs.clone();
+        }
+        self.midi_in_connected = ports.input_connected.clone();
+        self.midi_out_connected = ports.output_connected.clone();
+    }
+
+    fn write_midi_ports_file(&self) {
+        let path = crate::paths::midi_ports_path();
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let body = serde_json::json!({
+            "input": self.midi_in_filter,
+            "output": self.midi_out_filter,
+        });
+        let _ = std::fs::write(path, body.to_string() + "\n");
+    }
+
+    fn persist_midi_filters(&mut self) {
+        self.mark_dirty();
+        self.write_midi_ports_file();
+    }
+
+    fn apply_midi_select(&mut self, outbox: &mut Outbox) {
+        outbox.midi_select(
+            Some(self.midi_in_filter.clone()),
+            Some(self.midi_out_filter.clone()),
+        );
+        self.persist_midi_filters();
+        let inn = if self.midi_in_filter.is_empty() {
+            "ALL".into()
+        } else {
+            midi_core::short_port_label(&self.midi_in_filter).to_string()
+        };
+        let out = if self.midi_out_filter.is_empty() {
+            "AUTO".into()
+        } else {
+            midi_core::short_port_label(&self.midi_out_filter).to_string()
+        };
+        self.status_line = format!("MIDI in={inn}  out={out}");
+        self.push_log(self.status_line.clone());
+    }
+
+    fn cycle_midi_in(&mut self, outbox: &mut Outbox) {
+        self.midi_in_filter = midi_core::cycle_port_filter(&self.midi_in_filter, &self.midi_inputs);
+        self.apply_midi_select(outbox);
+    }
+
+    fn cycle_midi_out(&mut self, outbox: &mut Outbox) {
+        self.midi_out_filter =
+            midi_core::cycle_port_filter(&self.midi_out_filter, &self.midi_outputs);
+        self.apply_midi_select(outbox);
+    }
+
+    fn pick_midi_in_row(&mut self, index: usize, outbox: &mut Outbox) {
+        let Some(name) = self.midi_inputs.get(index).cloned() else {
+            return;
+        };
+        if midi_core::is_virtual_port_name(&name) && self.midi_inputs.iter().any(|n| !midi_core::is_virtual_port_name(n)) {
+            // Allow picking Through only when the user taps it explicitly.
+        }
+        self.midi_in_filter = name;
+        self.apply_midi_select(outbox);
+    }
+
+    fn pick_midi_out_row(&mut self, index: usize, outbox: &mut Outbox) {
+        let Some(name) = self.midi_outputs.get(index).cloned() else {
+            return;
+        };
+        self.midi_out_filter = name;
+        self.apply_midi_select(outbox);
+    }
+
+    fn test_midi_out(&mut self, outbox: &mut Outbox) {
+        outbox.midi_emit("note_on", 0, Some(60), Some(100), None, None);
+        outbox.midi_emit("note_off", 0, Some(60), Some(0), None, None);
+        self.last_midi_activity = "OUT  test C4".into();
+        self.status_line = "sent test note C4 on USB out".into();
+        self.push_log(self.status_line.clone());
     }
 
     pub fn panic_ui_state(&mut self, outbox: &mut Outbox) {
@@ -3031,7 +3152,28 @@ impl NativeModel {
             }
             Hit::MapRefresh => {
                 self.tap_ui(slot, id, gesture, px, py);
+                outbox.midi_ports();
                 self.start_host_job(HostTask::MapList);
+            }
+            Hit::MapIn => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.cycle_midi_in(outbox);
+            }
+            Hit::MapOut => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.cycle_midi_out(outbox);
+            }
+            Hit::MapTest => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.test_midi_out(outbox);
+            }
+            Hit::MapInRow(index) => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.pick_midi_in_row(index, outbox);
+            }
+            Hit::MapOutRow(index) => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.pick_midi_out_row(index, outbox);
             }
             Hit::ChordsOut => {
                 self.tap_ui(slot, id, gesture, px, py);
@@ -8138,5 +8280,63 @@ mod tests {
             "move stream should advance song_scroll"
         );
         model.finger_up(1, &mut out);
+    }
+
+    #[test]
+    fn map_default_in_is_all_class_compliant_devices() {
+        let model = NativeModel::new();
+        assert!(
+            model.midi_in_filter.is_empty(),
+            "empty IN filter means listen to every hardware USB MIDI port"
+        );
+    }
+
+    #[test]
+    fn map_in_cycles_usb_ports_and_selects_them() {
+        let mut model = NativeModel::new();
+        let mut out = Outbox::new();
+        model.midi_inputs = vec![
+            "Midi Through:Midi Through Port-0 14:0".into(),
+            "U2MIDI PRO:U2MIDI PRO MIDI 1 20:0".into(),
+            "MPK mini 3".into(),
+        ];
+        model.switch_mode(UiMode::Map, &mut out);
+        out.take();
+        let inn = model.layout.map_in;
+        model.finger_down(1, inn.x + 8, inn.y + 8, &mut out);
+        model.finger_up(1, &mut out);
+        assert!(model.midi_in_filter.contains("U2MIDI"));
+        let batch = out.take();
+        assert!(batch.iter().any(|r| matches!(
+            r,
+            Request::MidiSelect {
+                input: Some(ref s),
+                ..
+            } if s.contains("U2MIDI")
+        )));
+        let row = model.layout.map_in_row(2);
+        model.finger_down(2, row.x + 8, row.y + 8, &mut out);
+        model.finger_up(2, &mut out);
+        assert!(model.midi_in_filter.contains("MPK"));
+    }
+
+    #[test]
+    fn map_test_emits_a_c4() {
+        let mut model = NativeModel::new();
+        let mut out = Outbox::new();
+        model.switch_mode(UiMode::Map, &mut out);
+        out.take();
+        let test = model.layout.map_test;
+        model.finger_down(1, test.x + 8, test.y + 8, &mut out);
+        model.finger_up(1, &mut out);
+        let batch = out.take();
+        assert!(batch.iter().any(|r| matches!(
+            r,
+            Request::MidiEmit {
+                kind,
+                note: Some(60),
+                ..
+            } if kind == "note_on"
+        )));
     }
 }

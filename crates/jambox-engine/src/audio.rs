@@ -68,7 +68,7 @@ impl AudioHealth {
         self.reopen.store(true, Ordering::Relaxed);
     }
 
-    fn take_reopen(&self) -> bool {
+    pub(crate) fn take_reopen(&self) -> bool {
         self.reopen.swap(false, Ordering::Relaxed)
     }
 }
