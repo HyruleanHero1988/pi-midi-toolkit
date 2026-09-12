@@ -270,6 +270,10 @@ impl Outbox {
         self.reliable.push_back(Request::MidiSelect { input, output });
     }
 
+    pub fn channel_map(&mut self, bits: [u16; 16]) {
+        self.reliable.push_back(Request::ChannelMap { bits });
+    }
+
     pub fn hello(&mut self) {
         self.reliable.push_front(Request::Hello {
             protocol: PROTOCOL_VERSION,

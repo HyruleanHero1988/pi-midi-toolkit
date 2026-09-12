@@ -165,6 +165,10 @@ pub enum Request {
         #[serde(default)]
         output: Option<String>,
     },
+    /// Live 1:N channel remap. `bits[in] == 0` is identity for that input.
+    ChannelMap {
+        bits: [u16; 16],
+    },
 }
 
 const fn default_velocity() -> u8 {
@@ -415,6 +419,9 @@ pub enum Decoded {
     MidiSelect {
         input: Option<String>,
         output: Option<String>,
+    },
+    ChannelMap {
+        bits: [u16; 16],
     },
 }
 
@@ -721,6 +728,7 @@ pub fn decode(request: Request) -> Result<Decoded, String> {
         Request::AudioReopen => Decoded::AudioReopen,
         Request::MidiPorts => Decoded::MidiPorts,
         Request::MidiSelect { input, output } => Decoded::MidiSelect { input, output },
+        Request::ChannelMap { bits } => Decoded::ChannelMap { bits },
     })
 }
 

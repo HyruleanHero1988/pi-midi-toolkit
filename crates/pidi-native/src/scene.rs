@@ -290,6 +290,7 @@ pub fn build(model: &NativeModel) -> Scene {
             UiMode::Presets => draw_presets(&mut scene, model),
             UiMode::Songs => draw_songs(&mut scene, model),
             UiMode::Map => draw_map(&mut scene, model),
+            UiMode::Ports => draw_ports(&mut scene, model),
             UiMode::Settings => draw_settings(&mut scene, model),
             UiMode::Fx => draw_fx(&mut scene, model),
             UiMode::Log => draw_log(&mut scene, model),
@@ -660,6 +661,20 @@ fn chrome_status(model: &NativeModel) -> String {
         UiMode::Settings => {
             if model.status_line.is_empty() {
                 "SETTINGS".into()
+            } else {
+                model.status_line.chars().take(24).collect()
+            }
+        }
+        UiMode::Map => {
+            if let Some(ch) = model.map_out_edit {
+                format!("CH {} →", ch + 1)
+            } else {
+                "MAP".into()
+            }
+        }
+        UiMode::Ports => {
+            if model.status_line.is_empty() {
+                "PORTS".into()
             } else {
                 model.status_line.chars().take(24).collect()
             }
@@ -2588,8 +2603,65 @@ fn draw_map_port_rows(
 
 fn draw_map(scene: &mut Scene, model: &NativeModel) {
     let layout = model.layout;
+    if let Some(input) = model.map_out_edit {
+        scene.fill_rect(layout.map_channel_done(), 0x689d6a);
+        scene.text_centered(layout.map_channel_done(), "DONE", 0xffffff, 2);
+        scene.fill_rect(layout.map_channel_clear(), 0x9d0006);
+        scene.text_centered(layout.map_channel_clear(), "CLEAR", 0xffffff, 2);
+        scene.text(
+            336,
+            crate::layout::HUD_H + 16,
+            &format!("CH {} → tap outputs", input + 1),
+            0xfbf1c7,
+        );
+        let selected = midi_core::fanout_dest_mask(model.channel_map_bits[input as usize], input);
+        for index in 0..16u8 {
+            let rect = layout.map_channel_cell(index as usize);
+            let on = selected & (1 << index) != 0;
+            scene.button(rect, if on { 0x458588 } else { 0x3c3836 });
+            scene.text_centered(rect, &format!("{}", index + 1), 0xfbf1c7, 3);
+        }
+        return;
+    }
+
+    scene.text(layout.content.x + 16, layout.content.y + 10, "MAP", 0xfbf1c7);
+    scene.text(
+        layout.content.x + 80,
+        layout.content.y + 12,
+        "tap in  ·  remap to any out",
+        0x83a598,
+    );
+    for index in 0..16u8 {
+        let rect = layout.map_channel_cell(index as usize);
+        let bits = model.channel_map_bits[index as usize];
+        let targets = midi_core::format_fanout_targets(bits, index);
+        let mapped = targets.is_some();
+        scene.button(rect, if mapped { 0x458588 } else { 0x3c3836 });
+        if let Some(targets) = targets {
+            let top = crate::layout::Rect {
+                x: rect.x,
+                y: rect.y + 6,
+                w: rect.w,
+                h: rect.h / 2,
+            };
+            let bot = crate::layout::Rect {
+                x: rect.x + 4,
+                y: rect.y + rect.h / 2 - 2,
+                w: rect.w - 8,
+                h: rect.h / 2 - 6,
+            };
+            scene.text_centered(top, &format!("{}", index + 1), 0xfbf1c7, 3);
+            scene.text_centered(bot, &targets, 0xfabd2f, 2);
+        } else {
+            scene.text_centered(rect, &format!("{}", index + 1), 0xfbf1c7, 3);
+        }
+    }
+}
+
+fn draw_ports(scene: &mut Scene, model: &NativeModel) {
+    let layout = model.layout;
     let c = layout.content;
-    scene.text(c.x + 16, c.y + 8, "MAP / MIDI", 0xfbf1c7);
+    scene.text(c.x + 16, c.y + 8, "PORTS / MIDI", 0xfbf1c7);
     scene.text(
         c.x + 16,
         c.y + 32,
@@ -2705,7 +2777,7 @@ fn draw_settings(scene: &mut Scene, model: &NativeModel) {
     scene.fill_rect(layout.settings_log, 0x504945);
     scene.text_centered(layout.settings_log, "LOG", 0xffffff, 2);
     scene.fill_rect(layout.settings_map, 0x83a598);
-    scene.text_centered(layout.settings_map, "MAP", 0xffffff, 2);
+    scene.text_centered(layout.settings_map, "PORTS", 0xffffff, 2);
     let wifi_busy = model.host_busy() == Some(crate::host::HostTask::Wifi);
     scene.fill_rect(
         layout.settings_wifi,

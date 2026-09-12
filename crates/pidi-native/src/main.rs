@@ -126,7 +126,7 @@ fn main() {
 
         if status_tick.elapsed() > Duration::from_millis(250) {
             client.outbox.status();
-            if model.mode == pidi_native::mode::UiMode::Map {
+            if model.mode == pidi_native::mode::UiMode::Ports {
                 client.outbox.midi_ports();
             }
             status_tick = Instant::now();

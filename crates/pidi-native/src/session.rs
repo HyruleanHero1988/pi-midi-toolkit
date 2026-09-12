@@ -191,6 +191,9 @@ pub struct SessionState {
     /// USB MIDI output name substring. Empty = first hardware port.
     #[serde(default)]
     pub midi_out: String,
+    /// Per-input MIDI channel fan-out. `0` = identity for that input (0–15).
+    #[serde(default)]
+    pub channel_map: [u16; 16],
 }
 
 fn default_kaoss_root_midi() -> u8 {
@@ -260,6 +263,7 @@ impl Default for SessionState {
             kaoss_mono_color: 0,
             midi_in: String::new(),
             midi_out: String::new(),
+            channel_map: [0; 16],
         }
     }
 }
@@ -338,6 +342,15 @@ mod tests {
         let back: SessionState = serde_json::from_str(&json).unwrap();
         assert_eq!(back.midi_in, "U2MIDI");
         assert_eq!(back.midi_out, "U2MIDI");
+    }
+
+    #[test]
+    fn session_roundtrip_includes_channel_map() {
+        let mut s = SessionState::default();
+        s.channel_map[0] = 1 << 5;
+        let json = serde_json::to_string(&s).unwrap();
+        let back: SessionState = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.channel_map[0], 1 << 5);
     }
 
     #[test]

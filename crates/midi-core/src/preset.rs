@@ -22,6 +22,10 @@ pub enum ChannelMapMode {
     AllTo { channel: u8 },
     /// Per-input-channel remap table (length 16). Index = in channel.
     Remap { map: [u8; 16] },
+    /// Per-input bitmask of destinations. `bits[in] == 0` means identity
+    /// (that channel passes through unchanged). Bit `j` of `bits[i]` maps
+    /// incoming channel `i` onto outgoing channel `j`.
+    Fanout { bits: [u16; 16] },
 }
 
 impl Default for ChannelMapMode {
@@ -30,14 +34,79 @@ impl Default for ChannelMapMode {
     }
 }
 
+/// Destination mask for one input channel. `0` means pass through `in_channel`.
+#[inline]
+pub fn fanout_dest_mask(bits: u16, in_channel: u8) -> u16 {
+    if bits == 0 {
+        1u16 << (in_channel & 0x0f)
+    } else {
+        bits
+    }
+}
+
+/// True when this input has no remap (pass through itself only).
+#[inline]
+pub fn fanout_is_identity(bits: u16, in_channel: u8) -> bool {
+    bits == 0 || bits == (1u16 << (in_channel & 0x0f))
+}
+
+/// Toggle an output destination. Empty / self-only collapses back to identity (`0`).
+/// The first tap away from identity replaces pass-through with that destination
+/// (ch 1 → ch 6), instead of keeping the original channel in the set.
+pub fn toggle_fanout_bit(bits: u16, in_channel: u8, out_channel: u8) -> u16 {
+    let in_channel = in_channel & 0x0f;
+    let out_channel = out_channel & 0x0f;
+    if bits == 0 {
+        if out_channel == in_channel {
+            return 0;
+        }
+        return 1u16 << out_channel;
+    }
+    let mut mask = bits;
+    mask ^= 1u16 << out_channel;
+    if fanout_is_identity(mask, in_channel) {
+        0
+    } else {
+        mask
+    }
+}
+
+/// Compact 1-based target list for the input grid subtitle (`"6"` / `"6 7"`).
+/// `None` when the channel is identity (no remap).
+pub fn format_fanout_targets(bits: u16, in_channel: u8) -> Option<String> {
+    if fanout_is_identity(bits, in_channel) {
+        return None;
+    }
+    let mut parts = Vec::new();
+    for j in 0..16u8 {
+        if bits & (1 << j) != 0 {
+            parts.push((j + 1).to_string());
+        }
+    }
+    if parts.len() > 4 {
+        Some(format!("{} +{}", parts[..3].join(" "), parts.len() - 3))
+    } else {
+        Some(parts.join(" "))
+    }
+}
+
 impl ChannelMapMode {
+    /// First destination (1:1 callers). Fan-out uses [`Self::dest_mask`].
     #[inline]
     pub fn map_channel(&self, in_channel: u8) -> u8 {
+        let mask = self.dest_mask(in_channel);
+        mask.trailing_zeros() as u8
+    }
+
+    /// Bitmask of output channels (0–15) for one incoming channel.
+    #[inline]
+    pub fn dest_mask(&self, in_channel: u8) -> u16 {
         let in_channel = in_channel & 0x0f;
         match self {
-            Self::Identity => in_channel,
-            Self::AllTo { channel } => *channel & 0x0f,
-            Self::Remap { map } => map[in_channel as usize] & 0x0f,
+            Self::Identity => 1u16 << in_channel,
+            Self::AllTo { channel } => 1u16 << (*channel & 0x0f),
+            Self::Remap { map } => 1u16 << (map[in_channel as usize] & 0x0f),
+            Self::Fanout { bits } => fanout_dest_mask(bits[in_channel as usize], in_channel),
         }
     }
 }
@@ -139,6 +208,7 @@ impl EnginePreset {
                     }
                 }
             }
+            ChannelMapMode::Fanout { .. } => {}
             _ => {}
         }
         if self.cc_map.len() > MAX_CC_MAP {
@@ -231,5 +301,23 @@ mod tests {
         }"#;
         let p = EnginePreset::from_json(json).unwrap();
         assert!(p.validate().is_err());
+    }
+
+    #[test]
+    fn fanout_mask_and_subtitle() {
+        let mut bits = [0u16; 16];
+        bits[0] = 1 << 5;
+        let mode = ChannelMapMode::Fanout { bits };
+        assert_eq!(mode.map_channel(0), 5);
+        assert_eq!(mode.dest_mask(0), 1 << 5);
+        assert_eq!(mode.dest_mask(1), 1 << 1);
+        assert_eq!(format_fanout_targets(bits[0], 0).as_deref(), Some("6"));
+        assert_eq!(format_fanout_targets(0, 0), None);
+        assert_eq!(toggle_fanout_bit(0, 0, 5), 1 << 5);
+        bits[0] = toggle_fanout_bit(bits[0], 0, 6);
+        assert_eq!(format_fanout_targets(bits[0], 0).as_deref(), Some("6 7"));
+        bits[0] = toggle_fanout_bit(bits[0], 0, 5);
+        bits[0] = toggle_fanout_bit(bits[0], 0, 6);
+        assert_eq!(bits[0], 0);
     }
 }

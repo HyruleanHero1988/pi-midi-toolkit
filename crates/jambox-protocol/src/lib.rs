@@ -16,6 +16,7 @@ pub const NATIVE_FEATURES: &[&str] = &[
     "runtime_diagnostics",
     "audio_reopen",
     "midi_ports",
+    "channel_map",
 ];
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -204,6 +205,10 @@ pub enum Request {
         input: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         output: Option<String>,
+    },
+    /// Live 1:N channel remap. `bits[in] == 0` is identity for that input.
+    ChannelMap {
+        bits: [u16; 16],
     },
 }
 
@@ -406,5 +411,12 @@ mod tests {
                 output: None
             } if s == "U2MIDI"
         ));
+        let mut bits = [0u16; 16];
+        bits[0] = 1 << 5;
+        let map = Request::ChannelMap { bits };
+        let json = serde_json::to_string(&map).unwrap();
+        assert!(json.contains("channel_map"));
+        let decoded: Request = serde_json::from_str(&json).unwrap();
+        assert!(matches!(decoded, Request::ChannelMap { bits: b } if b[0] == 1 << 5));
     }
 }

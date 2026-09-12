@@ -9,7 +9,9 @@ use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use midi_core::{is_virtual_port_name, matching_port_names, pick_port_name, MidiEvent};
+use midi_core::{
+    fanout_dest_mask, is_virtual_port_name, matching_port_names, pick_port_name, MidiEvent,
+};
 use midir::{MidiInput, MidiInputConnection, MidiOutput, MidiOutputConnection};
 use tracing::{info, warn};
 
@@ -216,15 +218,25 @@ impl MidiMap {
 }
 
 /// Push a MIDI event into DSP and to every UI client.
+///
+/// `dest_mask` is the live channel-map bitmask (`bit j` = emit on channel `j`).
 pub fn ingest(
     event: MidiEvent,
+    dest_mask: u16,
     hub: &crate::ipc::ClientHub,
     map: &MidiMap,
-    send: impl FnOnce(Command) -> bool,
+    mut send: impl FnMut(Command) -> bool,
 ) {
-    hub.broadcast_midi(event);
-    if let Some(command) = map.interpret(event) {
-        let _ = send(command);
+    let mask = fanout_dest_mask(dest_mask, event.channel());
+    for dest in 0..16u8 {
+        if mask & (1 << dest) == 0 {
+            continue;
+        }
+        let mapped = event.with_channel(dest);
+        hub.broadcast_midi(mapped);
+        if let Some(command) = map.interpret(mapped) {
+            let _ = send(command);
+        }
     }
 }
 
@@ -256,6 +268,7 @@ pub struct MidiIo {
     out_filter: Mutex<String>,
     in_connected: Mutex<String>,
     out_connected: Mutex<String>,
+    channel_map: Mutex<[u16; 16]>,
 }
 
 impl MidiIo {
@@ -265,7 +278,23 @@ impl MidiIo {
             out_filter: Mutex::new(out_filter),
             in_connected: Mutex::new(String::new()),
             out_connected: Mutex::new(String::new()),
+            channel_map: Mutex::new([0; 16]),
         }
+    }
+
+    pub fn set_channel_map(&self, bits: [u16; 16]) {
+        *self
+            .channel_map
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = bits;
+    }
+
+    pub fn dest_mask(&self, channel: u8) -> u16 {
+        let bits = *self
+            .channel_map
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        fanout_dest_mask(bits[(channel & 0x0f) as usize], channel)
     }
 
     fn lock_string(slot: &Mutex<String>) -> String {
@@ -381,6 +410,7 @@ pub fn spawn_input(
                 announced_wait = false;
                 match try_connect(
                     name,
+                    Arc::clone(&io),
                     Arc::clone(&shared_side),
                     Arc::clone(&hub),
                     Arc::clone(&map),
@@ -406,6 +436,7 @@ pub fn spawn_input(
 
 fn try_connect(
     name: &str,
+    io: Arc<MidiIo>,
     side: Arc<std::sync::Mutex<MidiInSide>>,
     hub: Arc<crate::ipc::ClientHub>,
     map: Arc<MidiMap>,
@@ -424,8 +455,9 @@ fn try_connect(
             "jambox-in",
             move |_stamp, bytes, _| {
                 if let Some(event) = MidiEvent::parse(bytes) {
+                    let dest_mask = io.dest_mask(event.channel());
                     let mut guard = side.lock().unwrap_or_else(|p| p.into_inner());
-                    ingest(event, &hub, &map, |c| guard.send(c));
+                    ingest(event, dest_mask, &hub, &map, |c| guard.send(c));
                 }
             },
             (),

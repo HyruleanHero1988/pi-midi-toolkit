@@ -1,7 +1,6 @@
 //! Instrument-surface state. Rendering and IPC consume this; they do not own notes.
 //!
-//! Remaining Tk gaps (see NATIVE_KIOSK.md): deeper Map remap UI.
-//! Map/WIFI/UPDATE are appliance-oriented host hooks.
+//! MAP is the home-screen MIDI channel remap. PORTS (Settings) keep IN/OUT.
 
 use crate::chords::{self, ChordSpec, Overlay as ChordsOverlay, QualityRow, PALETTE_SLOTS};
 use crate::client::Outbox;
@@ -288,6 +287,10 @@ pub struct NativeModel {
     pub midi_inputs: Vec<String>,
     pub midi_outputs: Vec<String>,
     pub last_midi_activity: String,
+    /// Per-input destination bitmask (0 = identity).
+    pub channel_map_bits: [u16; 16],
+    /// When set, MAP is picking outputs for this input channel (0–15).
+    pub map_out_edit: Option<u8>,
     pub pads_out: OutMode,
     pub song_out: OutMode,
     pub kaoss_out: OutMode,
@@ -482,6 +485,8 @@ impl NativeModel {
             midi_inputs: Vec::new(),
             midi_outputs: Vec::new(),
             last_midi_activity: String::new(),
+            channel_map_bits: [0; 16],
+            map_out_edit: None,
             pads_out: OutMode::Both,
             song_out: OutMode::Both,
             kaoss_out: OutMode::Local,
@@ -664,6 +669,7 @@ impl NativeModel {
         self.kit_repeat_open = false;
         self.chords_overlay = None;
         self.chords_arm = false;
+        self.map_out_edit = None;
         if mode == UiMode::Drums {
             self.kit_wave_dirty = true;
         }
@@ -702,7 +708,7 @@ impl NativeModel {
         if mode == UiMode::Fm {
             self.status_line = format!("FM · {}", jambox_core::fm_recipe(self.fm_recipe).title);
         }
-        if mode == UiMode::Map {
+        if mode == UiMode::Ports {
             outbox.midi_ports();
         }
     }
@@ -720,6 +726,8 @@ impl NativeModel {
                 | UiMode::Songs
                 | UiMode::Presets
                 | UiMode::Fx
+                | UiMode::Map
+                | UiMode::Ports
                 | UiMode::Log
                 | UiMode::Settings
         )
@@ -779,6 +787,9 @@ impl NativeModel {
         }
         if self.kit_repeat_open {
             return Some("kit_repeat");
+        }
+        if self.map_out_edit.is_some() {
+            return Some("map_out");
         }
         None
     }
@@ -867,6 +878,10 @@ impl NativeModel {
                 self.kit_repeat_open = false;
                 self.status_line.clear();
             }
+            Some("map_out") => {
+                self.map_out_edit = None;
+                self.status_line = "MAP".into();
+            }
             _ => {
                 if let Some(prev) = self.nav_stack.pop() {
                     self.nav_back_navigating = true;
@@ -892,6 +907,7 @@ impl NativeModel {
             "pre" | "presets" => UiMode::Presets,
             "fx" => UiMode::Fx,
             "map" => UiMode::Map,
+            "port" | "ports" => UiMode::Ports,
             "log" => UiMode::Log,
             "set" | "settings" => UiMode::Settings,
             _ => UiMode::Kaoss,
@@ -1610,12 +1626,19 @@ impl NativeModel {
         }
         self.midi_in_filter = s.midi_in.clone();
         self.midi_out_filter = s.midi_out.clone();
+        self.channel_map_bits = s.channel_map;
         outbox.midi_select(
             Some(self.midi_in_filter.clone()),
             Some(self.midi_out_filter.clone()),
         );
+        outbox.channel_map(self.channel_map_bits);
         outbox.midi_ports();
         self.write_midi_ports_file();
+        crate::host::write_live_thru_preset(
+            &self.midi_in_filter,
+            &self.midi_out_filter,
+            self.channel_map_bits,
+        );
         outbox.emit_mode("clips", self.pads_out.wire());
         outbox.emit_mode("kaoss", self.kaoss_out.wire());
         outbox.tempo(self.bpm);
@@ -1695,6 +1718,7 @@ impl NativeModel {
             kaoss_mono_color: self.kaoss_mono_color,
             midi_in: self.midi_in_filter.clone(),
             midi_out: self.midi_out_filter.clone(),
+            channel_map: self.channel_map_bits,
         }
     }
 
@@ -1759,6 +1783,7 @@ impl NativeModel {
         let body = serde_json::json!({
             "input": self.midi_in_filter,
             "output": self.midi_out_filter,
+            "channel_map": self.channel_map_bits,
         });
         let _ = std::fs::write(path, body.to_string() + "\n");
     }
@@ -1816,6 +1841,37 @@ impl NativeModel {
         };
         self.midi_out_filter = name;
         self.apply_midi_select(outbox);
+    }
+
+    fn tap_map_channel(&mut self, channel: u8, outbox: &mut Outbox) {
+        let channel = channel.min(15);
+        if let Some(input) = self.map_out_edit {
+            self.channel_map_bits[input as usize] =
+                midi_core::toggle_fanout_bit(self.channel_map_bits[input as usize], input, channel);
+            self.apply_channel_map(outbox);
+            if let Some(targets) =
+                midi_core::format_fanout_targets(self.channel_map_bits[input as usize], input)
+            {
+                self.status_line = format!("CH {} → {targets}", input + 1);
+            } else {
+                self.status_line = format!("CH {} pass through", input + 1);
+            }
+            return;
+        }
+        self.map_out_edit = Some(channel);
+        self.status_line = format!("CH {} → tap outputs", channel + 1);
+        self.mark_dirty();
+    }
+
+    fn apply_channel_map(&mut self, outbox: &mut Outbox) {
+        outbox.channel_map(self.channel_map_bits);
+        self.mark_dirty();
+        self.write_midi_ports_file();
+        crate::host::write_live_thru_preset(
+            &self.midi_in_filter,
+            &self.midi_out_filter,
+            self.channel_map_bits,
+        );
     }
 
     fn test_midi_out(&mut self, outbox: &mut Outbox) {
@@ -3139,8 +3195,8 @@ impl NativeModel {
             }
             Hit::SettingsMap => {
                 self.tap_ui(slot, id, gesture, px, py);
-                self.push_nav_history(UiMode::Map);
-                self.switch_mode(UiMode::Map, outbox);
+                self.push_nav_history(UiMode::Ports);
+                self.switch_mode(UiMode::Ports, outbox);
             }
             Hit::MapThruOn => {
                 self.tap_ui(slot, id, gesture, px, py);
@@ -3174,6 +3230,26 @@ impl NativeModel {
             Hit::MapOutRow(index) => {
                 self.tap_ui(slot, id, gesture, px, py);
                 self.pick_midi_out_row(index, outbox);
+            }
+            Hit::MapChannel(channel) => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.tap_map_channel(channel, outbox);
+            }
+            Hit::MapChannelDone => {
+                self.tap_ui(slot, id, gesture, px, py);
+                if self.map_out_edit.take().is_some() {
+                    self.status_line = "MAP".into();
+                    self.mark_dirty();
+                }
+            }
+            Hit::MapChannelClear => {
+                self.tap_ui(slot, id, gesture, px, py);
+                if let Some(input) = self.map_out_edit {
+                    self.channel_map_bits[input as usize] = 0;
+                    self.apply_channel_map(outbox);
+                    self.status_line = format!("CH {} pass through", input + 1);
+                    self.mark_dirty();
+                }
             }
             Hit::ChordsOut => {
                 self.tap_ui(slot, id, gesture, px, py);
@@ -8300,7 +8376,7 @@ mod tests {
             "U2MIDI PRO:U2MIDI PRO MIDI 1 20:0".into(),
             "MPK mini 3".into(),
         ];
-        model.switch_mode(UiMode::Map, &mut out);
+        model.switch_mode(UiMode::Ports, &mut out);
         out.take();
         let inn = model.layout.map_in;
         model.finger_down(1, inn.x + 8, inn.y + 8, &mut out);
@@ -8324,7 +8400,7 @@ mod tests {
     fn map_test_emits_a_c4() {
         let mut model = NativeModel::new();
         let mut out = Outbox::new();
-        model.switch_mode(UiMode::Map, &mut out);
+        model.switch_mode(UiMode::Ports, &mut out);
         out.take();
         let test = model.layout.map_test;
         model.finger_down(1, test.x + 8, test.y + 8, &mut out);
@@ -8338,5 +8414,45 @@ mod tests {
                 ..
             } if kind == "note_on"
         )));
+    }
+
+    #[test]
+    fn map_channel_grid_sets_fanout() {
+        let mut model = NativeModel::new();
+        let mut out = Outbox::new();
+        model.switch_mode(UiMode::Map, &mut out);
+        out.take();
+        let ch1 = model.layout.map_channel_cell(0);
+        model.finger_down(1, ch1.x + 8, ch1.y + 8, &mut out);
+        model.finger_up(1, &mut out);
+        assert_eq!(model.map_out_edit, Some(0));
+        let ch6 = model.layout.map_channel_cell(5);
+        model.finger_down(2, ch6.x + 8, ch6.y + 8, &mut out);
+        model.finger_up(2, &mut out);
+        assert_eq!(model.channel_map_bits[0], 1 << 5);
+        let batch = out.take();
+        assert!(batch.iter().any(|r| matches!(
+            r,
+            Request::ChannelMap { bits } if bits[0] == 1 << 5
+        )));
+        assert_eq!(
+            midi_core::format_fanout_targets(model.channel_map_bits[0], 0).as_deref(),
+            Some("6")
+        );
+        let done = model.layout.map_channel_done();
+        model.finger_down(3, done.x + 8, done.y + 8, &mut out);
+        model.finger_up(3, &mut out);
+        assert_eq!(model.map_out_edit, None);
+    }
+
+    #[test]
+    fn settings_ports_opens_port_picker() {
+        let mut model = NativeModel::new();
+        let mut out = Outbox::new();
+        model.set_mode(UiMode::Settings);
+        let ports = model.layout.settings_map;
+        model.finger_down(1, ports.x + 8, ports.y + 8, &mut out);
+        model.finger_up(1, &mut out);
+        assert_eq!(model.mode, UiMode::Ports);
     }
 }
