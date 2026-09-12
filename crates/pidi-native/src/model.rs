@@ -1775,7 +1775,7 @@ impl NativeModel {
         );
         self.persist_midi_filters();
         let inn = if self.midi_in_filter.is_empty() {
-            "AUTO".into()
+            "ALL".into()
         } else {
             midi_core::short_port_label(&self.midi_in_filter).to_string()
         };
@@ -8280,6 +8280,15 @@ mod tests {
             "move stream should advance song_scroll"
         );
         model.finger_up(1, &mut out);
+    }
+
+    #[test]
+    fn map_default_in_is_all_class_compliant_devices() {
+        let model = NativeModel::new();
+        assert!(
+            model.midi_in_filter.is_empty(),
+            "empty IN filter means listen to every hardware USB MIDI port"
+        );
     }
 
     #[test]

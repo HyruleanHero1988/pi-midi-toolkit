@@ -36,7 +36,7 @@ enum Cmd {
         /// Audio output device name substring (e.g. "headphone").
         #[arg(long, default_value = "")]
         output: String,
-        /// MIDI input name substring (empty = first hardware USB MIDI port).
+        /// MIDI input name substring. Empty = every class-compliant USB MIDI device.
         #[arg(long, default_value = "")]
         midi_in: String,
         /// MIDI output name substring for clip/DIN emit (empty = first hardware port).

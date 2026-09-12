@@ -27,21 +27,31 @@ pub fn short_port_label(name: &str) -> &str {
     }
 }
 
-/// First name that contains `filter` (case-insensitive). Empty filter → first
-/// non-virtual hardware port.
-pub fn pick_port_name<'a>(names: impl IntoIterator<Item = &'a str>, filter: &str) -> Option<String> {
+/// Names that should be opened for this filter.
+///
+/// Empty filter = every class-compliant hardware port (skip Through / engine
+/// loopback). A non-empty filter is a case-insensitive substring.
+pub fn matching_port_names<'a>(
+    names: impl IntoIterator<Item = &'a str>,
+    filter: &str,
+) -> Vec<String> {
     let filter_lc = filter.trim().to_ascii_lowercase();
-    let names: Vec<&'a str> = names.into_iter().collect();
-    if !filter_lc.is_empty() {
-        return names
-            .into_iter()
-            .find(|name| name.to_ascii_lowercase().contains(&filter_lc))
-            .map(str::to_string);
-    }
     names
         .into_iter()
-        .find(|name| !is_virtual_port_name(name))
+        .filter(|name| {
+            if filter_lc.is_empty() {
+                !is_virtual_port_name(name)
+            } else {
+                name.to_ascii_lowercase().contains(&filter_lc)
+            }
+        })
         .map(str::to_string)
+        .collect()
+}
+
+/// First matching name. Empty filter → first non-virtual hardware port.
+pub fn pick_port_name<'a>(names: impl IntoIterator<Item = &'a str>, filter: &str) -> Option<String> {
+    matching_port_names(names, filter).into_iter().next()
 }
 
 /// Cycle Auto → each hardware port → Auto. Virtual ports are skipped unless
@@ -87,20 +97,25 @@ mod tests {
     }
 
     #[test]
-    fn empty_filter_skips_through_and_jambox() {
+    fn empty_filter_opens_every_hardware_port() {
         let names = [
             "Midi Through:Midi Through Port-0 14:0",
             "jambox-out:jambox-out 129:0",
             "U2MIDI PRO:U2MIDI PRO MIDI 1 20:0",
+            "Keystation Mini 32",
         ];
+        assert_eq!(
+            matching_port_names(names, ""),
+            vec![
+                "U2MIDI PRO:U2MIDI PRO MIDI 1 20:0".to_string(),
+                "Keystation Mini 32".to_string(),
+            ]
+        );
         assert_eq!(
             pick_port_name(names, "").as_deref(),
             Some("U2MIDI PRO:U2MIDI PRO MIDI 1 20:0")
         );
-        assert_eq!(
-            pick_port_name(names, "MPK").as_deref(),
-            None
-        );
+        assert!(matching_port_names(names, "MPK").is_empty());
         assert_eq!(
             pick_port_name(names, "U2MIDI").as_deref(),
             Some("U2MIDI PRO:U2MIDI PRO MIDI 1 20:0")

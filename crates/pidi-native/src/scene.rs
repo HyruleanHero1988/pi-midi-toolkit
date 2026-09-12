@@ -2515,10 +2515,40 @@ fn draw_songs(scene: &mut Scene, model: &NativeModel) {
     scene.text_centered(layout.song_out, model.song_out.short_label(), 0xffffff, 2);
 }
 
+fn midi_connected_names(connected: &str) -> Vec<&str> {
+    connected
+        .split(" | ")
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+fn map_port_is_live(connected: &str, name: &str) -> bool {
+    midi_connected_names(connected).iter().any(|n| *n == name)
+}
+
 fn map_port_button_label(filter: &str, connected: &str, kind: &str) -> String {
+    if filter.trim().is_empty() {
+        let n = midi_connected_names(connected).len();
+        if kind == "IN" {
+            return if n > 1 {
+                format!("IN: ALL ({n})")
+            } else if n == 1 {
+                "IN: ALL".into()
+            } else {
+                "IN: ALL".into()
+            };
+        }
+        if connected.is_empty() {
+            return format!("{kind}: AUTO");
+        }
+    }
     if !connected.is_empty() {
-        format!("{kind}: {}", midi_core::short_port_label(connected))
-    } else if filter.trim().is_empty() {
+        if let Some(first) = midi_connected_names(connected).first() {
+            return format!("{kind}: {}", midi_core::short_port_label(first));
+        }
+    }
+    if filter.trim().is_empty() {
         format!("{kind}: AUTO")
     } else {
         format!("{kind}: {}", midi_core::short_port_label(filter))
@@ -2536,8 +2566,12 @@ fn draw_map_port_rows(
     for (index, name) in names.iter().take(crate::layout::Layout::MAP_PORT_ROWS).enumerate() {
         let rect = row(index);
         let name_lc = name.to_ascii_lowercase();
-        let selected = !filter_lc.is_empty() && name_lc.contains(&filter_lc);
-        let live = !connected.is_empty() && name == connected;
+        let selected = if filter_lc.is_empty() {
+            !midi_core::is_virtual_port_name(name)
+        } else {
+            name_lc.contains(&filter_lc)
+        };
+        let live = map_port_is_live(connected, name);
         let color = if live {
             0x689d6a
         } else if selected {
@@ -2559,7 +2593,7 @@ fn draw_map(scene: &mut Scene, model: &NativeModel) {
     scene.text(
         c.x + 16,
         c.y + 32,
-        "Tap IN/OUT or a port. AUTO = first USB MIDI device.",
+        "Plug any class-compliant USB MIDI device. IN ALL = every keyboard.",
         0x83a598,
     );
     let activity = if model.last_midi_activity.is_empty() {

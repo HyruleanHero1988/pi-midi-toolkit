@@ -30,7 +30,7 @@ move the beat. See [PLAN.md](PLAN.md) "Rust jambox engine".
 cargo test -p jambox-core                   # timing + DSP tests, no hardware
 cargo run -p jambox-engine -- devices       # audio outputs + MIDI ports
 cargo run -p jambox-engine --release -- bench   # CPU headroom, no device needed
-cargo run -p jambox-engine -- run --midi-in MPK --control /tmp/jambox.sock --rt
+cargo run -p jambox-engine -- run --control /tmp/jambox.sock --rt
 ```
 
 Control protocol is line-delimited JSON on a Unix socket (`--tcp` for host testing):
@@ -87,29 +87,21 @@ midi-engine run --preset presets/active.json --rt
 
 Ctrl-C (and preset reload) flush active note-offs + All Notes Off.
 
-## First USB MIDI keyboard
+## USB MIDI (plug and play)
 
-The appliance used to listen only for a port named `MPK`. A U2MIDI PRO (or any
-other class-compliant USB MIDI keyboard/interface) never matched, so notes
-went nowhere in **or** out.
+Any class-compliant USB MIDI keyboard or interface should just work. The
+engine opens **every** hardware input (it skips Midi Through / loopback).
+You do not have to pick MPK, U2MIDI, or any other brand.
 
-On MAP:
-
-1. Plug the USB MIDI keyboard — or a USB-MIDI-DIN interface (U2MIDI PRO) with
-   the keyboard's DIN **out** into the interface **in**.
-2. Open **SETTINGS → MAP** (or HOME → SETTINGS → MAP).
-3. Tap **IN** until the keyboard/interface name is selected (or tap its row).
-   **AUTO** grabs the first real USB MIDI device and skips Midi Through.
-4. Play a key. The yellow line should show `IN  ch… n… v…` and SYNTH should
-   sound. If it doesn't, tap **REFRESH** and pick the port again.
-5. For hardware-synth **out**, tap **OUT** to the same U2MIDI (or your DIN
-   interface), set a mode's OUT to USB/BOTH, then **TEST OUT**.
-6. **THRU ON** is the remap cable (keyboard → DIN synth). It uses the same
-   ports you picked. You do not need THRU to play the onboard synth.
-
-Port choice is saved in `settings.json` and applied on the next boot without
-editing systemd. New `jambox-engine.service` installs default to AUTO
-(`--midi-in ""`) instead of `MPK`.
+1. Plug the USB MIDI device. For a DIN keyboard, use a USB-MIDI-DIN
+   interface (e.g. U2MIDI PRO): keyboard DIN **out** → interface **in**.
+2. Play. SYNTH should sound. SETTINGS → MAP shows live ports and the last
+   incoming note; tap IN only if you want to pin one device.
+3. Hardware-synth **out** is the first hardware port by default. Tap OUT
+   on MAP if you have more than one, set a mode's OUT to USB/BOTH, then
+   **TEST OUT**.
+4. **THRU ON** is the optional remap cable (keyboard → DIN synth). You do
+   not need it to play the onboard synth.
 
 ## Preset JSON
 

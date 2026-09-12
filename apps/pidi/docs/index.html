@@ -519,13 +519,13 @@
 
     <section class="screen" id="map">
       <h2>MAP</h2>
-      <p class="lede">USB MIDI device picker for the onboard synth, plus optional thru to a DIN synth. Opens from SETTINGS → MAP.</p>
+      <p class="lede">Class-compliant USB MIDI is plug-and-play. MAP shows what is open and lets you pin a port or start thru.</p>
       <figure>
         <img src="screens/18-map.png" alt="MAP MIDI port picker" width="800" height="480" />
         <figcaption>18 — MAP</figcaption>
       </figure>
       <table>
-        <tr><th>IN / OUT</th><td>Cycle the USB MIDI port the synth listens to / emits on. AUTO = first hardware device (skips Midi Through).</td></tr>
+        <tr><th>IN / OUT</th><td>IN ALL listens to every class-compliant USB MIDI keyboard/interface. Tap a row only to pin one device. OUT AUTO = first hardware port.</td></tr>
         <tr><th>Port rows</th><td>Tap a listed input or output to select it. Green = currently open.</td></tr>
         <tr><th>TEST OUT</th><td>Send a C4 on the selected USB/DIN output.</td></tr>
         <tr><th>THRU ON / OFF</th><td>Start or stop <code>midi-engine</code> remap using the same ports (keyboard → hardware synth).</td></tr>

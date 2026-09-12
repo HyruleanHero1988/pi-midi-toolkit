@@ -196,7 +196,8 @@ pub enum Request {
     AudioReopen,
     /// List live MIDI ports and the filters the engine is watching.
     MidiPorts,
-    /// Change IN/OUT name filters. Empty string = first hardware USB MIDI port.
+    /// Change IN/OUT name filters. Empty input = every class-compliant USB MIDI
+    /// device. Empty output = first hardware port.
     /// Omitted fields stay as they are.
     MidiSelect {
         #[serde(default, skip_serializing_if = "Option::is_none")]

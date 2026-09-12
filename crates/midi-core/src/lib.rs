@@ -10,7 +10,9 @@ mod process;
 mod stuck;
 
 pub use event::{Channel, MidiEvent, Note, Velocity};
-pub use ports::{cycle_port_filter, is_virtual_port_name, pick_port_name, short_port_label};
+pub use ports::{
+    cycle_port_filter, is_virtual_port_name, matching_port_names, pick_port_name, short_port_label,
+};
 pub use preset::{
     CcMapEntry, ChannelMapMode, EnginePreset, PortsConfig, PresetError, VelocityConfig,
 };

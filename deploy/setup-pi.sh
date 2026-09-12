@@ -36,4 +36,4 @@ echo "  1. From your PC: TARGET=armv7-unknown-linux-gnueabihf ./deploy/deploy.sh
 echo "  2. Edit $APP_DIR/presets/active.json (start from mpk-mini-ch3.json)"
 echo "  3. midi-engine list   # confirm keyboard / USB-DIN port names (U2MIDI, MPK, …)"
 echo "  4. sudo systemctl restart midi-engine"
-echo "Plug MPK + USB-MIDI→DIN on separate USB ports; use a powered hub if devices drop."
+echo "Plug any class-compliant USB MIDI keyboard/interface; use a powered hub if devices drop."

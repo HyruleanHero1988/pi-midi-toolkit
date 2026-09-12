@@ -4,11 +4,12 @@
 //! MIDI on the control socket) are parsed once, turned into [`Command`]s, and
 //! fanned out to the kiosk. Knob meaning lives here — Tk only displays.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use midi_core::{is_virtual_port_name, pick_port_name, MidiEvent};
+use midi_core::{is_virtual_port_name, matching_port_names, pick_port_name, MidiEvent};
 use midir::{MidiInput, MidiInputConnection, MidiOutput, MidiOutputConnection};
 use tracing::{info, warn};
 
@@ -301,8 +302,10 @@ impl MidiIo {
         Self::lock_string(&self.out_connected)
     }
 
-    fn set_input_connected(&self, name: String) {
-        Self::store_string(&self.in_connected, name);
+    fn set_input_connected_list(&self, names: impl IntoIterator<Item = String>) {
+        let mut names: Vec<String> = names.into_iter().collect();
+        names.sort();
+        Self::store_string(&self.in_connected, names.join(" | "));
     }
 
     fn set_output_connected(&self, name: String) {
@@ -322,9 +325,9 @@ impl MidiIo {
     }
 }
 
-fn pick_input_name(filter: &str) -> Option<String> {
+fn wanted_input_names(filter: &str) -> Vec<String> {
     let (ins, _) = list_ports();
-    pick_port_name(ins.iter().map(String::as_str), filter)
+    matching_port_names(ins.iter().map(String::as_str), filter)
 }
 
 fn pick_output_name(filter: &str) -> Option<String> {
@@ -332,7 +335,9 @@ fn pick_output_name(filter: &str) -> Option<String> {
     pick_port_name(outs.iter().map(String::as_str), filter)
 }
 
-/// Watch MIDI inputs and connect when a matching port appears (or returns).
+/// Watch MIDI inputs and connect when matching ports appear (or return).
+///
+/// An empty filter opens every class-compliant hardware USB MIDI device.
 pub fn spawn_input(
     io: Arc<MidiIo>,
     side: Arc<std::sync::Mutex<MidiInSide>>,
@@ -342,8 +347,7 @@ pub fn spawn_input(
 ) {
     std::thread::spawn(move || {
         let shared_side = side;
-        let mut connection: Option<MidiInputConnection<()>> = None;
-        let mut current = String::new();
+        let mut connections: HashMap<String, MidiInputConnection<()>> = HashMap::new();
         let mut announced_wait = false;
         let mut last_filter = String::from("\0");
         while running.load(Ordering::Relaxed) {
@@ -352,48 +356,48 @@ pub fn spawn_input(
                 if !filter.trim().is_empty() {
                     info!(filter = %filter, "midi: watching for input (hotplug)");
                 } else {
-                    info!("midi: watching for a hardware input (hotplug)");
+                    info!("midi: watching every class-compliant USB MIDI input");
                 }
                 last_filter = filter.clone();
-                if connection.is_some() {
-                    info!(port = %current, "midi: input filter changed; reconnecting");
-                    connection = None;
-                    current.clear();
-                    io.set_input_connected(String::new());
+                if !connections.is_empty() {
+                    info!("midi: input filter changed; reconnecting");
+                    connections.clear();
+                    io.set_input_connected_list(Vec::new());
                 }
             }
-            let wanted = pick_input_name(&filter);
-            let still =
-                wanted.as_ref().map(|n| n == &current).unwrap_or(false) && connection.is_some();
-            if connection.is_some() && !still {
-                info!(port = %current, "midi: input gone; waiting for reconnect");
-                connection = None;
-                current.clear();
-                io.set_input_connected(String::new());
-            }
-            if connection.is_none() {
-                if let Some(name) = wanted {
-                    announced_wait = false;
-                    match try_connect(
-                        &name,
-                        Arc::clone(&shared_side),
-                        Arc::clone(&hub),
-                        Arc::clone(&map),
-                    ) {
-                        Ok(conn) => {
-                            info!(port = %name, "midi: input open");
-                            current = name.clone();
-                            io.set_input_connected(name);
-                            connection = Some(conn);
-                        }
-                        Err(err) => {
-                            warn!(%err, port = %name, "midi: input connect failed");
-                        }
+            let wanted = wanted_input_names(&filter);
+            connections.retain(|name, _| {
+                if wanted.iter().any(|n| n == name) {
+                    true
+                } else {
+                    info!(port = %name, "midi: input gone; waiting for reconnect");
+                    false
+                }
+            });
+            for name in &wanted {
+                if connections.contains_key(name) {
+                    continue;
+                }
+                announced_wait = false;
+                match try_connect(
+                    name,
+                    Arc::clone(&shared_side),
+                    Arc::clone(&hub),
+                    Arc::clone(&map),
+                ) {
+                    Ok(conn) => {
+                        info!(port = %name, "midi: input open");
+                        connections.insert(name.clone(), conn);
                     }
-                } else if !announced_wait {
-                    announced_wait = true;
-                    info!("midi: no matching input yet; will grab it when it appears");
+                    Err(err) => {
+                        warn!(%err, port = %name, "midi: input connect failed");
+                    }
                 }
+            }
+            io.set_input_connected_list(connections.keys().cloned());
+            if connections.is_empty() && !announced_wait {
+                announced_wait = true;
+                info!("midi: no class-compliant USB MIDI input yet; will grab any that appear");
             }
             std::thread::sleep(HOTPLUG_POLL);
         }
