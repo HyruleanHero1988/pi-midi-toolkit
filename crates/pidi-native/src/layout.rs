@@ -94,6 +94,11 @@ pub enum Hit {
     MapThruOn,
     MapThruOff,
     MapRefresh,
+    MapIn,
+    MapOut,
+    MapTest,
+    MapInRow(usize),
+    MapOutRow(usize),
     KaossProg,
     KaossScale,
     KaossKey,
@@ -266,6 +271,9 @@ pub struct Layout {
     pub map_thru_on: Rect,
     pub map_thru_off: Rect,
     pub map_refresh: Rect,
+    pub map_in: Rect,
+    pub map_out: Rect,
+    pub map_test: Rect,
     pub kaoss_prog: Rect,
     pub kaoss_scale: Rect,
     pub kaoss_key: Rect,
@@ -791,23 +799,41 @@ impl Layout {
                 w: 556,
                 h: 48,
             },
+            map_in: Rect {
+                x: 16,
+                y: HUD_H + 72,
+                w: 384,
+                h: 56,
+            },
+            map_out: Rect {
+                x: 408,
+                y: HUD_H + 72,
+                w: 376,
+                h: 56,
+            },
+            map_test: Rect {
+                x: 536,
+                y: HUD_H + 136,
+                w: 248,
+                h: 44,
+            },
             map_thru_on: Rect {
-                x: 24,
-                y: HUD_H + 120,
-                w: 240,
-                h: 72,
+                x: 16,
+                y: SCREEN_H - 68,
+                w: 248,
+                h: 56,
             },
             map_thru_off: Rect {
-                x: 280,
-                y: HUD_H + 120,
-                w: 240,
-                h: 72,
+                x: 276,
+                y: SCREEN_H - 68,
+                w: 248,
+                h: 56,
             },
             map_refresh: Rect {
                 x: 536,
-                y: HUD_H + 120,
-                w: 240,
-                h: 72,
+                y: SCREEN_H - 68,
+                w: 248,
+                h: 56,
             },
             // Sequencer only — drums live on the dedicated DRUM KIT page.
             seq_rec: Rect {
@@ -2677,7 +2703,36 @@ impl Layout {
         Hit::None
     }
 
+    pub const MAP_PORT_ROWS: usize = 5;
+
+    pub fn map_in_row(&self, index: usize) -> Rect {
+        Rect {
+            x: 16,
+            y: HUD_H + 190 + (index as i32) * 36,
+            w: 384,
+            h: 34,
+        }
+    }
+
+    pub fn map_out_row(&self, index: usize) -> Rect {
+        Rect {
+            x: 408,
+            y: HUD_H + 190 + (index as i32) * 36,
+            w: 376,
+            h: 34,
+        }
+    }
+
     fn hit_map(&self, px: i32, py: i32) -> Hit {
+        if self.map_in.contains(px, py) {
+            return Hit::MapIn;
+        }
+        if self.map_out.contains(px, py) {
+            return Hit::MapOut;
+        }
+        if self.map_test.contains(px, py) {
+            return Hit::MapTest;
+        }
         if self.map_thru_on.contains(px, py) {
             return Hit::MapThruOn;
         }
@@ -2686,6 +2741,14 @@ impl Layout {
         }
         if self.map_refresh.contains(px, py) {
             return Hit::MapRefresh;
+        }
+        for index in 0..Self::MAP_PORT_ROWS {
+            if self.map_in_row(index).contains(px, py) {
+                return Hit::MapInRow(index);
+            }
+            if self.map_out_row(index).contains(px, py) {
+                return Hit::MapOutRow(index);
+            }
         }
         Hit::None
     }

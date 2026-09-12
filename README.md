@@ -8,7 +8,7 @@ low-latency MIDI thru/remap to a hardware synth. **Not** related to play-my-synt
 - **Kiosk UI (active):** [`crates/pidi-native`](crates/pidi-native) — SDL/KMSDRM + GLES2 over `jambox-engine`. See [NATIVE_KIOSK.md](NATIVE_KIOSK.md) and the [native screen reference](docs/index.html).
 - **Shared Pi assets:** [`apps/pidi`](apps/pidi) — wavetables, OTA `updater.py`, power/HW scripts (not a UI)
 - **Thru engine:** Rust `midi-engine` — channel/CC/velocity remap via CLI + JSON presets (Map mode in the native kiosk)
-- **Target hardware:** Pi 2 + MPK mini mk3 (+ USB-MIDI-DIN → synth when available)
+- **Target hardware:** Pi 2 + any class-compliant USB MIDI keyboard or USB-MIDI-DIN interface (MPK mini, U2MIDI PRO, …)
 
 ## Crates
 
@@ -86,6 +86,30 @@ midi-engine run --preset presets/active.json --rt
 ```
 
 Ctrl-C (and preset reload) flush active note-offs + All Notes Off.
+
+## First USB MIDI keyboard
+
+The appliance used to listen only for a port named `MPK`. A U2MIDI PRO (or any
+other class-compliant USB MIDI keyboard/interface) never matched, so notes
+went nowhere in **or** out.
+
+On MAP:
+
+1. Plug the USB MIDI keyboard — or a USB-MIDI-DIN interface (U2MIDI PRO) with
+   the keyboard's DIN **out** into the interface **in**.
+2. Open **SETTINGS → MAP** (or HOME → SETTINGS → MAP).
+3. Tap **IN** until the keyboard/interface name is selected (or tap its row).
+   **AUTO** grabs the first real USB MIDI device and skips Midi Through.
+4. Play a key. The yellow line should show `IN  ch… n… v…` and SYNTH should
+   sound. If it doesn't, tap **REFRESH** and pick the port again.
+5. For hardware-synth **out**, tap **OUT** to the same U2MIDI (or your DIN
+   interface), set a mode's OUT to USB/BOTH, then **TEST OUT**.
+6. **THRU ON** is the remap cable (keyboard → DIN synth). It uses the same
+   ports you picked. You do not need THRU to play the onboard synth.
+
+Port choice is saved in `settings.json` and applied on the next boot without
+editing systemd. New `jambox-engine.service` installs default to AUTO
+(`--midi-in ""`) instead of `MPK`.
 
 ## Preset JSON
 

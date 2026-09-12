@@ -28,7 +28,7 @@ runtime.
 | CHORDS | Omnichord-style circle-of-fifths buttons (MAJ/min/7 + combos), **strumplate**, 8-slot **palette**, **CHANGES** (named progressions in the chosen key), LOCAL/USB/BOTH. Block chords (buttons/palette) and harp strums record into SEQ / pad REC while those are armed. |
 | SONGS | List `songs/*.mid`, SMF→clip PLAY/STOP/LOOP, SAVE SEQ, OUT cycle |
 | PRESETS | 8 slots save/load synth params to `user-presets/` |
-| MAP | Thru status; THRU ON / OFF / REFRESH PORTS → `midi-engine` (Linux appliance; Windows host explains Pi-only) |
+| MAP | USB MIDI device picker for the synth (IN/OUT, tap a port, TEST OUT) plus THRU ON / OFF → `midi-engine` |
 | FX | BUS / VOICE / DRUMS target; DRIVE / DELAY / REVERB / **FLANGE** (bus = global wet; voice mirrors SYNTH FLANGE) |
 | SETTINGS | Appliance hub: Panic, notes-off, **AUDIO**, **WIFI**, **UPDATE**, FONT, LOG, MAP |
 | LOG | Engine counters + recent action lines |

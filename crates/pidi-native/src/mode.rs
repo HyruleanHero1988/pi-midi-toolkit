@@ -88,8 +88,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn thirteen_modes_round_trip() {
-        assert_eq!(UiMode::ALL.len(), 13);
+    fn all_modes_round_trip() {
+        assert_eq!(UiMode::ALL.len(), 14);
         for (i, mode) in UiMode::ALL.iter().enumerate() {
             assert_eq!(UiMode::from_index(i), Some(*mode));
             assert_eq!(mode.index(), i);

@@ -263,6 +263,44 @@ pub fn map_list_ports() -> (String, Vec<String>) {
     }
 }
 
+#[allow(dead_code)]
+fn load_selected_midi_ports() -> (String, String) {
+    let path = crate::paths::midi_ports_path();
+    if let Ok(text) = std::fs::read_to_string(&path) {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+            let input = v
+                .get("input")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string();
+            let output = v
+                .get("output")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string();
+            return (input, output);
+        }
+    }
+    (String::new(), String::new())
+}
+
+#[allow(dead_code)]
+fn thru_preset_path() -> PathBuf {
+    let root = find_repo_root();
+    for rel in [
+        "presets/usb-identity.json",
+        "presets/active.json",
+        "presets/example.json",
+        "presets/mpk-mini-ch3.json",
+    ] {
+        let p = root.join(rel);
+        if p.is_file() {
+            return p;
+        }
+    }
+    root.join("presets/usb-identity.json")
+}
+
 pub fn map_thru_on() -> (String, Vec<String>) {
     #[cfg(not(target_os = "linux"))]
     {
@@ -274,21 +312,45 @@ pub fn map_thru_on() -> (String, Vec<String>) {
     #[cfg(target_os = "linux")]
     {
         let mut lines = Vec::new();
-        if Path::new("/etc/systemd/system/midi-engine.service").exists()
-            || Path::new("/lib/systemd/system/midi-engine.service").exists()
-        {
-            let msg = "start midi-engine via systemd: sudo systemctl start midi-engine";
-            lines.push(msg.into());
-            return ("use systemctl for thru".into(), lines);
-        }
         let Some(bin) = resolve_midi_engine() else {
             return (
                 "midi-engine not found".into(),
                 vec!["THRU ON: no midi-engine binary".into()],
             );
         };
+        let preset = thru_preset_path();
+        if !preset.is_file() {
+            return (
+                "THRU preset missing".into(),
+                vec!["expected presets/usb-identity.json".into()],
+            );
+        }
+        let (input, output) = load_selected_midi_ports();
+        let input = if input.trim().is_empty() {
+            "U2MIDI".to_string()
+        } else {
+            input
+        };
+        let output = if output.trim().is_empty() {
+            "U2MIDI".to_string()
+        } else {
+            output
+        };
+        lines.push(format!(
+            "thru {} → {}  ({})",
+            midi_core::short_port_label(&input),
+            midi_core::short_port_label(&output),
+            preset.display()
+        ));
         match Command::new(&bin)
             .arg("run")
+            .arg("--preset")
+            .arg(&preset)
+            .arg("--input")
+            .arg(&input)
+            .arg("--output")
+            .arg(&output)
+            .arg("--watch")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())

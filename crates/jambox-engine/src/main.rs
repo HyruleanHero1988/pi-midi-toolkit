@@ -36,10 +36,10 @@ enum Cmd {
         /// Audio output device name substring (e.g. "headphone").
         #[arg(long, default_value = "")]
         output: String,
-        /// MIDI input name substring (e.g. "MPK").
+        /// MIDI input name substring (empty = first hardware USB MIDI port).
         #[arg(long, default_value = "")]
         midi_in: String,
-        /// MIDI output name substring for clip/DIN emit.
+        /// MIDI output name substring for clip/DIN emit (empty = first hardware port).
         #[arg(long, default_value = "")]
         midi_out: String,
         /// Control socket path (Unix) or host:port.
@@ -204,14 +204,15 @@ fn run(
         );
     }
 
+    let midi_io = Arc::new(midi::MidiIo::new(midi_in, midi_out));
     midi::spawn_input(
-        midi_in,
+        Arc::clone(&midi_io),
         Arc::clone(&midi_in_bus),
         Arc::clone(&hub),
         Arc::clone(&midi_map),
         running.clone(),
     );
-    midi::spawn_output(midi_out, midi_out_side, running.clone());
+    midi::spawn_output(Arc::clone(&midi_io), midi_out_side, running.clone());
 
     let endpoint = if tcp {
         ipc::Endpoint::Tcp(control)
@@ -235,6 +236,7 @@ fn run(
             hub,
             midi_map,
             midi_in_bus,
+            midi_io,
             ipc_health,
             ipc_running,
         );

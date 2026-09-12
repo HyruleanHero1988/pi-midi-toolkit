@@ -5,10 +5,10 @@
 //! fanned out to the kiosk. Knob meaning lives here — Tk only displays.
 
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU8, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use midi_core::MidiEvent;
+use midi_core::{is_virtual_port_name, pick_port_name, MidiEvent};
 use midir::{MidiInput, MidiInputConnection, MidiOutput, MidiOutputConnection};
 use tracing::{info, warn};
 
@@ -247,25 +247,94 @@ pub fn list_ports() -> (Vec<String>, Vec<String>) {
     (ins, outs)
 }
 
-fn is_virtual_name(name: &str) -> bool {
-    let n = name.to_ascii_lowercase();
-    n.contains("through") || n.contains("jambox")
+/// Live IN/OUT filters and the ports actually open. The kiosk writes filters
+/// over the control socket; the hotplug threads re-open without a restart.
+#[derive(Default)]
+pub struct MidiIo {
+    in_filter: Mutex<String>,
+    out_filter: Mutex<String>,
+    in_connected: Mutex<String>,
+    out_connected: Mutex<String>,
+}
+
+impl MidiIo {
+    pub fn new(in_filter: String, out_filter: String) -> Self {
+        Self {
+            in_filter: Mutex::new(in_filter),
+            out_filter: Mutex::new(out_filter),
+            in_connected: Mutex::new(String::new()),
+            out_connected: Mutex::new(String::new()),
+        }
+    }
+
+    fn lock_string(slot: &Mutex<String>) -> String {
+        slot.lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+    }
+
+    fn store_string(slot: &Mutex<String>, value: String) {
+        *slot.lock().unwrap_or_else(|p| p.into_inner()) = value;
+    }
+
+    pub fn input_filter(&self) -> String {
+        Self::lock_string(&self.in_filter)
+    }
+
+    pub fn output_filter(&self) -> String {
+        Self::lock_string(&self.out_filter)
+    }
+
+    pub fn set_input_filter(&self, filter: String) {
+        Self::store_string(&self.in_filter, filter);
+    }
+
+    pub fn set_output_filter(&self, filter: String) {
+        Self::store_string(&self.out_filter, filter);
+    }
+
+    pub fn input_connected(&self) -> String {
+        Self::lock_string(&self.in_connected)
+    }
+
+    pub fn output_connected(&self) -> String {
+        Self::lock_string(&self.out_connected)
+    }
+
+    fn set_input_connected(&self, name: String) {
+        Self::store_string(&self.in_connected, name);
+    }
+
+    fn set_output_connected(&self, name: String) {
+        Self::store_string(&self.out_connected, name);
+    }
+
+    pub fn snapshot(&self) -> jambox_protocol::MidiPortsReply {
+        let (inputs, outputs) = list_ports();
+        jambox_protocol::MidiPortsReply {
+            inputs,
+            outputs,
+            input_filter: self.input_filter(),
+            output_filter: self.output_filter(),
+            input_connected: self.input_connected(),
+            output_connected: self.output_connected(),
+        }
+    }
 }
 
 fn pick_input_name(filter: &str) -> Option<String> {
     let (ins, _) = list_ports();
-    let filter_lc = filter.trim().to_ascii_lowercase();
-    if !filter_lc.is_empty() {
-        return ins
-            .into_iter()
-            .find(|name| name.to_ascii_lowercase().contains(&filter_lc));
-    }
-    ins.into_iter().find(|name| !is_virtual_name(name))
+    pick_port_name(ins.iter().map(String::as_str), filter)
+}
+
+fn pick_output_name(filter: &str) -> Option<String> {
+    let (_, outs) = list_ports();
+    pick_port_name(outs.iter().map(String::as_str), filter)
 }
 
 /// Watch MIDI inputs and connect when a matching port appears (or returns).
 pub fn spawn_input(
-    filter: String,
+    io: Arc<MidiIo>,
     side: Arc<std::sync::Mutex<MidiInSide>>,
     hub: Arc<crate::ipc::ClientHub>,
     map: Arc<MidiMap>,
@@ -276,12 +345,23 @@ pub fn spawn_input(
         let mut connection: Option<MidiInputConnection<()>> = None;
         let mut current = String::new();
         let mut announced_wait = false;
-        if !filter.trim().is_empty() {
-            info!(filter = %filter, "midi: watching for input (hotplug)");
-        } else {
-            info!("midi: watching for a hardware input (hotplug)");
-        }
+        let mut last_filter = String::from("\0");
         while running.load(Ordering::Relaxed) {
+            let filter = io.input_filter();
+            if filter != last_filter {
+                if !filter.trim().is_empty() {
+                    info!(filter = %filter, "midi: watching for input (hotplug)");
+                } else {
+                    info!("midi: watching for a hardware input (hotplug)");
+                }
+                last_filter = filter.clone();
+                if connection.is_some() {
+                    info!(port = %current, "midi: input filter changed; reconnecting");
+                    connection = None;
+                    current.clear();
+                    io.set_input_connected(String::new());
+                }
+            }
             let wanted = pick_input_name(&filter);
             let still =
                 wanted.as_ref().map(|n| n == &current).unwrap_or(false) && connection.is_some();
@@ -289,6 +369,7 @@ pub fn spawn_input(
                 info!(port = %current, "midi: input gone; waiting for reconnect");
                 connection = None;
                 current.clear();
+                io.set_input_connected(String::new());
             }
             if connection.is_none() {
                 if let Some(name) = wanted {
@@ -301,7 +382,8 @@ pub fn spawn_input(
                     ) {
                         Ok(conn) => {
                             info!(port = %name, "midi: input open");
-                            current = name;
+                            current = name.clone();
+                            io.set_input_connected(name);
                             connection = Some(conn);
                         }
                         Err(err) => {
@@ -347,52 +429,86 @@ fn try_connect(
         .map_err(|e| MidiError::Connect(e.to_string()))
 }
 
-fn open_output(filter: &str) -> Result<MidiOutputConnection, MidiError> {
+fn try_open_output(name: &str) -> Result<MidiOutputConnection, MidiError> {
     let output = MidiOutput::new("jambox-out").map_err(|e| MidiError::Init(e.to_string()))?;
-    let filter_lc = filter.trim().to_ascii_lowercase();
     let ports = output.ports();
     let chosen = ports
         .iter()
-        .find(|p| {
-            let name = output.port_name(p).unwrap_or_default().to_ascii_lowercase();
-            if is_virtual_name(&name) && !filter_lc.is_empty() && !name.contains(&filter_lc) {
-                return false;
-            }
-            filter_lc.is_empty() || name.contains(&filter_lc)
-        })
+        .find(|p| output.port_name(p).ok().as_deref() == Some(name))
         .cloned()
-        .ok_or_else(|| MidiError::NoPort(filter.to_string()))?;
-    let name = output.port_name(&chosen).unwrap_or_default();
-    info!(port = %name, "midi: output open");
+        .ok_or_else(|| MidiError::NoPort(name.to_string()))?;
     output
         .connect(&chosen, "jambox-out")
         .map_err(|e| MidiError::Connect(e.to_string()))
 }
 
 /// Drain engine-emitted MIDI to a hardware port until `running` clears.
-pub fn spawn_output(filter: String, mut side: MidiOutSide, running: Arc<AtomicBool>) {
+/// Re-opens when the cable returns or the kiosk changes the OUT filter.
+pub fn spawn_output(io: Arc<MidiIo>, mut side: MidiOutSide, running: Arc<AtomicBool>) {
     std::thread::spawn(move || {
-        let mut connection = match open_output(&filter) {
-            Ok(c) => c,
-            Err(err) => {
-                warn!(%err, "midi: output unavailable; clip MIDI stays local");
-                while running.load(Ordering::Relaxed) {
-                    while side.events.pop().is_ok() {}
-                    std::thread::sleep(OUT_POLL);
-                }
-                return;
-            }
-        };
+        let mut connection: Option<MidiOutputConnection> = None;
+        let mut current = String::new();
+        let mut announced_wait = false;
+        let mut last_filter = String::from("\0");
         let mut buf = [0u8; 3];
         while running.load(Ordering::Relaxed) {
+            let filter = io.output_filter();
+            if filter != last_filter {
+                if !filter.trim().is_empty() {
+                    info!(filter = %filter, "midi: watching for output (hotplug)");
+                } else {
+                    info!("midi: watching for a hardware output (hotplug)");
+                }
+                last_filter = filter.clone();
+                if connection.is_some() {
+                    info!(port = %current, "midi: output filter changed; reconnecting");
+                    connection = None;
+                    current.clear();
+                    io.set_output_connected(String::new());
+                }
+            }
+            let wanted = pick_output_name(&filter);
+            let still =
+                wanted.as_ref().map(|n| n == &current).unwrap_or(false) && connection.is_some();
+            if connection.is_some() && !still {
+                info!(port = %current, "midi: output gone; waiting for reconnect");
+                connection = None;
+                current.clear();
+                io.set_output_connected(String::new());
+            }
+            if connection.is_none() {
+                if let Some(name) = wanted {
+                    announced_wait = false;
+                    match try_open_output(&name) {
+                        Ok(conn) => {
+                            info!(port = %name, "midi: output open");
+                            current = name.clone();
+                            io.set_output_connected(name);
+                            connection = Some(conn);
+                        }
+                        Err(err) => {
+                            warn!(%err, port = %name, "midi: output connect failed");
+                        }
+                    }
+                } else if !announced_wait {
+                    announced_wait = true;
+                    info!("midi: no matching output yet; clip MIDI stays local until one appears");
+                }
+            }
             let mut idle = true;
             while let Ok(event) = side.events.pop() {
                 idle = false;
-                let n = event.encode(&mut buf);
-                let _ = connection.send(&buf[..n]);
+                if let Some(conn) = connection.as_mut() {
+                    let n = event.encode(&mut buf);
+                    let _ = conn.send(&buf[..n]);
+                }
             }
             if idle {
-                std::thread::sleep(OUT_POLL);
+                std::thread::sleep(if connection.is_some() {
+                    OUT_POLL
+                } else {
+                    HOTPLUG_POLL
+                });
             }
         }
     });
@@ -532,8 +648,9 @@ mod tests {
 
     #[test]
     fn skips_through_and_engine_loopback_names() {
-        assert!(is_virtual_name("Midi Through:Midi Through Port-0 14:0"));
-        assert!(is_virtual_name("jambox-out:jambox-out 129:0"));
-        assert!(!is_virtual_name("MPK mini 3"));
+        assert!(is_virtual_port_name("Midi Through:Midi Through Port-0 14:0"));
+        assert!(is_virtual_port_name("jambox-out:jambox-out 129:0"));
+        assert!(!is_virtual_port_name("MPK mini 3"));
+        assert!(!is_virtual_port_name("U2MIDI PRO:U2MIDI PRO MIDI 1 20:0"));
     }
 }

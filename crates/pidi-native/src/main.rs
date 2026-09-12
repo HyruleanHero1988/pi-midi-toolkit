@@ -126,6 +126,9 @@ fn main() {
 
         if status_tick.elapsed() > Duration::from_millis(250) {
             client.outbox.status();
+            if model.mode == pidi_native::mode::UiMode::Map {
+                client.outbox.midi_ports();
+            }
             status_tick = Instant::now();
         }
         client.flush();
@@ -134,6 +137,7 @@ fn main() {
         }
         model.connected = client.connected;
         model.status = client.last_status;
+        model.apply_midi_ports(&client.last_midi_ports);
         model.tick(dt, &mut client.outbox);
         model.maybe_autosave();
         if model.take_reexec() {

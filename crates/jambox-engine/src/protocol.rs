@@ -156,6 +156,15 @@ pub enum Request {
     },
     /// Drop and reopen the ALSA/cpal output stream without resetting engine state.
     AudioReopen,
+    /// List live MIDI ports and the filters the engine is watching.
+    MidiPorts,
+    /// Change IN/OUT name filters. Empty string = first hardware USB MIDI port.
+    MidiSelect {
+        #[serde(default)]
+        input: Option<String>,
+        #[serde(default)]
+        output: Option<String>,
+    },
 }
 
 const fn default_velocity() -> u8 {
@@ -241,6 +250,7 @@ pub enum Response {
     Status(StatusReply),
     /// Unsolicited: a MIDI event the engine heard (notes already went to DSP).
     Midi(MidiNotice),
+    MidiPorts(jambox_protocol::MidiPortsReply),
 }
 
 /// UI-facing MIDI echo. DSP already applied the mapped command.
@@ -401,6 +411,11 @@ pub enum Decoded {
     },
     /// Rebuild the host audio device stream (engine + rings stay up).
     AudioReopen,
+    MidiPorts,
+    MidiSelect {
+        input: Option<String>,
+        output: Option<String>,
+    },
 }
 
 pub fn parse_quantize(value: Option<&str>) -> Quantize {
@@ -704,6 +719,8 @@ pub fn decode(request: Request) -> Result<Decoded, String> {
             division: map_repeat_division(division),
         },
         Request::AudioReopen => Decoded::AudioReopen,
+        Request::MidiPorts => Decoded::MidiPorts,
+        Request::MidiSelect { input, output } => Decoded::MidiSelect { input, output },
     })
 }
 

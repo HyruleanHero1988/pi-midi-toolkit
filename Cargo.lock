@@ -917,6 +917,7 @@ dependencies = [
  "jambox-core",
  "jambox-protocol",
  "libc",
+ "midi-core",
  "sdl2",
  "serde",
  "serde_json",
