@@ -312,7 +312,7 @@ pub fn handle_line(
         }
         Ok(Decoded::MidiIn(event)) => {
             let mut side = midi_in.lock().unwrap_or_else(|p| p.into_inner());
-            ingest(event, hub, map, |c| side.send(c));
+            ingest(event, 0, hub, map, |c| side.send(c));
             Response::Ok
         }
         Ok(Decoded::Command(command)) => {
@@ -380,6 +380,10 @@ pub fn handle_line(
                 midi_io.set_output_filter(filter);
             }
             Response::MidiPorts(midi_io.snapshot())
+        }
+        Ok(Decoded::ChannelMap { bits }) => {
+            midi_io.set_channel_map(bits);
+            Response::Ok
         }
     }
 }

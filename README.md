@@ -3,7 +3,7 @@
 Raspberry Pi **MIDI appliance**: one kiosk UI for local soft-synth play **and**
 low-latency MIDI thru/remap to a hardware synth. **Not** related to play-my-synth.
 
-**North star:** power on → kiosk → modes (Synth / Seq / Pads / Kaoss / Chords / Log / Map). See [PLAN.md](PLAN.md).
+**North star:** power on → kiosk → modes (Synth / Seq / Pads / Kaoss / Chords / Map / Log). See [PLAN.md](PLAN.md).
 
 - **Kiosk UI (active):** [`crates/pidi-native`](crates/pidi-native) — SDL/KMSDRM + GLES2 over `jambox-engine`. See [NATIVE_KIOSK.md](NATIVE_KIOSK.md) and the [native screen reference](docs/index.html).
 - **Shared Pi assets:** [`apps/pidi`](apps/pidi) — wavetables, OTA `updater.py`, power/HW scripts (not a UI)
@@ -95,12 +95,13 @@ You do not have to pick MPK, U2MIDI, or any other brand.
 
 1. Plug the USB MIDI device. For a DIN keyboard, use a USB-MIDI-DIN
    interface (e.g. U2MIDI PRO): keyboard DIN **out** → interface **in**.
-2. Play. SYNTH should sound. SETTINGS → MAP shows live ports and the last
+2. Play. SYNTH should sound. SETTINGS → PORTS shows live ports and the last
    incoming note; tap IN only if you want to pin one device.
 3. Hardware-synth **out** is the first hardware port by default. Tap OUT
-   on MAP if you have more than one, set a mode's OUT to USB/BOTH, then
+   on PORTS if you have more than one, set a mode's OUT to USB/BOTH, then
    **TEST OUT**.
-4. **THRU ON** is the optional remap cable (keyboard → DIN synth). You do
+4. HOME → **MAP** remaps incoming MIDI channels (e.g. ch 1 → ch 6, or 1 → several).
+5. **THRU ON** (on PORTS) is the optional remap cable (keyboard → DIN synth). You do
    not need it to play the onboard synth.
 
 ## Preset JSON
@@ -108,7 +109,7 @@ You do not have to pick MPK, U2MIDI, or any other brand.
 See [`presets/example.json`](presets/example.json) and [`presets/mpk-mini-ch3.json`](presets/mpk-mini-ch3.json):
 
 - `ports.input` / `ports.output` — name substrings (e.g. `MPK`, `MIDI`)
-- `channel_map` — `identity` | `all_to` | `remap`
+- `channel_map` — `identity` | `all_to` | `remap` | `fanout` (1:N bitmasks)
 - `cc_map` — `(in_channel, in_cc) → (out_channel, out_cc)`
 - `velocity` — `pass_through` | `always_full` | `clamp` | `curve`
 

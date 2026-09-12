@@ -93,7 +93,7 @@ pub fn wifi_credentials_path() -> PathBuf {
     data_root().join(".wifi-credentials")
 }
 
-/// Last IN/OUT name filters chosen on MAP (also used by THRU ON).
+/// Last IN/OUT name filters and channel-map bits (also used by THRU ON).
 pub fn midi_ports_path() -> PathBuf {
     data_root().join("midi-ports.json")
 }

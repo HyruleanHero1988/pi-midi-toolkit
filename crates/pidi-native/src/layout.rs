@@ -23,8 +23,8 @@ pub const JAM_MODES: [UiMode; 6] = [
     UiMode::Chords,
 ];
 
-/// Home grid entries (5×2). LOG / MAP live under Settings.
-pub const HOME_TILES: [(UiMode, &'static str, u32); 11] = [
+/// Home grid entries (4×3). LOG / PORTS live under Settings.
+pub const HOME_TILES: [(UiMode, &'static str, u32); 12] = [
     (UiMode::Synth, "SYNTH", 0x458588),
     (UiMode::Fm, "FM", 0x8ec07c),
     (UiMode::Drums, "DRUMS", 0x98971a),
@@ -35,6 +35,7 @@ pub const HOME_TILES: [(UiMode, &'static str, u32); 11] = [
     (UiMode::Songs, "SONGS", 0x689d6a),
     (UiMode::Presets, "PRESETS", 0x83a598),
     (UiMode::Fx, "FX", 0xb16286),
+    (UiMode::Map, "MAP", 0x458588),
     (UiMode::Settings, "SETTINGS", 0x665c54),
 ];
 
@@ -99,6 +100,10 @@ pub enum Hit {
     MapTest,
     MapInRow(usize),
     MapOutRow(usize),
+    /// Input or output channel cell (0–15) on the MAP utility.
+    MapChannel(u8),
+    MapChannelDone,
+    MapChannelClear,
     KaossProg,
     KaossScale,
     KaossKey,
@@ -2206,7 +2211,8 @@ impl Layout {
             UiMode::Settings => self.hit_settings(px, py),
             UiMode::Fx => self.hit_fx(px, py),
             UiMode::Log => self.hit_log(px, py),
-            UiMode::Map => self.hit_map(px, py),
+            UiMode::Map => self.hit_map_channels(px, py),
+            UiMode::Ports => self.hit_map(px, py),
             UiMode::Chords => self.hit_chords(px, py),
         }
     }
@@ -2705,6 +2711,62 @@ impl Layout {
 
     pub const MAP_PORT_ROWS: usize = 5;
 
+    pub fn map_channel_done(&self) -> Rect {
+        Rect {
+            x: 16,
+            y: HUD_H + 8,
+            w: 148,
+            h: 40,
+        }
+    }
+
+    pub fn map_channel_clear(&self) -> Rect {
+        Rect {
+            x: 172,
+            y: HUD_H + 8,
+            w: 148,
+            h: 40,
+        }
+    }
+
+    pub fn map_channel_grid(&self) -> Rect {
+        Rect {
+            x: 12,
+            y: HUD_H + 56,
+            w: SCREEN_W - 24,
+            h: SCREEN_H - HUD_H - 64,
+        }
+    }
+
+    pub fn map_channel_cell(&self, index: usize) -> Rect {
+        let col = (index % 4) as i32;
+        let row = (index / 4) as i32;
+        let grid = self.map_channel_grid();
+        let gw = grid.w / 4;
+        let gh = grid.h / 4;
+        Rect {
+            x: grid.x + col * gw + 4,
+            y: grid.y + row * gh + 4,
+            w: gw - 8,
+            h: gh - 8,
+        }
+    }
+
+    fn hit_map_channels(&self, px: i32, py: i32) -> Hit {
+        if self.map_channel_done().contains(px, py) {
+            return Hit::MapChannelDone;
+        }
+        if self.map_channel_clear().contains(px, py) {
+            return Hit::MapChannelClear;
+        }
+        for index in 0..16 {
+            if self.map_channel_cell(index).contains(px, py) {
+                return Hit::MapChannel(index as u8);
+            }
+        }
+        Hit::None
+    }
+
     pub fn map_in_row(&self, index: usize) -> Rect {
         Rect {
             x: 16,
@@ -3010,7 +3072,7 @@ mod tests {
         assert_on_screen("home settings", settings);
         assert!(
             layout.home_grid().max_scroll() == 0,
-            "eleven home tiles should fit without scrolling"
+            "twelve home tiles should fit without scrolling"
         );
     }
 
@@ -3173,6 +3235,28 @@ mod tests {
         assert_eq!(
             layout.hit(UiMode::Home, home_fm.x + 4, home_fm.y + 4),
             Hit::HomeTile(UiMode::Fm)
+        );
+    }
+
+    #[test]
+    fn map_channel_grid_hits() {
+        let layout = Layout::new();
+        let ch1 = layout.map_channel_cell(0);
+        assert_eq!(
+            layout.hit(UiMode::Map, ch1.x + 4, ch1.y + 4),
+            Hit::MapChannel(0)
+        );
+        let ch16 = layout.map_channel_cell(15);
+        assert_eq!(
+            layout.hit(UiMode::Map, ch16.x + 4, ch16.y + 4),
+            Hit::MapChannel(15)
+        );
+        assert_on_screen("map ch1", ch1);
+        assert_on_screen("map ch16", ch16);
+        let home_map = layout.home_tile(10, 0);
+        assert_eq!(
+            layout.hit(UiMode::Home, home_map.x + 4, home_map.y + 4),
+            Hit::HomeTile(UiMode::Map)
         );
     }
 

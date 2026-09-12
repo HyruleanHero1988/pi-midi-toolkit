@@ -5,8 +5,8 @@
 use crate::event::MidiEvent;
 use crate::preset::{CcMapEntry, ChannelMapMode, EnginePreset, VelocityConfig};
 
-/// Max events one input can expand into (CC remap is 1:1; reserved for later).
-pub const MAX_OUT: usize = 4;
+/// Max events one input can expand into (one per MIDI channel on fan-out).
+pub const MAX_OUT: usize = 16;
 /// Max CC remap rules stored in the hot-path chain (overflow truncated with a warning at load).
 pub const MAX_CC_MAP: usize = 64;
 
@@ -173,42 +173,54 @@ impl ProcessorChain {
     }
 }
 
-/// Apply channel remap → CC remap → velocity. Returns 0 or 1 events today.
+/// Apply channel remap → CC remap → velocity. One input may expand to many outs.
 pub fn process_event(chain: &ProcessorChain, event: MidiEvent) -> ProcessOutput {
-    let event = match event {
+    let mut out = ProcessOutput::empty();
+    match event {
         MidiEvent::ControlChange {
             channel,
             controller,
             value,
         } => {
             if let Some(mapped) = lookup_cc(chain.cc_map(), channel, controller) {
-                MidiEvent::ControlChange {
+                out.push(MidiEvent::ControlChange {
                     channel: mapped.out_channel & 0x0f,
                     controller: mapped.out_cc & 0x7f,
                     value,
-                }
+                });
             } else {
-                event.with_channel(chain.channel_map.map_channel(channel))
+                push_mapped_channel_events(&mut out, chain, event);
             }
         }
-        other => {
-            let ch = chain.channel_map.map_channel(other.channel());
-            let other = other.with_channel(ch);
-            match other {
-                MidiEvent::NoteOn {
-                    channel,
-                    note,
-                    velocity,
-                } => MidiEvent::NoteOn {
-                    channel,
-                    note,
-                    velocity: chain.velocity.map(velocity),
-                },
-                e => e,
-            }
+        other => push_mapped_channel_events(&mut out, chain, other),
+    }
+    out
+}
+
+fn push_mapped_channel_events(
+    out: &mut ProcessOutput,
+    chain: &ProcessorChain,
+    event: MidiEvent,
+) {
+    let mask = chain.channel_map.dest_mask(event.channel());
+    for dest in 0..16u8 {
+        if mask & (1 << dest) == 0 {
+            continue;
         }
-    };
-    ProcessOutput::one(event)
+        let mapped = event.with_channel(dest);
+        out.push(match mapped {
+            MidiEvent::NoteOn {
+                channel,
+                note,
+                velocity,
+            } => MidiEvent::NoteOn {
+                channel,
+                note,
+                velocity: chain.velocity.map(velocity),
+            },
+            e => e,
+        });
+    }
 }
 
 fn lookup_cc(map: &[CcMapEntry], channel: u8, controller: u8) -> Option<&CcMapEntry> {
@@ -451,6 +463,56 @@ mod tests {
                 note: 1,
                 velocity: 40,
             }
+        );
+    }
+
+    #[test]
+    fn channel_fanout_emits_each_destination() {
+        let mut bits = [0u16; 16];
+        bits[0] = (1 << 5) | (1 << 6);
+        let c = chain(
+            ChannelMapMode::Fanout { bits },
+            vec![],
+            VelocityConfig::PassThrough,
+        );
+        let out = process_event(
+            &c,
+            MidiEvent::NoteOn {
+                channel: 0,
+                note: 60,
+                velocity: 80,
+            },
+        );
+        assert_eq!(
+            out.as_slice(),
+            &[
+                MidiEvent::NoteOn {
+                    channel: 5,
+                    note: 60,
+                    velocity: 80,
+                },
+                MidiEvent::NoteOn {
+                    channel: 6,
+                    note: 60,
+                    velocity: 80,
+                },
+            ]
+        );
+        let pass = process_event(
+            &c,
+            MidiEvent::NoteOff {
+                channel: 2,
+                note: 10,
+                velocity: 0,
+            },
+        );
+        assert_eq!(
+            pass.as_slice(),
+            &[MidiEvent::NoteOff {
+                channel: 2,
+                note: 10,
+                velocity: 0,
+            }]
         );
     }
 
