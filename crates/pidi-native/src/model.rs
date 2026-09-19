@@ -1,7 +1,6 @@
 //! Instrument-surface state. Rendering and IPC consume this; they do not own notes.
 //!
-//! Remaining Tk gaps (see NATIVE_KIOSK.md): deeper Map remap UI.
-//! Map/WIFI/UPDATE are appliance-oriented host hooks.
+//! MAP is the home-screen MIDI channel remap. PORTS (Settings) keep IN/OUT.
 
 use crate::chords::{self, ChordSpec, Overlay as ChordsOverlay, QualityRow, PALETTE_SLOTS};
 use crate::client::Outbox;
@@ -24,11 +23,12 @@ use jambox_core::{
     DrumModel, DRUM_MODEL_COUNT, DRUM_PREVIEW_SAMPLES, DRUM_PREVIEW_SR,
 };
 use jambox_protocol::{
-    MidiNotice, RepeatDivision, RepeatPhase, StatusReply, TouchPhase, WireClipEvent,
+    MidiNotice, MidiPortsReply, RepeatDivision, RepeatPhase, StatusReply, TouchPhase,
+    WireClipEvent,
 };
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, TryRecvError};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 pub const LED_COLS: usize = 12;
 pub const LED_ROWS: usize = 7;
@@ -108,6 +108,25 @@ impl RepeatDivisionChoice {
             Self::EighthTriplet => Some("1/8T"),
             Self::Sixteenth => Some("1/16"),
             Self::Triple => Some("TRIP"),
+        }
+    }
+
+    /// Seconds between hold-to-repeat hits at `bpm`.
+    pub fn interval_secs(self, bpm: f32) -> Option<f64> {
+        if !self.is_on() {
+            return None;
+        }
+        let ticks = self.as_wire_ticks();
+        Some(ticks as f64 / f64::from(jambox_core::PPQ) * 60.0 / f64::from(bpm.max(1.0)))
+    }
+
+    fn as_wire_ticks(self) -> u64 {
+        match self {
+            Self::Off | Self::Quarter => jambox_core::PPQ as u64,
+            Self::Eighth => jambox_core::PPQ as u64 / 2,
+            Self::EighthTriplet => jambox_core::PPQ as u64 / 3,
+            Self::Sixteenth => jambox_core::PPQ as u64 / 4,
+            Self::Triple => jambox_core::PPQ as u64 * 2 / 3,
         }
     }
 }
@@ -261,6 +280,17 @@ pub struct NativeModel {
     pub fx_drum: [f32; 4],
     pub fx_target: FxEditTarget,
     pub log_lines: Vec<String>,
+    pub midi_in_filter: String,
+    pub midi_out_filter: String,
+    pub midi_in_connected: String,
+    pub midi_out_connected: String,
+    pub midi_inputs: Vec<String>,
+    pub midi_outputs: Vec<String>,
+    pub last_midi_activity: String,
+    /// Per-input destination bitmask (0 = identity).
+    pub channel_map_bits: [u16; 16],
+    /// When set, MAP is picking outputs for this input channel (0–15).
+    pub map_out_edit: Option<u8>,
     pub pads_out: OutMode,
     pub song_out: OutMode,
     pub kaoss_out: OutMode,
@@ -335,6 +365,8 @@ pub struct NativeModel {
     /// Per-cell touch envelope (CELLS viz) — fades in fast, out slow.
     cell_amp: [[f32; LED_COLS]; LED_ROWS],
     fingers: [Finger; MAX_FINGERS],
+    /// Next SEQ / pad-REC capture instant for a held note-repeat drum.
+    repeat_due: [Option<Instant>; MAX_FINGERS],
     next_gesture: u32,
     cells: [[u32; LED_COLS]; LED_ROWS],
     phrases_loaded: bool,
@@ -446,6 +478,15 @@ impl NativeModel {
             fx_drum: [0.0, 0.0, 0.0, 0.0],
             fx_target: FxEditTarget::Bus,
             log_lines: Vec::new(),
+            midi_in_filter: String::new(),
+            midi_out_filter: String::new(),
+            midi_in_connected: String::new(),
+            midi_out_connected: String::new(),
+            midi_inputs: Vec::new(),
+            midi_outputs: Vec::new(),
+            last_midi_activity: String::new(),
+            channel_map_bits: [0; 16],
+            map_out_edit: None,
             pads_out: OutMode::Both,
             song_out: OutMode::Both,
             kaoss_out: OutMode::Local,
@@ -505,6 +546,7 @@ impl NativeModel {
             kaoss_ripples: Vec::new(),
             cell_amp: [[0.0; LED_COLS]; LED_ROWS],
             fingers: [Finger::silent(); MAX_FINGERS],
+            repeat_due: [None; MAX_FINGERS],
             next_gesture: 1,
             cells: [[0; LED_COLS]; LED_ROWS],
             phrases_loaded: false,
@@ -627,6 +669,7 @@ impl NativeModel {
         self.kit_repeat_open = false;
         self.chords_overlay = None;
         self.chords_arm = false;
+        self.map_out_edit = None;
         if mode == UiMode::Drums {
             self.kit_wave_dirty = true;
         }
@@ -665,6 +708,9 @@ impl NativeModel {
         if mode == UiMode::Fm {
             self.status_line = format!("FM · {}", jambox_core::fm_recipe(self.fm_recipe).title);
         }
+        if mode == UiMode::Ports {
+            outbox.midi_ports();
+        }
     }
 
     fn tracks_nav_history(mode: UiMode) -> bool {
@@ -680,6 +726,8 @@ impl NativeModel {
                 | UiMode::Songs
                 | UiMode::Presets
                 | UiMode::Fx
+                | UiMode::Map
+                | UiMode::Ports
                 | UiMode::Log
                 | UiMode::Settings
         )
@@ -739,6 +787,9 @@ impl NativeModel {
         }
         if self.kit_repeat_open {
             return Some("kit_repeat");
+        }
+        if self.map_out_edit.is_some() {
+            return Some("map_out");
         }
         None
     }
@@ -827,6 +878,10 @@ impl NativeModel {
                 self.kit_repeat_open = false;
                 self.status_line.clear();
             }
+            Some("map_out") => {
+                self.map_out_edit = None;
+                self.status_line = "MAP".into();
+            }
             _ => {
                 if let Some(prev) = self.nav_stack.pop() {
                     self.nav_back_navigating = true;
@@ -852,6 +907,7 @@ impl NativeModel {
             "pre" | "presets" => UiMode::Presets,
             "fx" => UiMode::Fx,
             "map" => UiMode::Map,
+            "port" | "ports" => UiMode::Ports,
             "log" => UiMode::Log,
             "set" | "settings" => UiMode::Settings,
             _ => UiMode::Kaoss,
@@ -986,6 +1042,7 @@ impl NativeModel {
         }
         self.tick_kaoss_gate(outbox);
         self.tick_chords_combo_grace(dt, outbox);
+        self.capture_held_repeats_at(Instant::now());
         self.tick_screensaver(dt);
         self.poll_host_job();
         self.poll_update_job();
@@ -1568,6 +1625,21 @@ impl NativeModel {
         if s.screensaver_sec >= 0.0 && std::env::var("MIDI_TONE_SCREENSAVER_SEC").is_err() {
             self.screensaver.timeout_sec = s.screensaver_sec;
         }
+        self.midi_in_filter = s.midi_in.clone();
+        self.midi_out_filter = s.midi_out.clone();
+        self.channel_map_bits = s.channel_map;
+        outbox.midi_select(
+            Some(self.midi_in_filter.clone()),
+            Some(self.midi_out_filter.clone()),
+        );
+        outbox.channel_map(self.channel_map_bits);
+        outbox.midi_ports();
+        self.write_midi_ports_file();
+        crate::host::write_live_thru_preset(
+            &self.midi_in_filter,
+            &self.midi_out_filter,
+            self.channel_map_bits,
+        );
         outbox.emit_mode("clips", self.pads_out.wire());
         outbox.emit_mode("kaoss", self.kaoss_out.wire());
         outbox.tempo(self.bpm);
@@ -1646,6 +1718,9 @@ impl NativeModel {
             kaoss_viz_style: self.kaoss_viz_style.wire().into(),
             kaoss_mono_color: self.kaoss_mono_color,
             seq_cue_beep: self.seq.cue_beep,
+            midi_in: self.midi_in_filter.clone(),
+            midi_out: self.midi_out_filter.clone(),
+            channel_map: self.channel_map_bits,
         }
     }
 
@@ -1671,6 +1746,8 @@ impl NativeModel {
             if vel > 0 {
                 self.seq.push_note(true, notice.channel, note, vel);
                 self.push_pad_rec(true, notice.channel, note, vel);
+                self.last_midi_activity =
+                    format!("IN  ch{} n{} v{}", notice.channel + 1, note, vel);
                 self.push_log(format!("midi on ch{} n{} v{}", notice.channel, note, vel));
             } else {
                 self.seq.push_note(false, notice.channel, note, 0);
@@ -1681,7 +1758,130 @@ impl NativeModel {
             self.seq.push_note(false, notice.channel, note, 0);
             self.push_pad_rec(false, notice.channel, note, 0);
             self.push_log(format!("midi off ch{} n{}", notice.channel, note));
+        } else if kind == "control_change" || kind == "cc" {
+            self.last_midi_activity = format!(
+                "IN  ch{} cc{} v{}",
+                notice.channel + 1,
+                notice.control.unwrap_or(0),
+                notice.value.unwrap_or(0)
+            );
         }
+    }
+
+    pub fn apply_midi_ports(&mut self, ports: &MidiPortsReply) {
+        if !ports.inputs.is_empty() || !ports.outputs.is_empty() {
+            self.midi_inputs = ports.inputs.clone();
+            self.midi_outputs = ports.outputs.clone();
+        }
+        self.midi_in_connected = ports.input_connected.clone();
+        self.midi_out_connected = ports.output_connected.clone();
+    }
+
+    fn write_midi_ports_file(&self) {
+        let path = crate::paths::midi_ports_path();
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let body = serde_json::json!({
+            "input": self.midi_in_filter,
+            "output": self.midi_out_filter,
+            "channel_map": self.channel_map_bits,
+        });
+        let _ = std::fs::write(path, body.to_string() + "\n");
+    }
+
+    fn persist_midi_filters(&mut self) {
+        self.mark_dirty();
+        self.write_midi_ports_file();
+    }
+
+    fn apply_midi_select(&mut self, outbox: &mut Outbox) {
+        outbox.midi_select(
+            Some(self.midi_in_filter.clone()),
+            Some(self.midi_out_filter.clone()),
+        );
+        self.persist_midi_filters();
+        let inn = if self.midi_in_filter.is_empty() {
+            "ALL".into()
+        } else {
+            midi_core::short_port_label(&self.midi_in_filter).to_string()
+        };
+        let out = if self.midi_out_filter.is_empty() {
+            "AUTO".into()
+        } else {
+            midi_core::short_port_label(&self.midi_out_filter).to_string()
+        };
+        self.status_line = format!("MIDI in={inn}  out={out}");
+        self.push_log(self.status_line.clone());
+    }
+
+    fn cycle_midi_in(&mut self, outbox: &mut Outbox) {
+        self.midi_in_filter = midi_core::cycle_port_filter(&self.midi_in_filter, &self.midi_inputs);
+        self.apply_midi_select(outbox);
+    }
+
+    fn cycle_midi_out(&mut self, outbox: &mut Outbox) {
+        self.midi_out_filter =
+            midi_core::cycle_port_filter(&self.midi_out_filter, &self.midi_outputs);
+        self.apply_midi_select(outbox);
+    }
+
+    fn pick_midi_in_row(&mut self, index: usize, outbox: &mut Outbox) {
+        let Some(name) = self.midi_inputs.get(index).cloned() else {
+            return;
+        };
+        if midi_core::is_virtual_port_name(&name) && self.midi_inputs.iter().any(|n| !midi_core::is_virtual_port_name(n)) {
+            // Allow picking Through only when the user taps it explicitly.
+        }
+        self.midi_in_filter = name;
+        self.apply_midi_select(outbox);
+    }
+
+    fn pick_midi_out_row(&mut self, index: usize, outbox: &mut Outbox) {
+        let Some(name) = self.midi_outputs.get(index).cloned() else {
+            return;
+        };
+        self.midi_out_filter = name;
+        self.apply_midi_select(outbox);
+    }
+
+    fn tap_map_channel(&mut self, channel: u8, outbox: &mut Outbox) {
+        let channel = channel.min(15);
+        if let Some(input) = self.map_out_edit {
+            self.channel_map_bits[input as usize] =
+                midi_core::toggle_fanout_bit(self.channel_map_bits[input as usize], input, channel);
+            self.apply_channel_map(outbox);
+            if let Some(targets) =
+                midi_core::format_fanout_targets(self.channel_map_bits[input as usize], input)
+            {
+                self.status_line = format!("CH {} → {targets}", input + 1);
+            } else {
+                self.status_line = format!("CH {} pass through", input + 1);
+            }
+            return;
+        }
+        self.map_out_edit = Some(channel);
+        self.status_line = format!("CH {} → tap outputs", channel + 1);
+        self.mark_dirty();
+    }
+
+    fn apply_channel_map(&mut self, outbox: &mut Outbox) {
+        outbox.channel_map(self.channel_map_bits);
+        self.mark_dirty();
+        self.write_midi_ports_file();
+        crate::host::write_live_thru_preset(
+            &self.midi_in_filter,
+            &self.midi_out_filter,
+            self.channel_map_bits,
+        );
+    }
+
+    fn test_midi_out(&mut self, outbox: &mut Outbox) {
+        outbox.midi_emit("note_on", 0, Some(60), Some(100), None, None);
+        outbox.midi_emit("note_off", 0, Some(60), Some(0), None, None);
+        self.last_midi_activity = "OUT  test C4".into();
+        self.status_line = "sent test note C4 on USB out".into();
+        self.push_log(self.status_line.clone());
     }
 
     pub fn panic_ui_state(&mut self, outbox: &mut Outbox) {
@@ -1979,6 +2179,7 @@ impl NativeModel {
                 }
                 self.seq.push_note(true, DRUM_CHANNEL, note, 110);
                 self.push_pad_rec(true, DRUM_CHANNEL, note, 110);
+                self.arm_repeat_capture(slot, Instant::now());
             }
             Hit::KitNoteRepeat => {
                 self.tap_ui(slot, id, gesture, px, py);
@@ -3012,8 +3213,8 @@ impl NativeModel {
             }
             Hit::SettingsMap => {
                 self.tap_ui(slot, id, gesture, px, py);
-                self.push_nav_history(UiMode::Map);
-                self.switch_mode(UiMode::Map, outbox);
+                self.push_nav_history(UiMode::Ports);
+                self.switch_mode(UiMode::Ports, outbox);
             }
             Hit::MapThruOn => {
                 self.tap_ui(slot, id, gesture, px, py);
@@ -3025,7 +3226,48 @@ impl NativeModel {
             }
             Hit::MapRefresh => {
                 self.tap_ui(slot, id, gesture, px, py);
+                outbox.midi_ports();
                 self.start_host_job(HostTask::MapList);
+            }
+            Hit::MapIn => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.cycle_midi_in(outbox);
+            }
+            Hit::MapOut => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.cycle_midi_out(outbox);
+            }
+            Hit::MapTest => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.test_midi_out(outbox);
+            }
+            Hit::MapInRow(index) => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.pick_midi_in_row(index, outbox);
+            }
+            Hit::MapOutRow(index) => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.pick_midi_out_row(index, outbox);
+            }
+            Hit::MapChannel(channel) => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.tap_map_channel(channel, outbox);
+            }
+            Hit::MapChannelDone => {
+                self.tap_ui(slot, id, gesture, px, py);
+                if self.map_out_edit.take().is_some() {
+                    self.status_line = "MAP".into();
+                    self.mark_dirty();
+                }
+            }
+            Hit::MapChannelClear => {
+                self.tap_ui(slot, id, gesture, px, py);
+                if let Some(input) = self.map_out_edit {
+                    self.channel_map_bits[input as usize] = 0;
+                    self.apply_channel_map(outbox);
+                    self.status_line = format!("CH {} pass through", input + 1);
+                    self.mark_dirty();
+                }
             }
             Hit::ChordsOut => {
                 self.tap_ui(slot, id, gesture, px, py);
@@ -3271,6 +3513,7 @@ impl NativeModel {
                 }
                 self.seq.push_note(false, DRUM_CHANNEL, note, 0);
                 self.push_pad_rec(false, DRUM_CHANNEL, note, 0);
+                self.repeat_due[slot] = None;
             }
             Surface::SynthKey { note } => {
                 // Finger already cleared above; remaining holders keep the note.
@@ -3598,14 +3841,21 @@ impl NativeModel {
     }
 
     fn push_pad_rec(&mut self, on: bool, channel: u8, note: u8, velocity: u8) {
-        if self.pads_recording.is_none() {
-            return;
-        }
         let Some(started) = self.pad_rec_started else {
             return;
         };
+        self.push_pad_rec_at(on, channel, note, velocity, started.elapsed().as_secs_f64());
+    }
+
+    fn push_pad_rec_at(&mut self, on: bool, channel: u8, note: u8, velocity: u8, t: f64) {
+        if self.pads_recording.is_none() {
+            return;
+        }
+        if self.pad_rec_started.is_none() {
+            return;
+        }
         self.pad_rec_events.push(PadRecEvent {
-            t: started.elapsed().as_secs_f64(),
+            t: t.max(0.0),
             on,
             ch: channel & 0x0f,
             note: note & 0x7f,
@@ -3846,6 +4096,116 @@ impl NativeModel {
 
     pub fn drum_repeat_for_note(&self, note: u8) -> RepeatDivisionChoice {
         self.drum_repeat[drum_model_for_note(note).index()]
+    }
+
+    fn recording_origin(&self) -> Option<Instant> {
+        if self.seq.is_recording() {
+            self.seq.rec_origin()
+        } else if self.pads_recording.is_some() {
+            self.pad_rec_started
+        } else {
+            None
+        }
+    }
+
+    fn record_bpm(&self) -> f32 {
+        if self.seq.is_recording() {
+            self.seq.bpm
+        } else {
+            self.bpm
+        }
+    }
+
+    fn arm_repeat_capture(&mut self, slot: usize, now: Instant) {
+        self.repeat_due[slot] = None;
+        let Some(origin) = self.recording_origin() else {
+            return;
+        };
+        let Surface::Drum {
+            note,
+            repeat: true,
+        } = self.fingers[slot].surface
+        else {
+            return;
+        };
+        let Some(interval) = self.drum_repeat_for_note(note).interval_secs(self.record_bpm()) else {
+            return;
+        };
+        if interval <= 0.0 {
+            return;
+        }
+        let t = now.saturating_duration_since(origin).as_secs_f64();
+        let next = (t / interval).floor() * interval + interval;
+        self.repeat_due[slot] = Some(origin + Duration::from_secs_f64(next.max(0.0)));
+    }
+
+    fn record_repeat_hit(&mut self, note: u8, at: Instant) {
+        if self.seq.is_recording() {
+            if let Some(origin) = self.seq.rec_origin() {
+                let t = at.saturating_duration_since(origin).as_secs_f64();
+                self.seq.push_note_at(false, DRUM_CHANNEL, note, 0, t);
+                self.seq.push_note_at(true, DRUM_CHANNEL, note, 110, t);
+            }
+        }
+        if self.pads_recording.is_some() {
+            if let Some(origin) = self.pad_rec_started {
+                let t = at.saturating_duration_since(origin).as_secs_f64();
+                self.push_pad_rec_at(false, DRUM_CHANNEL, note, 0, t);
+                self.push_pad_rec_at(true, DRUM_CHANNEL, note, 110, t);
+            }
+        }
+    }
+
+    fn capture_held_repeats_at(&mut self, now: Instant) {
+        if !self.seq.is_recording() && self.pads_recording.is_none() {
+            return;
+        }
+        let Some(grid_origin) = self.recording_origin() else {
+            return;
+        };
+        let bpm = self.record_bpm();
+        let mut hits = Vec::new();
+        for slot in 0..MAX_FINGERS {
+            if !self.fingers[slot].active {
+                self.repeat_due[slot] = None;
+                continue;
+            }
+            let Surface::Drum { note, repeat } = self.fingers[slot].surface else {
+                self.repeat_due[slot] = None;
+                continue;
+            };
+            if !repeat {
+                self.repeat_due[slot] = None;
+                continue;
+            }
+            let Some(interval) = self.drum_repeat_for_note(note).interval_secs(bpm) else {
+                self.repeat_due[slot] = None;
+                continue;
+            };
+            if interval <= 0.0 {
+                self.repeat_due[slot] = None;
+                continue;
+            }
+            if self.repeat_due[slot].is_none() {
+                let t = now.saturating_duration_since(grid_origin).as_secs_f64();
+                let next = (t / interval).floor() * interval + interval;
+                self.repeat_due[slot] = Some(grid_origin + Duration::from_secs_f64(next.max(0.0)));
+            }
+            let mut due = match self.repeat_due[slot] {
+                Some(due) => due,
+                None => continue,
+            };
+            let mut n = 0u32;
+            while due <= now && n < 32 {
+                hits.push((note, due));
+                due += Duration::from_secs_f64(interval);
+                n += 1;
+            }
+            self.repeat_due[slot] = Some(due);
+        }
+        for (note, due) in hits {
+            self.record_repeat_hit(note, due);
+        }
     }
 
     pub fn edit_drum_repeat(&self) -> RepeatDivisionChoice {
@@ -7022,6 +7382,110 @@ mod tests {
     }
 
     #[test]
+    fn note_repeat_interval_matches_musical_division() {
+        assert!((RepeatDivisionChoice::Eighth.interval_secs(120.0).unwrap() - 0.25).abs() < 1e-9);
+        assert!((RepeatDivisionChoice::Sixteenth.interval_secs(120.0).unwrap() - 0.125).abs() < 1e-9);
+        assert!((RepeatDivisionChoice::Quarter.interval_secs(120.0).unwrap() - 0.5).abs() < 1e-9);
+        assert!(RepeatDivisionChoice::Off.interval_secs(120.0).is_none());
+    }
+
+    #[test]
+    fn note_repeat_drums_record_into_seq() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Drums);
+        model.bpm = 120.0;
+        model.seq.bpm = 120.0;
+        model.drum_repeat[jambox_core::DrumModel::Kick.index()] = RepeatDivisionChoice::Eighth;
+        assert!(matches!(
+            model.seq.toggle_record(),
+            crate::seq::SeqAction::Stop
+        ));
+        let origin = model.seq.rec_origin().expect("take clock");
+        let mut out = Outbox::new();
+        let kick = model.layout.kit_pad_cell(4);
+        model.finger_down(1, kick.x + 4, kick.y + 4, &mut out);
+        assert_eq!(model.seq.recorded_on_notes(), vec![36]);
+
+        model.capture_held_repeats_at(origin + Duration::from_millis(260));
+        model.capture_held_repeats_at(origin + Duration::from_millis(510));
+        let ons = model.seq.recorded_on_notes();
+        assert!(
+            ons.iter().filter(|n| **n == 36).count() >= 3,
+            "held 1/8 note-repeat should land later hits in the take, got {ons:?}"
+        );
+        let times = model.seq.recorded_on_times();
+        assert!(
+            times.windows(2).any(|w| (w[1] - w[0] - 0.25).abs() < 0.05),
+            "repeat hits should sit on the 1/8 grid, got {times:?}"
+        );
+
+        model.finger_up(1, &mut out);
+        match model.seq.toggle_record() {
+            crate::seq::SeqAction::Upload { events, .. } => {
+                let kick_ons = events.iter().filter(|e| e.on && e.note == 36).count();
+                assert!(
+                    kick_ons >= 3,
+                    "uploaded backbone should keep the repeated kicks, got {events:?}"
+                );
+            }
+            _ => panic!("expected seq upload after repeat take"),
+        }
+    }
+
+    #[test]
+    fn one_shot_drum_does_not_invent_repeat_hits_while_held() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Drums);
+        model.seq.bpm = 120.0;
+        assert!(matches!(
+            model.seq.toggle_record(),
+            crate::seq::SeqAction::Stop
+        ));
+        let origin = model.seq.rec_origin().expect("take clock");
+        let mut out = Outbox::new();
+        let kick = model.layout.kit_pad_cell(4);
+        model.finger_down(1, kick.x + 4, kick.y + 4, &mut out);
+        model.capture_held_repeats_at(origin + Duration::from_millis(510));
+        assert_eq!(model.seq.recorded_on_notes(), vec![36]);
+    }
+
+    #[test]
+    fn note_repeat_drums_record_into_pad_rec() {
+        let mut model = NativeModel::new();
+        model.pads_edit = true;
+        model.pads_selected = 0;
+        model.bpm = 120.0;
+        model.drum_repeat[jambox_core::DrumModel::Kick.index()] = RepeatDivisionChoice::Eighth;
+        let mut out = Outbox::new();
+        model.set_mode(UiMode::Pads);
+        let rec = model.layout.pads_rec;
+        model.finger_down(1, rec.x + 4, rec.y + 4, &mut out);
+        model.finger_up(1, &mut out);
+        assert!(model.pads_recording.is_some());
+        let origin = model.pad_rec_started.expect("pad rec clock");
+        model.set_mode(UiMode::Drums);
+        let kick = model.layout.kit_pad_cell(4);
+        model.finger_down(2, kick.x + 4, kick.y + 4, &mut out);
+        model.capture_held_repeats_at(origin + Duration::from_millis(260));
+        model.capture_held_repeats_at(origin + Duration::from_millis(510));
+        model.finger_up(2, &mut out);
+        model.set_mode(UiMode::Pads);
+        model.pads_edit = true;
+        model.finger_down(3, rec.x + 4, rec.y + 4, &mut out);
+        model.finger_up(3, &mut out);
+        let ons: Vec<u8> = model.phrases[0]
+            .events
+            .iter()
+            .filter(|e| e.on)
+            .map(|e| e.note)
+            .collect();
+        assert!(
+            ons.iter().filter(|n| **n == 36).count() >= 3,
+            "pad clip should capture note-repeat kicks, got {ons:?}"
+        );
+    }
+
+    #[test]
     fn kit_scope_renders_a_one_shot() {
         let mut model = NativeModel::new();
         model.set_mode(UiMode::Drums);
@@ -7936,5 +8400,103 @@ mod tests {
             reqs.iter().any(|r| matches!(r, Request::ClipLoad { .. })),
             "turning BEEP on should reload the looping clip, got {reqs:?}"
         );
+    }
+
+    #[test]
+    fn map_default_in_is_all_class_compliant_devices() {
+        let model = NativeModel::new();
+        assert!(
+            model.midi_in_filter.is_empty(),
+            "empty IN filter means listen to every hardware USB MIDI port"
+        );
+    }
+
+    #[test]
+    fn map_in_cycles_usb_ports_and_selects_them() {
+        let mut model = NativeModel::new();
+        let mut out = Outbox::new();
+        model.midi_inputs = vec![
+            "Midi Through:Midi Through Port-0 14:0".into(),
+            "U2MIDI PRO:U2MIDI PRO MIDI 1 20:0".into(),
+            "MPK mini 3".into(),
+        ];
+        model.switch_mode(UiMode::Ports, &mut out);
+        out.take();
+        let inn = model.layout.map_in;
+        model.finger_down(1, inn.x + 8, inn.y + 8, &mut out);
+        model.finger_up(1, &mut out);
+        assert!(model.midi_in_filter.contains("U2MIDI"));
+        let batch = out.take();
+        assert!(batch.iter().any(|r| matches!(
+            r,
+            Request::MidiSelect {
+                input: Some(ref s),
+                ..
+            } if s.contains("U2MIDI")
+        )));
+        let row = model.layout.map_in_row(2);
+        model.finger_down(2, row.x + 8, row.y + 8, &mut out);
+        model.finger_up(2, &mut out);
+        assert!(model.midi_in_filter.contains("MPK"));
+    }
+
+    #[test]
+    fn map_test_emits_a_c4() {
+        let mut model = NativeModel::new();
+        let mut out = Outbox::new();
+        model.switch_mode(UiMode::Ports, &mut out);
+        out.take();
+        let test = model.layout.map_test;
+        model.finger_down(1, test.x + 8, test.y + 8, &mut out);
+        model.finger_up(1, &mut out);
+        let batch = out.take();
+        assert!(batch.iter().any(|r| matches!(
+            r,
+            Request::MidiEmit {
+                kind,
+                note: Some(60),
+                ..
+            } if kind == "note_on"
+        )));
+    }
+
+    #[test]
+    fn map_channel_grid_sets_fanout() {
+        let mut model = NativeModel::new();
+        let mut out = Outbox::new();
+        model.switch_mode(UiMode::Map, &mut out);
+        out.take();
+        let ch1 = model.layout.map_channel_cell(0);
+        model.finger_down(1, ch1.x + 8, ch1.y + 8, &mut out);
+        model.finger_up(1, &mut out);
+        assert_eq!(model.map_out_edit, Some(0));
+        let ch6 = model.layout.map_channel_cell(5);
+        model.finger_down(2, ch6.x + 8, ch6.y + 8, &mut out);
+        model.finger_up(2, &mut out);
+        assert_eq!(model.channel_map_bits[0], 1 << 5);
+        let batch = out.take();
+        assert!(batch.iter().any(|r| matches!(
+            r,
+            Request::ChannelMap { bits } if bits[0] == 1 << 5
+        )));
+        assert_eq!(
+            midi_core::format_fanout_targets(model.channel_map_bits[0], 0).as_deref(),
+            Some("6")
+        );
+        let done = model.layout.map_channel_done();
+        model.finger_down(3, done.x + 8, done.y + 8, &mut out);
+        model.finger_up(3, &mut out);
+        assert_eq!(model.map_out_edit, None);
+    }
+
+    #[test]
+    fn settings_ports_opens_port_picker() {
+        let mut model = NativeModel::new();
+        let mut out = Outbox::new();
+        model.set_mode(UiMode::Settings);
+        let ports = model.layout.settings_map;
+        model.finger_down(1, ports.x + 8, ports.y + 8, &mut out);
+        model.finger_up(1, &mut out);
+        assert_eq!(model.mode, UiMode::Ports);
     }
 }

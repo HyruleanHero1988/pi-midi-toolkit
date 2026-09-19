@@ -15,6 +15,8 @@ pub const NATIVE_FEATURES: &[&str] = &[
     "sample_clock_repeat",
     "runtime_diagnostics",
     "audio_reopen",
+    "midi_ports",
+    "channel_map",
 ];
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -193,6 +195,21 @@ pub enum Request {
     /// Drop and reopen the ALSA/cpal output stream without resetting engine state.
     /// Used after a headphone jack swap leaves the PCM open but silent.
     AudioReopen,
+    /// List live MIDI ports and the filters the engine is watching.
+    MidiPorts,
+    /// Change IN/OUT name filters. Empty input = every class-compliant USB MIDI
+    /// device. Empty output = first hardware port.
+    /// Omitted fields stay as they are.
+    MidiSelect {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        input: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output: Option<String>,
+    },
+    /// Live 1:N channel remap. `bits[in] == 0` is identity for that input.
+    ChannelMap {
+        bits: [u16; 16],
+    },
 }
 
 const fn default_velocity() -> u8 {
@@ -242,6 +259,21 @@ pub enum Response {
     Error { message: String },
     Status(StatusReply),
     Midi(MidiNotice),
+    MidiPorts(MidiPortsReply),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct MidiPortsReply {
+    pub inputs: Vec<String>,
+    pub outputs: Vec<String>,
+    #[serde(default)]
+    pub input_filter: String,
+    #[serde(default)]
+    pub output_filter: String,
+    #[serde(default)]
+    pub input_connected: String,
+    #[serde(default)]
+    pub output_connected: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -361,5 +393,30 @@ mod tests {
         let legacy: Request =
             serde_json::from_str(r#"{"cmd":"synth","param":"drum_tone","value":0.7}"#).unwrap();
         assert!(matches!(legacy, Request::Synth { drum: None, .. }));
+    }
+
+    #[test]
+    fn midi_ports_round_trips() {
+        let request = Request::MidiPorts;
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(json.contains("midi_ports"));
+        let decoded: Request = serde_json::from_str(&json).unwrap();
+        assert!(matches!(decoded, Request::MidiPorts));
+        let select: Request =
+            serde_json::from_str(r#"{"cmd":"midi_select","input":"U2MIDI"}"#).unwrap();
+        assert!(matches!(
+            select,
+            Request::MidiSelect {
+                input: Some(ref s),
+                output: None
+            } if s == "U2MIDI"
+        ));
+        let mut bits = [0u16; 16];
+        bits[0] = 1 << 5;
+        let map = Request::ChannelMap { bits };
+        let json = serde_json::to_string(&map).unwrap();
+        assert!(json.contains("channel_map"));
+        let decoded: Request = serde_json::from_str(&json).unwrap();
+        assert!(matches!(decoded, Request::ChannelMap { bits: b } if b[0] == 1 << 5));
     }
 }

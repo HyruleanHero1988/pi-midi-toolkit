@@ -188,6 +188,15 @@ pub struct SessionState {
     /// SEQ loop-start clave click (playback only).
     #[serde(default)]
     pub seq_cue_beep: bool,
+    /// USB MIDI input name substring. Empty = first hardware port.
+    #[serde(default)]
+    pub midi_in: String,
+    /// USB MIDI output name substring. Empty = first hardware port.
+    #[serde(default)]
+    pub midi_out: String,
+    /// Per-input MIDI channel fan-out. `0` = identity for that input (0–15).
+    #[serde(default)]
+    pub channel_map: [u16; 16],
 }
 
 fn default_kaoss_root_midi() -> u8 {
@@ -256,6 +265,9 @@ impl Default for SessionState {
             kaoss_viz_style: default_kaoss_viz_style(),
             kaoss_mono_color: 0,
             seq_cue_beep: false,
+            midi_in: String::new(),
+            midi_out: String::new(),
+            channel_map: [0; 16],
         }
     }
 }
@@ -333,5 +345,33 @@ mod tests {
         let json = serde_json::to_string(&s).unwrap();
         let back: SessionState = serde_json::from_str(&json).unwrap();
         assert_eq!(back.kaoss_fx_target, KaossFxTarget::Both);
+    }
+
+    #[test]
+    fn session_roundtrip_includes_midi_ports() {
+        let mut s = SessionState::default();
+        s.midi_in = "U2MIDI".into();
+        s.midi_out = "U2MIDI".into();
+        let json = serde_json::to_string(&s).unwrap();
+        let back: SessionState = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.midi_in, "U2MIDI");
+        assert_eq!(back.midi_out, "U2MIDI");
+    }
+
+    #[test]
+    fn session_roundtrip_includes_channel_map() {
+        let mut s = SessionState::default();
+        s.channel_map[0] = 1 << 5;
+        let json = serde_json::to_string(&s).unwrap();
+        let back: SessionState = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.channel_map[0], 1 << 5);
+    }
+
+    #[test]
+    fn old_session_json_defaults_midi_ports() {
+        let json = r#"{"version":1,"bpm":120.0,"morph":0.5,"tone":0.5,"level":0.8,"attack":0.05,"release":0.3,"morph_a":0,"morph_b":1,"kaoss_scale_index":1,"kaoss_key":0,"kaoss_octaves":2,"kaoss_program":0,"kaoss_gate":0,"kaoss_hold":false,"fx_bus":[0.0,0.0,0.0]}"#;
+        let s: SessionState = serde_json::from_str(json).unwrap();
+        assert!(s.midi_in.is_empty());
+        assert!(s.midi_out.is_empty());
     }
 }

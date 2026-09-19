@@ -14,12 +14,13 @@ pub enum UiMode {
     Presets,
     Fx,
     Map,
+    Ports,
     Log,
     Settings,
 }
 
 impl UiMode {
-    pub const ALL: [UiMode; 14] = [
+    pub const ALL: [UiMode; 15] = [
         UiMode::Home,
         UiMode::Synth,
         UiMode::Fm,
@@ -32,6 +33,7 @@ impl UiMode {
         UiMode::Presets,
         UiMode::Fx,
         UiMode::Map,
+        UiMode::Ports,
         UiMode::Log,
         UiMode::Settings,
     ];
@@ -50,6 +52,7 @@ impl UiMode {
             Self::Presets => "PRE",
             Self::Fx => "FX",
             Self::Map => "MAP",
+            Self::Ports => "PORT",
             Self::Log => "LOG",
             Self::Settings => "SET",
         }
@@ -69,6 +72,7 @@ impl UiMode {
             Self::Presets => "PRESETS",
             Self::Fx => "FX",
             Self::Map => "MAP",
+            Self::Ports => "PORTS",
             Self::Log => "LOG",
             Self::Settings => "SETTINGS",
         }
@@ -88,8 +92,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn thirteen_modes_round_trip() {
-        assert_eq!(UiMode::ALL.len(), 13);
+    fn all_modes_round_trip() {
+        assert_eq!(UiMode::ALL.len(), 15);
         for (i, mode) in UiMode::ALL.iter().enumerate() {
             assert_eq!(UiMode::from_index(i), Some(*mode));
             assert_eq!(mode.index(), i);

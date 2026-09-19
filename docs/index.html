@@ -131,7 +131,7 @@
       not the archived Python / Tk UI.
       Top chrome is always <strong>PiDI · HOME · POWER</strong>.
       Jam tabs <strong>SYN · SEQ · PAD · KAO · CHD</strong> stay while you are in those modes.
-      Everything else is a HOME tile, or SETTINGS → LOG / MAP.
+      Everything else is a HOME tile, or SETTINGS → LOG / PORTS.
     </p>
   </header>
 
@@ -159,6 +159,7 @@
     <a href="#settings">SETTINGS</a>
     <a href="#log">LOG</a>
     <a href="#map">MAP</a>
+    <a href="#ports">PORTS</a>
     <a href="#power">POWER</a>
     <a href="#knobs">MPK knobs</a>
   </nav>
@@ -182,13 +183,14 @@
       <p class="lede">Launcher. New screens get a tile here instead of another persistent tab.</p>
       <figure>
         <img src="screens/00-home.png" alt="HOME 3x3 launcher tiles" width="800" height="480" />
-        <figcaption>00 — HOME (3×3). LOG and MAP live under SETTINGS.</figcaption>
+        <figcaption>00 — HOME. MAP is a launcher tile; LOG and PORTS live under SETTINGS.</figcaption>
       </figure>
       <table>
         <tr><th>SYNTH / DRUMS / SEQ / PADS / KAOSS / CHORDS</th><td>Performance cluster. SYN SEQ PAD KAO CHD also stay as jam tabs.</td></tr>
         <tr><th>SONGS</th><td>Play Standard MIDI Files locally and/or USB→DIN.</td></tr>
         <tr><th>PRESETS</th><td>Eight named slots for a session snapshot, plus FACTORY.</td></tr>
-        <tr><th>SETTINGS</th><td>FX sliders, WIFI, UPDATE, FONT, plus tiles through to LOG and MAP.</td></tr>
+        <tr><th>MAP</th><td>MIDI channel remap: tap an input channel, then pick one or more outputs.</td></tr>
+        <tr><th>SETTINGS</th><td>FX sliders, WIFI, UPDATE, FONT, plus tiles through to LOG and PORTS.</td></tr>
       </table>
     </section>
 
@@ -489,7 +491,7 @@
 
     <section class="screen" id="settings">
       <h2>SETTINGS</h2>
-      <p class="lede">FX, Wi‑Fi, font, software update, and doors into LOG / MAP.</p>
+      <p class="lede">FX, Wi‑Fi, font, software update, and doors into LOG / PORTS.</p>
       <figure>
         <img src="screens/11-settings.png" alt="SETTINGS screen" width="800" height="480" />
         <figcaption>11 — SETTINGS (FLANGE is the fourth insert after drive / delay / reverb)</figcaption>
@@ -498,7 +500,7 @@
         <tr><th>PANIC / NOTES OFF</th><td>Silence everything, or all-notes-off.</td></tr>
         <tr><th>FX: BUS / VOICE / DRUMS</th><td>Which insert the four sliders edit.</td></tr>
         <tr><th>DRIVE DELAY REVERB FLANGE</th><td>Vertical mix sliders. Flanger is also a KAOSS program (Y = mix, X = rate).</td></tr>
-        <tr><th>LOG / MAP</th><td>Engine log, MIDI thru.</td></tr>
+        <tr><th>LOG / PORTS</th><td>Engine log, USB MIDI IN/OUT picker and THRU.</td></tr>
         <tr><th>WIFI</th><td>Join the saved NetworkManager profile or <code>.wifi-credentials</code>.</td></tr>
         <tr><th>FONT</th><td>RETRO bitmap vs SMOOTH TTF.</td></tr>
         <tr><th>UPDATE</th><td>CHECK GitHub <code>master</code>, then overlay the repo and copy committed <code>dist/armv7</code> onto <code>bin/</code> (midi-engine, jambox-engine, pidi-native). Does not cargo-build on the Pi.</td></tr>
@@ -520,14 +522,36 @@
 
     <section class="screen" id="map">
       <h2>MAP</h2>
-      <p class="lede">MIDI thru status. Opens from SETTINGS → MAP. Remap JSON editing is still thinner than the CLI learn workflow.</p>
+      <p class="lede">Home-screen MIDI utility. Remap any incoming channel onto one or more outgoing channels (1 → 6, or 1 → 6+7, …).</p>
       <figure>
-        <img src="screens/18-map.png" alt="MAP thru screen" width="800" height="480" />
-        <figcaption>18 — MAP</figcaption>
+        <img src="screens/18-map.png" alt="MAP channel grid" width="800" height="480" />
+        <figcaption>18 — MAP input channels. Remapped cells show destinations under the number.</figcaption>
+      </figure>
+      <figure>
+        <img src="screens/18-map-out.png" alt="MAP output channel picker" width="800" height="480" />
+        <figcaption>18b — tap an input to choose its output channels</figcaption>
       </figure>
       <table>
-        <tr><th>THRU ON / OFF</th><td>Start or stop <code>midi-engine</code> with the active preset.</td></tr>
-        <tr><th>REFRESH PORTS</th><td>Re-list USB MIDI devices.</td></tr>
+        <tr><th>1–16</th><td>Input MIDI channels. Tap one to set where it is sent.</td></tr>
+        <tr><th>Subtitle</th><td>Smaller numbers under a cell are the output channels that input maps to.</td></tr>
+        <tr><th>Output grid</th><td>Multi-select. Empty / CLEAR = pass through the same channel.</td></tr>
+      </table>
+      <p class="note">Applies to incoming USB MIDI (local synth) and to THRU once you start it from PORTS.</p>
+    </section>
+
+    <section class="screen" id="ports">
+      <h2>PORTS</h2>
+      <p class="lede">Opened from SETTINGS. Class-compliant USB MIDI is plug-and-play; this screen shows what is open and lets you pin a port or start thru.</p>
+      <figure>
+        <img src="screens/25-ports.png" alt="PORTS MIDI port picker" width="800" height="480" />
+        <figcaption>25 — PORTS</figcaption>
+      </figure>
+      <table>
+        <tr><th>IN / OUT</th><td>IN ALL listens to every class-compliant USB MIDI keyboard/interface. Tap a row only to pin one device. OUT AUTO = first hardware port.</td></tr>
+        <tr><th>Port rows</th><td>Tap a listed input or output to select it. Green = currently open.</td></tr>
+        <tr><th>TEST OUT</th><td>Send a C4 on the selected USB/DIN output.</td></tr>
+        <tr><th>THRU ON / OFF</th><td>Start or stop <code>midi-engine</code> remap using the MAP channel table (keyboard → hardware synth).</td></tr>
+        <tr><th>REFRESH</th><td>Re-list USB MIDI devices.</td></tr>
       </table>
       <p class="note">On a Windows host these actions explain that they belong on the Pi.</p>
     </section>

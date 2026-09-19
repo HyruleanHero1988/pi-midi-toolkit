@@ -3,12 +3,12 @@
 Raspberry Pi **MIDI appliance**: one kiosk UI for local soft-synth play **and**
 low-latency MIDI thru/remap to a hardware synth. **Not** related to play-my-synth.
 
-**North star:** power on → kiosk → modes (Synth / Seq / Pads / Kaoss / Chords / Log / Map). See [PLAN.md](PLAN.md).
+**North star:** power on → kiosk → modes (Synth / Seq / Pads / Kaoss / Chords / Map / Log). See [PLAN.md](PLAN.md).
 
 - **Kiosk UI (active):** [`crates/pidi-native`](crates/pidi-native) — SDL/KMSDRM + GLES2 over `jambox-engine`. See [NATIVE_KIOSK.md](NATIVE_KIOSK.md) and the [native screen reference](docs/index.html).
-- **Python Tk kiosk (archived):** [`apps/pidi`](apps/pidi) on `cursor/python-kiosk-archive-dfc2`
+- **Shared Pi assets:** [`apps/pidi`](apps/pidi) — wavetables, OTA `updater.py`, power/HW scripts (not a UI)
 - **Thru engine:** Rust `midi-engine` — channel/CC/velocity remap via CLI + JSON presets (Map mode in the native kiosk)
-- **Target hardware:** Pi 2 + MPK mini mk3 (+ USB-MIDI-DIN → synth when available)
+- **Target hardware:** Pi 2 + any class-compliant USB MIDI keyboard or USB-MIDI-DIN interface (MPK mini, U2MIDI PRO, …)
 
 ## Crates
 
@@ -30,7 +30,7 @@ move the beat. See [PLAN.md](PLAN.md) "Rust jambox engine".
 cargo test -p jambox-core                   # timing + DSP tests, no hardware
 cargo run -p jambox-engine -- devices       # audio outputs + MIDI ports
 cargo run -p jambox-engine --release -- bench   # CPU headroom, no device needed
-cargo run -p jambox-engine -- run --midi-in MPK --control /tmp/jambox.sock --rt
+cargo run -p jambox-engine -- run --control /tmp/jambox.sock --rt
 ```
 
 Control protocol is line-delimited JSON on a Unix socket (`--tcp` for host testing):
@@ -49,8 +49,6 @@ systemd units: [`deploy/jambox-engine.service`](deploy/jambox-engine.service) an
 cargo test -p pidi-native -p jambox-protocol -p jambox-core
 cargo run -p pidi-native -- --display dummy --frames 30 --dump /tmp/pidi.ppm
 ```
-
-The archived Python Tk tests still live on `cursor/python-kiosk-archive-dfc2` under `apps/pidi/tests/`.
 
 ## Build & test (Windows / host)
 
@@ -89,12 +87,29 @@ midi-engine run --preset presets/active.json --rt
 
 Ctrl-C (and preset reload) flush active note-offs + All Notes Off.
 
+## USB MIDI (plug and play)
+
+Any class-compliant USB MIDI keyboard or interface should just work. The
+engine opens **every** hardware input (it skips Midi Through / loopback).
+You do not have to pick MPK, U2MIDI, or any other brand.
+
+1. Plug the USB MIDI device. For a DIN keyboard, use a USB-MIDI-DIN
+   interface (e.g. U2MIDI PRO): keyboard DIN **out** → interface **in**.
+2. Play. SYNTH should sound. SETTINGS → PORTS shows live ports and the last
+   incoming note; tap IN only if you want to pin one device.
+3. Hardware-synth **out** is the first hardware port by default. Tap OUT
+   on PORTS if you have more than one, set a mode's OUT to USB/BOTH, then
+   **TEST OUT**.
+4. HOME → **MAP** remaps incoming MIDI channels (e.g. ch 1 → ch 6, or 1 → several).
+5. **THRU ON** (on PORTS) is the optional remap cable (keyboard → DIN synth). You do
+   not need it to play the onboard synth.
+
 ## Preset JSON
 
 See [`presets/example.json`](presets/example.json) and [`presets/mpk-mini-ch3.json`](presets/mpk-mini-ch3.json):
 
 - `ports.input` / `ports.output` — name substrings (e.g. `MPK`, `MIDI`)
-- `channel_map` — `identity` | `all_to` | `remap`
+- `channel_map` — `identity` | `all_to` | `remap` | `fanout` (1:N bitmasks)
 - `cc_map` — `(in_channel, in_cc) → (out_channel, out_cc)`
 - `velocity` — `pass_through` | `always_full` | `clamp` | `curve`
 
