@@ -243,9 +243,39 @@ fn main() {
     {
         let (mut model, mut ob) = fresh();
         model.set_mode(UiMode::Map);
-        model.push_log("THRU on  in=MPK  out=U2MIDI");
+        model.channel_map_bits[0] = 1 << 5;
+        model.channel_map_bits[2] = (1 << 6) | (1 << 7);
         tick_n(&mut model, &mut ob, 2);
         dump(&model, &out, "18-map");
+    }
+    {
+        let (mut model, mut ob) = fresh();
+        model.set_mode(UiMode::Map);
+        model.map_out_edit = Some(0);
+        model.channel_map_bits[0] = 1 << 5;
+        tick_n(&mut model, &mut ob, 2);
+        dump(&model, &out, "18-map-out");
+    }
+    {
+        let (mut model, mut ob) = fresh();
+        model.set_mode(UiMode::Ports);
+        model.midi_inputs = vec![
+            "U2MIDI PRO:U2MIDI PRO MIDI 1 20:0".into(),
+            "Keystation Mini 32".into(),
+            "Midi Through:Midi Through Port-0 14:0".into(),
+        ];
+        model.midi_outputs = vec![
+            "U2MIDI PRO:U2MIDI PRO MIDI 1 20:0".into(),
+            "jambox-out:jambox-out 129:0".into(),
+        ];
+        model.midi_in_filter.clear();
+        model.midi_out_filter = "U2MIDI".into();
+        model.midi_in_connected =
+            "Keystation Mini 32 | U2MIDI PRO:U2MIDI PRO MIDI 1 20:0".into();
+        model.midi_out_connected = "U2MIDI PRO:U2MIDI PRO MIDI 1 20:0".into();
+        model.last_midi_activity = "IN  ch1 n60 v100".into();
+        tick_n(&mut model, &mut ob, 2);
+        dump(&model, &out, "25-ports");
     }
     {
         let (mut model, mut ob) = fresh();

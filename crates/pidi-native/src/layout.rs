@@ -23,8 +23,8 @@ pub const JAM_MODES: [UiMode; 6] = [
     UiMode::Chords,
 ];
 
-/// Home grid entries (5×3). LOG / MAP live under Settings.
-pub const HOME_TILES: [(UiMode, &'static str, u32); 12] = [
+/// Home grid entries (5-col). LOG / PORTS live under Settings.
+pub const HOME_TILES: [(UiMode, &'static str, u32); 13] = [
     (UiMode::Synth, "SYNTH", 0x458588),
     (UiMode::Fm, "FM", 0x8ec07c),
     (UiMode::Drums, "DRUMS", 0x98971a),
@@ -36,6 +36,7 @@ pub const HOME_TILES: [(UiMode, &'static str, u32); 12] = [
     (UiMode::Presets, "PRESETS", 0x83a598),
     (UiMode::Fx, "FX", 0xb16286),
     (UiMode::Mix, "MIX", 0xfabd2f),
+    (UiMode::Map, "MAP", 0x458588),
     (UiMode::Settings, "SETTINGS", 0x665c54),
 ];
 
@@ -95,6 +96,15 @@ pub enum Hit {
     MapThruOn,
     MapThruOff,
     MapRefresh,
+    MapIn,
+    MapOut,
+    MapTest,
+    MapInRow(usize),
+    MapOutRow(usize),
+    /// Input or output channel cell (0–15) on the MAP utility.
+    MapChannel(u8),
+    MapChannelDone,
+    MapChannelClear,
     KaossProg,
     KaossScale,
     KaossKey,
@@ -269,6 +279,9 @@ pub struct Layout {
     pub map_thru_on: Rect,
     pub map_thru_off: Rect,
     pub map_refresh: Rect,
+    pub map_in: Rect,
+    pub map_out: Rect,
+    pub map_test: Rect,
     pub kaoss_prog: Rect,
     pub kaoss_scale: Rect,
     pub kaoss_key: Rect,
@@ -794,23 +807,41 @@ impl Layout {
                 w: 556,
                 h: 48,
             },
+            map_in: Rect {
+                x: 16,
+                y: HUD_H + 72,
+                w: 384,
+                h: 56,
+            },
+            map_out: Rect {
+                x: 408,
+                y: HUD_H + 72,
+                w: 376,
+                h: 56,
+            },
+            map_test: Rect {
+                x: 536,
+                y: HUD_H + 136,
+                w: 248,
+                h: 44,
+            },
             map_thru_on: Rect {
-                x: 24,
-                y: HUD_H + 120,
-                w: 240,
-                h: 72,
+                x: 16,
+                y: SCREEN_H - 68,
+                w: 248,
+                h: 56,
             },
             map_thru_off: Rect {
-                x: 280,
-                y: HUD_H + 120,
-                w: 240,
-                h: 72,
+                x: 276,
+                y: SCREEN_H - 68,
+                w: 248,
+                h: 56,
             },
             map_refresh: Rect {
                 x: 536,
-                y: HUD_H + 120,
-                w: 240,
-                h: 72,
+                y: SCREEN_H - 68,
+                w: 248,
+                h: 56,
             },
             // Sequencer only — drums live on the dedicated DRUM KIT page.
             seq_rec: Rect {
@@ -2196,7 +2227,8 @@ impl Layout {
             UiMode::Fx => self.hit_fx(px, py),
             UiMode::Mix => self.hit_mix(px, py),
             UiMode::Log => self.hit_log(px, py),
-            UiMode::Map => self.hit_map(px, py),
+            UiMode::Map => self.hit_map_channels(px, py),
+            UiMode::Ports => self.hit_map(px, py),
             UiMode::Chords => self.hit_chords(px, py),
         }
     }
@@ -2693,7 +2725,92 @@ impl Layout {
         Hit::None
     }
 
+    pub const MAP_PORT_ROWS: usize = 5;
+
+    pub fn map_channel_done(&self) -> Rect {
+        Rect {
+            x: 16,
+            y: HUD_H + 8,
+            w: 148,
+            h: 40,
+        }
+    }
+
+    pub fn map_channel_clear(&self) -> Rect {
+        Rect {
+            x: 172,
+            y: HUD_H + 8,
+            w: 148,
+            h: 40,
+        }
+    }
+
+    pub fn map_channel_grid(&self) -> Rect {
+        Rect {
+            x: 12,
+            y: HUD_H + 56,
+            w: SCREEN_W - 24,
+            h: SCREEN_H - HUD_H - 64,
+        }
+    }
+
+    pub fn map_channel_cell(&self, index: usize) -> Rect {
+        let col = (index % 4) as i32;
+        let row = (index / 4) as i32;
+        let grid = self.map_channel_grid();
+        let gw = grid.w / 4;
+        let gh = grid.h / 4;
+        Rect {
+            x: grid.x + col * gw + 4,
+            y: grid.y + row * gh + 4,
+            w: gw - 8,
+            h: gh - 8,
+        }
+    }
+
+    fn hit_map_channels(&self, px: i32, py: i32) -> Hit {
+        if self.map_channel_done().contains(px, py) {
+            return Hit::MapChannelDone;
+        }
+        if self.map_channel_clear().contains(px, py) {
+            return Hit::MapChannelClear;
+        }
+        for index in 0..16 {
+            if self.map_channel_cell(index).contains(px, py) {
+                return Hit::MapChannel(index as u8);
+            }
+        }
+        Hit::None
+    }
+
+    pub fn map_in_row(&self, index: usize) -> Rect {
+        Rect {
+            x: 16,
+            y: HUD_H + 190 + (index as i32) * 36,
+            w: 384,
+            h: 34,
+        }
+    }
+
+    pub fn map_out_row(&self, index: usize) -> Rect {
+        Rect {
+            x: 408,
+            y: HUD_H + 190 + (index as i32) * 36,
+            w: 376,
+            h: 34,
+        }
+    }
+
     fn hit_map(&self, px: i32, py: i32) -> Hit {
+        if self.map_in.contains(px, py) {
+            return Hit::MapIn;
+        }
+        if self.map_out.contains(px, py) {
+            return Hit::MapOut;
+        }
+        if self.map_test.contains(px, py) {
+            return Hit::MapTest;
+        }
         if self.map_thru_on.contains(px, py) {
             return Hit::MapThruOn;
         }
@@ -2702,6 +2819,14 @@ impl Layout {
         }
         if self.map_refresh.contains(px, py) {
             return Hit::MapRefresh;
+        }
+        for index in 0..Self::MAP_PORT_ROWS {
+            if self.map_in_row(index).contains(px, py) {
+                return Hit::MapInRow(index);
+            }
+            if self.map_out_row(index).contains(px, py) {
+                return Hit::MapOutRow(index);
+            }
         }
         Hit::None
     }
@@ -3176,6 +3301,28 @@ mod tests {
         assert_eq!(
             layout.hit(UiMode::Home, home_fm.x + 4, home_fm.y + 4),
             Hit::HomeTile(UiMode::Fm)
+        );
+    }
+
+    #[test]
+    fn map_channel_grid_hits() {
+        let layout = Layout::new();
+        let ch1 = layout.map_channel_cell(0);
+        assert_eq!(
+            layout.hit(UiMode::Map, ch1.x + 4, ch1.y + 4),
+            Hit::MapChannel(0)
+        );
+        let ch16 = layout.map_channel_cell(15);
+        assert_eq!(
+            layout.hit(UiMode::Map, ch16.x + 4, ch16.y + 4),
+            Hit::MapChannel(15)
+        );
+        assert_on_screen("map ch1", ch1);
+        assert_on_screen("map ch16", ch16);
+        let home_map = layout.home_tile(11, 0);
+        assert_eq!(
+            layout.hit(UiMode::Home, home_map.x + 4, home_map.y + 4),
+            Hit::HomeTile(UiMode::Map)
         );
     }
 

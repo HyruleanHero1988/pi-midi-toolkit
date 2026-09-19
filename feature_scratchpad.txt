@@ -1,0 +1,19 @@
+- hide piano keys from any interface that has it if a MIDI device has been connected that is known to have piano keys. 
+
+- Need a UI for MIDI channel mapper, should be possible to allow for one to one, or one to many, or even many to many. The interface should be really simple, basically a grid of 16 squares, one for each midi channel, clearly labeled "IN". When you press one, a new grid of 16 squares shows up, clearly labeled "OUT". Each square in "OUT" that has been pressed, and is highlighted to show that is selected, is where the "IN" channel will now output too. 
+- Latency is VERY important in this mode. If the user is in the mapper mode, and no other sound engine tasks are happening, it may be beneficial to shut down any other non-essential sound engine processes or anything else that can be shut down to allow for as much responsiveness in this mode as possible. 
+
+- Still need to implement UI for the arpeggiator that also allows for changing the root note. Basically there needs to be a mode where you define the arp, and then once latched, also a mode where any subsequent note played changes the root note of the looping arp. 
+
+- Need a "kaoss mode" creation wizard. User should be able to name the new program, and pick what goes on the Y axis from a list of all possible parameters that the device could support, or even MIDI control commands. If a MIDI control command number is selected, the user should also be able to rename the parameter to something meaningful. This name should also be placed on the respective axis. 
+
+- Need some kind of "probe" mode where the pi can be observed while running, possibly some really lightweight logging or process monitoring, and if the device "chokes", we can diagnose what caused the choking. I have directly observed it choking while playing, so I know something can and does cause this to happen. 
+
+- Support TE EP line style FX 
+
+- chords mode "changes" to "progressions" 
+
+- move pallet pads to a 2x4 grid where the strum pad is, then expand the strumpad along the entire bottom of the screen.
+
+- kaoss modes like "bend" and "vib" need a small dead zone to be able to not do the effect, because when any pixel away from 0 causes an effect to change, then it's basically impossible not to enact the effect on a touch device 
+

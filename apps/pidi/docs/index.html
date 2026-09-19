@@ -553,14 +553,17 @@
 
     <section class="screen" id="map">
       <h2>MAP</h2>
-      <p class="lede">MIDI thru status. Opens from SETTINGS → MAP. Remap JSON editing is still thinner than the CLI learn workflow.</p>
+      <p class="lede">Class-compliant USB MIDI is plug-and-play. MAP shows what is open and lets you pin a port or start thru.</p>
       <figure>
-        <img src="screens/18-map.png" alt="MAP thru screen" width="800" height="480" />
+        <img src="screens/18-map.png" alt="MAP MIDI port picker" width="800" height="480" />
         <figcaption>18 — MAP</figcaption>
       </figure>
       <table>
-        <tr><th>THRU ON / OFF</th><td>Start or stop <code>midi-engine</code> with the active preset.</td></tr>
-        <tr><th>REFRESH PORTS</th><td>Re-list USB MIDI devices.</td></tr>
+        <tr><th>IN / OUT</th><td>IN ALL listens to every class-compliant USB MIDI keyboard/interface. Tap a row only to pin one device. OUT AUTO = first hardware port.</td></tr>
+        <tr><th>Port rows</th><td>Tap a listed input or output to select it. Green = currently open.</td></tr>
+        <tr><th>TEST OUT</th><td>Send a C4 on the selected USB/DIN output.</td></tr>
+        <tr><th>THRU ON / OFF</th><td>Start or stop <code>midi-engine</code> remap using the same ports (keyboard → hardware synth).</td></tr>
+        <tr><th>REFRESH</th><td>Re-list USB MIDI devices.</td></tr>
       </table>
       <p class="note">On a Windows host these actions explain that they belong on the Pi.</p>
     </section>

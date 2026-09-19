@@ -16,7 +16,7 @@ use tracing::{debug, info, warn};
 
 use crate::audio::AudioHealth;
 use crate::bus::{ClipUpdate, ControlSide, MidiInSide};
-use crate::midi::{ingest, MidiMap};
+use crate::midi::{ingest, MidiIo, MidiMap};
 use crate::protocol::{decode, Decoded, MidiNotice, Request, Response, StatusReply};
 use jambox_protocol::{
     HelloReply, RepeatPhase, TouchPhase, NATIVE_FEATURES, PROTOCOL_VERSION,
@@ -162,6 +162,7 @@ fn serve_client<R: BufRead>(
     hub: &ClientHub,
     map: &MidiMap,
     midi_in: &Mutex<MidiInSide>,
+    midi_io: &MidiIo,
     health: &AudioHealth,
 ) {
     let mut session = ClientSession::new();
@@ -194,6 +195,7 @@ fn serve_client<R: BufRead>(
                 hub,
                 map,
                 midi_in,
+                midi_io,
                 health,
                 &mut session,
             )
@@ -258,6 +260,7 @@ pub fn handle_line(
     hub: &ClientHub,
     map: &MidiMap,
     midi_in: &Mutex<MidiInSide>,
+    midi_io: &MidiIo,
     health: &AudioHealth,
     session: &mut ClientSession,
 ) -> Response {
@@ -309,7 +312,7 @@ pub fn handle_line(
         }
         Ok(Decoded::MidiIn(event)) => {
             let mut side = midi_in.lock().unwrap_or_else(|p| p.into_inner());
-            ingest(event, hub, map, |c| side.send(c));
+            ingest(event, 0, hub, map, |c| side.send(c));
             Response::Ok
         }
         Ok(Decoded::Command(command)) => {
@@ -364,6 +367,22 @@ pub fn handle_line(
         Ok(Decoded::AudioReopen) => {
             info!("control: audio reopen requested");
             health.request_reopen();
+            Response::Ok
+        }
+        Ok(Decoded::MidiPorts) => Response::MidiPorts(midi_io.snapshot()),
+        Ok(Decoded::MidiSelect { input, output }) => {
+            if let Some(filter) = input {
+                info!(filter = %filter, "midi: input filter from kiosk");
+                midi_io.set_input_filter(filter);
+            }
+            if let Some(filter) = output {
+                info!(filter = %filter, "midi: output filter from kiosk");
+                midi_io.set_output_filter(filter);
+            }
+            Response::MidiPorts(midi_io.snapshot())
+        }
+        Ok(Decoded::ChannelMap { bits }) => {
+            midi_io.set_channel_map(bits);
             Response::Ok
         }
     }
@@ -489,6 +508,7 @@ pub fn serve(
     hub: Arc<ClientHub>,
     map: Arc<MidiMap>,
     midi_in: Arc<Mutex<MidiInSide>>,
+    midi_io: Arc<MidiIo>,
     health: Arc<AudioHealth>,
     running: Arc<AtomicBool>,
 ) {
@@ -513,7 +533,16 @@ pub fn serve(
                 }
                 match stream {
                     Ok(stream) => {
-                        spawn_client(stream, &shared, &hub, &map, &midi_in, &health, &running)
+                        spawn_client(
+                            stream,
+                            &shared,
+                            &hub,
+                            &map,
+                            &midi_in,
+                            &midi_io,
+                            &health,
+                            &running,
+                        )
                     }
                     Err(err) => warn!(%err, "control: accept failed"),
                 }
@@ -535,7 +564,16 @@ pub fn serve(
                 }
                 match stream {
                     Ok(stream) => {
-                        spawn_client(stream, &shared, &hub, &map, &midi_in, &health, &running)
+                        spawn_client(
+                            stream,
+                            &shared,
+                            &hub,
+                            &map,
+                            &midi_in,
+                            &midi_io,
+                            &health,
+                            &running,
+                        )
                     }
                     Err(err) => warn!(%err, "control: accept failed"),
                 }
@@ -574,6 +612,7 @@ fn spawn_client<S: ClientStream>(
     hub: &Arc<ClientHub>,
     map: &Arc<MidiMap>,
     midi_in: &Arc<Mutex<MidiInSide>>,
+    midi_io: &Arc<MidiIo>,
     health: &Arc<AudioHealth>,
     running: &Arc<AtomicBool>,
 ) {
@@ -591,6 +630,7 @@ fn spawn_client<S: ClientStream>(
     let hub = Arc::clone(hub);
     let map = Arc::clone(map);
     let midi_in = Arc::clone(midi_in);
+    let midi_io = Arc::clone(midi_io);
     let health = Arc::clone(health);
     std::thread::spawn(move || {
         serve_client(
@@ -601,6 +641,7 @@ fn spawn_client<S: ClientStream>(
             &hub,
             &map,
             &midi_in,
+            &midi_io,
             &health,
         );
     });
@@ -633,6 +674,7 @@ mod tests {
             &ClientHub::default(),
             &MidiMap::default(),
             midi_in,
+            &MidiIo::default(),
             &AudioHealth::new(),
             session,
         )
@@ -857,10 +899,40 @@ mod tests {
             &ClientHub::default(),
             &MidiMap::default(),
             &midi_in,
+            &MidiIo::default(),
             &health,
             &mut session,
         );
         assert!(matches!(response, Response::Ok));
         assert!(health.take_reopen());
+    }
+
+    #[test]
+    fn midi_select_updates_filters_and_lists_ports() {
+        let (mut control, midi_in, _midi_out, _audio) = bus::channel();
+        let midi_in = Mutex::new(midi_in);
+        let mut cache = StatusCache::default();
+        let mut session = ClientSession::new();
+        let io = MidiIo::new("MPK".into(), String::new());
+        let response = handle_line(
+            r#"{"cmd":"midi_select","input":"U2MIDI","output":"U2MIDI"}"#,
+            &mut control,
+            &mut cache,
+            &ClientHub::default(),
+            &MidiMap::default(),
+            &midi_in,
+            &io,
+            &AudioHealth::new(),
+            &mut session,
+        );
+        match response {
+            Response::MidiPorts(ports) => {
+                assert_eq!(ports.input_filter, "U2MIDI");
+                assert_eq!(ports.output_filter, "U2MIDI");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(io.input_filter(), "U2MIDI");
+        assert_eq!(io.output_filter(), "U2MIDI");
     }
 }

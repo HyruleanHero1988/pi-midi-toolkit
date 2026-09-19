@@ -1,0 +1,14 @@
+{
+  "name": "usb-midi-identity",
+  "ports": {
+    "input": "U2MIDI",
+    "output": "U2MIDI"
+  },
+  "channel_map": {
+    "mode": "identity"
+  },
+  "cc_map": [],
+  "velocity": {
+    "mode": "pass_through"
+  }
+}

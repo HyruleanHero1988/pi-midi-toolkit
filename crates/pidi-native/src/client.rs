@@ -6,8 +6,8 @@ use std::net::TcpStream;
 use std::time::Duration;
 
 use jambox_protocol::{
-    MidiNotice, RepeatDivision, RepeatPhase, Request, Response, StatusReply, TouchPhase,
-    WireClipEvent, PROTOCOL_VERSION,
+    MidiNotice, MidiPortsReply, RepeatDivision, RepeatPhase, Request, Response, StatusReply,
+    TouchPhase, WireClipEvent, PROTOCOL_VERSION,
 };
 use tracing::{info, warn};
 
@@ -269,6 +269,18 @@ impl Outbox {
         self.reliable.push_back(Request::Status);
     }
 
+    pub fn midi_ports(&mut self) {
+        self.reliable.push_back(Request::MidiPorts);
+    }
+
+    pub fn midi_select(&mut self, input: Option<String>, output: Option<String>) {
+        self.reliable.push_back(Request::MidiSelect { input, output });
+    }
+
+    pub fn channel_map(&mut self, bits: [u16; 16]) {
+        self.reliable.push_back(Request::ChannelMap { bits });
+    }
+
     pub fn hello(&mut self) {
         self.reliable.push_front(Request::Hello {
             protocol: PROTOCOL_VERSION,
@@ -307,6 +319,7 @@ pub struct NativeClient {
     reader: Option<BufReader<Stream>>,
     pub outbox: Outbox,
     pub last_status: StatusReply,
+    pub last_midi_ports: MidiPortsReply,
     pub midi_inbox: Vec<MidiNotice>,
     pub connected: bool,
     address: String,
@@ -320,6 +333,7 @@ impl NativeClient {
             reader: None,
             outbox: Outbox::new(),
             last_status: StatusReply::default(),
+            last_midi_ports: MidiPortsReply::default(),
             midi_inbox: Vec::new(),
             connected: false,
             address,
@@ -413,6 +427,7 @@ impl NativeClient {
                         match response {
                             Response::Status(status) => self.last_status = status,
                             Response::Midi(notice) => self.midi_inbox.push(notice),
+                            Response::MidiPorts(ports) => self.last_midi_ports = ports,
                             _ => {}
                         }
                     }

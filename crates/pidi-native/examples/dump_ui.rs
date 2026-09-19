@@ -38,6 +38,7 @@ fn main() {
         ("settings", UiMode::Settings),
         ("log", UiMode::Log),
         ("map", UiMode::Map),
+        ("ports", UiMode::Ports),
     ];
     for (name, mode) in modes {
         let mut model = NativeModel::new();

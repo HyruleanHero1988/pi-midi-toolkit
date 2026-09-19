@@ -93,6 +93,11 @@ pub fn wifi_credentials_path() -> PathBuf {
     data_root().join(".wifi-credentials")
 }
 
+/// Last IN/OUT name filters and channel-map bits (also used by THRU ON).
+pub fn midi_ports_path() -> PathBuf {
+    data_root().join("midi-ports.json")
+}
+
 fn home_dir() -> Option<PathBuf> {
     if let Ok(h) = std::env::var("HOME") {
         if !h.trim().is_empty() {

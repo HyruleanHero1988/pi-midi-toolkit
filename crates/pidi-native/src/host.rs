@@ -263,6 +263,101 @@ pub fn map_list_ports() -> (String, Vec<String>) {
     }
 }
 
+#[allow(dead_code)]
+fn load_selected_midi_ports() -> (String, String) {
+    let path = crate::paths::midi_ports_path();
+    if let Ok(text) = std::fs::read_to_string(&path) {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+            let input = v
+                .get("input")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string();
+            let output = v
+                .get("output")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string();
+            return (input, output);
+        }
+    }
+    (String::new(), String::new())
+}
+
+#[allow(dead_code)]
+fn load_selected_channel_map() -> [u16; 16] {
+    let path = crate::paths::midi_ports_path();
+    if let Ok(text) = std::fs::read_to_string(&path) {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+            if let Some(arr) = v.get("channel_map").and_then(|x| x.as_array()) {
+                let mut bits = [0u16; 16];
+                for (i, slot) in bits.iter_mut().enumerate() {
+                    *slot = arr
+                        .get(i)
+                        .and_then(|x| x.as_u64())
+                        .unwrap_or(0) as u16;
+                }
+                return bits;
+            }
+        }
+    }
+    [0; 16]
+}
+
+/// Write the live THRU preset (`presets/active.json`) so `--watch` picks up remaps.
+pub fn write_live_thru_preset(input: &str, output: &str, bits: [u16; 16]) {
+    let input = if input.trim().is_empty() {
+        "USB".to_string()
+    } else {
+        input.to_string()
+    };
+    let output = if output.trim().is_empty() {
+        "USB".to_string()
+    } else {
+        output.to_string()
+    };
+    let channel_map = if bits.iter().all(|&b| b == 0) {
+        midi_core::ChannelMapMode::Identity
+    } else {
+        midi_core::ChannelMapMode::Fanout { bits }
+    };
+    let preset = midi_core::EnginePreset {
+        name: "pidi-live".into(),
+        ports: midi_core::PortsConfig { input, output },
+        channel_map,
+        cc_map: Vec::new(),
+        velocity: midi_core::VelocityConfig::PassThrough,
+    };
+    let path = crate::paths::data_root().join("thru-preset.json");
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(body) = serde_json::to_string_pretty(&preset) {
+        let _ = std::fs::write(path, body + "\n");
+    }
+}
+
+#[allow(dead_code)]
+fn thru_preset_path() -> PathBuf {
+    let live = crate::paths::data_root().join("thru-preset.json");
+    if live.is_file() {
+        return live;
+    }
+    let root = find_repo_root();
+    for rel in [
+        "presets/active.json",
+        "presets/usb-identity.json",
+        "presets/example.json",
+        "presets/mpk-mini-ch3.json",
+    ] {
+        let p = root.join(rel);
+        if p.is_file() {
+            return p;
+        }
+    }
+    root.join("presets/usb-identity.json")
+}
+
 pub fn map_thru_on() -> (String, Vec<String>) {
     #[cfg(not(target_os = "linux"))]
     {
@@ -274,21 +369,47 @@ pub fn map_thru_on() -> (String, Vec<String>) {
     #[cfg(target_os = "linux")]
     {
         let mut lines = Vec::new();
-        if Path::new("/etc/systemd/system/midi-engine.service").exists()
-            || Path::new("/lib/systemd/system/midi-engine.service").exists()
-        {
-            let msg = "start midi-engine via systemd: sudo systemctl start midi-engine";
-            lines.push(msg.into());
-            return ("use systemctl for thru".into(), lines);
-        }
         let Some(bin) = resolve_midi_engine() else {
             return (
                 "midi-engine not found".into(),
                 vec!["THRU ON: no midi-engine binary".into()],
             );
         };
+        let (input, output) = load_selected_midi_ports();
+        let bits = load_selected_channel_map();
+        write_live_thru_preset(&input, &output, bits);
+        let preset = thru_preset_path();
+        if !preset.is_file() {
+            return (
+                "THRU preset missing".into(),
+                vec!["expected presets/active.json".into()],
+            );
+        }
+        let input = if input.trim().is_empty() {
+            "U2MIDI".to_string()
+        } else {
+            input
+        };
+        let output = if output.trim().is_empty() {
+            "U2MIDI".to_string()
+        } else {
+            output
+        };
+        lines.push(format!(
+            "thru {} → {}  ({})",
+            midi_core::short_port_label(&input),
+            midi_core::short_port_label(&output),
+            preset.display()
+        ));
         match Command::new(&bin)
             .arg("run")
+            .arg("--preset")
+            .arg(&preset)
+            .arg("--input")
+            .arg(&input)
+            .arg("--output")
+            .arg(&output)
+            .arg("--watch")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -1024,7 +1145,7 @@ pub fn spawn_update_job(
     rx
 }
 
-/// Soft reboot/poweroff via midi-tone `pi-power.sh` when present (Tk POWER menu).
+/// Soft reboot/poweroff via `pi-power.sh` when present (SET → POWER).
 pub fn pi_power(action: &str) -> (String, Vec<String>) {
     let action = if action == "reboot" { "reboot" } else { "poweroff" };
     #[cfg(not(target_os = "linux"))]
