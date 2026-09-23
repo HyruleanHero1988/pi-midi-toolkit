@@ -126,6 +126,17 @@ sudo bash deploy/setup-pi.sh
 
 ### From the PC (daily)
 
+PowerShell (lab Pi; uses `apps/pidi/.pi-credentials`):
+
+```powershell
+python tmp_deploy_master.py      # deploy master
+python deploy/deploy-branch.py   # deploy the current checkout
+```
+
+These overlay the repo, install committed `dist/armv7` engines, and restart
+`jambox-engine` + `pidi-native`. Rebuild bins first with
+`.\deploy\build-pi-bins.ps1` when crates changed.
+
 Cross-compile is preferred for Pi 2. **SET→UPDATE** installs committed
 `dist/armv7/{midi-engine,jambox-engine,pidi-native}` onto `bin/`. A green
 push to `master` that touches crates runs
