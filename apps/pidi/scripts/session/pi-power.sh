@@ -76,10 +76,7 @@ if [[ "$SOFT_OK" -ne 1 ]]; then
   fi
 fi
 
-# Stop the app only after poweroff is queued (clean audio). Do not kill
-# kiosk.sh / the X session — that is what lands users on the LightDM greeter
-# when shutdown is blocked or delayed.
-pkill -15 -f '[m]idi_tone.py' >/dev/null 2>&1 || true
+# Queue only. Do not pkill the kiosk — that blanks KMSDRM if shutdown is delayed.
 
 if [[ "$(id -u)" -ne 0 ]]; then
   # Without root we cannot force via sysrq; soft path must have worked.

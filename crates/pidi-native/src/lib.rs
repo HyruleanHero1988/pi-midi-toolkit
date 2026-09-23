@@ -9,6 +9,7 @@ pub mod smooth_font;
 #[cfg(feature = "sdl")]
 pub mod gles;
 pub mod host;
+pub mod ota;
 pub mod input;
 pub mod kaoss_ui;
 pub mod kaoss_viz;

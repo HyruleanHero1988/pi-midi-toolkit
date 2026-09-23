@@ -14,7 +14,6 @@ Run from anywhere::
 Optional ``.pi-credentials`` keys (defaults shown for user ``pi``)::
 
     PI_REPO=/home/pi/pi-midi-toolkit
-    PI_DIR=~/midi-tone
     PIDI_DATA_ROOT=/home/pi/.local/share/pidi
 """
 
@@ -58,19 +57,6 @@ KEEP_REPO = {
     "apps/pidi/version.json",
 }
 
-KEEP_KIOSK = {
-    "settings.json",
-    "songs",
-    "phrases",
-    "user-presets",
-    "user-wavetables",
-    ".venv",
-    ".pi-credentials",
-    ".update-credentials",
-    "version.json",
-    "bin",
-}
-
 TAR_SKIP_PARTS = {
     ".git",
     "target",
@@ -99,12 +85,11 @@ def load_creds() -> dict[str, str]:
     return creds
 
 
-def remote_paths(creds: dict[str, str]) -> tuple[str, str, str]:
+def remote_paths(creds: dict[str, str]) -> tuple[str, str]:
     user = creds["PI_USER"]
     repo = creds.get("PI_REPO", f"/home/{user}/pi-midi-toolkit")
-    kiosk = creds.get("PI_DIR", "~/midi-tone").replace("~", f"/home/{user}")
     data = creds.get("PIDI_DATA_ROOT", f"/home/{user}/.local/share/pidi")
-    return repo, kiosk, data
+    return repo, data
 
 
 def git_sha() -> str:
@@ -235,14 +220,11 @@ def sftp_put_file(
 
 def overlay_script() -> str:
     keep_repo = " ".join(f"'{x}'" for x in sorted(KEEP_REPO))
-    keep_kiosk = " ".join(f"'{x}'" for x in sorted(KEEP_KIOSK))
     return f"""#!/bin/bash
 set -euo pipefail
 SRC="$1"
 DEST_REPO="$2"
-DEST_KIOSK="$3"
 KEEP_REPO=({keep_repo})
-KEEP_KIOSK=({keep_kiosk})
 
 should_skip() {{
   local rel="$1"
@@ -281,18 +263,15 @@ overlay() {{
 }}
 
 overlay "$SRC" "$DEST_REPO" "${{KEEP_REPO[@]}}"
-overlay "$SRC/apps/pidi" "$DEST_KIOSK" "${{KEEP_KIOSK[@]}}"
 echo "overlay complete"
 """
 
 
 def version_payload(sha: str, branch: str) -> dict[str, object]:
-    components: dict[str, str] = {
-        "engines": sha256_file(STAGE / "pidi-native")[:16],
-    }
-    ui = ROOT / "apps" / "pidi" / "midi_tone.py"
-    if ui.is_file():
-        components["ui"] = sha256_file(ui)[:16]
+    native = STAGE / "pidi-native"
+    components: dict[str, str] = {}
+    if native.is_file():
+        components["pidi-native"] = sha256_file(native)[:16]
     return {
         "sha": sha,
         "branch": branch,
@@ -320,7 +299,7 @@ def deploy(*, branch: str | None, skip_bins: bool, restart: bool) -> int:
     )
 
     creds = load_creds()
-    remote_repo, remote_kiosk, data_root = remote_paths(creds)
+    remote_repo, data_root = remote_paths(creds)
     password = creds["PI_PASSWORD"]
     client = connect(creds)
     stamp = int(time.time())
@@ -332,7 +311,7 @@ def deploy(*, branch: str | None, skip_bins: bool, restart: bool) -> int:
     try:
         run(
             client,
-            f"mkdir -p {remote_repo}/bin {remote_kiosk}/bin "
+            f"mkdir -p {remote_repo}/bin "
             f"{data_root}/{{songs,phrases,user-presets,user-wavetables,takes}}",
         )
         sftp_put_bytes(client, tar_data, remote_tar)
@@ -345,13 +324,11 @@ def deploy(*, branch: str | None, skip_bins: bool, restart: bool) -> int:
         run(
             client,
             f"chmod +x '{overlay_path}' && bash '{overlay_path}' "
-            f"'{remote_src}' '{remote_repo}' '{remote_kiosk}'",
+            f"'{remote_src}' '{remote_repo}'",
         )
         run(
             client,
             f"find {remote_repo}/apps/pidi -name '*.sh' -type f -print0 2>/dev/null | "
-            f"xargs -0 sed -i 's/\\r$//' || true; "
-            f"find {remote_kiosk} -name '*.sh' -type f -print0 2>/dev/null | "
             f"xargs -0 sed -i 's/\\r$//' || true",
         )
 
@@ -359,10 +336,9 @@ def deploy(*, branch: str | None, skip_bins: bool, restart: bool) -> int:
             sudo(client, password, "systemctl stop pidi-native jambox-engine 2>/dev/null || true")
             for name in ENGINE_BINS:
                 sftp_put_file(client, STAGE / name, f"{remote_repo}/bin/{name}")
-                sftp_put_file(client, STAGE / name, f"{remote_kiosk}/bin/{name}")
 
         version_json = json.dumps(version_payload(sha, branch_name), indent=2) + "\n"
-        for dest in (f"{remote_kiosk}/version.json", f"{remote_repo}/apps/pidi/version.json"):
+        for dest in (f"{data_root}/version.json", f"{remote_repo}/version.json"):
             sftp_put_bytes(client, version_json.encode(), dest + ".tmp")
             run(client, f"mv -f '{dest}.tmp' '{dest}'")
 
@@ -376,7 +352,7 @@ def deploy(*, branch: str | None, skip_bins: bool, restart: bool) -> int:
         run(
             client,
             f"ls -la {remote_repo}/bin/; "
-            f"head -8 {remote_kiosk}/version.json; "
+            f"head -8 {data_root}/version.json; "
             f"systemctl is-active jambox-engine pidi-native",
         )
         if restart and not skip_bins:
