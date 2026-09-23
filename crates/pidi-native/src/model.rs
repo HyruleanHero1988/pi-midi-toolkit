@@ -700,8 +700,7 @@ impl NativeModel {
             self.leave_kaoss_mode(outbox);
         }
         if self.mode == UiMode::Chords && mode != UiMode::Chords {
-            self.chords_block_off(outbox);
-            self.chords_strum_off(outbox);
+            self.leave_chords_mode(outbox);
         }
         self.set_mode(mode);
         self.sync_melody_engine(outbox);
@@ -815,6 +814,32 @@ impl NativeModel {
             self.release_kaoss_gate(outbox);
             self.kaoss_touching = false;
         }
+    }
+
+    fn leave_chords_mode(&mut self, outbox: &mut Outbox) {
+        let ids: Vec<i32> = self
+            .fingers
+            .iter()
+            .filter(|f| {
+                f.active
+                    && matches!(
+                        f.surface,
+                        Surface::ChordsButton { .. }
+                            | Surface::ChordsPalette { .. }
+                            | Surface::ChordsStrum
+                    )
+            })
+            .map(|f| f.id)
+            .collect();
+        for id in ids {
+            self.finger_up(id, outbox);
+        }
+        // HOLD latches the last block across modes; MOM (and a leftover
+        // strum swipe) still silence when leaving the page.
+        if !self.chords_hold {
+            self.chords_block_off(outbox);
+        }
+        self.chords_strum_off(outbox);
     }
 
     fn close_kaoss_settings(&mut self) {
@@ -7918,6 +7943,100 @@ mod tests {
             "HOLD should keep notes after lift, got {after:?}"
         );
         assert!(model.chords_block.iter().any(|n| n.is_some()));
+    }
+
+    #[test]
+    fn chords_hold_survives_switch_to_kaoss() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Chords);
+        model.chords_out = OutMode::Local;
+        model.chords_hold = true;
+        model.chords_palette[0] = Some(ChordSpec::new(0, chords::ChordQuality::Maj));
+        let mut out = Outbox::new();
+        let cell = model.layout.chords_palette_slot(0);
+        model.finger_down(1, cell.x + 4, cell.y + 4, &mut out);
+        out.take();
+        model.finger_up(1, &mut out);
+        out.take();
+        assert!(model.chords_block.iter().any(|n| n.is_some()));
+
+        let kaoss = model.layout.nav_jam(4);
+        model.finger_down(2, kaoss.x + 4, kaoss.y + 4, &mut out);
+        let switch = out.take();
+        assert_eq!(model.mode, UiMode::Kaoss);
+        assert!(
+            switch
+                .iter()
+                .all(|r| !matches!(r, Request::NoteOff { .. })),
+            "HOLD chord must keep sounding in KAOSS, got {switch:?}"
+        );
+        assert!(model.chords_block.iter().any(|n| n.is_some()));
+    }
+
+    #[test]
+    fn chords_mom_silences_when_leaving() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Chords);
+        model.chords_out = OutMode::Local;
+        model.chords_hold = false;
+        model.chords_palette[0] = Some(ChordSpec::new(0, chords::ChordQuality::Maj));
+        let mut out = Outbox::new();
+        let cell = model.layout.chords_palette_slot(0);
+        model.finger_down(1, cell.x + 4, cell.y + 4, &mut out);
+        out.take();
+        assert!(model.chords_block.iter().any(|n| n.is_some()));
+
+        let kaoss = model.layout.nav_jam(4);
+        model.finger_down(2, kaoss.x + 4, kaoss.y + 4, &mut out);
+        let switch = out.take();
+        assert_eq!(model.mode, UiMode::Kaoss);
+        assert!(
+            switch.iter().any(|r| matches!(r, Request::NoteOff { .. })),
+            "MOM chord should drop when leaving CHORDS, got {switch:?}"
+        );
+        assert!(model.chords_block.iter().all(|n| n.is_none()));
+    }
+
+    #[test]
+    fn kaoss_hold_survives_switch_to_chords() {
+        let mut model = NativeModel::new();
+        model.kaoss_out = OutMode::Local;
+        model.kaoss_hold = true;
+        model.kaoss_program = kaoss_ui::KAOSS_PROGRAMS
+            .iter()
+            .position(|p| p.id == "lead")
+            .expect("lead");
+        let mut out = Outbox::new();
+        let cell = model.layout.kaoss_cell(4, 3);
+        model.finger_down(1, cell.x + 4, cell.y + 4, &mut out);
+        let down = out.take();
+        let hold_gesture = down.iter().find_map(|r| match r {
+            Request::Touch {
+                phase: TouchPhase::Down,
+                gesture,
+                ..
+            } => Some(*gesture),
+            _ => None,
+        });
+        model.finger_up(1, &mut out);
+        out.take();
+        assert!(model.kaoss_hold_gesture.is_some());
+
+        let chords = model.layout.nav_jam(5);
+        model.finger_down(2, chords.x + 4, chords.y + 4, &mut out);
+        let switch = out.take();
+        assert_eq!(model.mode, UiMode::Chords);
+        assert!(
+            switch.iter().all(|r| !matches!(
+                r,
+                Request::Touch {
+                    phase: TouchPhase::Up,
+                    ..
+                }
+            )),
+            "HOLD drone must keep sounding in CHORDS, got {switch:?}"
+        );
+        assert_eq!(model.kaoss_hold_gesture, hold_gesture);
     }
 
     #[test]
