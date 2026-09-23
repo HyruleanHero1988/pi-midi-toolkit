@@ -3,6 +3,8 @@
 //! Voices are grouped by the wavetable they play, because that group is also the
 //! FX insert slot: melody FX on `saw` must not wet a dry kit (see `PLAN.md`).
 
+use crate::clip::MAX_CLIPS;
+use crate::mix::MixSource;
 use crate::wavetable::{TABLE_MASK, TABLE_SIZE};
 
 /// Fixed polyphony. Sized for Pi 2; the array is allocated once.
@@ -15,6 +17,8 @@ struct Voice {
     note: u8,
     /// Wavetable index — also the FX insert slot.
     group: usize,
+    /// Live keys vs a clip slot (MIX trims).
+    mix: MixSource,
     /// Clip / SEQ / song playback — isolated from the live tone knob.
     recorded: bool,
     /// Baked brightness for recorded voices (`1` = open / bypass).
@@ -35,6 +39,7 @@ impl Voice {
             channel: 0,
             note: 0,
             group: 0,
+            mix: MixSource::Live,
             recorded: false,
             tone: 1.0,
             tone_lp: 0.0,
@@ -56,6 +61,9 @@ pub struct VoiceContext {
     pub pitch_mul: f32,
     pub attack_sec: f32,
     pub release_sec: f32,
+    /// Live-keys MIX trim. Clip voices use `clip_gains`.
+    pub live_gain: f32,
+    pub clip_gains: [f32; MAX_CLIPS],
     /// Live tone knob (0 dark … 1 open). Recorded voices ignore this.
     pub live_tone: f32,
     pub tone_lfo_amount: f32,
@@ -93,7 +101,19 @@ impl VoicePool {
 
     /// Start (or retrigger) a live note on `group`'s wavetable.
     pub fn note_on(&mut self, channel: u8, note: u8, velocity: u8, group: usize) {
-        self.start_note(channel, note, velocity, group, false, 1.0);
+        self.start_note(channel, note, velocity, group, MixSource::Live, false, 1.0);
+    }
+
+    pub fn note_on_mix(
+        &mut self,
+        channel: u8,
+        note: u8,
+        velocity: u8,
+        group: usize,
+        mix: MixSource,
+    ) {
+        let recorded = matches!(mix, MixSource::Clip(_));
+        self.start_note(channel, note, velocity, group, mix, recorded, 1.0);
     }
 
     /// Start a clip / SEQ / song note. `tone` is baked brightness (1 = open).
@@ -104,8 +124,9 @@ impl VoicePool {
         velocity: u8,
         group: usize,
         tone: f32,
+        mix: MixSource,
     ) {
-        self.start_note(channel, note, velocity, group, true, tone);
+        self.start_note(channel, note, velocity, group, mix, true, tone);
     }
 
     fn start_note(
@@ -114,6 +135,7 @@ impl VoicePool {
         note: u8,
         velocity: u8,
         group: usize,
+        mix: MixSource,
         recorded: bool,
         tone: f32,
     ) {
@@ -127,6 +149,7 @@ impl VoicePool {
         if let Some(slot) = self.find_playing(channel, note, recorded) {
             let v = &mut self.voices[slot];
             v.group = group;
+            v.mix = mix;
             v.tone = tone.clamp(0.0, 1.0);
             v.tone_lp = 0.0;
             v.tone_bp = 0.0;
@@ -144,6 +167,7 @@ impl VoicePool {
             channel,
             note,
             group,
+            mix,
             recorded,
             tone: tone.clamp(0.0, 1.0),
             tone_lp: 0.0,
@@ -284,6 +308,7 @@ impl VoicePool {
             let mut lfo_phase = ctx.tone_lfo_phase;
             let lfo_inc = std::f64::consts::TAU * ctx.tone_lfo_rate_hz.max(0.01) as f64
                 / ctx.sample_rate.max(8000.0) as f64;
+            let g = v.mix.gain(ctx.live_gain, &ctx.clip_gains);
 
             for sample in dest.iter_mut() {
                 if v.target_amp > v.amp {
@@ -320,7 +345,7 @@ impl VoicePool {
                         ctx.sample_rate,
                     );
                 }
-                *sample += s * v.amp;
+                *sample += s * v.amp * g;
 
                 v.phase += phase_inc;
                 if v.phase >= TABLE_SIZE as f64 {
@@ -384,6 +409,8 @@ mod tests {
             pitch_mul: 1.0,
             attack_sec: 0.002,
             release_sec: 0.010,
+            live_gain: 1.0,
+            clip_gains: [1.0; MAX_CLIPS],
             live_tone: 1.0,
             tone_lfo_amount: 0.0,
             tone_lfo_rate_hz: 5.0,
@@ -456,7 +483,7 @@ mod tests {
         let bank = WaveBank::with_builtins();
         let mut pool = VoicePool::new();
         pool.note_on(0, 60, 100, 0);
-        pool.note_on_recorded(0, 60, 100, 0, 1.0);
+        pool.note_on_recorded(0, 60, 100, 0, 1.0, MixSource::clip(0));
         assert_eq!(pool.active_count(), 2);
 
         pool.note_off_recorded(0, 60);
@@ -476,7 +503,7 @@ mod tests {
     fn recorded_voices_render_onto_the_recorded_bus() {
         let bank = WaveBank::with_builtins();
         let mut pool = VoicePool::new();
-        pool.note_on_recorded(0, 69, 127, 0, 1.0);
+        pool.note_on_recorded(0, 69, 127, 0, 1.0, MixSource::clip(0));
         let mut live = vec![0.0f32; 256];
         let mut recorded = vec![0.0f32; 256];
         pool.render_group_split(0, bank.table(0), &mut live, &mut recorded, ctx());

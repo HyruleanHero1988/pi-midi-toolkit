@@ -117,6 +117,11 @@ pub enum Request {
         quantize: Option<String>,
     },
     StopAllClips,
+    /// Per-slot mix trim (phrase pads 0..15, SEQ/songs on slot 16). 0..2, unity 1.0.
+    ClipGain {
+        slot: u8,
+        value: f32,
+    },
     Status,
     Midi {
         kind: String,
@@ -396,6 +401,24 @@ mod tests {
     }
 
     #[test]
+    fn clip_gain_round_trips() {
+        let request = Request::ClipGain {
+            slot: 16,
+            value: 0.5,
+        };
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(json.contains(""cmd":"clip_gain""));
+        let decoded: Request = serde_json::from_str(&json).unwrap();
+        assert!(matches!(
+            decoded,
+            Request::ClipGain {
+                slot: 16,
+                value,
+            } if (value - 0.5).abs() < 1e-6
+        ));
+    }
+
+    #[test]
     fn midi_ports_round_trips() {
         let request = Request::MidiPorts;
         let json = serde_json::to_string(&request).unwrap();
@@ -419,4 +442,5 @@ mod tests {
         let decoded: Request = serde_json::from_str(&json).unwrap();
         assert!(matches!(decoded, Request::ChannelMap { bits: b } if b[0] == 1 << 5));
     }
+
 }
