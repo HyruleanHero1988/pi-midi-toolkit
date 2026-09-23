@@ -143,6 +143,17 @@ impl WaveBank {
         &self.morph_table
     }
 
+    /// Blend two bank tables into `out` without touching the live morph pair.
+    pub fn blend_pair(&self, a: usize, b: usize, morph: f32, out: &mut [f32; TABLE_SIZE]) {
+        let a = self.table(a);
+        let b = self.table(b);
+        let frac = morph.clamp(0.0, 1.0);
+        let inv = 1.0 - frac;
+        for i in 0..TABLE_SIZE {
+            out[i] = a[i] * inv + b[i] * frac;
+        }
+    }
+
     /// Wavetable for a live voice group. Morph A/B always hear the blend, even
     /// after the nearer endpoint (and FX slot) flips at 50%.
     pub fn table_for_live_group(&self, group: usize) -> &[f32; TABLE_SIZE] {

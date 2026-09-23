@@ -28,7 +28,8 @@ mod voice;
 mod wavetable;
 
 pub use clip::{
-    Clip, ClipEvent, ClipEventKind, ClipSlot, LaunchMode, Sequencer, MAX_CLIPS, SEQ_CLIP_SLOT,
+    Clip, ClipEvent, ClipEventKind, ClipSlot, ClipVoice, LaunchMode, Sequencer, MAX_CLIPS,
+    SEQ_CLIP_SLOT,
 };
 pub use mix::MixSource;
 pub use command::{

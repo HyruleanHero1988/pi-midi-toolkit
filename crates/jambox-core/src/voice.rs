@@ -206,6 +206,16 @@ impl VoicePool {
         }
     }
 
+    /// Release live keys only — recorded pad / SEQ voices keep ringing.
+    pub fn all_notes_off_live(&mut self) {
+        for v in self.voices.iter_mut() {
+            if v.active && !v.recorded {
+                v.releasing = true;
+                v.target_amp = 0.0;
+            }
+        }
+    }
+
     /// Hard stop — no release tail. Used when the stream restarts.
     pub fn silence(&mut self) {
         self.voices = [Voice::silent(); MAX_VOICES];
@@ -253,6 +263,21 @@ impl VoicePool {
         n
     }
 
+    /// Distinct clip slots that currently have recorded voices.
+    pub fn active_clip_slots(&self, out: &mut [usize; MAX_VOICES]) -> usize {
+        let mut n = 0;
+        for v in self.voices.iter().filter(|v| v.active) {
+            if let MixSource::Clip(slot) = v.mix {
+                let slot = slot as usize;
+                if !out[..n].contains(&slot) {
+                    out[n] = slot;
+                    n += 1;
+                }
+            }
+        }
+        n
+    }
+
     /// Sum every voice belonging to `group` into `out` (additive).
     ///
     /// Returns true if any voice in the group is still audible.
@@ -286,6 +311,120 @@ impl VoicePool {
 
         for v in self.voices.iter_mut() {
             if !v.active || v.group != group {
+                continue;
+            }
+            let dest = if v.recorded {
+                if recorded.len() >= n {
+                    &mut recorded[..n]
+                } else {
+                    continue;
+                }
+            } else {
+                &mut live[..n]
+            };
+            audible = true;
+            let hz = midi_to_hz(v.note) * ctx.pitch_mul as f64;
+            let phase_inc = hz * TABLE_SIZE as f64 / ctx.sample_rate as f64;
+            let use_lfo = !v.recorded && ctx.tone_lfo_amount > 0.01;
+            let static_tone = if v.recorded {
+                v.tone
+            } else {
+                ctx.live_tone
+            };
+            let filter_tone = !use_lfo && static_tone < 0.985;
+            let mut tone_lp = v.tone_lp;
+            let mut tone_bp = v.tone_bp;
+            let mut lfo_phase = ctx.tone_lfo_phase;
+            let lfo_inc = std::f64::consts::TAU * ctx.tone_lfo_rate_hz.max(0.01) as f64
+                / ctx.sample_rate.max(8000.0) as f64;
+            let g = v.mix.gain(ctx.live_gain, &ctx.clip_gains);
+
+            for sample in dest.iter_mut() {
+                if v.target_amp > v.amp {
+                    v.amp = (v.amp + attack_step * v.target_amp.max(0.05)).min(v.target_amp);
+                } else {
+                    let ref_amp = if v.releasing {
+                        v.amp.max(1e-4)
+                    } else {
+                        v.amp.max(0.05)
+                    };
+                    v.amp = (v.amp - release_step * ref_amp).max(v.target_amp);
+                }
+
+                let i0 = v.phase as usize & TABLE_MASK;
+                let i1 = (i0 + 1) & TABLE_MASK;
+                let frac = (v.phase - v.phase.floor()) as f32;
+                let mut s = table[i0] * (1.0 - frac) + table[i1] * frac;
+                if use_lfo {
+                    lfo_phase += lfo_inc;
+                    if lfo_phase > std::f64::consts::TAU {
+                        lfo_phase %= std::f64::consts::TAU;
+                    }
+                    let lfo = 0.5 + 0.5 * lfo_phase.sin() as f32;
+                    let tone = (ctx.live_tone * (1.0 - ctx.tone_lfo_amount)
+                        + lfo * ctx.tone_lfo_amount)
+                        .clamp(0.0, 1.0);
+                    s = tone_svf_sample(s, tone, &mut tone_lp, &mut tone_bp, ctx.sample_rate);
+                } else if filter_tone {
+                    s = tone_svf_sample(
+                        s,
+                        static_tone,
+                        &mut tone_lp,
+                        &mut tone_bp,
+                        ctx.sample_rate,
+                    );
+                }
+                *sample += s * v.amp * g;
+
+                v.phase += phase_inc;
+                if v.phase >= TABLE_SIZE as f64 {
+                    v.phase -= TABLE_SIZE as f64;
+                }
+            }
+            v.tone_lp = tone_lp;
+            v.tone_bp = tone_bp;
+
+            if v.releasing && v.amp < 0.0005 {
+                *v = Voice::silent();
+            }
+        }
+        audible
+    }
+
+    /// Render recorded voices that belong to one clip slot.
+    pub fn render_clip_slot(
+        &mut self,
+        slot: usize,
+        table: &[f32; TABLE_SIZE],
+        out: &mut [f32],
+        ctx: VoiceContext,
+    ) -> bool {
+        let want = MixSource::clip(slot);
+        let mut unused = [0.0f32; 0];
+        self.render_matching(
+            |v| v.recorded && v.mix == want,
+            table,
+            out,
+            &mut unused,
+            ctx,
+        )
+    }
+
+    fn render_matching(
+        &mut self,
+        matches: impl Fn(&Voice) -> bool,
+        table: &[f32; TABLE_SIZE],
+        live: &mut [f32],
+        recorded: &mut [f32],
+        ctx: VoiceContext,
+    ) -> bool {
+        let mut audible = false;
+        let attack_step = linear_env_step(ctx.attack_sec, ctx.sample_rate);
+        let release_step = linear_env_step(ctx.release_sec, ctx.sample_rate);
+        let n = live.len();
+
+        for v in self.voices.iter_mut() {
+            if !v.active || !matches(v) {
                 continue;
             }
             let dest = if v.recorded && recorded.len() >= n {

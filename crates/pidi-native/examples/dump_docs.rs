@@ -345,6 +345,8 @@ fn main() {
         model.phrases[0].gain = 1.4;
         model.phrases[1].gain = 0.6;
         model.phrases[4].gain = 1.8;
+        model.phrase_playing[0] = true;
+        model.phrase_playing[4] = true;
         model.synth_params[2] = 0.72;
         model.drum_level = 0.48;
         model.seq_level = 1.2;

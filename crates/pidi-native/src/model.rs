@@ -24,7 +24,7 @@ use jambox_core::{
 };
 use jambox_protocol::{
     MidiNotice, MidiPortsReply, RepeatDivision, RepeatPhase, StatusReply, TouchPhase,
-    WireClipEvent,
+    WireClipEvent, WireClipVoice,
 };
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, TryRecvError};
@@ -3666,11 +3666,6 @@ impl NativeModel {
             self.phrase_playing[index] = false;
             self.status_line = format!("{} stop", phrases::pad_label(index));
         } else {
-            let pad = &self.phrases[index];
-            if pad.voice_locked {
-                outbox.morph_pair(pad.morph_a, pad.morph_b);
-                outbox.synth("morph", pad.morph);
-            }
             outbox.clip_launch(index as u8, "bar");
             self.phrase_playing[index] = true;
             self.status_line = format!("{} launch", phrases::pad_label(index));
@@ -3823,6 +3818,7 @@ impl NativeModel {
         };
         let mut pad = phrases::from_wire(events, length_ticks, self.seq.bpm, true);
         pad.tone = self.seq.baked_tone.unwrap_or(self.synth_params[1].clamp(0.0, 1.0));
+        self.apply_live_voice_snapshot(&mut pad);
         self.phrases[index] = pad;
         let dir = phrases::phrases_dir_from_env();
         let _ = phrases::save_pad(&dir, index, &self.phrases[index], self.bpm);
@@ -3889,6 +3885,7 @@ impl NativeModel {
             .collect();
         let mut pad = phrases::from_wire(wire, length_ticks.max(1), self.bpm, false);
         pad.tone = self.synth_params[1].clamp(0.0, 1.0);
+        self.apply_live_voice_snapshot(&mut pad);
         self.phrases[index] = pad;
         let dir = phrases::phrases_dir_from_env();
         let _ = phrases::save_pad(&dir, index, &self.phrases[index], self.bpm);
@@ -3953,14 +3950,60 @@ impl NativeModel {
             outbox.clip_clear(index as u8);
             return;
         }
-        outbox.clip_load(
+        outbox.clip_load_voice(
             index as u8,
             pad.length_ticks,
             if pad.loop_mode { "loop" } else { "oneshot" },
             pad.events.clone(),
             pad.tone,
+            Some(Self::phrase_clip_voice(pad)),
         );
         outbox.clip_gain(index as u8, pad.gain);
+    }
+
+    fn apply_live_voice_snapshot(&self, pad: &mut PhrasePad) {
+        pad.voice_locked = true;
+        pad.morph_a = self.morph_a;
+        pad.morph_b = self.morph_b;
+        pad.morph = self.synth_params[0].clamp(0.0, 1.0);
+        pad.fx_drive = self.fx_voice[0].clamp(0.0, 1.0);
+        pad.fx_delay_mix = self.fx_voice[1].clamp(0.0, 1.0);
+        pad.fx_reverb_mix = self.fx_voice[2].clamp(0.0, 1.0);
+        pad.fx_flanger_mix = self.fx_voice[3].clamp(0.0, 1.0);
+    }
+
+    fn apply_live_voice_snapshot_at(&mut self, index: usize) {
+        let morph_a = self.morph_a;
+        let morph_b = self.morph_b;
+        let morph = self.synth_params[0].clamp(0.0, 1.0);
+        let fx = [
+            self.fx_voice[0].clamp(0.0, 1.0),
+            self.fx_voice[1].clamp(0.0, 1.0),
+            self.fx_voice[2].clamp(0.0, 1.0),
+            self.fx_voice[3].clamp(0.0, 1.0),
+        ];
+        let pad = &mut self.phrases[index];
+        pad.voice_locked = true;
+        pad.morph_a = morph_a;
+        pad.morph_b = morph_b;
+        pad.morph = morph;
+        pad.fx_drive = fx[0];
+        pad.fx_delay_mix = fx[1];
+        pad.fx_reverb_mix = fx[2];
+        pad.fx_flanger_mix = fx[3];
+    }
+
+    fn phrase_clip_voice(pad: &PhrasePad) -> WireClipVoice {
+        WireClipVoice {
+            locked: pad.voice_locked,
+            morph_a: pad.morph_a,
+            morph_b: pad.morph_b,
+            morph: pad.morph,
+            drive: pad.fx_drive,
+            delay_mix: pad.fx_delay_mix,
+            reverb_mix: pad.fx_reverb_mix,
+            flanger_mix: pad.fx_flanger_mix,
+        }
     }
 
     const SYNTH_PARAM_NAMES: [&'static str; 5] = ["morph", "tone", "level", "attack", "release"];
@@ -5859,13 +5902,11 @@ impl NativeModel {
         }
         self.phrases[index].voice_locked = !self.phrases[index].voice_locked;
         if self.phrases[index].voice_locked {
-            self.phrases[index].morph_a = self.morph_a;
-            self.phrases[index].morph_b = self.morph_b;
-            self.phrases[index].morph = self.synth_params[0];
+            self.apply_live_voice_snapshot_at(index);
         }
         let dir = phrases::phrases_dir_from_env();
         let _ = phrases::save_pad(&dir, index, &self.phrases[index], self.bpm);
-        let _ = outbox;
+        self.send_phrase_clip(index, outbox);
         self.status_line = if self.phrases[index].voice_locked {
             format!("{} VOICE LOCK", phrases::pad_label(index))
         } else {
@@ -7030,7 +7071,7 @@ mod tests {
     }
 
     #[test]
-    fn locked_pad_launch_sends_morph_pair() {
+    fn locked_pad_launch_does_not_stomp_live_morph() {
         let mut model = NativeModel::new();
         let mut out = Outbox::new();
         model.phrases[0].empty = false;
@@ -7041,16 +7082,56 @@ mod tests {
         model.phrases[0].length_ticks = 960;
         model.toggle_phrase(0, &mut out);
         let batch = out.take();
-        assert!(batch
-            .iter()
-            .any(|r| matches!(r, Request::MorphPair { a: 2, b: 3 })));
-        assert!(batch.iter().any(|r| matches!(
-            r,
-            Request::Synth { param, value, .. } if param == "morph" && (*value - 0.25).abs() < 1e-6
-        )));
+        assert!(
+            batch
+                .iter()
+                .all(|r| !matches!(r, Request::MorphPair { .. })),
+            "locked pad playback must not rewrite the live morph: {batch:?}"
+        );
         assert!(batch
             .iter()
             .any(|r| matches!(r, Request::ClipLaunch { slot: 0, .. })));
+    }
+
+    #[test]
+    fn pad_record_snapshots_voice_and_fx() {
+        let mut model = NativeModel::new();
+        model.pads_edit = true;
+        model.pads_selected = 0;
+        model.morph_a = 2;
+        model.morph_b = 3;
+        model.synth_params[0] = 0.4;
+        model.synth_params[1] = 0.25;
+        model.fx_voice = [0.1, 0.55, 0.35, 0.2];
+        let mut out = Outbox::new();
+        model.set_mode(UiMode::Pads);
+        let rec = model.layout.pads_rec;
+        model.finger_down(1, rec.x + 4, rec.y + 4, &mut out);
+        model.finger_up(1, &mut out);
+        assert!(model.pads_recording.is_some());
+        model.push_pad_rec_at(true, 0, 60, 100, 0.0);
+        model.push_pad_rec_at(false, 0, 60, 0, 0.4);
+        model.finger_down(2, rec.x + 4, rec.y + 4, &mut out);
+        model.finger_up(2, &mut out);
+        let pad = &model.phrases[0];
+        assert!(!pad.empty);
+        assert!(pad.voice_locked);
+        assert_eq!((pad.morph_a, pad.morph_b), (2, 3));
+        assert!((pad.morph - 0.4).abs() < 1e-6);
+        assert!((pad.tone - 0.25).abs() < 1e-6);
+        assert!((pad.fx_delay_mix - 0.55).abs() < 1e-6);
+        assert!((pad.fx_flanger_mix - 0.2).abs() < 1e-6);
+        let batch = out.take();
+        assert!(
+            batch.iter().any(|r| matches!(
+                r,
+                Request::ClipLoad {
+                    voice: Some(v),
+                    ..
+                } if v.locked && v.morph_a == 2 && (v.delay_mix - 0.55).abs() < 1e-6
+            )),
+            "recorded pad should upload a locked voice snapshot: {batch:?}"
+        );
     }
 
     #[test]

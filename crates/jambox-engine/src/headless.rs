@@ -53,18 +53,14 @@ pub fn run(
         scheduled.clear();
 
         while let Ok(update) = audio.clips.pop() {
-            if let Some(slot) = engine.sequencer_mut().slot_mut(update.slot as usize) {
-                if let Some(mode) = update.mode {
-                    slot.set_mode(mode);
-                }
-                if let Some(tone) = update.tone {
-                    slot.set_playback_tone(tone);
-                } else if update.clip.is_none() {
-                    slot.set_playback_tone(1.0);
-                }
-                if let Some(previous) = slot.swap_boxed(update.clip) {
-                    let _ = audio.garbage.push(previous);
-                }
+            if let Some(previous) = engine.apply_clip_update(
+                update.slot as usize,
+                update.clip,
+                update.mode,
+                update.tone,
+                update.voice,
+            ) {
+                let _ = audio.garbage.push(previous);
             }
         }
         while scheduled.len() < MAX_BLOCK_COMMANDS {

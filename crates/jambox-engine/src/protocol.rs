@@ -62,6 +62,8 @@ pub enum Request {
         mode: Option<String>,
         #[serde(default)]
         tone: Option<f32>,
+        #[serde(default)]
+        voice: Option<jambox_protocol::WireClipVoice>,
         events: Vec<WireClipEvent>,
     },
     ClipClear {
@@ -390,6 +392,7 @@ pub enum Decoded {
         clip: Option<Box<Clip>>,
         mode: Option<LaunchMode>,
         tone: Option<f32>,
+        voice: Option<jambox_core::ClipVoice>,
     },
     /// Answer without touching audio.
     StatusRequest,
@@ -441,6 +444,20 @@ pub fn parse_mode(value: &str) -> LaunchMode {
     match value {
         "one_shot" | "oneshot" | "one-shot" => LaunchMode::OneShot,
         _ => LaunchMode::Loop,
+    }
+}
+
+fn clip_voice_from_wire(voice: jambox_protocol::WireClipVoice) -> jambox_core::ClipVoice {
+    jambox_core::ClipVoice {
+        locked: voice.locked,
+        morph_a: voice.morph_a,
+        morph_b: voice.morph_b,
+        morph: voice.morph,
+        tone: 1.0,
+        drive: voice.drive,
+        delay_mix: voice.delay_mix,
+        reverb_mix: voice.reverb_mix,
+        flanger_mix: voice.flanger_mix,
     }
 }
 
@@ -620,6 +637,7 @@ pub fn decode(request: Request) -> Result<Decoded, String> {
             length_ticks,
             mode,
             tone,
+            voice,
             events,
         } => {
             let events: Vec<ClipEvent> = events.into_iter().map(ClipEvent::from).collect();
@@ -628,6 +646,13 @@ pub fn decode(request: Request) -> Result<Decoded, String> {
                 clip: Some(Box::new(Clip::new(events, length_ticks))),
                 mode: mode.as_deref().map(parse_mode),
                 tone,
+                voice: voice.map(|v| {
+                    let mut snapshot = clip_voice_from_wire(v);
+                    if let Some(tone) = tone {
+                        snapshot.tone = tone;
+                    }
+                    snapshot
+                }),
             }
         }
         Request::ClipClear { slot } => Decoded::ClipUpdate {
@@ -635,6 +660,7 @@ pub fn decode(request: Request) -> Result<Decoded, String> {
             clip: None,
             mode: None,
             tone: Some(1.0),
+            voice: None,
         },
         Request::ClipMode { slot, mode } => Decoded::Command(Command::SetClipMode {
             slot,
@@ -801,6 +827,26 @@ mod tests {
     }
 
     #[test]
+    fn clip_load_carries_a_locked_voice_snapshot() {
+        let d = decode_line(
+            r#"{"cmd":"clip_load","slot":0,"length_ticks":960,"tone":0.2,
+                "voice":{"locked":true,"morph_a":2,"morph_b":3,"morph":0.4,
+                         "delay_mix":0.5,"reverb_mix":0.3},"events":[]}"#,
+        );
+        match d {
+            Decoded::ClipUpdate { voice, tone, .. } => {
+                assert_eq!(tone, Some(0.2));
+                let voice = voice.expect("voice");
+                assert!(voice.locked);
+                assert_eq!(voice.morph_a, 2);
+                assert!((voice.tone - 0.2).abs() < 1e-6);
+                assert!((voice.delay_mix - 0.5).abs() < 1e-6);
+            }
+            _ => panic!("wrong decode"),
+        }
+    }
+
+    #[test]
     fn clip_load_allocates_off_the_audio_thread() {
         let d = decode_line(
             r#"{"cmd":"clip_load","slot":2,"length_ticks":3840,"mode":"loop",
@@ -812,10 +858,12 @@ mod tests {
                 clip,
                 mode,
                 tone,
+                voice,
             } => {
                 assert_eq!(slot, 2);
                 assert_eq!(mode, Some(LaunchMode::Loop));
                 assert!(tone.is_none());
+                assert!(voice.is_none());
                 let clip = clip.expect("clip");
                 assert_eq!(clip.events().len(), 1);
                 assert_eq!(clip.length_ticks(), 3840);
@@ -832,7 +880,7 @@ mod tests {
                 assert_eq!(slot, 16);
                 assert!((value - 0.5).abs() < 1e-6);
             }
-            _ => panic!("wrong decode: {d:?}"),
+            _ => panic!("wrong decode"),
         }
     }
 

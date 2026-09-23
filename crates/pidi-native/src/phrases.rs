@@ -26,6 +26,10 @@ pub struct PhrasePad {
     pub local_synth: bool,
     /// Brightness captured when the take was written. Live tone does not follow.
     pub tone: f32,
+    pub fx_drive: f32,
+    pub fx_delay_mix: f32,
+    pub fx_reverb_mix: f32,
+    pub fx_flanger_mix: f32,
 }
 
 impl Default for PhrasePad {
@@ -44,6 +48,10 @@ impl Default for PhrasePad {
             out_channel: -1,
             local_synth: true,
             tone: 1.0,
+            fx_drive: 0.0,
+            fx_delay_mix: 0.0,
+            fx_reverb_mix: 0.0,
+            fx_flanger_mix: 0.0,
         }
     }
 }
@@ -72,6 +80,14 @@ struct FilePhrase {
     gain: f32,
     #[serde(default = "tone_default")]
     tone: f32,
+    #[serde(default)]
+    fx_drive: f32,
+    #[serde(default)]
+    fx_delay_mix: f32,
+    #[serde(default)]
+    fx_reverb_mix: f32,
+    #[serde(default)]
+    fx_flanger_mix: f32,
     #[serde(default)]
     events: Vec<FileEvent>,
 }
@@ -160,6 +176,10 @@ pub fn load_pad(path: &Path, bpm: f32) -> Option<PhrasePad> {
         out_channel: file.out_channel.clamp(-1, 15),
         local_synth: file.local_synth,
         tone: file.tone.clamp(0.0, 1.0),
+        fx_drive: file.fx_drive.clamp(0.0, 1.0),
+        fx_delay_mix: file.fx_delay_mix.clamp(0.0, 1.0),
+        fx_reverb_mix: file.fx_reverb_mix.clamp(0.0, 1.0),
+        fx_flanger_mix: file.fx_flanger_mix.clamp(0.0, 1.0),
     })
 }
 
@@ -182,7 +202,7 @@ pub fn save_pad(dir: &Path, index: usize, pad: &PhrasePad, bpm: f32) -> bool {
         })
         .collect();
     let file = FilePhrase {
-        version: 4,
+        version: 5,
         length: if pad.length_secs > 0.0 {
             pad.length_secs
         } else {
@@ -205,6 +225,10 @@ pub fn save_pad(dir: &Path, index: usize, pad: &PhrasePad, bpm: f32) -> bool {
         local_synth: pad.local_synth,
         gain: pad.gain.clamp(0.1, 2.0),
         tone: pad.tone.clamp(0.0, 1.0),
+        fx_drive: pad.fx_drive.clamp(0.0, 1.0),
+        fx_delay_mix: pad.fx_delay_mix.clamp(0.0, 1.0),
+        fx_reverb_mix: pad.fx_reverb_mix.clamp(0.0, 1.0),
+        fx_flanger_mix: pad.fx_flanger_mix.clamp(0.0, 1.0),
         events,
     };
     let path = pad_path(dir, index);
@@ -399,6 +423,40 @@ mod tests {
         assert!(save_pad(&dir, 0, &pad, 120.0));
         let loaded = load_pad(&pad_path(&dir, 0), 120.0).unwrap();
         assert!((loaded.tone - 0.25).abs() < 1e-6);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pad_voice_fx_round_trips() {
+        let dir = std::env::temp_dir().join(format!("pidi-phrase-fx-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let mut pad = from_wire(
+            vec![WireClipEvent {
+                tick: 0,
+                on: true,
+                channel: 0,
+                note: 36,
+                velocity: 100,
+            }],
+            1920,
+            120.0,
+            true,
+        );
+        pad.voice_locked = true;
+        pad.morph_a = 2;
+        pad.morph_b = 3;
+        pad.morph = 0.4;
+        pad.fx_drive = 0.1;
+        pad.fx_delay_mix = 0.5;
+        pad.fx_reverb_mix = 0.3;
+        pad.fx_flanger_mix = 0.2;
+        assert!(save_pad(&dir, 0, &pad, 120.0));
+        let loaded = load_pad(&pad_path(&dir, 0), 120.0).unwrap();
+        assert!(loaded.voice_locked);
+        assert_eq!(loaded.morph_a, 2);
+        assert!((loaded.fx_delay_mix - 0.5).abs() < 1e-6);
+        assert!((loaded.fx_flanger_mix - 0.2).abs() < 1e-6);
         let _ = fs::remove_dir_all(&dir);
     }
 }

@@ -97,6 +97,9 @@ pub enum Request {
         /// Brightness captured when the take was written. Live tone does not follow.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tone: Option<f32>,
+        /// Morph + voice FX snapshot. Locked clips ignore live FOLLOW / FM.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        voice: Option<WireClipVoice>,
         events: Vec<WireClipEvent>,
     },
     ClipClear {
@@ -256,6 +259,27 @@ pub struct WireClipEvent {
     pub velocity: u8,
 }
 
+/// Morph + voice-insert snapshot carried on `clip_load`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct WireClipVoice {
+    #[serde(default)]
+    pub locked: bool,
+    #[serde(default)]
+    pub morph_a: u16,
+    #[serde(default)]
+    pub morph_b: u16,
+    #[serde(default)]
+    pub morph: f32,
+    #[serde(default)]
+    pub drive: f32,
+    #[serde(default)]
+    pub delay_mix: f32,
+    #[serde(default)]
+    pub reverb_mix: f32,
+    #[serde(default)]
+    pub flanger_mix: f32,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Response {
@@ -407,7 +431,7 @@ mod tests {
             value: 0.5,
         };
         let json = serde_json::to_string(&request).unwrap();
-        assert!(json.contains(""cmd":"clip_gain""));
+        assert!(json.contains("\"cmd\":\"clip_gain\""));
         let decoded: Request = serde_json::from_str(&json).unwrap();
         assert!(matches!(
             decoded,

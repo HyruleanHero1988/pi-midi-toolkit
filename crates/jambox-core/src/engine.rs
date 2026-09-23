@@ -6,7 +6,9 @@
 
 use midi_core::MidiEvent;
 
-use crate::clip::{ClipEventKind, LaunchMode, SeqEvent, Sequencer, MAX_CLIPS};
+use crate::clip::{
+    Clip, ClipEventKind, ClipVoice, LaunchMode, SeqEvent, Sequencer, MAX_CLIPS,
+};
 use crate::mix::MixSource;
 use crate::command::{
     Command, EmitMode, FxParam, FxTarget, ScheduledCommand, SynthParam, MAX_BLOCK_COMMANDS,
@@ -20,7 +22,7 @@ use crate::kaoss::{unpack_xy, KaossMapper, LatestTouch, TouchDelta};
 use crate::repeat::{RepeatEvent, RepeatRack, MAX_REPEAT_EVENTS_PER_BLOCK};
 use crate::transport::Transport;
 use crate::voice::{VoiceContext, VoicePool, MAX_VOICES};
-use crate::wavetable::WaveBank;
+use crate::wavetable::{WaveBank, TABLE_SIZE};
 use crate::DRUM_CHANNEL;
 
 /// Max MIDI events the engine emits per block (clip playback → USB out).
@@ -216,6 +218,9 @@ pub struct JamboxEngine {
     drum_fx: Vec<FxUnit>,
     drum_group_fx: FxUnit,
     bus_fx: FxUnit,
+    clip_fx: Vec<FxUnit>,
+    clip_table: [[f32; TABLE_SIZE]; MAX_CLIPS],
+    clip_baked: [bool; MAX_CLIPS],
 
     key_bus: Vec<f32>,
     drum_bus: Vec<f32>,
@@ -268,6 +273,9 @@ impl JamboxEngine {
             drum_fx,
             drum_group_fx: FxUnit::new(sr),
             bus_fx: FxUnit::new(sr),
+            clip_fx: (0..MAX_CLIPS).map(|_| FxUnit::new(sr)).collect(),
+            clip_table: [[0.0; TABLE_SIZE]; MAX_CLIPS],
+            clip_baked: [false; MAX_CLIPS],
             key_bus: vec![0.0; MAX_BLOCK],
             drum_bus: vec![0.0; MAX_BLOCK],
             group_buf: vec![0.0; MAX_BLOCK],
@@ -328,6 +336,58 @@ impl JamboxEngine {
         &mut self.sequencer
     }
 
+    /// Audio-thread clip pointer swap. Bakes a locked voice without allocating.
+    pub fn apply_clip_update(
+        &mut self,
+        slot: usize,
+        clip: Option<Box<Clip>>,
+        mode: Option<LaunchMode>,
+        tone: Option<f32>,
+        voice: Option<ClipVoice>,
+    ) -> Option<Box<Clip>> {
+        let slot = slot.min(MAX_CLIPS - 1);
+        if let Some(mode) = mode {
+            if let Some(s) = self.sequencer.slot_mut(slot) {
+                s.set_mode(mode);
+            }
+        }
+        if let Some(voice) = voice {
+            if let Some(s) = self.sequencer.slot_mut(slot) {
+                s.set_voice(voice);
+            }
+            if voice.locked {
+                self.bank.blend_pair(
+                    voice.morph_a as usize,
+                    voice.morph_b as usize,
+                    voice.morph,
+                    &mut self.clip_table[slot],
+                );
+                self.clip_baked[slot] = true;
+                if let Some(fx) = self.clip_fx.get_mut(slot) {
+                    fx.set_params(voice.fx_params());
+                }
+            } else {
+                self.clip_baked[slot] = false;
+            }
+        } else if let Some(tone) = tone {
+            if let Some(s) = self.sequencer.slot_mut(slot) {
+                s.set_playback_tone(tone);
+            }
+        } else if clip.is_none() {
+            if let Some(s) = self.sequencer.slot_mut(slot) {
+                s.set_voice(ClipVoice::default());
+            }
+            self.clip_baked[slot] = false;
+            if let Some(fx) = self.clip_fx.get_mut(slot) {
+                fx.set_params(FxParams::default());
+                fx.reset();
+            }
+        }
+        self.sequencer
+            .slot_mut(slot)
+            .and_then(|s| s.swap_boxed(clip))
+    }
+
     pub fn status(&self) -> EngineStatus {
         self.status
     }
@@ -359,7 +419,12 @@ impl JamboxEngine {
         self.transport.set_sample_rate(sample_rate);
         let sr = sample_rate as f32;
         self.drums.set_sample_rate(sr);
-        for fx in self.voice_fx.iter_mut().chain(self.drum_fx.iter_mut()) {
+        for fx in self
+            .voice_fx
+            .iter_mut()
+            .chain(self.drum_fx.iter_mut())
+            .chain(self.clip_fx.iter_mut())
+        {
             let params = fx.params();
             *fx = FxUnit::new(sr);
             fx.set_params(params);
@@ -538,10 +603,14 @@ impl JamboxEngine {
             fm,
             fm_enabled,
             drums,
+            sequencer,
             voice_fx,
             drum_fx,
             drum_group_fx,
             bus_fx,
+            clip_fx,
+            clip_table,
+            clip_baked,
             key_bus,
             drum_bus,
             group_buf,
@@ -602,8 +671,7 @@ impl JamboxEngine {
 
         drums.set_mix_gains(*drum_level, *clip_gain);
 
-        // Keys: one FX insert per wavetable group. Live tone is applied per
-        // voice so a pad / SEQ layer keeps the brightness it was written with.
+        // Live keys: one FX insert per wavetable group.
         let mut groups = [0usize; MAX_VOICES];
         let group_count = voices.active_groups(&mut groups);
         for &group in groups.iter().take(group_count) {
@@ -611,6 +679,37 @@ impl JamboxEngine {
             let table = bank.table_for_live_group(group);
             voices.render_group(group, table, &mut group_buf[..n], ctx);
             if let Some(fx) = voice_fx.get_mut(group) {
+                if !fx.params().is_bypassed() {
+                    fx.process(&mut group_buf[..n]);
+                }
+            }
+            for i in 0..n {
+                key_bus[i] += group_buf[i];
+            }
+        }
+
+        // Recorded pads / SEQ: baked table + insert when locked, else live morph.
+        let mut slots = [0usize; MAX_VOICES];
+        let slot_count = voices.active_clip_slots(&mut slots);
+        for &slot in slots.iter().take(slot_count) {
+            group_buf[..n].iter_mut().for_each(|s| *s = 0.0);
+            let locked = clip_baked[slot]
+                && sequencer
+                    .slot(slot)
+                    .map(|s| s.voice().locked)
+                    .unwrap_or(false);
+            let table = if locked {
+                &clip_table[slot]
+            } else {
+                bank.morph_table()
+            };
+            voices.render_clip_slot(slot, table, &mut group_buf[..n], ctx);
+            let fx = if locked {
+                clip_fx.get_mut(slot)
+            } else {
+                voice_fx.get_mut(bank.nearer_index())
+            };
+            if let Some(fx) = fx {
                 if !fx.params().is_bypassed() {
                     fx.process(&mut group_buf[..n]);
                 }
@@ -700,9 +799,8 @@ impl JamboxEngine {
                 } else if channel == DRUM_CHANNEL {
                     self.drums
                         .trigger_mix(drum_model_for_note(note), velocity, mix);
-                } else if self.fm_enabled {
-                    self.fm.note_on_recorded(channel, note, velocity, tone);
                 } else {
+                    // Clips stay on the wavetable path so FM mode cannot rewrite a take.
                     let group = self.bank.nearer_index();
                     self.voices
                         .note_on_recorded(channel, note, velocity, group, tone, mix);
@@ -735,7 +833,12 @@ impl JamboxEngine {
                     },
                 }; MAX_BLOCK_COMMANDS];
                 self.sequencer.stop_all(&mut flush);
-                for fx in self.voice_fx.iter_mut().chain(self.drum_fx.iter_mut()) {
+                for fx in self
+                    .voice_fx
+                    .iter_mut()
+                    .chain(self.drum_fx.iter_mut())
+                    .chain(self.clip_fx.iter_mut())
+                {
                     fx.reset();
                 }
                 self.drum_group_fx.reset();
@@ -998,7 +1101,7 @@ impl JamboxEngine {
                 let enable = value > 0.5;
                 if enable != self.fm_enabled {
                     if enable {
-                        self.voices.all_notes_off();
+                        self.voices.all_notes_off_live();
                     } else {
                         self.fm.all_notes_off();
                     }
@@ -1082,7 +1185,7 @@ impl JamboxEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::clip::{Clip, ClipEvent};
+    use crate::clip::{Clip, ClipEvent, ClipVoice, LaunchMode};
     use crate::kaoss::LatestTouch;
     use crate::transport::{Quantize, PPQ};
 
@@ -2049,5 +2152,151 @@ mod tests {
             energy(&baked_dark) < energy(&baked_open) * 0.55,
             "a pad written dark should stay darker than an open take"
         );
+    }
+
+    fn load_locked_clip(e: &mut JamboxEngine, voice: ClipVoice) {
+        let clip = Clip::new(
+            vec![ClipEvent {
+                tick: 0,
+                kind: ClipEventKind::NoteOn {
+                    channel: 0,
+                    note: 72,
+                    velocity: 120,
+                },
+            }],
+            PPQ * 8,
+        );
+        let _ = e.apply_clip_update(0, Some(Box::new(clip)), Some(LaunchMode::Loop), None, Some(voice));
+        apply_now(
+            e,
+            Command::LaunchClip {
+                slot: 0,
+                quantize: Quantize::Off,
+            },
+        );
+    }
+
+    fn correlate(a: &[f32], b: &[f32]) -> f32 {
+        let n = a.len().min(b.len());
+        let mut acc = 0.0;
+        let mut na = 0.0;
+        let mut nb = 0.0;
+        for i in 0..n {
+            acc += a[i] * b[i];
+            na += a[i] * a[i];
+            nb += b[i] * b[i];
+        }
+        acc / (na.sqrt() * nb.sqrt()).max(1e-9)
+    }
+
+    #[test]
+    fn locked_clip_keeps_baked_morph_when_live_morph_moves() {
+        let saw_voice = ClipVoice {
+            locked: true,
+            morph_a: 2,
+            morph_b: 2,
+            morph: 0.0,
+            tone: 1.0,
+            ..ClipVoice::default()
+        };
+
+        let mut locked = engine();
+        apply_now(
+            &mut locked,
+            Command::SetMorphPair { a: 0, b: 0 },
+        );
+        apply_now(
+            &mut locked,
+            Command::SetSynth {
+                param: SynthParam::Morph,
+                value: 0.0,
+            },
+        );
+        load_locked_clip(&mut locked, saw_voice);
+        let mut locked_buf = vec![0.0f32; 2048];
+        let mut midi = MidiOutSink::new();
+        locked.render(&mut locked_buf, &[], &mut midi);
+
+        let mut sine = engine();
+        apply_now(&mut sine, Command::SetMorphPair { a: 0, b: 0 });
+        apply_now(
+            &mut sine,
+            Command::SetSynth {
+                param: SynthParam::Morph,
+                value: 0.0,
+            },
+        );
+        launch_held_clip(&mut sine, 72, 1.0);
+        let mut sine_buf = vec![0.0f32; 2048];
+        sine.render(&mut sine_buf, &[], &mut midi);
+
+        let mut saw = engine();
+        apply_now(&mut saw, Command::SetMorphPair { a: 2, b: 2 });
+        apply_now(
+            &mut saw,
+            Command::SetSynth {
+                param: SynthParam::Morph,
+                value: 0.0,
+            },
+        );
+        launch_held_clip(&mut saw, 72, 1.0);
+        let mut saw_buf = vec![0.0f32; 2048];
+        saw.render(&mut saw_buf, &[], &mut midi);
+
+        assert!(
+            correlate(&locked_buf, &saw_buf) > correlate(&locked_buf, &sine_buf),
+            "locked pad should keep the saw snapshot, not follow live sine"
+        );
+    }
+
+    #[test]
+    fn locked_clip_fx_ignores_live_voice_fx() {
+        let mut e = engine();
+        let voice = ClipVoice {
+            locked: true,
+            morph_a: 0,
+            morph_b: 0,
+            delay_mix: 0.8,
+            ..ClipVoice::default()
+        };
+        load_locked_clip(&mut e, voice);
+        apply_now(
+            &mut e,
+            Command::SetFx {
+                target: FxTarget::Voice(0),
+                param: FxParam::DelayMix,
+                value: 0.0,
+            },
+        );
+        assert!(
+            (e.clip_fx[0].params().delay_mix - 0.8).abs() < 1e-6,
+            "live voice FX must not rewrite a locked pad insert"
+        );
+        assert!(e.voice_fx[0].params().delay_mix < 0.01);
+    }
+
+    #[test]
+    fn fm_enable_does_not_reroute_or_kill_a_clip() {
+        let mut e = engine();
+        launch_held_clip(&mut e, 72, 1.0);
+        let mut out = vec![0.0f32; 1024];
+        let mut midi = MidiOutSink::new();
+        e.render(&mut out, &[], &mut midi);
+        assert!(e.voices.active_count() >= 1);
+        apply_now(
+            &mut e,
+            Command::SetSynth {
+                param: SynthParam::FmEnable,
+                value: 1.0,
+            },
+        );
+        out.iter_mut().for_each(|s| *s = 0.0);
+        e.render(&mut out, &[], &mut midi);
+        assert!(
+            e.voices.active_count() >= 1,
+            "entering FM must not release a playing pad"
+        );
+        assert_eq!(e.fm.active_count(), 0, "pad notes must not jump to FM");
+        assert!(peak(&out) > 0.01);
     }
 }
