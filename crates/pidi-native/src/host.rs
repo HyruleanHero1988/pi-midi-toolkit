@@ -164,6 +164,15 @@ fn find_repo_root() -> PathBuf {
     cwd
 }
 
+/// Appliance OTA helper. Lives in ``deploy/``, not the retired Tk package.
+fn updater_script(root: &PathBuf) -> PathBuf {
+    let deploy = root.join("deploy/updater.py");
+    if deploy.is_file() {
+        return deploy;
+    }
+    root.join("apps/pidi/pidi/updater.py")
+}
+
 fn midi_engine_candidates() -> Vec<PathBuf> {
     let mut out = Vec::new();
     if let Ok(p) = std::env::var("MIDI_ENGINE_BIN") {
@@ -945,7 +954,7 @@ pub fn update_check_detailed() -> UpdateCheckResult {
     let root = find_repo_root();
     let mut lines = Vec::new();
 
-    let updater = root.join("apps/pidi/pidi/updater.py");
+    let updater = updater_script(&root);
     if updater.is_file() {
         let (code, stdout, stderr) = run_capture(
             Command::new("python3")
@@ -1037,7 +1046,7 @@ pub fn update_check_detailed() -> UpdateCheckResult {
 
 pub fn update_apply() -> UpdateCheckResult {
     let root = find_repo_root();
-    let updater = root.join("apps/pidi/pidi/updater.py");
+    let updater = updater_script(&root);
     if !updater.is_file() {
         return UpdateCheckResult {
             status: "UPDATE: updater.py missing".into(),
@@ -1055,6 +1064,25 @@ pub fn update_apply() -> UpdateCheckResult {
         600,
     );
     update_apply_result(code, &stdout, &stderr)
+}
+
+fn useful_update_error(stderr: &str, stdout: &str) -> String {
+    let skip = |t: &str| {
+        t.is_empty()
+            || t.starts_with("Traceback")
+            || t.starts_with("File ")
+            || t.starts_with("  ")
+    };
+    stderr
+        .lines()
+        .rev()
+        .chain(stdout.lines().rev())
+        .map(str::trim)
+        .find(|t| !skip(t))
+        .or_else(|| stderr.lines().next())
+        .or_else(|| stdout.lines().next())
+        .unwrap_or("see LOG")
+        .to_string()
 }
 
 pub(crate) fn update_apply_result(code: i32, stdout: &str, stderr: &str) -> UpdateCheckResult {
@@ -1082,11 +1110,7 @@ pub(crate) fn update_apply_result(code: i32, stdout: &str, stderr: &str) -> Upda
     } else {
         format!(
             "INSTALL failed (exit {code}): {}",
-            stderr
-                .lines()
-                .next()
-                .or_else(|| stdout.lines().next())
-                .unwrap_or("see LOG")
+            useful_update_error(stderr, stdout)
         )
     };
     UpdateCheckResult {
@@ -1260,5 +1284,21 @@ mod tests {
         assert!(!result.ok);
         assert!(!result.reload_kiosk);
         assert!(result.status.contains("INSTALL failed"));
+    }
+
+    #[test]
+    fn apply_result_failed_prefers_update_error_over_traceback() {
+        let result = update_apply_result(
+            1,
+            "",
+            "Traceback (most recent call last):\n  File \"updater.py\", line 1\nUpdateError: downloaded archive was not a full pi-midi-toolkit tree\n",
+        );
+        assert!(!result.ok);
+        assert!(
+            result.status.contains("downloaded archive was not a full pi-midi-toolkit tree"),
+            "{}",
+            result.status
+        );
+        assert!(!result.status.contains("Traceback"));
     }
 }

@@ -35,7 +35,7 @@ runtime.
 ## Appliance-oriented hooks
 
 Map, WIFI, and UPDATE call host tools when present (`midi-engine`, `nmcli`,
-`python3 apps/pidi/pidi/updater.py`). On a Windows host they report that those
+`python3 deploy/updater.py`). On a Windows host they report that those
 actions belong on the Pi. Bin deploy remains `deploy/build-pi-bins.sh` /
 `deploy/deploy.sh`.
 
