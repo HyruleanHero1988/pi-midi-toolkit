@@ -129,7 +129,7 @@ sudo bash deploy/setup-pi.sh
 PowerShell (lab Pi; uses `apps/pidi/.pi-credentials`):
 
 ```powershell
-python tmp_deploy_master.py      # deploy master
+python deploy_master.py          # deploy master
 python deploy/deploy-branch.py   # deploy the current checkout
 ```
 

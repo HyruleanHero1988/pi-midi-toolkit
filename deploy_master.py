@@ -270,16 +270,19 @@ def main() -> int:
             sftp_put_file(client, STAGE / name, f"{REMOTE_REPO}/bin/{name}")
             sftp_put_file(client, STAGE / name, f"{REMOTE_KIOSK}/bin/{name}")
 
+        components = {
+            "engines": sha256_file(STAGE / "pidi-native")[:16],
+        }
+        ui = ROOT / "apps" / "pidi" / "midi_tone.py"
+        if ui.is_file():
+            components["ui"] = sha256_file(ui)[:16]
         version = {
             "sha": sha,
             "branch": "master",
             "source": "ssh-deploy",
             "repo_url": "local",
             "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            "components": {
-                "ui": sha256_file(ROOT / "apps" / "pidi" / "midi_tone.py")[:16],
-                "engines": sha256_file(STAGE / "pidi-native")[:16],
-            },
+            "components": components,
         }
         version_json = json.dumps(version, indent=2) + "\n"
         for dest in (f"{REMOTE_KIOSK}/version.json", f"{REMOTE_REPO}/apps/pidi/version.json"):
