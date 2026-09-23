@@ -1,0 +1,5 @@
+deploy master branch:
+python tmp_deploy_master.py
+
+deploy current branch: 
+python deploy/deploy-branch.py
