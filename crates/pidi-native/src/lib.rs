@@ -27,6 +27,7 @@ pub mod screensaver;
 pub mod seq;
 pub mod session;
 pub mod songs;
+pub mod throttle;
 pub mod voice_bake;
 pub mod waves;
 pub mod wifi;

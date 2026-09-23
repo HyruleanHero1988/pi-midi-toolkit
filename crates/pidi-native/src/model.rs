@@ -378,6 +378,10 @@ pub struct NativeModel {
     /// In-flight SET/MAP host subprocess (UPDATE/WIFI/THRU). Polled from tick.
     host_rx: Option<Receiver<(String, Vec<String>)>>,
     host_busy: Option<HostTask>,
+    /// Pi firmware throttle / under-voltage flags (sticky for the session).
+    pub throttle: crate::throttle::ThrottleState,
+    last_throttle_poll: Instant,
+    logged_undervolt: bool,
 }
 
 impl Default for NativeModel {
@@ -559,6 +563,9 @@ impl NativeModel {
             session_loaded: false,
             host_rx: None,
             host_busy: None,
+            throttle: crate::throttle::ThrottleState::default(),
+            last_throttle_poll: Instant::now(),
+            logged_undervolt: false,
         };
         // Ensure ~/.local/share/pidi/{songs,phrases,…} exist on first boot.
         let _ = crate::paths::data_root();
@@ -1074,6 +1081,7 @@ impl NativeModel {
         self.poll_host_job();
         self.poll_update_job();
         self.poll_wifi_job();
+        self.poll_throttle();
         self.tick_ota_reload(dt);
         if self.mode == UiMode::Drums && self.kit_edit_open && self.kit_wave_dirty {
             self.rebuild_kit_wave();
@@ -1096,6 +1104,28 @@ impl NativeModel {
         self.host_rx = Some(task.spawn());
         self.host_busy = Some(task);
         self.mark_dirty();
+    }
+
+    fn poll_throttle(&mut self) {
+        if self.frame > 1 && self.last_throttle_poll.elapsed() < Duration::from_secs(2) {
+            return;
+        }
+        self.last_throttle_poll = Instant::now();
+        let mut next = crate::throttle::read_throttle();
+        if self.throttle.power_fault() {
+            next.flags |= crate::throttle::UV_OCCURRED;
+        }
+        let became_fault = next.power_fault() && !self.throttle.power_fault();
+        let became_now = next.power_fault_now() && !self.throttle.power_fault_now();
+        if next != self.throttle {
+            self.throttle = next;
+            self.mark_dirty();
+        }
+        if (became_fault || became_now) && !self.logged_undervolt {
+            self.logged_undervolt = true;
+            self.push_log(next.log_line());
+            self.mark_dirty();
+        }
     }
 
     fn poll_host_job(&mut self) {

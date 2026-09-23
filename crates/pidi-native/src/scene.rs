@@ -299,6 +299,7 @@ pub fn build(model: &NativeModel) -> Scene {
         }
         apply_content_shift(&mut scene, model.ui_shift, crate::layout::HUD_H);
     }
+    draw_power_warn(&mut scene, model);
     let _ = (SCREEN_W, SCREEN_H);
     scene
 }
@@ -611,6 +612,47 @@ fn draw_chrome(scene: &mut Scene, model: &NativeModel) {
     if !status.is_empty() {
         scene.text_centered(layout.status_bar, &status, 0xfe8019, 2);
     }
+}
+
+fn draw_power_warn(scene: &mut Scene, model: &NativeModel) {
+    let Some(label) = model.throttle.badge_label() else {
+        return;
+    };
+    let active = model.throttle.power_fault_now();
+    let flash_on = !active || (model.frame / 20) % 2 == 0;
+    let bolt = if active && flash_on {
+        0xfabd2f
+    } else if active {
+        0xfb4934
+    } else {
+        0xd79921
+    };
+    let pill_bg = if active { 0x9d0006 } else { 0x3c3836 };
+    let fg = if active && flash_on { 0x1d2021 } else { 0xfbf1c7 };
+
+    let bar = model.layout.status_bar;
+    let pill = crate::layout::Rect {
+        x: bar.x + 4,
+        y: bar.y + 2,
+        w: 132,
+        h: bar.h - 4,
+    };
+    scene.fill_rect(pill, pill_bg);
+    draw_lightning_bolt(scene, (pill.x + 6) as f32, (pill.y + 2) as f32, bolt);
+    scene.text(pill.x + 26, pill.y + 4, label, fg);
+
+    // Firmware-style corner bolt so FULL PAD / screensaver still show it.
+    draw_lightning_bolt(scene, (SCREEN_W - 22) as f32, 6.0, bolt);
+}
+
+fn draw_lightning_bolt(scene: &mut Scene, x: f32, y: f32, color: u32) {
+    scene.fill(x + 8.0, y, 6.0, 3.0, color);
+    scene.fill(x + 5.0, y + 2.0, 7.0, 3.0, color);
+    scene.fill(x + 2.0, y + 5.0, 8.0, 3.0, color);
+    scene.fill(x + 0.0, y + 8.0, 10.0, 3.0, color);
+    scene.fill(x + 6.0, y + 10.0, 7.0, 3.0, color);
+    scene.fill(x + 3.0, y + 13.0, 6.0, 3.0, color);
+    scene.fill(x + 5.0, y + 16.0, 4.0, 3.0, color);
 }
 
 fn chrome_status(model: &NativeModel) -> String {
@@ -2823,6 +2865,15 @@ fn draw_settings(scene: &mut Scene, model: &NativeModel) {
         let c = layout.content;
         scene.text(c.x + 16, c.y + c.h - 28, &model.status_line, 0xfabd2f);
     }
+    if model.throttle.power_fault() {
+        let c = layout.content;
+        scene.text(
+            c.x + 16,
+            c.y + c.h - 50,
+            &model.throttle.log_line(),
+            0xfb4934,
+        );
+    }
 }
 
 fn draw_fx(scene: &mut Scene, model: &NativeModel) {
@@ -2917,9 +2968,37 @@ fn draw_mix(scene: &mut Scene, model: &NativeModel) {
     for index in 0..16 {
         let cell = layout.mix_pad_cell(index);
         let pad = &model.phrases[index];
-        scene.fill_rect(cell, if pad.empty { 0x1a1a22 } else { 0x20202c });
+        let playing = !pad.empty && model.phrase_playing[index];
+        if playing {
+            scene.fill_rect(cell, 0x689d6a);
+            scene.fill_rect(
+                Rect {
+                    x: cell.x + 3,
+                    y: cell.y + 3,
+                    w: cell.w - 6,
+                    h: cell.h - 6,
+                },
+                0x1d2021,
+            );
+        } else {
+            scene.fill_rect(cell, if pad.empty { 0x1a1a22 } else { 0x20202c });
+        }
         let label = phrases::pad_label(index);
-        scene.text(cell.x + 4, cell.y + 4, &label, if pad.empty { 0x665c54 } else { 0xc0c0d0 });
+        scene.text(
+            cell.x + 4,
+            cell.y + 4,
+            &label,
+            if pad.empty {
+                0x665c54
+            } else if playing {
+                0xb8bb26
+            } else {
+                0xc0c0d0
+            },
+        );
+        if playing {
+            scene.text(cell.x + cell.w - 22, cell.y + 4, "ON", 0xb8bb26);
+        }
         if pad.empty {
             continue;
         }
@@ -2931,7 +3010,7 @@ fn draw_mix(scene: &mut Scene, model: &NativeModel) {
             w: cell.w - 12,
             h: fill_h,
         };
-        scene.fill_rect(fill, 0xd79921);
+        scene.fill_rect(fill, if playing { 0x689d6a } else { 0xd79921 });
     }
 }
 
@@ -2952,6 +3031,20 @@ fn draw_log(scene: &mut Scene, model: &NativeModel) {
         ),
         0xa0a0b8,
     );
+    let mut log_y = c.y + 70;
+    if model.throttle.power_fault() {
+        scene.text(
+            c.x + 16,
+            c.y + 58,
+            &model.throttle.log_line(),
+            if model.throttle.power_fault_now() {
+                0xfb4934
+            } else {
+                0xfabd2f
+            },
+        );
+        log_y = c.y + 80;
+    }
     for (i, line) in model
         .log_lines
         .iter()
@@ -2960,7 +3053,7 @@ fn draw_log(scene: &mut Scene, model: &NativeModel) {
         .take(10)
         .enumerate()
     {
-        scene.text(c.x + 16, c.y + 70 + (i as i32) * 18, line, 0xd5c4a1);
+        scene.text(c.x + 16, log_y + (i as i32) * 18, line, 0xd5c4a1);
     }
     scene.fill_rect(model.layout.log_clear, 0x504945);
     scene.text(
@@ -3118,6 +3211,44 @@ mod tests {
     }
 
     #[test]
+    fn mix_marks_playing_phrase() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Mix);
+        model.phrases[0].empty = false;
+        model.phrases[0].gain = 1.2;
+        model.phrase_playing[0] = true;
+        let scene = build(&model);
+        let cell = model.layout.mix_pad_cell(0);
+        let in_cell = |q: &ColorQuad| {
+            q.x >= cell.x as f32 - 1.0
+                && q.y >= cell.y as f32 - 1.0
+                && q.x + q.w <= (cell.x + cell.w) as f32 + 1.0
+                && q.y + q.h <= (cell.y + cell.h) as f32 + 1.0
+        };
+        assert!(
+            scene
+                .color
+                .iter()
+                .any(|q| q.color == 0x689d6a && in_cell(q)),
+            "playing mix pad should paint green"
+        );
+        assert!(
+            scene.glyphs.iter().any(|g| g.color == 0xb8bb26),
+            "playing mix pad should label ON"
+        );
+
+        model.phrase_playing[0] = false;
+        let scene = build(&model);
+        assert!(
+            !scene
+                .color
+                .iter()
+                .any(|q| q.color == 0x689d6a && in_cell(q)),
+            "idle mix pad should not use the playing green"
+        );
+    }
+
+    #[test]
     fn pads_mode_draws_sixteen_tiles() {
         let mut model = NativeModel::new();
         model.set_mode(UiMode::Pads);
@@ -3169,5 +3300,40 @@ mod tests {
             })
             .count();
         assert!(clear_btn >= 1, "CLEAR button missing");
+    }
+
+    #[test]
+    fn undervolt_draws_low_pwr_badge() {
+        let mut model = NativeModel::new();
+        model.throttle = crate::throttle::ThrottleState::parse("throttled=0x50005").unwrap();
+        let scene = build(&model);
+        let bolts = scene
+            .color
+            .iter()
+            .filter(|q| q.color == 0xfabd2f && q.w <= 12.0 && q.h <= 6.0)
+            .count();
+        assert!(bolts >= 4, "expected lightning bolt quads, got {bolts}");
+        let pill = scene
+            .color
+            .iter()
+            .any(|q| q.color == 0x9d0006 && q.w > 100.0 && q.h < 28.0);
+        assert!(pill, "expected LOW PWR status pill");
+        assert!(
+            scene.glyphs.iter().any(|g| g.color == 0x1d2021 || g.color == 0xfbf1c7),
+            "badge label missing"
+        );
+    }
+
+    #[test]
+    fn healthy_supply_has_no_power_badge() {
+        let model = NativeModel::new();
+        assert!(!model.throttle.power_fault());
+        let scene = build(&model);
+        let bolts = scene
+            .color
+            .iter()
+            .filter(|q| q.color == 0xfabd2f && q.w <= 12.0 && q.h <= 6.0)
+            .count();
+        assert_eq!(bolts, 0);
     }
 }
