@@ -1479,7 +1479,7 @@ fn draw_chords(scene: &mut Scene, model: &NativeModel) {
     if let Some(overlay) = model.chords_overlay {
         let title = match overlay {
             Overlay::Key => "KEY",
-            Overlay::Changes => "CHANGES",
+            Overlay::Changes => "PROGRESSIONS",
         };
         scene.text_scaled(
             layout.content.x + 12,
@@ -1516,7 +1516,7 @@ fn draw_chords(scene: &mut Scene, model: &NativeModel) {
         model.chords_out.short_label(),
         if model.chords_hold { "HOLD" } else { "MOM" },
         KEY_NAMES[model.chords_key as usize],
-        "CHANGES",
+        "PROGS",
         if model.chords_arm { "ARM*" } else { "ARM" },
     ];
     let tool_colors = [

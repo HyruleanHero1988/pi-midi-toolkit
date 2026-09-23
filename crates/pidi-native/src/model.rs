@@ -3370,7 +3370,7 @@ impl NativeModel {
             Hit::ChordsChanges => {
                 self.tap_ui(slot, id, gesture, px, py);
                 self.chords_overlay = Some(ChordsOverlay::Changes);
-                self.status_line = "pick changes".into();
+                self.status_line = "pick progressions".into();
             }
             Hit::ChordsArm => {
                 self.tap_ui(slot, id, gesture, px, py);
@@ -8294,6 +8294,18 @@ mod tests {
             .map(|c| c.name())
             .collect();
         assert_eq!(names, ["C", "G", "Am", "F"]);
+    }
+
+    #[test]
+    fn chords_progs_button_opens_progressions_overlay() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Chords);
+        let mut out = Outbox::new();
+        let cell = model.layout.chords_tool(3);
+        model.finger_down(1, cell.x + 4, cell.y + 4, &mut out);
+        model.finger_up(1, &mut out);
+        assert_eq!(model.chords_overlay, Some(ChordsOverlay::Changes));
+        assert_eq!(model.status_line, "pick progressions");
     }
 
     #[test]
