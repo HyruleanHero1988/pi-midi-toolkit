@@ -259,6 +259,8 @@ pub struct JamboxEngine {
     clip_emit: EmitMode,
     kaoss_emit: EmitMode,
     arp_emit: EmitMode,
+    /// Last arp pitch the engine actually sounded — released before the next step.
+    arp_live: Option<(u8, u8)>,
     status: EngineStatus,
 }
 
@@ -367,6 +369,7 @@ impl JamboxEngine {
             clip_emit: EmitMode::Both,
             kaoss_emit: EmitMode::Local,
             arp_emit: EmitMode::Both,
+            arp_live: None,
             status: EngineStatus::default(),
         }
     }
@@ -908,7 +911,9 @@ impl JamboxEngine {
             } => {
                 if self.arp.enabled() && channel != DRUM_CHANNEL {
                     if velocity == 0 {
-                        self.arp.note_off(note);
+                        if let Some((ch, n)) = self.arp.note_off(note) {
+                            self.apply_arp_voice(ch, n, 0, false, relative_frame, midi_out);
+                        }
                     } else if self.arp.note_on(note, velocity, channel, absolute_frame) {
                         let step = self
                             .transport
@@ -925,7 +930,9 @@ impl JamboxEngine {
             }
             Command::NoteOff { channel, note } => {
                 if self.arp.enabled() && channel != DRUM_CHANNEL {
-                    self.arp.note_off(note);
+                    if let Some((ch, n)) = self.arp.note_off(note) {
+                        self.apply_arp_voice(ch, n, 0, false, relative_frame, midi_out);
+                    }
                 } else if channel != DRUM_CHANNEL {
                     self.voices.note_off(channel, note);
                     self.fm.note_off(channel, note);
@@ -966,7 +973,10 @@ impl JamboxEngine {
                 self.voices.all_notes_off();
                 self.fm.all_notes_off();
                 self.repeats.stop_all();
-                self.arp.panic();
+                if let Some((ch, n)) = self.arp.panic() {
+                    self.apply_arp_voice(ch, n, 0, false, relative_frame, midi_out);
+                }
+                self.arp_live = None;
                 self.release_kaoss();
             }
             Command::Panic => {
@@ -974,7 +984,8 @@ impl JamboxEngine {
                 self.fm.silence();
                 self.drums.silence();
                 self.repeats.stop_all();
-                self.arp.panic();
+                let _ = self.arp.panic();
+                self.arp_live = None;
                 self.release_kaoss();
                 let mut flush = [SeqEvent {
                     frame: 0,
@@ -1162,8 +1173,12 @@ impl JamboxEngine {
                 self.arp.set_division(ArpDivision::from_u8(division));
                 self.arp.set_octaves(octaves);
                 self.arp.set_gate(gate);
-                self.arp.set_latch(latch);
-                self.arp.set_enabled(enabled);
+                if let Some((ch, n)) = self.arp.set_latch(latch) {
+                    self.apply_arp_voice(ch, n, 0, false, relative_frame, midi_out);
+                }
+                if let Some((ch, n)) = self.arp.set_enabled(enabled) {
+                    self.apply_arp_voice(ch, n, 0, false, relative_frame, midi_out);
+                }
             }
             Command::SetArpStep { index, interval } => self.arp.set_step(index, interval),
             Command::SetArpLen { len } => self.arp.set_len(len),
@@ -1190,29 +1205,50 @@ impl JamboxEngine {
         relative_frame: u32,
         midi_out: &mut MidiOutSink,
     ) {
-        if self.arp_emit.includes_local() {
-            if on {
-                self.sound_on(channel, note, velocity, MixSource::Live);
-            } else if channel != DRUM_CHANNEL {
-                self.voices.note_off(channel, note);
-                self.fm.note_off(channel, note);
+        if on {
+            if let Some((ch, n)) = self.arp_live.take() {
+                self.release_arp_pitch(ch, n, relative_frame, midi_out);
             }
-        }
-        if self.arp_emit.includes_usb() {
-            midi_out.push(
-                relative_frame,
-                if on {
+            self.arp_live = Some((channel, note));
+            if self.arp_emit.includes_local() {
+                self.sound_on(channel, note, velocity, MixSource::Live);
+            }
+            if self.arp_emit.includes_usb() {
+                midi_out.push(
+                    relative_frame,
                     MidiEvent::NoteOn {
                         channel,
                         note,
                         velocity,
-                    }
-                } else {
-                    MidiEvent::NoteOff {
-                        channel,
-                        note,
-                        velocity: 0,
-                    }
+                    },
+                );
+            }
+        } else {
+            if self.arp_live == Some((channel, note)) {
+                self.arp_live = None;
+            }
+            self.release_arp_pitch(channel, note, relative_frame, midi_out);
+        }
+    }
+
+    fn release_arp_pitch(
+        &mut self,
+        channel: u8,
+        note: u8,
+        relative_frame: u32,
+        midi_out: &mut MidiOutSink,
+    ) {
+        if self.arp_emit.includes_local() && channel != DRUM_CHANNEL {
+            self.voices.note_off(channel, note);
+            self.fm.note_off(channel, note);
+        }
+        if self.arp_emit.includes_usb() {
+            midi_out.push(
+                relative_frame,
+                MidiEvent::NoteOff {
+                    channel,
+                    note,
+                    velocity: 0,
                 },
             );
         }
@@ -2912,5 +2948,47 @@ mod tests {
             e.status().active_voices <= 1,
             "authored arp is monophonic — roots must not stack as a chord"
         );
+    }
+
+    #[test]
+    fn arp_unlatched_release_turns_the_voice_off() {
+        let mut e = engine();
+        apply_now(
+            &mut e,
+            Command::SetArp {
+                enabled: true,
+                latch: false,
+                order: crate::ArpOrder::Up.as_u8(),
+                division: crate::ArpDivision::Quarter.as_u8(),
+                octaves: 0,
+                gate: 90,
+            },
+        );
+        let mut out = vec![0.0f32; 256];
+        let mut midi = MidiOutSink::new();
+        e.render(
+            &mut out,
+            &[ScheduledCommand::now(Command::NoteOn {
+                channel: 0,
+                note: 60,
+                velocity: 120,
+            })],
+            &mut midi,
+        );
+        assert!(e.voices.held_count() >= 1, "root should start the arp");
+        e.render(
+            &mut out,
+            &[ScheduledCommand::now(Command::NoteOff {
+                channel: 0,
+                note: 60,
+            })],
+            &mut midi,
+        );
+        assert_eq!(
+            e.voices.held_count(),
+            0,
+            "unlatched lift must release the sounding arp step"
+        );
+        assert!(!e.status().arp_latched);
     }
 }

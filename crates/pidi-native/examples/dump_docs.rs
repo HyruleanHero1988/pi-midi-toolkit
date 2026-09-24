@@ -235,6 +235,12 @@ fn main() {
     }
     {
         let (mut model, mut ob) = fresh();
+        model.set_mode(UiMode::Arp);
+        tick_n(&mut model, &mut ob, 2);
+        dump(&model, &out, "27-arp");
+    }
+    {
+        let (mut model, mut ob) = fresh();
         model.set_mode(UiMode::Chords);
         model.chords_overlay = Some(ChordsOverlay::Changes);
         tick_n(&mut model, &mut ob, 2);

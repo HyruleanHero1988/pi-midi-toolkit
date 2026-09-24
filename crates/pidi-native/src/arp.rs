@@ -126,6 +126,7 @@ impl ArpUi {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use jambox_core::ArpOrder;
 
     #[test]
     fn add_and_delete_keep_a_live_pattern() {
@@ -143,5 +144,47 @@ mod tests {
         assert_eq!(ArpUi::interval_label(0), "+0");
         assert_eq!(ArpUi::interval_label(7), "+7");
         assert_eq!(ArpUi::interval_label(-5), "-5");
+    }
+
+    #[test]
+    fn chrome_labels_fit_retro_font() {
+        let arp = ArpUi::new();
+        let labels = [
+            arp.order.label().to_string(),
+            arp.division.label().to_string(),
+            arp.gate_label(),
+            arp.out.short_label().to_string(),
+            ArpUi::interval_label(-5),
+            ArpUi::interval_label(12),
+            "OCT-".into(),
+            "OCT+".into(),
+            "-".into(),
+            "+".into(),
+            "ADD".into(),
+            "DEL".into(),
+            "KEY-".into(),
+            "KEY+".into(),
+            "HOLD".into(),
+            "LATCH".into(),
+            "PLAY A ROOT  C4".into(),
+            "LATCHED  C4  NEXT KEY".into(),
+        ];
+        for label in &labels {
+            for ch in label.chars() {
+                assert!(
+                    ch.is_ascii() && (ch.is_ascii_graphic() || ch == ' '),
+                    "arp label {label:?} uses {ch:?}, which the 5x7 font cannot draw"
+                );
+            }
+        }
+        for order in ArpOrder::ALL {
+            for ch in order.label().chars() {
+                assert!(
+                    ch.is_ascii() && ch.is_ascii_graphic(),
+                    "order {} uses {ch:?}",
+                    order.label()
+                );
+            }
+        }
     }
 }

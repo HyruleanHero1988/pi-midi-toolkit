@@ -2199,7 +2199,7 @@ impl Layout {
     }
 
     pub fn arp_tool(&self, index: usize) -> Rect {
-        let n = 6i32;
+        let n = 7i32;
         let w = (self.content.w - 16) / n;
         Rect {
             x: self.content.x + 8 + (index as i32).min(n - 1) * w,
@@ -3117,9 +3117,12 @@ impl Layout {
             return Hit::ArpOctUp;
         }
         if self.arp_tool(4).contains(px, py) {
-            return Hit::ArpGate;
+            return Hit::ArpOctUp;
         }
         if self.arp_tool(5).contains(px, py) {
+            return Hit::ArpGate;
+        }
+        if self.arp_tool(6).contains(px, py) {
             return Hit::ArpOut;
         }
         for i in 0..16 {
@@ -3719,6 +3722,26 @@ mod tests {
         assert!(
             layout.chords_strum.y >= layout.chords_grid.y + layout.chords_grid.h + 6,
             "wide strumpad should sit below the fifths grid"
+        );
+    }
+
+    #[test]
+    fn arp_oct_up_and_minus_are_real_buttons() {
+        let layout = Layout::new();
+        let oct_plus = layout.arp_tool(4);
+        assert_eq!(
+            layout.hit(UiMode::Arp, oct_plus.x + 4, oct_plus.y + 4),
+            Hit::ArpOctUp
+        );
+        let minus = layout.arp_edit(0);
+        assert_eq!(
+            layout.hit(UiMode::Arp, minus.x + 4, minus.y + 4),
+            Hit::ArpIntervalDown
+        );
+        let plus = layout.arp_edit(1);
+        assert_eq!(
+            layout.hit(UiMode::Arp, plus.x + 4, plus.y + 4),
+            Hit::ArpIntervalUp
         );
     }
 

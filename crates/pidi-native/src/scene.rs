@@ -1667,9 +1667,9 @@ fn draw_arp(scene: &mut Scene, model: &NativeModel) {
         model.status.arp_root
     });
     let banner_text = if latched {
-        format!("LATCHED  ROOT {root}  ·  next key retargets")
+        format!("LATCHED  {root}  NEXT KEY")
     } else {
-        format!("DEFINE  play a root · {root}")
+        format!("PLAY A ROOT  {root}")
     };
     scene.text_centered(banner, &banner_text, 0xfbf1c7, 2);
 
@@ -1680,12 +1680,15 @@ fn draw_arp(scene: &mut Scene, model: &NativeModel) {
         scene.text_centered(cell, order.label(), 0xfbf1c7, 1);
     }
 
+    let oct_label = format!("{}", model.arp.octaves);
+    let gate_label = model.arp.gate_label();
     let tools = [
         if model.arp.latch { "LATCH" } else { "HOLD" },
         model.arp.division.label(),
         "OCT-",
-        &format!("OCT {}", model.arp.octaves),
-        &model.arp.gate_label(),
+        oct_label.as_str(),
+        "OCT+",
+        gate_label.as_str(),
         model.arp.out.short_label(),
     ];
     let tool_colors = [
@@ -1693,10 +1696,11 @@ fn draw_arp(scene: &mut Scene, model: &NativeModel) {
         0x458588,
         0x3c3836,
         0x504945,
+        0x3c3836,
         0x458588,
         model.arp.out.color(),
     ];
-    for i in 0..6 {
+    for i in 0..7 {
         let cell = layout.arp_tool(i);
         scene.button(cell, tool_colors[i]);
         scene.text_centered(cell, tools[i], 0xfbf1c7, 1);
@@ -1706,6 +1710,7 @@ fn draw_arp(scene: &mut Scene, model: &NativeModel) {
     for i in 0..16 {
         let cell = layout.arp_step(i, 16);
         let live = (i as u8) < model.arp.len;
+        let add_slot = i == model.arp.len as usize;
         let selected = live && i == model.arp.selected;
         let playing = model.status.arp_enabled && i == live_step;
         let bg = if playing {
@@ -1714,6 +1719,8 @@ fn draw_arp(scene: &mut Scene, model: &NativeModel) {
             0xd65d0e
         } else if live {
             0x504945
+        } else if add_slot {
+            0x3c3836
         } else {
             0x1d2021
         };
@@ -1725,10 +1732,12 @@ fn draw_arp(scene: &mut Scene, model: &NativeModel) {
                 0xfbf1c7,
                 2,
             );
+        } else if add_slot {
+            scene.text_centered(cell, "+", 0xa89984, 2);
         }
     }
 
-    let edits = ["−", "+", "ADD", "DEL", "KEY-", "KEY+"];
+    let edits = ["-", "+", "ADD", "DEL", "KEY-", "KEY+"];
     for (i, label) in edits.iter().enumerate() {
         let cell = layout.arp_edit(i);
         scene.button(cell, 0x3c3836);

@@ -57,10 +57,10 @@ impl ArpOrder {
         match self {
             Self::Up => "UP",
             Self::Down => "DOWN",
-            Self::InclUp => "IN↑",
-            Self::InclDown => "IN↓",
-            Self::ExclUp => "EX↑",
-            Self::ExclDown => "EX↓",
+            Self::InclUp => "INC+",
+            Self::InclDown => "INC-",
+            Self::ExclUp => "EXC+",
+            Self::ExclDown => "EXC-",
             Self::Random => "RAND",
             Self::Order => "ORD",
         }
@@ -69,10 +69,10 @@ impl ArpOrder {
     pub fn from_name(name: &str) -> Self {
         match name.to_ascii_lowercase().as_str() {
             "down" => Self::Down,
-            "incl" | "inclusive" | "incl_up" | "in_up" | "in↑" => Self::InclUp,
-            "incl_down" | "in_down" | "in↓" => Self::InclDown,
-            "excl" | "exclusive" | "excl_up" | "ex_up" | "ex↑" => Self::ExclUp,
-            "excl_down" | "ex_down" | "ex↓" => Self::ExclDown,
+            "incl" | "inclusive" | "incl_up" | "in_up" | "in↑" | "inc+" => Self::InclUp,
+            "incl_down" | "in_down" | "in↓" | "inc-" => Self::InclDown,
+            "excl" | "exclusive" | "excl_up" | "ex_up" | "ex↑" | "exc+" => Self::ExclUp,
+            "excl_down" | "ex_down" | "ex↓" | "exc-" => Self::ExclDown,
             "rand" | "random" => Self::Random,
             "order" | "ord" | "as_played" | "as_written" => Self::Order,
             _ => Self::Up,
@@ -315,17 +315,21 @@ impl Arpeggiator {
         self.division
     }
 
-    pub fn set_enabled(&mut self, on: bool) {
+    pub fn set_enabled(&mut self, on: bool) -> Option<(u8, u8)> {
         self.enabled = on;
         if !on {
-            self.stop();
+            self.stop()
+        } else {
+            None
         }
     }
 
-    pub fn set_latch(&mut self, on: bool) {
+    pub fn set_latch(&mut self, on: bool) -> Option<(u8, u8)> {
         self.latch_armed = on;
         if !on && self.held_len == 0 {
-            self.stop();
+            self.stop()
+        } else {
+            None
         }
     }
 
@@ -413,26 +417,30 @@ impl Arpeggiator {
         Some((self.channel, note, self.velocity))
     }
 
-    pub fn note_off(&mut self, note: u8) {
+    pub fn note_off(&mut self, note: u8) -> Option<(u8, u8)> {
         if !self.enabled {
-            return;
+            return None;
         }
         self.forget_held(note & 0x7f);
         if self.held_len == 0 && !self.latch_armed {
-            self.stop();
+            self.stop()
+        } else {
+            None
         }
     }
 
-    pub fn stop(&mut self) {
+    /// Stop the clock. Returns the note still held so the engine can release it.
+    pub fn stop(&mut self) -> Option<(u8, u8)> {
+        let sounding = self.sounding.take().map(|note| (self.channel, note));
         self.running = false;
         self.latched = false;
         self.next_off_frame = None;
-        self.sounding = None;
+        sounding
     }
 
-    pub fn panic(&mut self) {
+    pub fn panic(&mut self) -> Option<(u8, u8)> {
         self.held_len = 0;
-        self.stop();
+        self.stop()
     }
 
     /// Push note-on/off events that fall inside this audio block.
@@ -455,10 +463,15 @@ impl Arpeggiator {
         let mut len = 0;
 
         if let Some(off_at) = self.next_off_frame {
-            if off_at < block_end && off_at >= block_start && len < out.len() {
+            if off_at < block_end && len < out.len() {
                 if let Some(note) = self.sounding.take() {
+                    let frame = if off_at >= block_start {
+                        (off_at - block_start) as u32
+                    } else {
+                        0
+                    };
                     out[len] = ArpEvent {
-                        frame: (off_at - block_start) as u32,
+                        frame,
                         channel: self.channel,
                         note,
                         velocity: 0,
@@ -471,44 +484,53 @@ impl Arpeggiator {
         }
 
         while self.next_on_frame < block_end && len + 1 < out.len() {
-            if self.next_on_frame >= block_start {
-                if let Some(note) = self.sounding.take() {
-                    out[len] = ArpEvent {
-                        frame: (self.next_on_frame - block_start) as u32,
-                        channel: self.channel,
-                        note,
-                        velocity: 0,
-                        on: false,
-                    };
-                    len += 1;
-                }
-                let note = self.advance_and_peek();
+            let frame = if self.next_on_frame >= block_start {
+                (self.next_on_frame - block_start) as u32
+            } else {
+                0
+            };
+            if let Some(note) = self.sounding.take() {
                 out[len] = ArpEvent {
-                    frame: (self.next_on_frame - block_start) as u32,
+                    frame,
                     channel: self.channel,
                     note,
-                    velocity: self.velocity,
-                    on: true,
+                    velocity: 0,
+                    on: false,
                 };
                 len += 1;
-                self.sounding = Some(note);
-                let off_at = self.next_on_frame.saturating_add(gate_frames.min(step.saturating_sub(1)));
-                if off_at < block_end && len < out.len() && self.gate < 127 {
-                    out[len] = ArpEvent {
-                        frame: (off_at - block_start) as u32,
-                        channel: self.channel,
-                        note,
-                        velocity: 0,
-                        on: false,
-                    };
-                    len += 1;
-                    self.sounding = None;
-                    self.next_off_frame = None;
-                } else if self.gate < 127 {
-                    self.next_off_frame = Some(off_at);
-                } else {
-                    self.next_off_frame = None;
-                }
+            }
+            let note = self.advance_and_peek();
+            out[len] = ArpEvent {
+                frame,
+                channel: self.channel,
+                note,
+                velocity: self.velocity,
+                on: true,
+            };
+            len += 1;
+            self.sounding = Some(note);
+            let off_at = self
+                .next_on_frame
+                .saturating_add(gate_frames.min(step.saturating_sub(1)));
+            if self.gate < 127 && off_at < block_end && len < out.len() {
+                out[len] = ArpEvent {
+                    frame: if off_at >= block_start {
+                        (off_at - block_start) as u32
+                    } else {
+                        0
+                    },
+                    channel: self.channel,
+                    note,
+                    velocity: 0,
+                    on: false,
+                };
+                len += 1;
+                self.sounding = None;
+                self.next_off_frame = None;
+            } else if self.gate < 127 {
+                self.next_off_frame = Some(off_at);
+            } else {
+                self.next_off_frame = None;
             }
             self.next_on_frame = self.next_on_frame.saturating_add(step);
         }
@@ -812,6 +834,34 @@ mod tests {
         arp.note_off(60);
         assert_eq!(arp.sounding, Some(60));
         assert!(arp.running());
+    }
+
+    #[test]
+    fn overdue_gate_off_is_flushed_at_the_next_block() {
+        let transport = transport();
+        let mut arp = Arpeggiator::new();
+        arp.set_enabled(true);
+        arp.set_gate(40);
+        arp.set_division(ArpDivision::Sixteenth);
+        assert!(arp.note_on(60, 100, 0, 100));
+        let step = transport
+            .ticks_to_samples(ArpDivision::Sixteenth.ticks())
+            .round() as u64;
+        let first = arp.take_attack(100, step).unwrap();
+        assert_eq!(first.1, 60);
+        let mut events = [ArpEvent {
+            frame: 0,
+            channel: 0,
+            note: 0,
+            velocity: 0,
+            on: false,
+        }; MAX_ARP_EVENTS_PER_BLOCK];
+        let n = arp.collect(&transport, 10_000, 256, &mut events);
+        assert!(
+            events.iter().take(n).any(|e| !e.on && e.note == 60),
+            "a gate-off that landed in the previous block must still be emitted, got {:?}",
+            &events[..n]
+        );
     }
 
     #[test]

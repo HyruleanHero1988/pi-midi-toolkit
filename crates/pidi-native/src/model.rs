@@ -3794,11 +3794,13 @@ impl NativeModel {
             }
             Hit::ArpStep(index) => {
                 self.tap_ui(slot, id, gesture, px, py);
-                if index >= self.arp.len as usize {
-                    self.arp.len = (index as u8 + 1).min(jambox_core::MAX_ARP_STEPS as u8);
+                if index < self.arp.len as usize {
+                    self.arp.select_step(index);
+                    self.push_arp_pattern(outbox);
+                } else if index == self.arp.len as usize {
+                    self.arp.add_step();
+                    self.push_arp_pattern(outbox);
                 }
-                self.arp.select_step(index);
-                self.push_arp_pattern(outbox);
             }
             Hit::ArpIntervalUp => {
                 self.tap_ui(slot, id, gesture, px, py);
@@ -10162,6 +10164,16 @@ mod tests {
         model.finger_down(2, latch.x + 4, latch.y + 4, &mut out);
         model.finger_up(2, &mut out);
         assert!(model.arp.latch);
+        let oct_plus = model.layout.arp_tool(4);
+        let before = model.arp.octaves;
+        model.finger_down(3, oct_plus.x + 4, oct_plus.y + 4, &mut out);
+        model.finger_up(3, &mut out);
+        assert_eq!(model.arp.octaves, before + 1);
+        let empty = model.layout.arp_step(8, 16);
+        let len = model.arp.len;
+        model.finger_down(4, empty.x + 4, empty.y + 4, &mut out);
+        model.finger_up(4, &mut out);
+        assert_eq!(model.arp.len, len, "far empty slots must not grow the pattern");
         let batch = out.take();
         assert!(batch.iter().any(|r| matches!(
             r,

@@ -31,6 +31,7 @@ fn main() {
         ("pads", UiMode::Pads),
         ("kaoss", UiMode::Kaoss),
         ("chords", UiMode::Chords),
+        ("arp", UiMode::Arp),
         ("songs", UiMode::Songs),
         ("presets", UiMode::Presets),
         ("fm", UiMode::Fm),
