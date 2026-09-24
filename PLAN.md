@@ -27,7 +27,7 @@ todos:
     content: "Phase 2: per-pad/note auto-retrigger with configurable interval"
     status: pending
   - id: phrase-loop
-    content: "Phase 3a: SEQ mode — backbone take + 808-style overdub layers with keep/drop/undo; quantize later"
+    content: "Phase 3a: SEQ mode — backbone take + 808-style overdub layers with keep/drop/undo; QNT BAR/BEAT/OFF"
     status: completed
   - id: songs-smf
     content: "Phase 3b: Songs mode — save/load .mid, tempo, play to soft-synth and/or USB→DIN"

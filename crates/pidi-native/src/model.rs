@@ -14,7 +14,7 @@ use crate::presets::{self, PresetSnapshot};
 use crate::screensaver;
 use crate::scroll::{self, ScrollKind, TOUCH_SCROLL_THRESH_PX};
 use crate::seq::{SeqAction, SeqModel, SEQ_CLIP_SLOT};
-use crate::session::{self, OutMode, SessionState};
+use crate::session::{self, ClipQuantize, OutMode, SessionState};
 use crate::songs::{self, SONG_CLIP_SLOT};
 use crate::voice_bake;
 use crate::waves;
@@ -296,6 +296,7 @@ pub struct NativeModel {
     /// When set, MAP is picking outputs for this input channel (0–15).
     pub map_out_edit: Option<u8>,
     pub pads_out: OutMode,
+    pub clip_quantize: ClipQuantize,
     pub song_out: OutMode,
     pub kaoss_out: OutMode,
     pub chords_out: OutMode,
@@ -498,6 +499,7 @@ impl NativeModel {
             channel_map_bits: [0; 16],
             map_out_edit: None,
             pads_out: OutMode::Both,
+            clip_quantize: ClipQuantize::Bar,
             song_out: OutMode::Both,
             kaoss_out: OutMode::Local,
             chords_out: OutMode::Both,
@@ -1669,6 +1671,7 @@ impl NativeModel {
         // Voice flange (SYNTH / FX→VOICE); bus flange is independent global wet.
         self.fx_voice[3] = s.fx_flanger.clamp(0.0, 1.0);
         self.pads_out = s.pads_out;
+        self.clip_quantize = s.clip_quantize;
         self.song_out = s.song_out;
         self.kaoss_out = s.kaoss_out;
         self.chords_out = s.chords_out;
@@ -1769,6 +1772,7 @@ impl NativeModel {
             vibrato_rate: self.vibrato_rate,
             mode: self.mode.label().to_ascii_lowercase(),
             pads_out: self.pads_out,
+            clip_quantize: self.clip_quantize,
             song_out: self.song_out,
             kaoss_out: self.kaoss_out,
             chords_out: self.chords_out,
@@ -2370,6 +2374,19 @@ impl NativeModel {
             Hit::PadsSynth => {
                 self.tap_ui(slot, id, gesture, px, py);
                 self.toggle_pads_local_synth();
+            }
+            Hit::ClipQuantize => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.clip_quantize = self.clip_quantize.cycle();
+                self.status_line = format!(
+                    "clips lock to {}",
+                    match self.clip_quantize {
+                        ClipQuantize::Off => "now",
+                        ClipQuantize::Beat => "the next beat",
+                        ClipQuantize::Bar => "the next bar",
+                    }
+                );
+                self.mark_dirty();
             }
             Hit::PadsOut => {
                 self.tap_ui(slot, id, gesture, px, py);
@@ -3662,11 +3679,11 @@ impl NativeModel {
             return;
         }
         if self.phrase_playing[index] {
-            outbox.clip_stop(index as u8, "bar");
+            outbox.clip_stop(index as u8, self.clip_quantize.wire());
             self.phrase_playing[index] = false;
             self.status_line = format!("{} stop", phrases::pad_label(index));
         } else {
-            outbox.clip_launch(index as u8, "bar");
+            outbox.clip_launch(index as u8, self.clip_quantize.wire());
             self.phrase_playing[index] = true;
             self.status_line = format!("{} launch", phrases::pad_label(index));
         }
@@ -5495,7 +5512,7 @@ impl NativeModel {
                 );
                 outbox.clip_gain(SEQ_CLIP_SLOT, self.seq_level);
                 if launch {
-                    outbox.clip_launch(SEQ_CLIP_SLOT, "bar");
+                    outbox.clip_launch(SEQ_CLIP_SLOT, self.clip_quantize.wire());
                 }
             }
         }
@@ -6446,7 +6463,7 @@ impl NativeModel {
         let mode = if self.song_loop { "loop" } else { "oneshot" };
         outbox.clip_load(SONG_CLIP_SLOT, length_ticks, mode, events, 1.0);
         outbox.clip_gain(SONG_CLIP_SLOT, self.seq_level);
-        outbox.clip_launch(SONG_CLIP_SLOT, "bar");
+        outbox.clip_launch(SONG_CLIP_SLOT, self.clip_quantize.wire());
         self.song_playing = true;
         self.bpm = bpm.clamp(40.0, 240.0);
         self.seq.bpm = self.bpm;
@@ -7197,6 +7214,36 @@ mod tests {
         assert!(batch
             .iter()
             .any(|r| matches!(r, Request::ClipLaunch { slot: 0, .. })));
+    }
+
+    #[test]
+    fn clip_quantize_button_cycles_launch_grid() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Pads);
+        model.phrases[0].empty = false;
+        let mut out = Outbox::new();
+        let qnt = model.layout.pads_qnt;
+        assert_eq!(
+            model.layout.hit(UiMode::Pads, qnt.x + 4, qnt.y + 4),
+            Hit::ClipQuantize
+        );
+        model.finger_down(1, qnt.x + 4, qnt.y + 4, &mut out);
+        model.finger_up(1, &mut out);
+        out.take();
+        assert_eq!(model.clip_quantize, ClipQuantize::Beat);
+        model.toggle_phrase(0, &mut out);
+        assert!(out.take().iter().any(|r| matches!(
+            r,
+            Request::ClipLaunch {
+                slot: 0,
+                quantize: Some(q)
+            } if q == "beat"
+        )));
+        let seq_qnt = model.layout.seq_qnt;
+        assert_eq!(
+            model.layout.hit(UiMode::Seq, seq_qnt.x + 4, seq_qnt.y + 4),
+            Hit::ClipQuantize
+        );
     }
 
     #[test]

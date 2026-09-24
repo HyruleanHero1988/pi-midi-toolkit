@@ -1314,7 +1314,8 @@ fn draw_kaoss_note_readout(
 
 fn draw_pads(scene: &mut Scene, model: &NativeModel) {
     let layout = model.layout;
-    scene.text(16, HUD_H + 16, "Phrase Pads", 0xfbf1c7);
+    scene.fill_rect(layout.pads_qnt, model.clip_quantize.color());
+    scene.text_centered(layout.pads_qnt, model.clip_quantize.label(), 0xffffff, 1);
     scene.fill_rect(
         layout.pads_play,
         if !model.pads_edit { 0x689d6a } else { 0x3c3836 },
@@ -2421,6 +2422,8 @@ fn draw_seq(scene: &mut Scene, model: &NativeModel) {
     scene.text_centered(layout.seq_bpm_down, "- BPM", 0xffffff, 2);
     scene.fill_rect(layout.seq_bpm_up, 0x282828);
     scene.text_centered(layout.seq_bpm_up, "+ BPM", 0xffffff, 2);
+    scene.fill_rect(layout.seq_qnt, model.clip_quantize.color());
+    scene.text_centered(layout.seq_qnt, model.clip_quantize.label(), 0xffffff, 2);
     if model.seq_to_pad_armed {
         scene.text_scaled(520, HUD_H + 42, "tap a PAD slot", 0xfabd2f, 1);
     } else {
