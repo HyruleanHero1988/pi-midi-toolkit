@@ -474,6 +474,21 @@ impl KaossMapper {
             .map(|v| v.owner)
     }
 
+    /// True when any remaining voice still owns this channel+note.
+    pub fn note_is_held(&self, channel: u8, note: u8) -> bool {
+        let channel = channel & 0x0f;
+        self.voices
+            .iter()
+            .any(|v| v.active && v.channel == channel && v.note == note)
+    }
+
+    fn note_held_by_other(&self, owner: u32, channel: u8, note: u8) -> bool {
+        let channel = channel & 0x0f;
+        self.voices.iter().any(|v| {
+            v.active && v.owner != owner && v.channel == channel && v.note == note
+        })
+    }
+
     pub fn down(
         &mut self,
         owner: u32,
@@ -495,16 +510,21 @@ impl KaossMapper {
             velocity.min(127).max(1)
         };
         let channel = channel & 0x0f;
+        let already = self.note_is_held(channel, note);
         self.voices[slot] = TouchVoice {
             active: true,
             owner,
             channel,
             note,
         };
-        TouchDelta::Start {
-            channel,
-            note,
-            velocity,
+        if already {
+            TouchDelta::Idle
+        } else {
+            TouchDelta::Start {
+                channel,
+                note,
+                velocity,
+            }
         }
     }
 
@@ -527,12 +547,26 @@ impl KaossMapper {
         if new_note == old_note {
             return TouchDelta::Idle;
         }
+        let keep_old = self.note_held_by_other(owner, channel, old_note);
+        let new_already = self.note_held_by_other(owner, channel, new_note);
         self.voices[slot].note = new_note;
-        TouchDelta::Retune {
-            channel,
-            old_note,
-            new_note,
-            velocity,
+        match (keep_old, new_already) {
+            (true, true) => TouchDelta::Idle,
+            (true, false) => TouchDelta::Start {
+                channel,
+                note: new_note,
+                velocity,
+            },
+            (false, true) => TouchDelta::Stop {
+                channel,
+                note: old_note,
+            },
+            (false, false) => TouchDelta::Retune {
+                channel,
+                old_note,
+                new_note,
+                velocity,
+            },
         }
     }
 
@@ -542,6 +576,9 @@ impl KaossMapper {
                 let channel = voice.channel;
                 let note = voice.note;
                 *voice = TouchVoice::silent();
+                if self.note_is_held(channel, note) {
+                    return TouchDelta::Idle;
+                }
                 return TouchDelta::Stop { channel, note };
             }
         }
@@ -635,8 +672,26 @@ mod tests {
         assert_eq!(mapper.active_count(), 2);
         assert!(matches!(mapper.up(1), TouchDelta::Stop { note: 48, .. }));
         assert_eq!(mapper.active_count(), 1);
+        assert!(mapper.note_is_held(0, 72));
         assert!(matches!(mapper.up(2), TouchDelta::Stop { note: 72, .. }));
         assert_eq!(mapper.active_count(), 0);
+    }
+
+    #[test]
+    fn smear_onto_held_note_does_not_stop_it() {
+        let mut mapper = KaossMapper::new();
+        mapper.down(1, 0.0, 0.5, 0, 100);
+        mapper.down(2, 1.0, 0.5, 0, 100);
+        let glide = mapper.follow(1, 1.0, 0.5, 100);
+        assert!(
+            matches!(glide, TouchDelta::Stop { note: 48, .. }),
+            "leaving C should release C only: {glide:?}"
+        );
+        assert!(mapper.note_is_held(0, 72));
+        assert_eq!(mapper.up(1), TouchDelta::Idle);
+        assert_eq!(mapper.active_count(), 1);
+        assert!(mapper.note_is_held(0, 72));
+        assert!(matches!(mapper.up(2), TouchDelta::Stop { note: 72, .. }));
     }
 
     #[test]

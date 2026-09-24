@@ -4777,6 +4777,35 @@ impl NativeModel {
             .count()
     }
 
+    /// Sounding notes come from live contacts, not only the last start/stop edge.
+    fn reconcile_kaoss_from_fingers(&mut self, outbox: &mut Outbox) {
+        let prog = kaoss_ui::program(self.kaoss_program);
+        if !prog.note || kaoss_ui::gate(self.kaoss_gate).beats > 0.0 {
+            return;
+        }
+        let live: Vec<(f32, f32)> = self
+            .fingers
+            .iter()
+            .filter(|f| f.active && f.surface == Surface::Kaoss)
+            .map(|f| (f.x, f.y))
+            .collect();
+        if live.is_empty() {
+            return;
+        }
+        let held: Vec<u8> = live
+            .iter()
+            .map(|&(x, _)| self.kaoss_note_at(x))
+            .collect();
+        if let Some(current) = self.kaoss_usb_note {
+            if held.contains(&current) {
+                return;
+            }
+        }
+        if let Some(&(x, y)) = live.last() {
+            self.kaoss_usb_note_follow(x, y, outbox);
+        }
+    }
+
     fn begin_kaoss_touch(&mut self, gesture: u32, x: f32, y: f32, outbox: &mut Outbox) {
         // Count excludes this contact only if it isn't registered yet — callers
         // always arm the Finger slot before invoking us, so subtract one.
@@ -4920,6 +4949,7 @@ impl NativeModel {
                 self.kaoss_usb_note_off(outbox);
             }
         }
+        self.reconcile_kaoss_from_fingers(outbox);
         self.kaoss_touching = remaining > 0;
         if remaining == 0 {
             self.kaoss_usb_pad_up(outbox);
@@ -7156,6 +7186,140 @@ mod tests {
         let mut buf = [(0.0, 0.0); MAX_FINGERS];
         assert_eq!(model.copy_kaoss_fingers(&mut buf), 2);
         assert!((buf[0].0 - buf[1].0).abs() > 0.4);
+    }
+
+    #[test]
+    fn kaoss_lifting_one_finger_leaves_the_other_touch() {
+        let mut model = NativeModel::new();
+        assert!(kaoss_ui::program(model.kaoss_program).note);
+        let mut out = Outbox::new();
+        let a = model.layout.kaoss_cell(1, 3);
+        let b = model.layout.kaoss_cell(10, 3);
+        model.finger_down(1, a.x + 4, a.y + 4, &mut out);
+        model.finger_down(2, b.x + 4, b.y + 4, &mut out);
+        let downs: Vec<u32> = out
+            .take()
+            .iter()
+            .filter_map(|r| match r {
+                Request::Touch {
+                    phase: TouchPhase::Down,
+                    gesture,
+                    ..
+                } => Some(*gesture),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(downs.len(), 2);
+
+        model.finger_up(1, &mut out);
+        let lift = out.take();
+        let ups: Vec<u32> = lift
+            .iter()
+            .filter_map(|r| match r {
+                Request::Touch {
+                    phase: TouchPhase::Up,
+                    gesture,
+                    ..
+                } => Some(*gesture),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            ups,
+            vec![downs[0]],
+            "lifting finger 1 must not Touch-Up finger 2: {lift:?}"
+        );
+        let mut buf = [(0.0, 0.0); MAX_FINGERS];
+        assert_eq!(model.copy_kaoss_fingers(&mut buf), 1);
+
+        model.finger_up(2, &mut out);
+        let end = out.take();
+        assert!(end.iter().any(|r| matches!(
+            r,
+            Request::Touch {
+                phase: TouchPhase::Up,
+                gesture,
+                ..
+            } if *gesture == downs[1]
+        )));
+    }
+
+    #[test]
+    fn kaoss_smear_lift_does_not_touch_up_the_held_finger() {
+        let mut model = NativeModel::new();
+        let mut out = Outbox::new();
+        let a = model.layout.kaoss_cell(1, 3);
+        let b = model.layout.kaoss_cell(10, 3);
+        model.finger_down(1, a.x + 4, a.y + 4, &mut out);
+        model.finger_down(2, b.x + 4, b.y + 4, &mut out);
+        let downs: Vec<u32> = out
+            .take()
+            .iter()
+            .filter_map(|r| match r {
+                Request::Touch {
+                    phase: TouchPhase::Down,
+                    gesture,
+                    ..
+                } => Some(*gesture),
+                _ => None,
+            })
+            .collect();
+
+        model.finger_move(1, b.x + 4, b.y + 4, &mut out);
+        out.take();
+        model.finger_up(1, &mut out);
+        let lift = out.take();
+        assert!(
+            lift.iter().all(|r| !matches!(
+                r,
+                Request::Touch {
+                    phase: TouchPhase::Up,
+                    gesture,
+                    ..
+                } if *gesture == downs[1]
+            )),
+            "smear-lift must not send Up for the remaining finger: {lift:?}"
+        );
+        let mut buf = [(0.0, 0.0); MAX_FINGERS];
+        assert_eq!(model.copy_kaoss_fingers(&mut buf), 1);
+    }
+
+    #[test]
+    fn kaoss_usb_reconciles_to_the_remaining_finger() {
+        let mut model = NativeModel::new();
+        model.kaoss_out = OutMode::Usb;
+        let mut out = Outbox::new();
+        let a = model.layout.kaoss_cell(1, 3);
+        let b = model.layout.kaoss_cell(10, 3);
+        model.finger_down(1, a.x + 4, a.y + 4, &mut out);
+        model.finger_down(2, b.x + 4, b.y + 4, &mut out);
+        out.take();
+
+        let keep = model.kaoss_note_at(model.layout.kaoss.pad_xy(a.x + 4, a.y + 4).0);
+        model.finger_up(2, &mut out);
+        let lift = out.take();
+        assert!(
+            lift.iter().any(|r| matches!(
+                r,
+                Request::MidiEmit {
+                    kind,
+                    note: Some(n),
+                    ..
+                } if kind == "note_on" && *n == keep
+            )),
+            "USB out should retarget the remaining finger's note: {lift:?}"
+        );
+        assert!(
+            lift.iter().all(|r| !matches!(
+                r,
+                Request::MidiEmit {
+                    kind,
+                    note: Some(n),
+                    ..
+                } if kind == "note_off" && *n == keep
+            )),
+            "USB must not note-off the remaining pitch: {lift:?}"
+        );
     }
 
     #[test]
