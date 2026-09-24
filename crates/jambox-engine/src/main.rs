@@ -192,8 +192,7 @@ fn run(
             );
         });
     } else {
-        // Reopens after cable unplug / ALSA death / IPC audio_reopen; does not
-        // kill the control socket.
+        // Stays on the first successful stream. SET → AUDIO sends audio_reopen.
         audio::spawn_output(
             output,
             audio_side,

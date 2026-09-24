@@ -339,6 +339,10 @@ pub struct NativeModel {
     pub wifi_kb_shift: bool,
     pub wifi_kb_sym: bool,
     pub wifi_kb_show: bool,
+    /// Last known USB VBUS state for the Wi-Fi dongle (true until first park).
+    wifi_usb_on: bool,
+    wifi_usb_job: Option<std::sync::mpsc::Receiver<(bool, bool, String)>>,
+    pending_scan_after_power: bool,
     mode_before_power: UiMode,
     pub screensaver: screensaver::IdleWatch,
     panel_backlight: screensaver::PanelBacklight,
@@ -395,7 +399,7 @@ impl NativeModel {
         let fm_patch = jambox_core::fm_recipe_patch(0);
         let out = Self {
             layout: Layout::new(),
-            mode: UiMode::Kaoss,
+            mode: UiMode::Home,
             drum_repeat: [RepeatDivisionChoice::Off; DRUM_MODEL_COUNT],
             status: StatusReply::default(),
             fps: 0.0,
@@ -535,6 +539,9 @@ impl NativeModel {
             wifi_kb_shift: false,
             wifi_kb_sym: false,
             wifi_kb_show: false,
+            wifi_usb_on: true,
+            wifi_usb_job: None,
+            pending_scan_after_power: false,
             mode_before_power: UiMode::Kaoss,
             screensaver: screensaver::IdleWatch::new(screensaver::timeout_from_env()),
             panel_backlight: screensaver::PanelBacklight::new(),
@@ -926,6 +933,7 @@ impl NativeModel {
         self.mark_dirty();
     }
 
+    #[allow(dead_code)] // kept for session JSON labels; boot no longer restores last mode
     fn mode_from_session(raw: &str) -> UiMode {
         match raw.to_ascii_lowercase().as_str() {
             "home" => UiMode::Home,
@@ -1081,6 +1089,8 @@ impl NativeModel {
         self.poll_host_job();
         self.poll_update_job();
         self.poll_wifi_job();
+        self.poll_wifi_usb();
+        self.sync_wifi_usb();
         self.poll_throttle();
         self.tick_ota_reload(dt);
         if self.mode == UiMode::Drums && self.kit_edit_open && self.kit_wave_dirty {
@@ -1221,6 +1231,9 @@ impl NativeModel {
             "{}\n\nRemote: —\nTap CHECK to look at GitHub master.",
             host::update_local_status()
         );
+        if !self.wifi_usb_on {
+            self.update_status.push_str("\nPowering Wi-Fi…");
+        }
         self.status_line = "Update".into();
         self.mark_dirty();
     }
@@ -1246,11 +1259,16 @@ impl NativeModel {
         self.wifi_busy = false;
         self.wifi_job = None;
         self.wifi_scroll = 0;
-        self.wifi_status = "Tap SCAN to list networks, or REJOIN saved credentials.".into();
         self.status_line = "Wi-Fi".into();
         self.mark_dirty();
-        if self.wifi_networks.is_empty() {
-            self.start_wifi_scan();
+        if self.wifi_usb_on {
+            self.wifi_status = "Tap SCAN to list networks, or REJOIN saved credentials.".into();
+            if self.wifi_networks.is_empty() {
+                self.start_wifi_scan();
+            }
+        } else {
+            self.pending_scan_after_power = self.wifi_networks.is_empty();
+            self.wifi_status = "Powering Wi-Fi…".into();
         }
     }
 
@@ -1393,6 +1411,82 @@ impl NativeModel {
                 if self.wifi_kb_shift && !self.wifi_kb_sym {
                     self.wifi_kb_shift = false;
                 }
+            }
+        }
+        self.mark_dirty();
+    }
+
+    fn wifi_usb_wanted(&self) -> bool {
+        crate::wifi_power::usb_wanted(
+            self.wifi_panel_open,
+            self.wifi_kb_open,
+            self.update_panel_open,
+            self.wifi_busy,
+            self.update_busy,
+        ) || self.reload_ui_in.is_some()
+    }
+
+    fn sync_wifi_usb(&mut self) {
+        if self.wifi_usb_job.is_some() {
+            return;
+        }
+        let want = self.wifi_usb_wanted();
+        if want == self.wifi_usb_on {
+            return;
+        }
+        self.wifi_usb_job = Some(crate::wifi_power::spawn(want));
+        if want {
+            if self.wifi_panel_open && self.wifi_status == "Powering Wi-Fi…" {
+                // already set
+            } else if self.update_panel_open && !self.update_busy {
+                if !self.update_status.contains("Powering Wi-Fi") {
+                    self.update_status.push_str("\nPowering Wi-Fi…");
+                }
+            }
+        }
+        self.mark_dirty();
+    }
+
+    fn poll_wifi_usb(&mut self) {
+        let Some(rx) = self.wifi_usb_job.as_ref() else {
+            return;
+        };
+        let Ok((ok, on, detail)) = rx.try_recv() else {
+            return;
+        };
+        self.wifi_usb_job = None;
+        if ok {
+            self.wifi_usb_on = on;
+        } else if on {
+            // Power-on failed; still treat as available so SCAN/CHECK can try Ethernet.
+            self.wifi_usb_on = true;
+        }
+        if !detail.is_empty()
+            && !detail.contains("dry-run")
+            && !detail.contains("appliance only")
+        {
+            self.push_log(detail.clone());
+        }
+        if on {
+            if self.wifi_panel_open {
+                if self.pending_scan_after_power {
+                    self.pending_scan_after_power = false;
+                    self.start_wifi_scan();
+                } else if self.wifi_status == "Powering Wi-Fi…" {
+                    self.wifi_status =
+                        "Tap SCAN to list networks, or REJOIN saved credentials.".into();
+                }
+            }
+            if self.update_panel_open && !self.update_busy {
+                self.update_status = format!(
+                    "{}\n\nRemote: —\nTap CHECK to look at GitHub master.",
+                    host::update_local_status()
+                );
+            }
+        }
+        if !ok {
+            if self.wifi_panel_open {
+                self.wifi_status = detail;
             }
         }
         self.mark_dirty();
@@ -1729,9 +1823,9 @@ impl NativeModel {
         self.push_voice_fx("flanger_mix", self.fx_voice[3], outbox);
         self.sync_wave_bank();
         self.push_kaoss_scale(outbox);
-        if !s.mode.is_empty() {
-            self.mode = Self::mode_from_session(&s.mode);
-        }
+        // Last screen is still written to settings.json, but power-on is
+        // always the launcher — not whatever mode was up at shutdown.
+        self.mode = UiMode::Home;
         self.sync_melody_engine(outbox);
         self.session_dirty = false;
         self.status_line = "session loaded".into();
@@ -6587,6 +6681,12 @@ mod tests {
     use crate::client::Outbox;
     use jambox_protocol::Request;
 
+    fn model_on_kaoss() -> NativeModel {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Kaoss);
+        model
+    }
+
     #[test]
     fn kaoss_note_at_tracks_pad_x() {
         let model = NativeModel::new();
@@ -6627,7 +6727,7 @@ mod tests {
 
     #[test]
     fn kaoss_gesture_emits_touch_edges() {
-        let mut model = NativeModel::new();
+        let mut model = model_on_kaoss();
         let mut out = Outbox::new();
         let cell = model.layout.kaoss_cell(0, 0);
         model.finger_down(1, cell.x + 4, cell.y + 4, &mut out);
@@ -6642,7 +6742,7 @@ mod tests {
     #[test]
     fn kaoss_hold_survives_filter_pad_touch() {
         // HOLD a LEAD note, switch to FILTER, touch the pad — drone must stay.
-        let mut model = NativeModel::new();
+        let mut model = model_on_kaoss();
         model.kaoss_out = OutMode::Local;
         model.kaoss_hold = true;
         model.kaoss_program = kaoss_ui::KAOSS_PROGRAMS
@@ -6705,7 +6805,7 @@ mod tests {
 
     #[test]
     fn kaoss_bend_program_emits_pitch_bend_semis() {
-        let mut model = NativeModel::new();
+        let mut model = model_on_kaoss();
         model.kaoss_program = kaoss_ui::KAOSS_PROGRAMS
             .iter()
             .position(|p| p.id == "bend")
@@ -6738,7 +6838,7 @@ mod tests {
 
     #[test]
     fn kaoss_y_move_emits_tone_for_lead() {
-        let mut model = NativeModel::new();
+        let mut model = model_on_kaoss();
         assert_eq!(kaoss_ui::program(model.kaoss_program).y_param, "tone");
         let mut out = Outbox::new();
         let cell = model.layout.kaoss_cell(6, 3);
@@ -6757,7 +6857,7 @@ mod tests {
 
     #[test]
     fn kaoss_vib_y_drives_vibrato_not_tone() {
-        let mut model = NativeModel::new();
+        let mut model = model_on_kaoss();
         model.kaoss_program = kaoss_ui::KAOSS_PROGRAMS
             .iter()
             .position(|p| p.id == "vib")
@@ -6788,7 +6888,7 @@ mod tests {
 
     #[test]
     fn kaoss_wah_y_drives_tone_lfo_rate_not_tone() {
-        let mut model = NativeModel::new();
+        let mut model = model_on_kaoss();
         model.kaoss_program = kaoss_ui::KAOSS_PROGRAMS
             .iter()
             .position(|p| p.id == "wah")
@@ -6837,7 +6937,7 @@ mod tests {
 
     #[test]
     fn kaoss_wah_hold_keeps_tone_lfo_after_lift() {
-        let mut model = NativeModel::new();
+        let mut model = model_on_kaoss();
         model.kaoss_program = kaoss_ui::KAOSS_PROGRAMS
             .iter()
             .position(|p| p.id == "wah")
@@ -6861,7 +6961,7 @@ mod tests {
 
     #[test]
     fn gate_multi_touch_survives_first_finger_up() {
-        let mut model = NativeModel::new();
+        let mut model = model_on_kaoss();
         model.kaoss_gate = 1; // GATE 1/8
         assert!(kaoss_ui::program(model.kaoss_program).note);
         assert!(kaoss_ui::gate(model.kaoss_gate).beats > 0.0);
@@ -6893,7 +6993,7 @@ mod tests {
 
     #[test]
     fn kaoss_viz_tracks_multiple_fingers() {
-        let mut model = NativeModel::new();
+        let mut model = model_on_kaoss();
         model.kaoss_viz_style = crate::kaoss_viz::KaossVizStyle::Glow;
         let mut out = Outbox::new();
         let a = model.layout.kaoss_cell(1, 3);
@@ -6981,10 +7081,26 @@ mod tests {
     }
 
     #[test]
+    fn boot_and_session_load_open_home() {
+        let model = NativeModel::new();
+        assert_eq!(model.mode, UiMode::Home);
+
+        let mut loaded = NativeModel::new();
+        loaded.set_mode(UiMode::Kaoss);
+        let mut out = Outbox::new();
+        let mut s = SessionState::default();
+        s.mode = "kaoss".into();
+        loaded.apply_session(&s, &mut out);
+        assert_eq!(loaded.mode, UiMode::Home);
+        assert_eq!(NativeModel::mode_from_session("kaoss"), UiMode::Kaoss);
+        assert_eq!(NativeModel::mode_from_session("home"), UiMode::Home);
+    }
+
+    #[test]
     fn nav_changes_mode() {
         let mut model = NativeModel::new();
         let mut out = Outbox::new();
-        assert_eq!(model.mode, UiMode::Kaoss);
+        assert_eq!(model.mode, UiMode::Home);
         let cell = model.layout.nav_jam(3); // Pads
         model.finger_down(1, cell.x + 4, cell.y + 4, &mut out);
         assert_eq!(model.mode, UiMode::Pads);
@@ -7009,7 +7125,7 @@ mod tests {
 
     #[test]
     fn five_contacts_are_tracked() {
-        let mut model = NativeModel::new();
+        let mut model = model_on_kaoss();
         let mut out = Outbox::new();
         let k = model.layout.kaoss;
         for i in 0..5 {
@@ -7022,7 +7138,7 @@ mod tests {
 
     #[test]
     fn kaoss_two_fingers_emit_two_touch_downs() {
-        let mut model = NativeModel::new();
+        let mut model = model_on_kaoss();
         assert!(kaoss_ui::program(model.kaoss_program).note);
         let mut out = Outbox::new();
         let a = model.layout.kaoss_cell(1, 3);
@@ -7229,7 +7345,7 @@ mod tests {
 
     #[test]
     fn kaoss_echo_sends_voice_delay_not_bus() {
-        let mut model = NativeModel::new();
+        let mut model = model_on_kaoss();
         select_kaoss_program(&mut model, "echo");
         model.morph_a = 2;
         model.morph_b = 5;
@@ -7248,7 +7364,7 @@ mod tests {
 
     #[test]
     fn kaoss_echo_drums_sends_kit_group_not_voice() {
-        let mut model = NativeModel::new();
+        let mut model = model_on_kaoss();
         select_kaoss_program(&mut model, "echo");
         model.kaoss_fx_target = session::KaossFxTarget::Drums;
         model.morph_a = 2;
@@ -7266,7 +7382,7 @@ mod tests {
 
     #[test]
     fn kaoss_echo_both_sends_voice_and_kit_group() {
-        let mut model = NativeModel::new();
+        let mut model = model_on_kaoss();
         select_kaoss_program(&mut model, "space");
         model.kaoss_fx_target = session::KaossFxTarget::Both;
         model.morph_a = 1;
@@ -7299,7 +7415,7 @@ mod tests {
 
     #[test]
     fn kaoss_space_sends_voice_reverb_not_bus() {
-        let mut model = NativeModel::new();
+        let mut model = model_on_kaoss();
         select_kaoss_program(&mut model, "space");
         model.morph_a = 1;
         model.morph_b = 1;
@@ -8110,7 +8226,7 @@ mod tests {
 
     #[test]
     fn kaoss_hold_survives_switch_to_chords() {
-        let mut model = NativeModel::new();
+        let mut model = model_on_kaoss();
         model.kaoss_out = OutMode::Local;
         model.kaoss_hold = true;
         model.kaoss_program = kaoss_ui::KAOSS_PROGRAMS
@@ -8314,6 +8430,33 @@ mod tests {
         model.finger_down(2, close.x + 4, close.y + 4, &mut out);
         model.finger_up(2, &mut out);
         assert!(!model.update_panel_open);
+    }
+
+    #[test]
+    fn wifi_and_update_panels_request_usb_power() {
+        let mut model = NativeModel::new();
+        model.wifi_usb_on = false;
+        model.set_mode(UiMode::Settings);
+        let mut out = Outbox::new();
+        let wifi = model.layout.settings_wifi;
+        model.finger_down(1, wifi.x + 4, wifi.y + 4, &mut out);
+        model.finger_up(1, &mut out);
+        assert!(model.wifi_panel_open);
+        assert!(model.wifi_usb_wanted());
+        assert!(model.wifi_status.contains("Powering"));
+        assert!(model.wifi_job.is_none(), "scan waits until the dongle is up");
+
+        let close = model.layout.wifi_close();
+        model.finger_down(2, close.x + 4, close.y + 4, &mut out);
+        model.finger_up(2, &mut out);
+        assert!(!model.wifi_panel_open);
+        assert!(!model.wifi_usb_wanted());
+
+        let upd = model.layout.settings_update;
+        model.finger_down(3, upd.x + 4, upd.y + 4, &mut out);
+        model.finger_up(3, &mut out);
+        assert!(model.update_panel_open);
+        assert!(model.wifi_usb_wanted());
     }
 
     #[test]

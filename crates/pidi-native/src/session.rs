@@ -265,7 +265,7 @@ impl Default for SessionState {
             vibrato_always: 0.0,
             vibrato_depth: default_vibrato_depth(),
             vibrato_rate: default_vibrato_rate(),
-            mode: "kaoss".into(),
+            mode: "home".into(),
             pads_out: OutMode::Both,
             song_out: OutMode::Both,
             kaoss_out: OutMode::Local,

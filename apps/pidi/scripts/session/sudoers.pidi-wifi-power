@@ -1,0 +1,3 @@
+# Install as /etc/sudoers.d/pidi-wifi-power (visudo -c -f …).
+# Lets the kiosk cut VBUS to the Wi-Fi dongle without a password.
+ray ALL=(root) NOPASSWD: /home/ray/pi-midi-toolkit/apps/pidi/scripts/session/pi-wifi-power.sh

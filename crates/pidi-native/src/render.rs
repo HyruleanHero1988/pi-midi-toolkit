@@ -154,6 +154,7 @@ mod tests {
     #[test]
     fn a_complete_frame_covers_the_panel() {
         let mut model = NativeModel::new();
+        model.set_mode(crate::mode::UiMode::Kaoss);
         let mut out = Outbox::new();
         let k = model.layout.kaoss;
         model.finger_down(1, k.x + 40, k.y + 40, &mut out);

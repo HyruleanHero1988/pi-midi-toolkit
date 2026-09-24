@@ -3080,6 +3080,7 @@ mod tests {
     #[test]
     fn cells_are_one_batched_field() {
         let mut model = NativeModel::new();
+        model.set_mode(UiMode::Kaoss);
         assert!(model.kaoss_viz_style.is_cells());
         let mut out = Outbox::new();
         let k = model.layout.kaoss;
@@ -3107,6 +3108,7 @@ mod tests {
     #[test]
     fn glow_mode_skips_led_grid() {
         let mut model = NativeModel::new();
+        model.set_mode(UiMode::Kaoss);
         model.kaoss_viz_style = kaoss_viz::KaossVizStyle::Glow;
         let mut out = Outbox::new();
         let k = model.layout.kaoss;
@@ -3154,7 +3156,8 @@ mod tests {
 
     #[test]
     fn note_program_draws_scale_grid_lines() {
-        let model = NativeModel::new();
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Kaoss);
         assert!(model.kaoss_show_grid_lines);
         assert!(kaoss_ui::program(model.kaoss_program).note);
         let scene = build(&model);
@@ -3188,6 +3191,7 @@ mod tests {
     #[test]
     fn c8_one_octave_grid_uses_the_selected_start() {
         let mut model = NativeModel::new();
+        model.set_mode(UiMode::Kaoss);
         model.kaoss_root_midi = 108;
         model.kaoss_octaves = 1;
         let scene = build(&model);

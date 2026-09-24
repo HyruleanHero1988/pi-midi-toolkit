@@ -35,9 +35,10 @@ runtime.
 ## Appliance-oriented hooks
 
 Map, WIFI, and UPDATE call host tools when present (`midi-engine`, `nmcli`,
-in-process GitHub OTA). On a Windows host they report that those actions
-belong on the Pi. Bin deploy remains `deploy/build-pi-bins.sh` /
-`deploy/deploy.sh`.
+in-process GitHub OTA). The USB Wi‑Fi dongle is powered only while SET → WIFI
+or UPDATE is open (`pi-wifi-power.sh` + `uhubctl`); Ethernet and USB MIDI stay
+up. On a Windows host those actions report they belong on the Pi. Bin deploy
+remains `deploy/build-pi-bins.sh` / `deploy/deploy.sh`.
 
 ## User data (do not wipe)
 

@@ -171,7 +171,7 @@ pub fn program_hue(program_id: &str) -> f32 {
         "reso" => 0.85,
         "wash" => 0.70,
         "crush" => 0.98,
-        "sweep" => 0.50,
+        "dub" => 0.50,
         "bend" => 0.42,
         _ => 0.93,
     }

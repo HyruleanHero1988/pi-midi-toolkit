@@ -31,6 +31,7 @@ pub mod throttle;
 pub mod voice_bake;
 pub mod waves;
 pub mod wifi;
+pub mod wifi_power;
 #[cfg(feature = "sdl")]
 pub mod sdl_backend;
 

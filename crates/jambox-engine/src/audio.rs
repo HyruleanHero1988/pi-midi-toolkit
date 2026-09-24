@@ -3,10 +3,9 @@
 //! The callback body is deliberately boring — every expensive thing (allocating a
 //! clip, sending MIDI bytes, writing a log line) happens on another thread.
 //!
-//! Opening the device is *not* a one-shot. Unplugging a cable (USB audio, or the
-//! Pi analog jack with HDMI steal / mixer mute) used to leave a live process
-//! writing into a dead or muted ALSA stream. MIDI already hotplugs; audio now
-//! does the same: keep the engine, drop the stream, pick a device, unmute, reopen.
+//! The stream stays up once opened. Periodic mixer rescans and stale-callback
+//! reopens used to tear ALSA down every few seconds (heard as dropouts).
+//! Reopen only on SET → AUDIO (`audio_reopen`) or process shutdown.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -28,9 +27,6 @@ const SCRATCH_FRAMES: usize = MAX_RENDER_BLOCK;
 
 const HOTPLUG_POLL: Duration = Duration::from_millis(400);
 const WATCH_POLL: Duration = Duration::from_millis(200);
-const OPEN_GRACE_MS: u64 = 2_000;
-const STALE_CALLBACK_MS: u64 = 1_500;
-const MIXER_RESTORE_EVERY: Duration = Duration::from_secs(2);
 const BACKOFF_START: Duration = Duration::from_millis(250);
 const BACKOFF_MAX: Duration = Duration::from_secs(4);
 
@@ -188,27 +184,6 @@ pub fn select_output_name<'a>(names: &[&'a str], filter: &str) -> Option<&'a str
     best.map(|(_, n)| n).or(hdmi)
 }
 
-/// True when the stream should be dropped and the device re-picked.
-pub fn should_reopen(
-    now_ms: u64,
-    opened_at_ms: u64,
-    last_callback_ms: u64,
-    saw_error: bool,
-    grace_ms: u64,
-    stale_ms: u64,
-) -> bool {
-    if saw_error {
-        return true;
-    }
-    if now_ms.saturating_sub(opened_at_ms) < grace_ms {
-        return false;
-    }
-    if last_callback_ms == 0 {
-        return true;
-    }
-    now_ms.saturating_sub(last_callback_ms) >= stale_ms
-}
-
 /// Pick an output device, preferring a name substring (e.g. `headphone`).
 /// HDMI is skipped while any analog/USB output exists.
 pub fn pick_output(name_filter: &str) -> Result<Device, AudioError> {
@@ -263,7 +238,7 @@ pub struct RunningStream {
     pub buffer_label: String,
 }
 
-/// Own the output for the life of `running`: wait for a card, reopen on death.
+/// Own the output for the life of `running`. Reopens only on SET → AUDIO.
 pub fn spawn_output(
     filter: String,
     audio: AudioSide,
@@ -290,27 +265,19 @@ fn supervisor(
     let mut state: Option<Box<RenderState>> = None;
     let mut backoff = BACKOFF_START;
     let mut announced_wait = false;
-    let mut last_mixer = Instant::now()
-        .checked_sub(MIXER_RESTORE_EVERY)
-        .unwrap_or_else(Instant::now);
 
     if !filter.trim().is_empty() {
-        info!(filter = %filter, "audio: watching output (hotplug)");
+        info!(filter = %filter, "audio: opening output (SET → AUDIO to reopen)");
     } else {
-        info!("audio: watching output (hotplug)");
+        info!("audio: opening output (SET → AUDIO to reopen)");
     }
 
     while running.load(Ordering::Relaxed) {
-        if last_mixer.elapsed() >= MIXER_RESTORE_EVERY {
-            restore_mixer();
-            last_mixer = Instant::now();
-        }
-
         let device = match pick_output(&filter) {
             Ok(d) => d,
             Err(err) => {
                 if !announced_wait {
-                    warn!(%err, "audio: no output yet; will grab it when it appears");
+                    warn!(%err, "audio: no output yet; waiting for a card");
                     announced_wait = true;
                 }
                 std::thread::sleep(HOTPLUG_POLL);
@@ -319,7 +286,6 @@ fn supervisor(
         };
         announced_wait = false;
         restore_mixer();
-        last_mixer = Instant::now();
 
         let supported = match device.default_output_config() {
             Ok(c) => c,
@@ -359,10 +325,10 @@ fn supervisor(
                     "audio: running"
                 );
                 backoff = BACKOFF_START;
-                watch_stream(&running, &health, &mut last_mixer);
+                watch_stream(&running, &health);
                 drop(stream);
                 if running.load(Ordering::Relaxed) {
-                    warn!("audio: output died; reopening");
+                    info!("audio: SET → AUDIO reopen");
                 }
             }
             Err(err) => {
@@ -374,26 +340,12 @@ fn supervisor(
     }
 }
 
-fn watch_stream(running: &AtomicBool, health: &AudioHealth, last_mixer: &mut Instant) {
+fn watch_stream(running: &AtomicBool, health: &AudioHealth) {
     health.error.store(false, Ordering::Relaxed);
     health.last_callback_ms.store(0, Ordering::Relaxed);
     let _ = health.take_reopen();
-    let opened_at = now_ms();
     while running.load(Ordering::Relaxed) {
-        if last_mixer.elapsed() >= MIXER_RESTORE_EVERY {
-            restore_mixer();
-            *last_mixer = Instant::now();
-        }
-        if health.take_reopen()
-            || should_reopen(
-                now_ms(),
-                opened_at,
-                health.last_callback_ms.load(Ordering::Relaxed),
-                health.error.load(Ordering::Relaxed),
-                OPEN_GRACE_MS,
-                STALE_CALLBACK_MS,
-            )
-        {
+        if health.take_reopen() {
             break;
         }
         std::thread::sleep(WATCH_POLL);
@@ -758,23 +710,6 @@ mod tests {
     #[test]
     fn empty_list_is_none() {
         assert_eq!(select_output_name(&[], "headphone"), None);
-    }
-
-    #[test]
-    fn stream_error_reopens_immediately() {
-        assert!(should_reopen(100, 99, 99, true, 2_000, 1_500));
-    }
-
-    #[test]
-    fn grace_period_waits_for_first_callback() {
-        assert!(!should_reopen(500, 0, 0, false, 2_000, 1_500));
-        assert!(should_reopen(2_500, 0, 0, false, 2_000, 1_500));
-    }
-
-    #[test]
-    fn stale_callbacks_reopen() {
-        assert!(!should_reopen(3_000, 0, 2_400, false, 2_000, 1_500));
-        assert!(should_reopen(4_000, 0, 2_400, false, 2_000, 1_500));
     }
 
     #[test]

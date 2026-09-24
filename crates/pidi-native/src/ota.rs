@@ -455,6 +455,7 @@ fn restart_audio_engines(lines: &mut Vec<String>) {
 }
 
 pub fn check() -> UpdateCheckResult {
+    let _ = crate::wifi_power::ensure(true);
     let local = local_stamp();
     let branch = if local.branch.is_empty() {
         DEFAULT_BRANCH.to_string()
@@ -504,6 +505,7 @@ pub fn check() -> UpdateCheckResult {
 }
 
 pub fn apply() -> UpdateCheckResult {
+    let _ = crate::wifi_power::ensure(true);
     let local = local_stamp();
     let branch = if local.branch.is_empty() {
         DEFAULT_BRANCH.to_string()

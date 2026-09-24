@@ -1,4 +1,4 @@
-//! Appliance host hooks: Map/Thru (`midi-engine`), WIFI (`nmcli`), UPDATE (git/updater).
+//! Appliance host hooks: Map/Thru (`midi-engine`), WIFI (`nmcli`), UPDATE (in-process OTA).
 //!
 //! Subprocesses must never run on the UI/touch thread. Call [`HostTask::spawn`]
 //! and poll the receiver from `tick`.
@@ -47,7 +47,7 @@ fn kill_pid(pid: u32) {
     }
 }
 
-fn run_capture(cmd: &mut Command, timeout_secs: u64) -> (i32, String, String) {
+pub(crate) fn run_capture(cmd: &mut Command, timeout_secs: u64) -> (i32, String, String) {
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
     let child = match cmd.spawn() {
@@ -556,6 +556,10 @@ pub fn wifi_rejoin() -> (bool, String, Vec<String>) {
 #[cfg(target_os = "linux")]
 fn wifi_rejoin_linux() -> (bool, String, Vec<String>) {
     let mut lines = Vec::new();
+    let (_, power) = crate::wifi_power::ensure(true);
+    if !power.is_empty() {
+        lines.push(power);
+    }
     let (code, stdout, stderr) = nmcli(
         &["-t", "-f", "DEVICE,TYPE,STATE,CONNECTION", "device", "status"],
         8,
@@ -672,6 +676,7 @@ pub fn wifi_scan(rescan: bool) -> (Vec<crate::wifi::WifiNetwork>, String) {
     }
     #[cfg(target_os = "linux")]
     {
+        let _ = crate::wifi_power::ensure(true);
         let (code, _, _) = nmcli(&["-t", "-f", "WIFI", "radio"], 3);
         if code == 127 {
             return (Vec::new(), "nmcli not installed on this box".into());
@@ -730,6 +735,7 @@ pub fn wifi_connect(ssid: &str, password: &str, iface: &str, remember: bool) -> 
     }
     #[cfg(target_os = "linux")]
     {
+        let _ = crate::wifi_power::ensure(true);
         let (code, _, _) = nmcli(&["-t", "-f", "WIFI", "radio"], 3);
         if code == 127 {
             return (false, "nmcli not installed on this box".into());

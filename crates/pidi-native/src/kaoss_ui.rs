@@ -165,9 +165,10 @@ pub const KAOSS_PROGRAMS: &[KaossProgram] = &[
         x_param: Some("drive"),
         curated: false,
     },
+    // X = tone; Y = delay time. Mix-desk overlay (not a pitch pad).
     KaossProgram {
-        id: "sweep",
-        label: "SWEEP",
+        id: "dub",
+        label: "DUB",
         note: false,
         y_param: "delay_time",
         x_param: Some("tone"),
@@ -456,6 +457,14 @@ mod tests {
         assert!(KAOSS_PROGRAMS.iter().any(|p| p.id == "bend" && p.curated));
         assert!(KAOSS_PROGRAMS.iter().any(|p| {
             p.id == "wah" && p.curated && p.note && p.y_param == "tone_lfo"
+        }));
+        assert!(KAOSS_PROGRAMS.iter().any(|p| {
+            p.id == "dub"
+                && p.label == "DUB"
+                && !p.note
+                && p.y_param == "delay_time"
+                && p.x_param == Some("tone")
+                && !p.curated
         }));
     }
 }
