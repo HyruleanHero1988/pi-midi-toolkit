@@ -60,6 +60,7 @@ pub enum Hit {
     PadsChannel,
     PadsSynth,
     PadsOut,
+    ClipQuantize,
     HomeTile(UiMode),
     Power,
     PowerShutdown,
@@ -147,6 +148,7 @@ pub enum Hit {
     SeqLenDouble,
     SeqLenHalve,
     SeqExtend,
+    SeqCue,
     SeqStop,
     SeqClear,
     SeqBpmUp,
@@ -181,6 +183,7 @@ pub enum Hit {
     SettingsFont,
     SettingsLog,
     SettingsMap,
+    SettingsProbe,
     UpdateClose,
     UpdateCheck,
     UpdateApply,
@@ -254,6 +257,7 @@ pub struct Layout {
     pub pads_voice: Rect,
     pub pads_channel: Rect,
     pub pads_synth: Rect,
+    pub pads_qnt: Rect,
     pub synth_sliders: Rect,
     pub synth_keys: Rect,
     pub synth_scope: Rect,
@@ -303,6 +307,7 @@ pub struct Layout {
     pub kaoss_settings_btn: Rect,
     pub settings_log: Rect,
     pub settings_map: Rect,
+    pub settings_probe: Rect,
     pub seq_rec: Rect,
     pub seq_play: Rect,
     pub seq_keep: Rect,
@@ -311,6 +316,7 @@ pub struct Layout {
     pub seq_len_double: Rect,
     pub seq_len_halve: Rect,
     pub seq_extend: Rect,
+    pub seq_cue: Rect,
     pub seq_stop: Rect,
     pub seq_clear: Rect,
     pub seq_to_pad: Rect,
@@ -318,6 +324,7 @@ pub struct Layout {
     pub seq_bpm_up: Rect,
     pub seq_bpm_down: Rect,
     pub seq_drums: Rect,
+    pub seq_qnt: Rect,
     pub preset_grid: Rect,
     pub preset_load: Rect,
     pub preset_save: Rect,
@@ -357,6 +364,8 @@ pub struct Layout {
     pub update_close: Rect,
     pub update_check: Rect,
     pub update_apply: Rect,
+    /// When false, SYNTH/FM sliders and scopes grow into the piano strip.
+    pub show_on_screen_keys: bool,
 }
 
 impl Default for Layout {
@@ -675,16 +684,22 @@ impl Layout {
                 w: 136,
                 h: 40,
             },
+            pads_qnt: Rect {
+                x: 16,
+                y: HUD_H + 8,
+                w: 112,
+                h: 40,
+            },
             synth_sliders: Rect {
                 x: 24,
                 y: HUD_H + 72,
-                w: 480,
+                w: 536,
                 h: 160,
             },
             synth_scope: Rect {
-                x: 520,
+                x: 568,
                 y: HUD_H + 72,
-                w: 256,
+                w: 208,
                 h: 160,
             },
             kit_scope: Rect {
@@ -889,7 +904,13 @@ impl Layout {
             seq_extend: Rect {
                 x: 364,
                 y: HUD_H + 202,
-                w: 424,
+                w: 220,
+                h: 44,
+            },
+            seq_cue: Rect {
+                x: 592,
+                y: HUD_H + 202,
+                w: 196,
                 h: 44,
             },
             seq_stop: Rect {
@@ -933,6 +954,12 @@ impl Layout {
                 y: 0,
                 w: 0,
                 h: 0,
+            },
+            seq_qnt: Rect {
+                x: 12,
+                y: HUD_H + 306,
+                w: 160,
+                h: 44,
             },
             preset_grid: Rect {
                 x: 24,
@@ -1091,6 +1118,12 @@ impl Layout {
                 w: 240,
                 h: 72,
             },
+            settings_probe: Rect {
+                x: 280,
+                y: HUD_H + 308,
+                w: 240,
+                h: 72,
+            },
             log_clear: Rect {
                 x: 24,
                 y: HUD_H + content_h - 56,
@@ -1119,19 +1152,21 @@ impl Layout {
                 x: 8,
                 y: HUD_H + 82,
                 w: 560,
-                h: 218,
+                h: 150,
             },
-            chords_strum: Rect {
+            // 2×4 progressions sit in the former tall strumpad column.
+            chords_palette: Rect {
                 x: 576,
                 y: HUD_H + 82,
                 w: 216,
-                h: 218,
+                h: 150,
             },
-            chords_palette: Rect {
+            // Wide Omnichord-style plate under the fifths grid.
+            chords_strum: Rect {
                 x: 8,
-                y: HUD_H + 306,
+                y: HUD_H + 240,
                 w: SCREEN_W - 16,
-                h: 110,
+                h: 160,
             },
             power_blank_cycle,
             power_shutdown,
@@ -1140,6 +1175,7 @@ impl Layout {
             update_close,
             update_check,
             update_apply,
+            show_on_screen_keys: true,
         }
     }
 
@@ -1807,14 +1843,36 @@ impl Layout {
         }
     }
 
+    pub const SYNTH_SLIDER_COUNT: usize = 7;
+
+    fn synth_play_bottom(&self) -> i32 {
+        self.synth_keys.y + self.synth_keys.h
+    }
+
+    /// Slider / scope height. Grows into the piano strip when keys are hidden.
+    pub fn synth_play_h(&self) -> i32 {
+        if self.show_on_screen_keys {
+            self.synth_sliders.h
+        } else {
+            (self.synth_play_bottom() - self.synth_sliders.y).max(self.synth_sliders.h)
+        }
+    }
+
+    pub fn synth_scope_rect(&self) -> Rect {
+        let mut r = self.synth_scope;
+        r.h = self.synth_play_h();
+        r
+    }
+
     pub fn synth_slider(&self, index: usize) -> Rect {
-        let n = 6i32;
+        let n = Self::SYNTH_SLIDER_COUNT as i32;
         let w = self.synth_sliders.w / n;
+        let h = self.synth_play_h();
         Rect {
             x: self.synth_sliders.x + (index as i32) * w + 6,
             y: self.synth_sliders.y + 28,
             w: w - 12,
-            h: self.synth_sliders.h - 36,
+            h: h - 36,
         }
     }
 
@@ -1868,13 +1926,22 @@ impl Layout {
         }
     }
 
+    fn fm_expanded_h(&self, y: i32, compact: i32, bottom_pad: i32) -> i32 {
+        if self.show_on_screen_keys {
+            compact
+        } else {
+            (self.synth_play_bottom() - y - bottom_pad).max(compact)
+        }
+    }
+
     /// 2×2 operator graph. Swipe one circle into another to patch.
     pub fn fm_graph(&self) -> Rect {
+        let y = self.content.y + 74;
         Rect {
             x: 12,
-            y: self.content.y + 74,
+            y,
             w: 400,
-            h: 158,
+            h: self.fm_expanded_h(y, 158, 0),
         }
     }
 
@@ -1908,11 +1975,12 @@ impl Layout {
     }
 
     pub fn fm_scope(&self) -> Rect {
+        let y = self.content.y + 74;
         Rect {
             x: 420,
-            y: self.content.y + 74,
+            y,
             w: 168,
-            h: 158,
+            h: self.fm_expanded_h(y, 158, 0),
         }
     }
 
@@ -1921,11 +1989,14 @@ impl Layout {
         let area_x = 600;
         let area_w = 188;
         let w = area_w / n;
+        let y = self.content.y + 92;
+        // Room for the clang-ratio label under the tracks when keys are gone.
+        let pad = if self.show_on_screen_keys { 0 } else { 22 };
         Rect {
             x: area_x + (index as i32) * w + 6,
-            y: self.content.y + 92,
+            y,
             w: w - 12,
-            h: 132,
+            h: self.fm_expanded_h(y, 132, pad),
         }
     }
 
@@ -2044,7 +2115,7 @@ impl Layout {
     }
 
     pub fn synth_keyboard_note_at(&self, px: i32, py: i32) -> Option<u8> {
-        if !self.synth_keys.contains(px, py) {
+        if !self.show_on_screen_keys || !self.synth_keys.contains(px, py) {
             return None;
         }
         const BLACKS: [(usize, u8); 5] = [(0, 61), (1, 63), (2, 66), (3, 68), (4, 70)];
@@ -2080,7 +2151,7 @@ impl Layout {
         self.kit_pad_cell(index)
     }
 
-    /// Toolbar: OUT, HOLD, KEY, CHANGES, ARM.
+    /// Toolbar: OUT, HOLD, KEY, PROGS, ARM.
     pub fn chords_tool(&self, index: usize) -> Rect {
         let n = 5i32;
         let w = self.chords_toolbar.w / n;
@@ -2158,13 +2229,16 @@ impl Layout {
     }
 
     pub fn chords_palette_slot(&self, slot: usize) -> Rect {
-        let n = 8i32;
-        let w = self.chords_palette.w / n;
+        let col = (slot % 4) as i32;
+        let row = (slot / 4) as i32;
+        let header = 20;
+        let w = self.chords_palette.w / 4;
+        let h = (self.chords_palette.h - header) / 2;
         Rect {
-            x: self.chords_palette.x + (slot as i32) * w + 3,
-            y: self.chords_palette.y + 22,
+            x: self.chords_palette.x + col * w + 3,
+            y: self.chords_palette.y + header + row * h + 2,
             w: w - 6,
-            h: self.chords_palette.h - 26,
+            h: h - 4,
         }
     }
 
@@ -2356,6 +2430,9 @@ impl Layout {
         if self.pads_out.w > 0 && self.pads_out.contains(px, py) {
             return Hit::PadsOut;
         }
+        if self.pads_qnt.contains(px, py) {
+            return Hit::ClipQuantize;
+        }
         if self.stop_all.contains(px, py) {
             return Hit::StopAllClips;
         }
@@ -2397,7 +2474,7 @@ impl Layout {
         if self.synth_oct_up.contains(px, py) {
             return Hit::SynthOctUp;
         }
-        for index in 0..6 {
+        for index in 0..Self::SYNTH_SLIDER_COUNT {
             if self.synth_slider(index).contains(px, py) {
                 return Hit::SynthSlider(index);
             }
@@ -2853,16 +2930,16 @@ impl Layout {
         if self.chords_oct_up().contains(px, py) {
             return Hit::ChordsOctUp;
         }
+        for slot in 0..8 {
+            if self.chords_palette_slot(slot).contains(px, py) {
+                return Hit::ChordsPalette { slot };
+            }
+        }
         // Octave label and other STRUM chrome have no tap action — they are
         // the run-up above the highest string so a down-strum can start there.
         if self.chords_strum.contains(px, py) {
             let y = self.chords_strum_touch_y(py);
             return Hit::ChordsStrum { y };
-        }
-        for slot in 0..8 {
-            if self.chords_palette_slot(slot).contains(px, py) {
-                return Hit::ChordsPalette { slot };
-            }
         }
         for row in 0..3 {
             for col in 0..12 {
@@ -2901,6 +2978,9 @@ impl Layout {
         }
         if self.settings_map.contains(px, py) {
             return Hit::SettingsMap;
+        }
+        if self.settings_probe.contains(px, py) {
+            return Hit::SettingsProbe;
         }
         if self.settings_wifi.contains(px, py) {
             return Hit::SettingsWifi;
@@ -2995,6 +3075,9 @@ impl Layout {
         if self.seq_extend.contains(px, py) {
             return Hit::SeqExtend;
         }
+        if self.seq_cue.contains(px, py) {
+            return Hit::SeqCue;
+        }
         if self.seq_stop.contains(px, py) {
             return Hit::SeqStop;
         }
@@ -3012,6 +3095,9 @@ impl Layout {
         }
         if self.seq_bpm_down.contains(px, py) {
             return Hit::SeqBpmDown;
+        }
+        if self.seq_qnt.contains(px, py) {
+            return Hit::ClipQuantize;
         }
         Hit::None
     }
@@ -3172,6 +3258,11 @@ mod tests {
         assert!(gap_below(layout.chords_toolbar, layout.chords_root_strip) >= 10);
         assert!(gap_below(layout.chords_root_strip, layout.chords_grid) >= 4);
         assert!(bottom(layout.chords_palette) <= bottom(layout.content));
+        assert!(bottom(layout.chords_strum) <= bottom(layout.content));
+        assert!(
+            gap_below(layout.chords_grid, layout.chords_strum) >= 6,
+            "strumpad must not overlap the fifths grid"
+        );
     }
 
     #[test]
@@ -3181,6 +3272,39 @@ mod tests {
             layout.synth_sliders.x + layout.synth_sliders.w <= layout.synth_scope.x,
             "sliders should not overlap the scope panel"
         );
+        let rate = layout.synth_slider(Layout::SYNTH_SLIDER_COUNT - 1);
+        assert!(rate.x + rate.w <= layout.synth_scope.x);
+        assert_eq!(
+            layout.hit(UiMode::Synth, rate.x + 4, rate.y + rate.h / 2),
+            Hit::SynthSlider(6)
+        );
+    }
+
+    #[test]
+    fn hidden_keys_expand_synth_and_fm_into_the_piano_strip() {
+        let mut layout = Layout::new();
+        let compact_slider = layout.synth_slider(0).h;
+        let compact_scope = layout.synth_scope_rect().h;
+        let compact_fm = layout.fm_graph().h;
+        let key = layout.synth_keyboard_white_rect(0);
+        layout.show_on_screen_keys = false;
+        let slider = layout.synth_slider(0);
+        assert!(slider.h > compact_slider);
+        assert!(layout.synth_scope_rect().h > compact_scope);
+        assert!(layout.fm_graph().h > compact_fm);
+        assert!(
+            layout
+                .synth_keys
+                .contains(slider.x + 4, slider.y + slider.h - 4),
+            "expanded slider travel should occupy the former piano strip"
+        );
+        assert_eq!(layout.synth_keyboard_note_at(key.x + 4, key.y + 8), None);
+        match layout.hit(UiMode::Synth, slider.x + 4, slider.y + slider.h - 4) {
+            Hit::SynthSlider(0) => {}
+            other => panic!("former key strip should hit a slider, got {other:?}"),
+        }
+        let bottom = layout.synth_keys.y + layout.synth_keys.h;
+        assert!(layout.synth_scope_rect().y + layout.synth_scope_rect().h >= bottom - 2);
     }
 
     #[test]
@@ -3363,7 +3487,11 @@ mod tests {
             layout.chords_grid.y >= layout.chords_root_strip.y + layout.chords_root_strip.h + 2,
             "grid should sit below root labels"
         );
-        assert_eq!(layout.chords_grid.y, layout.chords_strum.y);
+        assert_eq!(layout.chords_grid.y, layout.chords_palette.y);
+        assert!(
+            layout.chords_strum.y >= layout.chords_grid.y + layout.chords_grid.h + 6,
+            "wide strumpad should sit below the fifths grid"
+        );
     }
 
     #[test]
@@ -3399,6 +3527,66 @@ mod tests {
                 assert!(y > 0.85, "octave label should start a down-strum, got {y}")
             }
             other => panic!("expected strum on octave label, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn seq_beep_and_wrap_do_not_overlap() {
+        let layout = Layout::new();
+        assert_eq!(
+            layout.hit(UiMode::Seq, layout.seq_cue.x + 4, layout.seq_cue.y + 4),
+            Hit::SeqCue
+        );
+        assert_eq!(
+            layout.hit(
+                UiMode::Seq,
+                layout.seq_extend.x + 4,
+                layout.seq_extend.y + 4
+            ),
+            Hit::SeqExtend
+        );
+        assert!(
+            layout.seq_extend.x + layout.seq_extend.w <= layout.seq_cue.x,
+            "WRAP and BEEP must sit side by side"
+        );
+        assert_on_screen("seq wrap", layout.seq_extend);
+        assert_on_screen("seq beep", layout.seq_cue);
+    }
+
+    #[test]
+    fn chords_omnichord_strumpad_swaps_with_palette() {
+        let layout = Layout::new();
+        assert!(
+            layout.chords_strum.w > layout.chords_palette.w * 2,
+            "strumpad should be the wide play surface"
+        );
+        assert!(
+            layout.chords_strum.y >= layout.chords_palette.y + layout.chords_palette.h,
+            "strumpad sits below the 2×4 palette"
+        );
+        let a = layout.chords_palette_slot(0);
+        let b = layout.chords_palette_slot(3);
+        let c = layout.chords_palette_slot(4);
+        let d = layout.chords_palette_slot(7);
+        assert!(b.x > a.x, "top row is 4 slots across");
+        assert!(c.y > a.y, "second row sits under the first");
+        assert!(d.x > c.x && d.y == c.y);
+        for slot in 0..8 {
+            let cell = layout.chords_palette_slot(slot);
+            assert_on_screen(&format!("palette {slot}"), cell);
+            assert_eq!(
+                layout.hit(UiMode::Chords, cell.x + 4, cell.y + 4),
+                Hit::ChordsPalette { slot }
+            );
+            assert!(
+                cell.y + cell.h <= layout.chords_strum.y,
+                "palette slot {slot} must not overlap the strumpad"
+            );
+        }
+        let play = layout.chords_strum_play();
+        match layout.hit(UiMode::Chords, play.x + play.w / 2, play.y + play.h / 2) {
+            Hit::ChordsStrum { .. } => {}
+            other => panic!("center of wide plate should strum, got {other:?}"),
         }
     }
 

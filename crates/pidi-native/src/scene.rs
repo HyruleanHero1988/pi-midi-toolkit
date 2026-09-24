@@ -709,7 +709,9 @@ fn chrome_status(model: &NativeModel) -> String {
             }
         }
         UiMode::Settings => {
-            if model.status_line.is_empty() {
+            if model.probe && model.status_line.is_empty() {
+                "PROBE ON".into()
+            } else if model.status_line.is_empty() {
                 "SETTINGS".into()
             } else {
                 model.status_line.chars().take(24).collect()
@@ -1314,7 +1316,8 @@ fn draw_kaoss_note_readout(
 
 fn draw_pads(scene: &mut Scene, model: &NativeModel) {
     let layout = model.layout;
-    scene.text(16, HUD_H + 16, "Phrase Pads", 0xfbf1c7);
+    scene.fill_rect(layout.pads_qnt, model.clip_quantize.color());
+    scene.text_centered(layout.pads_qnt, model.clip_quantize.label(), 0xffffff, 1);
     scene.fill_rect(
         layout.pads_play,
         if !model.pads_edit { 0x689d6a } else { 0x3c3836 },
@@ -1479,7 +1482,7 @@ fn draw_chords(scene: &mut Scene, model: &NativeModel) {
     if let Some(overlay) = model.chords_overlay {
         let title = match overlay {
             Overlay::Key => "KEY",
-            Overlay::Changes => "CHANGES",
+            Overlay::Changes => "PROGRESSIONS",
         };
         scene.text_scaled(
             layout.content.x + 12,
@@ -1516,7 +1519,7 @@ fn draw_chords(scene: &mut Scene, model: &NativeModel) {
         model.chords_out.short_label(),
         if model.chords_hold { "HOLD" } else { "MOM" },
         KEY_NAMES[model.chords_key as usize],
-        "CHANGES",
+        "PROGS",
         if model.chords_arm { "ARM*" } else { "ARM" },
     ];
     let tool_colors = [
@@ -1763,7 +1766,8 @@ fn draw_synth(scene: &mut Scene, model: &NativeModel) {
         return;
     }
 
-    const LABELS: [&str; 6] = ["MORPH", "TONE", "LEVEL", "ATK", "REL", "FLANGE"];
+    const LABELS: [&str; Layout::SYNTH_SLIDER_COUNT] =
+        ["MORPH", "TONE", "LEVEL", "ATK", "REL", "FLANGE", "RATE"];
 
     let a = waves::short_label(model.wave_label(model.morph_a));
     let b = waves::short_label(model.wave_label(model.morph_b));
@@ -1803,8 +1807,8 @@ fn draw_synth(scene: &mut Scene, model: &NativeModel) {
         format!("C{octave}")
     };
     scene.text_scaled(
-        layout.synth_scope.x + 6,
-        layout.synth_scope.y + 4,
+        layout.synth_scope_rect().x + 6,
+        layout.synth_scope_rect().y + 4,
         &format!(
             "{} {:.1}st {:.0}Hz {}",
             oct_label,
@@ -1819,14 +1823,16 @@ fn draw_synth(scene: &mut Scene, model: &NativeModel) {
     // CRT-ish morph scope (live A/B blend from the loaded wave bank).
     draw_synth_scope(scene, model);
 
-    for index in 0..6 {
+    for index in 0..Layout::SYNTH_SLIDER_COUNT {
         let track = layout.synth_slider(index);
         scene.fill_rect(track, 0x20202c);
-        scene.text(track.x + 8, track.y + 6, LABELS[index], 0xc0c0d0);
+        scene.text(track.x + 4, track.y + 6, LABELS[index], 0xc0c0d0);
         let value = if index < 5 {
             model.synth_params[index]
-        } else {
+        } else if index == 5 {
             model.fx_voice[3]
+        } else {
+            model.fx_flanger_rate
         };
         let fill_h = (track.h as f32 * value) as i32;
         let fill = Rect {
@@ -1839,7 +1845,7 @@ fn draw_synth(scene: &mut Scene, model: &NativeModel) {
             fill,
             if index == 0 {
                 0xb16286
-            } else if index == 5 {
+            } else if index == 5 || index == 6 {
                 0xd79921
             } else {
                 0x689d6a
@@ -1847,6 +1853,13 @@ fn draw_synth(scene: &mut Scene, model: &NativeModel) {
         );
     }
 
+    draw_on_screen_keyboard(scene, &layout, model);
+}
+
+fn draw_on_screen_keyboard(scene: &mut Scene, layout: &Layout, model: &NativeModel) {
+    if model.hardware_keybed_connected() {
+        return;
+    }
     for index in 0..Layout::SYNTH_WHITE_COUNT {
         let key = layout.synth_keyboard_white_rect(index);
         scene.fill_rect(key, 0xf2f2ea);
@@ -1869,7 +1882,7 @@ fn draw_synth(scene: &mut Scene, model: &NativeModel) {
 }
 
 fn draw_synth_scope(scene: &mut Scene, model: &NativeModel) {
-    let rect = model.layout.synth_scope;
+    let rect = model.layout.synth_scope_rect();
     scene.fill_rect(rect, 0x1a1a12);
     // Grid
     for i in 1..4 {
@@ -1957,25 +1970,7 @@ fn draw_fm(scene: &mut Scene, model: &NativeModel) {
         0xa89984,
     );
 
-    for index in 0..Layout::SYNTH_WHITE_COUNT {
-        let key = layout.synth_keyboard_white_rect(index);
-        scene.fill_rect(key, 0xf2f2ea);
-        scene.fill_rect(
-            Rect {
-                x: key.x,
-                y: key.y + key.h - 2,
-                w: key.w,
-                h: 2,
-            },
-            0xc0c0b8,
-        );
-    }
-    const BLACK_LABELS: [&str; 5] = ["C#", "D#", "F#", "G#", "A#"];
-    for index in 0..5 {
-        let key = layout.synth_keyboard_black_rect(index);
-        scene.fill_rect(key, 0x1a1a22);
-        scene.text_scaled(key.x + 4, key.y + 4, BLACK_LABELS[index], 0xd0d0d8, 1);
-    }
+    draw_on_screen_keyboard(scene, &layout, model);
 }
 
 fn draw_fm_graph(scene: &mut Scene, model: &NativeModel) {
@@ -2401,6 +2396,9 @@ fn draw_seq(scene: &mut Scene, model: &NativeModel) {
     let extend_label = if seq.extend_mode { "EXTEND" } else { "WRAP" };
     scene.fill_rect(layout.seq_extend, extend_bg);
     scene.text_centered(layout.seq_extend, extend_label, 0xffffff, 2);
+    let cue_bg = if seq.cue_beep { 0x689d6a } else { 0x3c3836 };
+    scene.fill_rect(layout.seq_cue, cue_bg);
+    scene.text_centered(layout.seq_cue, "BEEP", 0xffffff, 2);
 
     scene.fill_rect(layout.seq_stop, 0x504945);
     scene.text_centered(layout.seq_stop, "STOP", 0xffffff, 2);
@@ -2421,6 +2419,8 @@ fn draw_seq(scene: &mut Scene, model: &NativeModel) {
     scene.text_centered(layout.seq_bpm_down, "- BPM", 0xffffff, 2);
     scene.fill_rect(layout.seq_bpm_up, 0x282828);
     scene.text_centered(layout.seq_bpm_up, "+ BPM", 0xffffff, 2);
+    scene.fill_rect(layout.seq_qnt, model.clip_quantize.color());
+    scene.text_centered(layout.seq_qnt, model.clip_quantize.label(), 0xffffff, 2);
     if model.seq_to_pad_armed {
         scene.text_scaled(520, HUD_H + 42, "tap a PAD slot", 0xfabd2f, 1);
     } else {
@@ -2430,7 +2430,7 @@ fn draw_seq(scene: &mut Scene, model: &NativeModel) {
     scene.text(
         12,
         HUD_H + layout.content.h - 18,
-        "REC locks loop · overdub · KEEP/DROP/UNDO · >PAD assigns",
+        "REC locks loop · overdub · BEEP marks 1 · >PAD assigns",
         0x83a598,
     );
 }
@@ -2828,6 +2828,16 @@ fn draw_settings(scene: &mut Scene, model: &NativeModel) {
     scene.text_centered(layout.settings_log, "LOG", 0xffffff, 2);
     scene.fill_rect(layout.settings_map, 0x83a598);
     scene.text_centered(layout.settings_map, "PORTS", 0xffffff, 2);
+    scene.fill_rect(
+        layout.settings_probe,
+        if model.probe { 0x689d6a } else { 0x504945 },
+    );
+    scene.text_centered(
+        layout.settings_probe,
+        if model.probe { "PROBE ON" } else { "PROBE" },
+        0xffffff,
+        2,
+    );
     let wifi_busy = model.host_busy() == Some(crate::host::HostTask::Wifi);
     scene.fill_rect(
         layout.settings_wifi,
@@ -3021,13 +3031,14 @@ fn draw_log(scene: &mut Scene, model: &NativeModel) {
         c.x + 16,
         c.y + 40,
         &format!(
-            "cb {}/{}us  xrun {}  drop {}  rel {}  rpt {}",
+            "cb {}/{}us  xrun {}  drop {}  rel {}  rpt {}{}",
             model.status.callback_frames,
             model.status.callback_micros,
             model.status.xruns,
             model.status.command_drops,
             model.status.emergency_releases,
             model.status.active_repeats,
+            if model.probe { "  PROBE" } else { "" },
         ),
         0xa0a0b8,
     );

@@ -152,7 +152,7 @@
     <a href="#kaoss-settings">KAOSS SET</a>
     <a href="#kaoss-color">COLOR</a>
     <a href="#chords">CHORDS</a>
-    <a href="#chords-changes">CHANGES</a>
+    <a href="#chords-changes">PROGS</a>
     <a href="#chords-key">KEY</a>
     <a href="#songs">SONGS</a>
     <a href="#presets">PRESETS</a>
@@ -212,9 +212,9 @@
         <tr><th>VIB</th><td>Opens the vibrato overlay (depth, rate, wheel vs always-on).</td></tr>
         <tr><th>SAVE</th><td>Bake the current morph + drive/tone + delay/reverb/flanger sidecar into <code>user-wavetables/</code>. No name pad — it writes an auto name.</td></tr>
         <tr><th>OCT − / +</th><td>Transpose the on-screen keyboard.</td></tr>
-        <tr><th>MORPH TONE LEVEL ATK REL</th><td>Vertical sliders. Morph is A→B; tone is the Chamberlin LPF.</td></tr>
+        <tr><th>MORPH TONE LEVEL ATK REL FLANGE RATE</th><td>Vertical sliders. Morph is A→B; tone is the Chamberlin LPF. FLANGE is voice flanger mix; RATE is the flanger LFO speed.</td></tr>
         <tr><th>Scope</th><td>Live picture of the morph cycle.</td></tr>
-        <tr><th>Keys</th><td>One octave. Notes record into SEQ / pad REC while those are armed.</td></tr>
+        <tr><th>Keys</th><td>One octave. Hidden when a USB keybed is connected (MPK, Keystep, …); sliders and the scope grow into that strip. Stay visible for DIN interfaces (U2MIDI). Notes record into SEQ / pad REC while those are armed.</td></tr>
       </table>
     </section>
 
@@ -280,8 +280,10 @@
         <tr><th>KEEP / DROP / UNDO</th><td>Commit, discard, or peel the last layer.</td></tr>
         <tr><th>LEN ×2 / LEN ÷2</th><td>Double or half the loop.</td></tr>
         <tr><th>WRAP / EXTEND</th><td>WRAP stays inside the length; EXTEND can grow the cycle while overdubbing.</td></tr>
+        <tr><th>BEEP</th><td>Optional clave click at the start of each loop so a four-on-the-floor (or any even groove) still tells you where 1 is. Playback only — SAVE SEQ and &gt;PAD do not bake it in.</td></tr>
         <tr><th>&gt;PAD</th><td>Arm, then tap a PADS slot to copy the loop onto a phrase.</td></tr>
         <tr><th>− BPM / + BPM</th><td>Tempo. Chrome also shows BPM.</td></tr>
+        <tr><th>QNT</th><td>BAR / BEAT / OFF launch/stop grid (shared with PADS). Default BAR so layered takes lock to the clock.</td></tr>
       </table>
     </section>
 
@@ -294,6 +296,7 @@
       </figure>
       <table>
         <tr><th>Grid A1–B8</th><td>Tap a filled pad to launch / toggle. Green = sounding, blue/teal = clip ready, gray = empty. LOOP vs ONE is the subtitle.</td></tr>
+        <tr><th>QNT</th><td>BAR / BEAT / OFF. Two pads hit in the same bar (or beat) start together on the engine clock. Same control on SEQ.</td></tr>
         <tr><th>STOP</th><td>Stop every playing phrase.</td></tr>
         <tr><th>OUT</th><td>LOCAL / USB / BOTH (on the edit footer; PLAY keeps routing).</td></tr>
       </table>
@@ -350,6 +353,7 @@
         <tr><th>VIB</th><td>Y = vibrato depth. Lift restores the previous depth.</td></tr>
         <tr><th>WAH</th><td>Y = tone oscillation rate (auto-wah LFO on the filter). Bottom = slow sweep, top = fast wobble. Lift restores the sticky tone.</td></tr>
         <tr><th>BEND</th><td>Y = pitch bend about the pad midline (center = unison, ±12 st). Curated.</td></tr>
+        <tr><th>FLANGE</th><td>Y = flanger mix. Curated. X plays the scale; no rate wobble on this pad.</td></tr>
         <tr><th>LEVEL / DECAY / ATTACK / GRIT / DELAY</th><td>Y = volume / release / attack / drive / delay mix. Behind SHOW ALL.</td></tr>
       </table>
       <h3>FX programs — no pitch from the pad</h3>
@@ -357,10 +361,10 @@
         <tr><th>FILTER</th><td>X = TONE, Y = MORPH (momentary unless HOLD).</td></tr>
         <tr><th>ECHO</th><td>X = delay time, Y = delay mix. Lands on the SET pad-FX target (voice / drums / both).</td></tr>
         <tr><th>DRIVE</th><td>X = drive, Y = reverb. Same pad-FX target as ECHO.</td></tr>
-        <tr><th>FLANGE</th><td>X = flanger rate, Y = flanger mix. Curated. Latch a note first (LEAD + HOLD), then pick FLANGE.</td></tr>
+        <tr><th>FL RATE</th><td>SHOW ALL. X = flanger rate, Y = flanger mix. Latch a note first if you still want the old wobble pad.</td></tr>
         <tr><th>SPACE / RESO / WASH / CRUSH / DUB / SWELL</th><td>SHOW ALL extras — delay/reverb/drive pairs. Lift restores unless HOLD is on.</td></tr>
       </table>
-      <p class="note"><strong>FILTER / FLANGE / ECHO do not play notes.</strong> If you open them on an empty pad you hear silence. Latch a sound first, then sculpt. Pad FX follows SET → VOICE / DRUMS / BOTH. For <em>different</em> reverb on keys vs kit, use FX MODE sliders (TARGET: VOICE vs TARGET: DRUMS) — those inserts are independent.</p>
+      <p class="note"><strong>FILTER / ECHO do not play notes.</strong> If you open them on an empty pad you hear silence. Latch a sound first, then sculpt. Pad FX follows SET → VOICE / DRUMS / BOTH. For <em>different</em> reverb on keys vs kit, use FX MODE sliders (TARGET: VOICE vs TARGET: DRUMS) — those inserts are independent.</p>
     </section>
 
     <section class="screen" id="kaoss-scales">
@@ -431,21 +435,21 @@
       </figure>
       <table>
         <tr><th>12×3 grid</th><td>Columns F C G D A E B F# Db Ab Eb Bb. Rows MAJ / min / 7. Same-root and neighbour combos give M7, m7, dim, aug, sus4, add9. Lifting a combo together keeps it on the strum pad — fingers do not have to come up in the same instant.</td></tr>
-        <tr><th>STRUM</th><td>Four octaves of the selected chord, low→high. Slide to harp; buttons/palette play a block voicing (piano-style).</td></tr>
-        <tr><th>PALETTE</th><td>Eight slots. Empty tap or ARM stores the current chord. Filled press plays that chord as a block (MOM while held, HOLD latches).</td></tr>
+        <tr><th>STRUM</th><td>Wide plate under the fifths grid. Slide to harp (low→high); buttons/palette play a block voicing (piano-style).</td></tr>
+        <tr><th>PALETTE</th><td>2×4 grid to the right of the fifths buttons. Empty tap or ARM stores the current chord. Filled press plays that chord as a block (MOM while held, HOLD latches).</td></tr>
         <tr><th>HOLD / MOM</th><td>HOLD keeps the last block chord ringing (memory). MOM only sounds while your finger is down.</td></tr>
         <tr><th>OUT</th><td>LOCAL / USB / BOTH through the current synth voice (or MIDI out).</td></tr>
-        <tr><th>KEY / CHANGES / ARM</th><td>Pick the key, load a named progression into the palette, or arm the next empty slot.</td></tr>
+        <tr><th>KEY / PROGS / ARM</th><td>Pick the key, load a named progression into the palette, or arm the next empty slot.</td></tr>
       </table>
       <p class="note">While SEQ REC or pad REC is armed, chrome shows <code>REC {chord}</code> or <code>PAD {chord}</code>. Block chords and strums record the same way synth keys do. Switch to CHD without stopping the take — the sequencer lives on the kiosk, not the page.</p>
     </section>
 
     <section class="screen" id="chords-changes">
-      <h2>CHORDS — CHANGES</h2>
+      <h2>CHORDS — PROGRESSIONS</h2>
       <p class="lede">Named progressions in the chosen KEY, loaded into the palette.</p>
       <figure>
-        <img src="screens/17-chords-changes.png" alt="CHANGES progression picker" width="800" height="480" />
-        <figcaption>17 — CHANGES</figcaption>
+        <img src="screens/17-chords-changes.png" alt="PROGRESSIONS picker" width="800" height="480" />
+        <figcaption>17 — PROGRESSIONS</figcaption>
       </figure>
       <table>
         <tr><th>Pop / 50s / Folk / Jazz</th><td>I–V–vi–IV, I–vi–IV–V, I–IV–V, ii–V–I.</td></tr>
@@ -457,7 +461,7 @@
 
     <section class="screen" id="chords-key">
       <h2>CHORDS — KEY</h2>
-      <p class="lede">Sets the tonic CHANGES uses when filling the palette.</p>
+      <p class="lede">Sets the tonic PROGS uses when filling the palette.</p>
       <figure>
         <img src="screens/22-chords-key.png" alt="CHORDS key picker" width="800" height="480" />
         <figcaption>22 — KEY</figcaption>
@@ -537,8 +541,9 @@
         <tr><th>AUDIO</th><td>All-notes-off then reopen the sound device (headphone jack swap).</td></tr>
         <tr><th>LOG / MAP</th><td>Engine log, MIDI thru.</td></tr>
         <tr><th>FX: BUS / VOICE / DRUMS</th><td>Which insert the four sliders edit.</td></tr>
-        <tr><th>DRIVE DELAY REVERB FLANGE</th><td>Vertical mix sliders. Flanger is also a KAOSS program (Y = mix, X = rate).</td></tr>
+        <tr><th>DRIVE DELAY REVERB FLANGE</th><td>Vertical mix sliders. Flanger is also a KAOSS program (X = pitch, Y = mix).</td></tr>
         <tr><th>LOG / PORTS</th><td>Engine log, USB MIDI IN/OUT picker and THRU.</td></tr>
+        <tr><th>PROBE</th><td>Toggle a cheap local health log (<code>probe.log</code>): callback µs, xruns, reconnects, load, throttle. Safe to leave on while playing.</td></tr>
         <tr><th>WIFI</th><td>Join the saved NetworkManager profile or <code>.wifi-credentials</code>.</td></tr>
         <tr><th>FONT</th><td>RETRO bitmap vs SMOOTH TTF.</td></tr>
         <tr><th>UPDATE</th><td>CHECK GitHub <code>master</code>, then overlay the repo and copy committed <code>dist/armv7</code> onto <code>bin/</code> (midi-engine, jambox-engine, pidi-native). Does not cargo-build on the Pi.</td></tr>
@@ -553,7 +558,7 @@
         <figcaption>07 — LOG</figcaption>
       </figure>
       <table>
-        <tr><th>Counters</th><td>Callback frames/µs, xruns, command drops, emergency releases, active repeats.</td></tr>
+        <tr><th>Counters</th><td>Callback frames/µs, xruns, command drops, emergency releases, active repeats. SET→PROBE also writes these to <code>probe.log</code>.</td></tr>
         <tr><th>CLEAR / ALL OFF</th><td>Wipe the on-screen log, or panic.</td></tr>
       </table>
     </section>

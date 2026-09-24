@@ -14,7 +14,7 @@ use crate::presets::{self, PresetSnapshot};
 use crate::screensaver;
 use crate::scroll::{self, ScrollKind, TOUCH_SCROLL_THRESH_PX};
 use crate::seq::{SeqAction, SeqModel, SEQ_CLIP_SLOT};
-use crate::session::{self, OutMode, SessionState};
+use crate::session::{self, ClipQuantize, OutMode, SessionState};
 use crate::songs::{self, SONG_CLIP_SLOT};
 use crate::voice_bake;
 use crate::waves;
@@ -277,6 +277,8 @@ pub struct NativeModel {
     pub song_loop: bool,
     pub fx_bus: [f32; 4],
     pub fx_voice: [f32; 4],
+    /// Voice flanger LFO rate (0..1). Independent of SYNTH FLANGE mix.
+    pub fx_flanger_rate: f32,
     pub fx_drum: [f32; 4],
     pub fx_target: FxEditTarget,
     /// Kit bus trim (FX DRUMS / MIX KIT). Independent of melody `synth_params[2]` (LEVEL).
@@ -296,6 +298,7 @@ pub struct NativeModel {
     /// When set, MAP is picking outputs for this input channel (0–15).
     pub map_out_edit: Option<u8>,
     pub pads_out: OutMode,
+    pub clip_quantize: ClipQuantize,
     pub song_out: OutMode,
     pub kaoss_out: OutMode,
     pub chords_out: OutMode,
@@ -386,6 +389,12 @@ pub struct NativeModel {
     pub throttle: crate::throttle::ThrottleState,
     last_throttle_poll: Instant,
     logged_undervolt: bool,
+    /// SET→PROBE: append engine health to `probe.log` every couple of seconds.
+    pub probe: bool,
+    pub probe_reconnects: u64,
+    last_probe_write: Instant,
+    last_logged_xruns: u64,
+    last_logged_drops: u64,
 }
 
 impl Default for NativeModel {
@@ -487,6 +496,7 @@ impl NativeModel {
             song_loop: false,
             fx_bus: [0.0, 0.0, 0.0, 0.0],
             fx_voice: [0.0, 0.0, 0.0, 0.0],
+            fx_flanger_rate: 0.35,
             fx_drum: [0.0, 0.0, 0.0, 0.0],
             fx_target: FxEditTarget::Bus,
             drum_level: 1.0,
@@ -502,6 +512,7 @@ impl NativeModel {
             channel_map_bits: [0; 16],
             map_out_edit: None,
             pads_out: OutMode::Both,
+            clip_quantize: ClipQuantize::Bar,
             song_out: OutMode::Both,
             kaoss_out: OutMode::Local,
             chords_out: OutMode::Both,
@@ -573,6 +584,11 @@ impl NativeModel {
             throttle: crate::throttle::ThrottleState::default(),
             last_throttle_poll: Instant::now(),
             logged_undervolt: false,
+            probe: false,
+            probe_reconnects: 0,
+            last_probe_write: Instant::now(),
+            last_logged_xruns: 0,
+            last_logged_drops: 0,
         };
         // Ensure ~/.local/share/pidi/{songs,phrases,…} exist on first boot.
         let _ = crate::paths::data_root();
@@ -1092,6 +1108,7 @@ impl NativeModel {
         self.poll_wifi_usb();
         self.sync_wifi_usb();
         self.poll_throttle();
+        self.tick_probe();
         self.tick_ota_reload(dt);
         if self.mode == UiMode::Drums && self.kit_edit_open && self.kit_wave_dirty {
             self.rebuild_kit_wave();
@@ -1135,6 +1152,60 @@ impl NativeModel {
             self.logged_undervolt = true;
             self.push_log(next.log_line());
             self.mark_dirty();
+        }
+    }
+
+    /// Track engine socket drops so probe.log can attribute reconnect storms.
+    pub fn note_engine_link(&mut self, connected: bool) {
+        if self.connected && !connected {
+            self.probe_reconnects = self.probe_reconnects.saturating_add(1);
+            if self.probe {
+                self.push_log(format!("probe engine link down ({})", self.probe_reconnects));
+            }
+        }
+        self.connected = connected;
+    }
+
+    fn tick_probe(&mut self) {
+        if !self.probe {
+            return;
+        }
+        if self.frame > 1
+            && self.last_probe_write.elapsed().as_secs_f32() < crate::probe::INTERVAL_SEC
+        {
+            return;
+        }
+        self.write_probe_sample();
+    }
+
+    fn write_probe_sample(&mut self) {
+        let thr = format!("thr={:#x}", self.throttle.flags);
+        let line = crate::probe::format_line(
+            self.connected,
+            self.probe_reconnects,
+            self.status.callback_frames,
+            self.status.callback_micros,
+            self.status.callback_peak_micros,
+            self.status.xruns,
+            self.status.command_drops,
+            self.status.emergency_releases,
+            self.status.active_voices,
+            self.status.active_drums,
+            self.status.playing_clips,
+            self.status.peak,
+            &thr,
+        );
+        let wrote = crate::probe::append(&line);
+        let xrun_jump = self.status.xruns > self.last_logged_xruns;
+        let drop_jump = self.status.command_drops > self.last_logged_drops;
+        self.last_logged_xruns = self.status.xruns;
+        self.last_logged_drops = self.status.command_drops;
+        self.last_probe_write = Instant::now();
+        if wrote && (xrun_jump || drop_jump) {
+            self.push_log(format!(
+                "probe xrun={} drop={}",
+                self.status.xruns, self.status.command_drops
+            ));
         }
     }
 
@@ -1723,6 +1794,7 @@ impl NativeModel {
     pub fn apply_session(&mut self, s: &SessionState, outbox: &mut Outbox) {
         self.bpm = s.bpm.clamp(40.0, 240.0);
         self.seq.bpm = self.bpm;
+        self.seq.cue_beep = s.seq_cue_beep;
         self.synth_params = [s.morph, s.tone, s.level, s.attack, s.release];
         self.drum_level = s.drum_level.clamp(0.0, 1.0);
         self.seq_level = s.seq_level.clamp(0.0, 2.0);
@@ -1762,7 +1834,9 @@ impl NativeModel {
         ];
         // Voice flange (SYNTH / FX→VOICE); bus flange is independent global wet.
         self.fx_voice[3] = s.fx_flanger.clamp(0.0, 1.0);
+        self.fx_flanger_rate = s.fx_flanger_rate.clamp(0.0, 1.0);
         self.pads_out = s.pads_out;
+        self.clip_quantize = s.clip_quantize;
         self.song_out = s.song_out;
         self.kaoss_out = s.kaoss_out;
         self.chords_out = s.chords_out;
@@ -1780,6 +1854,7 @@ impl NativeModel {
         self.midi_in_filter = s.midi_in.clone();
         self.midi_out_filter = s.midi_out.clone();
         self.channel_map_bits = s.channel_map;
+        self.probe = s.probe;
         outbox.midi_select(
             Some(self.midi_in_filter.clone()),
             Some(self.midi_out_filter.clone()),
@@ -1821,6 +1896,7 @@ impl NativeModel {
             outbox.fx_bus(name, self.fx_bus[i]);
         }
         self.push_voice_fx("flanger_mix", self.fx_voice[3], outbox);
+        self.push_voice_fx("flanger_rate", self.fx_flanger_rate, outbox);
         self.sync_wave_bank();
         self.push_kaoss_scale(outbox);
         // Last screen is still written to settings.json, but power-on is
@@ -1855,6 +1931,7 @@ impl NativeModel {
             kaoss_fx_target: self.kaoss_fx_target,
             fx_bus: [self.fx_bus[0], self.fx_bus[1], self.fx_bus[2]],
             fx_flanger: self.fx_voice[3],
+            fx_flanger_rate: self.fx_flanger_rate,
             fx_bus_flanger: self.fx_bus[3],
             kaoss_show_all: self.kaoss_show_all,
             kaoss_channel: self.kaoss_channel,
@@ -1863,6 +1940,7 @@ impl NativeModel {
             vibrato_rate: self.vibrato_rate,
             mode: self.mode.label().to_ascii_lowercase(),
             pads_out: self.pads_out,
+            clip_quantize: self.clip_quantize,
             song_out: self.song_out,
             kaoss_out: self.kaoss_out,
             chords_out: self.chords_out,
@@ -1873,9 +1951,11 @@ impl NativeModel {
             screensaver_sec: self.screensaver.timeout_sec,
             kaoss_viz_style: self.kaoss_viz_style.wire().into(),
             kaoss_mono_color: self.kaoss_mono_color,
+            seq_cue_beep: self.seq.cue_beep,
             midi_in: self.midi_in_filter.clone(),
             midi_out: self.midi_out_filter.clone(),
             channel_map: self.channel_map_bits,
+            probe: self.probe,
         }
     }
 
@@ -1930,6 +2010,17 @@ impl NativeModel {
         }
         self.midi_in_connected = ports.input_connected.clone();
         self.midi_out_connected = ports.output_connected.clone();
+        self.layout.show_on_screen_keys = !self.hardware_keybed_connected();
+    }
+
+    /// Hide on-screen piano keys when a known keybed is plugged in.
+    pub fn hardware_keybed_connected(&self) -> bool {
+        if midi_core::port_looks_like_keybed(&self.midi_in_connected) {
+            return true;
+        }
+        self.midi_inputs
+            .iter()
+            .any(|name| midi_core::port_looks_like_keybed(name))
     }
 
     fn write_midi_ports_file(&self) {
@@ -2465,6 +2556,19 @@ impl NativeModel {
                 self.tap_ui(slot, id, gesture, px, py);
                 self.toggle_pads_local_synth();
             }
+            Hit::ClipQuantize => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.clip_quantize = self.clip_quantize.cycle();
+                self.status_line = format!(
+                    "clips lock to {}",
+                    match self.clip_quantize {
+                        ClipQuantize::Off => "now",
+                        ClipQuantize::Beat => "the next beat",
+                        ClipQuantize::Bar => "the next bar",
+                    }
+                );
+                self.mark_dirty();
+            }
             Hit::PadsOut => {
                 self.tap_ui(slot, id, gesture, px, py);
                 self.pads_out = self.pads_out.cycle();
@@ -2549,7 +2653,7 @@ impl NativeModel {
                     surface: Surface::KitSlider { index },
                     gate_on: false,
                 };
-                self.apply_kit_slider(index, py, outbox);
+                self.apply_kit_slider(index, py, false, outbox);
             }
             Hit::KitWave => {
                 self.tap_ui(slot, id, gesture, px, py);
@@ -2607,7 +2711,7 @@ impl NativeModel {
                     surface: Surface::SynthSlider { index },
                     gate_on: false,
                 };
-                self.apply_synth_slider(index, px, py, outbox);
+                self.apply_synth_slider(index, px, py, false, outbox);
             }
             Hit::FmRecipe(index) => {
                 self.tap_ui(slot, id, gesture, px, py);
@@ -2645,6 +2749,9 @@ impl NativeModel {
                 self.apply_fm_slider(index, py, outbox);
             }
             Hit::SynthKey { note } => {
+                if self.hardware_keybed_connected() {
+                    return;
+                }
                 let note = self.transpose_synth_key(note);
                 self.fingers[slot] = Finger {
                     active: true,
@@ -2977,6 +3084,22 @@ impl NativeModel {
                 };
                 self.seq.toggle_extend();
                 self.status_line = self.seq.status.clone();
+            }
+            Hit::SeqCue => {
+                self.fingers[slot] = Finger {
+                    active: true,
+                    id,
+                    gesture,
+                    x: 0.0,
+                    y: 0.0,
+                    px,
+                    py,
+                    surface: Surface::UiTap,
+                    gate_on: false,
+                };
+                let action = self.seq.toggle_cue_beep();
+                self.apply_seq_action(action, outbox);
+                self.mark_dirty();
             }
             Hit::SeqStop => {
                 self.fingers[slot] = Finger {
@@ -3383,6 +3506,19 @@ impl NativeModel {
                 self.push_nav_history(UiMode::Ports);
                 self.switch_mode(UiMode::Ports, outbox);
             }
+            Hit::SettingsProbe => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.probe = !self.probe;
+                if self.probe {
+                    self.status_line = "PROBE ON — writing probe.log".into();
+                    self.push_log("probe on");
+                    self.write_probe_sample();
+                } else {
+                    self.status_line = "PROBE OFF".into();
+                    self.push_log("probe off");
+                }
+                self.mark_dirty();
+            }
             Hit::MapThruOn => {
                 self.tap_ui(slot, id, gesture, px, py);
                 self.start_host_job(HostTask::MapThruOn);
@@ -3464,7 +3600,7 @@ impl NativeModel {
             Hit::ChordsChanges => {
                 self.tap_ui(slot, id, gesture, px, py);
                 self.chords_overlay = Some(ChordsOverlay::Changes);
-                self.status_line = "pick changes".into();
+                self.status_line = "pick progressions".into();
             }
             Hit::ChordsArm => {
                 self.tap_ui(slot, id, gesture, px, py);
@@ -3579,14 +3715,14 @@ impl NativeModel {
                 self.move_kaoss_touch(self.fingers[slot].gesture, x, y, outbox);
             }
             Surface::SynthSlider { index } => {
-                self.apply_synth_slider(index, px, py, outbox);
+                self.apply_synth_slider(index, px, py, true, outbox);
             }
             Surface::FmSlider { index } => {
                 self.apply_fm_slider(index, py, outbox);
             }
             Surface::FmGraph { .. } => {}
             Surface::KitSlider { index } => {
-                self.apply_kit_slider(index, py, outbox);
+                self.apply_kit_slider(index, py, true, outbox);
             }
             Surface::FxSlider { index } => {
                 self.apply_fx_slider(index, py, outbox);
@@ -3756,11 +3892,11 @@ impl NativeModel {
             return;
         }
         if self.phrase_playing[index] {
-            outbox.clip_stop(index as u8, "bar");
+            outbox.clip_stop(index as u8, self.clip_quantize.wire());
             self.phrase_playing[index] = false;
             self.status_line = format!("{} stop", phrases::pad_label(index));
         } else {
-            outbox.clip_launch(index as u8, "bar");
+            outbox.clip_launch(index as u8, self.clip_quantize.wire());
             self.phrase_playing[index] = true;
             self.status_line = format!("{} launch", phrases::pad_label(index));
         }
@@ -4101,20 +4237,58 @@ impl NativeModel {
     }
 
     const SYNTH_PARAM_NAMES: [&'static str; 5] = ["morph", "tone", "level", "attack", "release"];
+    /// Ignore a captured-slider sample that jumps more than this in one event.
+    /// Capacitive panels (and a finger leaving the track) used to clamp to 0 or 1.
+    const SLIDER_JUMP: f32 = 0.40;
 
-
-    fn apply_synth_slider(&mut self, index: usize, _px: i32, py: i32, outbox: &mut Outbox) {
-        let track = self.layout.synth_slider(index);
+    fn vertical_slider_t(track: Rect, py: i32) -> Option<f32> {
+        if py < track.y || py >= track.y + track.h {
+            return None;
+        }
         let y = 1.0 - ((py - track.y) as f32 / track.h.max(1) as f32);
-        let value = y.clamp(0.0, 1.0);
+        Some(y.clamp(0.0, 1.0))
+    }
+
+    fn accept_slider_value(prev: f32, next: f32, moving: bool) -> bool {
+        !moving || (next - prev).abs() <= Self::SLIDER_JUMP
+    }
+
+    fn apply_synth_slider(
+        &mut self,
+        index: usize,
+        _px: i32,
+        py: i32,
+        moving: bool,
+        outbox: &mut Outbox,
+    ) {
+        let track = self.layout.synth_slider(index);
+        let Some(value) = Self::vertical_slider_t(track, py) else {
+            return;
+        };
         if index == 5 {
+            if !Self::accept_slider_value(self.fx_voice[3], value, moving) {
+                return;
+            }
             self.fx_voice[3] = value;
             self.push_voice_fx("flanger_mix", value, outbox);
             self.status_line = format!("voice flange {:.2}", value);
             self.mark_dirty();
             return;
         }
+        if index == 6 {
+            if !Self::accept_slider_value(self.fx_flanger_rate, value, moving) {
+                return;
+            }
+            self.fx_flanger_rate = value;
+            self.push_voice_fx("flanger_rate", value, outbox);
+            self.status_line = format!("flange rate {:.2}", value);
+            self.mark_dirty();
+            return;
+        }
         if index >= 5 {
+            return;
+        }
+        if !Self::accept_slider_value(self.synth_params[index], value, moving) {
             return;
         }
         self.synth_params[index] = value;
@@ -4478,13 +4652,22 @@ impl NativeModel {
         self.mark_dirty();
     }
 
-    fn apply_kit_slider(&mut self, index: usize, py: i32, outbox: &mut Outbox) {
+    fn apply_kit_slider(&mut self, index: usize, py: i32, moving: bool, outbox: &mut Outbox) {
         if index >= 4 {
             return;
         }
         let track = self.layout.kit_edit_slider(index);
-        let y = 1.0 - ((py - track.y) as f32 / track.h.max(1) as f32);
-        let value = y.clamp(0.0, 1.0);
+        let Some(value) = Self::vertical_slider_t(track, py) else {
+            return;
+        };
+        let prev = if self.kit_all_drums {
+            self.drum_group_macros[index]
+        } else {
+            self.drum_macros[self.selected_drum_model().index()][index]
+        };
+        if !Self::accept_slider_value(prev, value, moving) {
+            return;
+        }
         let name = Self::DRUM_MACRO_NAMES[index];
         if self.kit_all_drums {
             self.drum_group_macros[index] = value;
@@ -4834,6 +5017,35 @@ impl NativeModel {
             .count()
     }
 
+    /// Sounding notes come from live contacts, not only the last start/stop edge.
+    fn reconcile_kaoss_from_fingers(&mut self, outbox: &mut Outbox) {
+        let prog = kaoss_ui::program(self.kaoss_program);
+        if !prog.note || kaoss_ui::gate(self.kaoss_gate).beats > 0.0 {
+            return;
+        }
+        let live: Vec<(f32, f32)> = self
+            .fingers
+            .iter()
+            .filter(|f| f.active && f.surface == Surface::Kaoss)
+            .map(|f| (f.x, f.y))
+            .collect();
+        if live.is_empty() {
+            return;
+        }
+        let held: Vec<u8> = live
+            .iter()
+            .map(|&(x, _)| self.kaoss_note_at(x))
+            .collect();
+        if let Some(current) = self.kaoss_usb_note {
+            if held.contains(&current) {
+                return;
+            }
+        }
+        if let Some(&(x, y)) = live.last() {
+            self.kaoss_usb_note_follow(x, y, outbox);
+        }
+    }
+
     fn begin_kaoss_touch(&mut self, gesture: u32, x: f32, y: f32, outbox: &mut Outbox) {
         // Count excludes this contact only if it isn't registered yet — callers
         // always arm the Finger slot before invoking us, so subtract one.
@@ -4977,6 +5189,7 @@ impl NativeModel {
                 self.kaoss_usb_note_off(outbox);
             }
         }
+        self.reconcile_kaoss_from_fingers(outbox);
         self.kaoss_touching = remaining > 0;
         if remaining == 0 {
             self.kaoss_usb_pad_up(outbox);
@@ -5381,8 +5594,10 @@ impl NativeModel {
                 self.mark_dirty();
             } else if prog.y_param == "vib" {
                 // Tk parity: Y raises depth and gates always-on vibrato.
+                // Bottom dead zone so a rest finger does not engage VIB.
+                let y = kaoss_ui::apply_zero_deadzone(y, kaoss_ui::ZERO_REST_DEADZONE);
                 self.vibrato_depth = (y * 2.0).clamp(0.0, 2.0);
-                self.vibrato_always = if y > 0.02 { 1.0 } else { 0.0 };
+                self.vibrato_always = if y > 0.0 { 1.0 } else { 0.0 };
                 outbox.synth("vibrato_depth", y.clamp(0.0, 1.0));
                 outbox.synth("vibrato_always", self.vibrato_always);
                 self.mark_dirty();
@@ -5402,8 +5617,9 @@ impl NativeModel {
                 self.apply_named_param(xp, x, outbox);
             }
             if prog.y_param == "vib" {
+                let y = kaoss_ui::apply_zero_deadzone(y, kaoss_ui::ZERO_REST_DEADZONE);
                 self.vibrato_depth = (y * 2.0).clamp(0.0, 2.0);
-                self.vibrato_always = if y > 0.02 { 1.0 } else { 0.0 };
+                self.vibrato_always = if y > 0.0 { 1.0 } else { 0.0 };
                 outbox.synth("vibrato_depth", y.clamp(0.0, 1.0));
                 outbox.synth("vibrato_always", self.vibrato_always);
             } else if prog.y_param == "tone_lfo" {
@@ -5435,6 +5651,9 @@ impl NativeModel {
         if self.kaoss_fx_target.includes_voice() {
             if let Some(i) = Self::voice_fx_slider_index(name) {
                 self.fx_voice[i] = value;
+            }
+            if name == "flanger_rate" {
+                self.fx_flanger_rate = value;
             }
             self.push_voice_fx(name, value, outbox);
         }
@@ -5549,7 +5768,7 @@ impl NativeModel {
                 );
                 outbox.clip_gain(SEQ_CLIP_SLOT, self.seq_level);
                 if launch {
-                    outbox.clip_launch(SEQ_CLIP_SLOT, "bar");
+                    outbox.clip_launch(SEQ_CLIP_SLOT, self.clip_quantize.wire());
                 }
             }
         }
@@ -6500,7 +6719,7 @@ impl NativeModel {
         let mode = if self.song_loop { "loop" } else { "oneshot" };
         outbox.clip_load(SONG_CLIP_SLOT, length_ticks, mode, events, 1.0);
         outbox.clip_gain(SONG_CLIP_SLOT, self.seq_level);
-        outbox.clip_launch(SONG_CLIP_SLOT, "bar");
+        outbox.clip_launch(SONG_CLIP_SLOT, self.clip_quantize.wire());
         self.song_playing = true;
         self.bpm = bpm.clamp(40.0, 240.0);
         self.seq.bpm = self.bpm;
@@ -6834,6 +7053,44 @@ mod tests {
             )),
             "midline should be near unison: {batch:?}"
         );
+        // A few pixels off center still rest in the dead zone.
+        let near = k.y + k.h / 2 + (k.h as f32 * 0.03) as i32;
+        model.finger_move(1, k.x + k.w / 2, near, &mut out);
+        let batch = out.take();
+        assert!(
+            batch.iter().any(|r| matches!(
+                r,
+                Request::Synth { param, value, .. }
+                    if param == "pitch_bend" && value.abs() < 1e-3
+            )),
+            "near-center should stay unison: {batch:?}"
+        );
+    }
+
+    #[test]
+    fn kaoss_vib_bottom_rest_does_not_engage() {
+        let mut model = NativeModel::new();
+        model.kaoss_program = kaoss_ui::KAOSS_PROGRAMS
+            .iter()
+            .position(|p| p.id == "vib")
+            .expect("vib program");
+        let mut out = Outbox::new();
+        let k = model.layout.kaoss;
+        // Sit just above the bottom edge — inside the rest dead zone.
+        model.finger_down(1, k.x + k.w / 2, k.y + k.h - 6, &mut out);
+        assert!(
+            model.vibrato_always < 0.01,
+            "bottom rest should leave VIB off"
+        );
+        let batch = out.take();
+        assert!(
+            !batch.iter().any(|r| matches!(
+                r,
+                Request::Synth { param, value, .. }
+                    if param == "vibrato_always" && *value > 0.01
+            )),
+            "bottom rest must not gate vibrato: {batch:?}"
+        );
     }
 
     #[test]
@@ -7124,6 +7381,34 @@ mod tests {
     }
 
     #[test]
+    fn synth_tone_slider_ignores_snap_jumps() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Synth);
+        let mut out = Outbox::new();
+        let track = model.layout.synth_slider(1);
+        model.finger_down(1, track.x + 4, track.y + track.h / 2, &mut out);
+        out.take();
+        let mid = model.synth_params[1];
+        assert!((mid - 0.5).abs() < 0.08, "down on midline, got {mid}");
+
+        // Wild coordinate (lift / capacitive glitch) used to clamp to 1.0.
+        model.finger_move(1, track.x + 4, 0, &mut out);
+        assert!(
+            (model.synth_params[1] - mid).abs() < 1e-4,
+            "outside-track jump must not snap tone, got {}",
+            model.synth_params[1]
+        );
+
+        // A small slide still works.
+        model.finger_move(1, track.x + 4, track.y + track.h / 2 - 12, &mut out);
+        assert!(
+            model.synth_params[1] > mid + 0.02,
+            "small slide should raise tone, got {}",
+            model.synth_params[1]
+        );
+    }
+
+    #[test]
     fn five_contacts_are_tracked() {
         let mut model = model_on_kaoss();
         let mut out = Outbox::new();
@@ -7169,6 +7454,140 @@ mod tests {
     }
 
     #[test]
+    fn kaoss_lifting_one_finger_leaves_the_other_touch() {
+        let mut model = NativeModel::new();
+        assert!(kaoss_ui::program(model.kaoss_program).note);
+        let mut out = Outbox::new();
+        let a = model.layout.kaoss_cell(1, 3);
+        let b = model.layout.kaoss_cell(10, 3);
+        model.finger_down(1, a.x + 4, a.y + 4, &mut out);
+        model.finger_down(2, b.x + 4, b.y + 4, &mut out);
+        let downs: Vec<u32> = out
+            .take()
+            .iter()
+            .filter_map(|r| match r {
+                Request::Touch {
+                    phase: TouchPhase::Down,
+                    gesture,
+                    ..
+                } => Some(*gesture),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(downs.len(), 2);
+
+        model.finger_up(1, &mut out);
+        let lift = out.take();
+        let ups: Vec<u32> = lift
+            .iter()
+            .filter_map(|r| match r {
+                Request::Touch {
+                    phase: TouchPhase::Up,
+                    gesture,
+                    ..
+                } => Some(*gesture),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            ups,
+            vec![downs[0]],
+            "lifting finger 1 must not Touch-Up finger 2: {lift:?}"
+        );
+        let mut buf = [(0.0, 0.0); MAX_FINGERS];
+        assert_eq!(model.copy_kaoss_fingers(&mut buf), 1);
+
+        model.finger_up(2, &mut out);
+        let end = out.take();
+        assert!(end.iter().any(|r| matches!(
+            r,
+            Request::Touch {
+                phase: TouchPhase::Up,
+                gesture,
+                ..
+            } if *gesture == downs[1]
+        )));
+    }
+
+    #[test]
+    fn kaoss_smear_lift_does_not_touch_up_the_held_finger() {
+        let mut model = NativeModel::new();
+        let mut out = Outbox::new();
+        let a = model.layout.kaoss_cell(1, 3);
+        let b = model.layout.kaoss_cell(10, 3);
+        model.finger_down(1, a.x + 4, a.y + 4, &mut out);
+        model.finger_down(2, b.x + 4, b.y + 4, &mut out);
+        let downs: Vec<u32> = out
+            .take()
+            .iter()
+            .filter_map(|r| match r {
+                Request::Touch {
+                    phase: TouchPhase::Down,
+                    gesture,
+                    ..
+                } => Some(*gesture),
+                _ => None,
+            })
+            .collect();
+
+        model.finger_move(1, b.x + 4, b.y + 4, &mut out);
+        out.take();
+        model.finger_up(1, &mut out);
+        let lift = out.take();
+        assert!(
+            lift.iter().all(|r| !matches!(
+                r,
+                Request::Touch {
+                    phase: TouchPhase::Up,
+                    gesture,
+                    ..
+                } if *gesture == downs[1]
+            )),
+            "smear-lift must not send Up for the remaining finger: {lift:?}"
+        );
+        let mut buf = [(0.0, 0.0); MAX_FINGERS];
+        assert_eq!(model.copy_kaoss_fingers(&mut buf), 1);
+    }
+
+    #[test]
+    fn kaoss_usb_reconciles_to_the_remaining_finger() {
+        let mut model = NativeModel::new();
+        model.kaoss_out = OutMode::Usb;
+        let mut out = Outbox::new();
+        let a = model.layout.kaoss_cell(1, 3);
+        let b = model.layout.kaoss_cell(10, 3);
+        model.finger_down(1, a.x + 4, a.y + 4, &mut out);
+        model.finger_down(2, b.x + 4, b.y + 4, &mut out);
+        out.take();
+
+        let keep = model.kaoss_note_at(model.layout.kaoss.pad_xy(a.x + 4, a.y + 4).0);
+        model.finger_up(2, &mut out);
+        let lift = out.take();
+        assert!(
+            lift.iter().any(|r| matches!(
+                r,
+                Request::MidiEmit {
+                    kind,
+                    note: Some(n),
+                    ..
+                } if kind == "note_on" && *n == keep
+            )),
+            "USB out should retarget the remaining finger's note: {lift:?}"
+        );
+        assert!(
+            lift.iter().all(|r| !matches!(
+                r,
+                Request::MidiEmit {
+                    kind,
+                    note: Some(n),
+                    ..
+                } if kind == "note_off" && *n == keep
+            )),
+            "USB must not note-off the remaining pitch: {lift:?}"
+        );
+    }
+
+    #[test]
     fn curated_program_pick_stores_absolute_index() {
         let mut model = NativeModel::new();
         model.kaoss_show_all = false;
@@ -7207,6 +7626,36 @@ mod tests {
         assert!(batch
             .iter()
             .any(|r| matches!(r, Request::ClipLaunch { slot: 0, .. })));
+    }
+
+    #[test]
+    fn clip_quantize_button_cycles_launch_grid() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Pads);
+        model.phrases[0].empty = false;
+        let mut out = Outbox::new();
+        let qnt = model.layout.pads_qnt;
+        assert_eq!(
+            model.layout.hit(UiMode::Pads, qnt.x + 4, qnt.y + 4),
+            Hit::ClipQuantize
+        );
+        model.finger_down(1, qnt.x + 4, qnt.y + 4, &mut out);
+        model.finger_up(1, &mut out);
+        out.take();
+        assert_eq!(model.clip_quantize, ClipQuantize::Beat);
+        model.toggle_phrase(0, &mut out);
+        assert!(out.take().iter().any(|r| matches!(
+            r,
+            Request::ClipLaunch {
+                slot: 0,
+                quantize: Some(q)
+            } if q == "beat"
+        )));
+        let seq_qnt = model.layout.seq_qnt;
+        assert_eq!(
+            model.layout.hit(UiMode::Seq, seq_qnt.x + 4, seq_qnt.y + 4),
+            Hit::ClipQuantize
+        );
     }
 
     #[test]
@@ -7360,6 +7809,38 @@ mod tests {
         assert_no_bus_fx(&batch);
         assert_no_drum_group_fx(&batch);
         assert!(model.fx_voice[1] > 0.5, "Y should raise voice delay mix");
+    }
+
+    #[test]
+    fn kaoss_flange_plays_note_and_mix_not_rate() {
+        let mut model = NativeModel::new();
+        select_kaoss_program(&mut model, "flange");
+        model.morph_a = 0;
+        model.morph_b = 0;
+        let mut out = Outbox::new();
+        let k = model.layout.kaoss;
+        model.finger_down(1, k.x + k.w / 2, k.y + 4, &mut out);
+        let batch = out.take();
+        assert!(
+            batch.iter().any(|r| matches!(
+                r,
+                Request::Touch {
+                    phase: TouchPhase::Down,
+                    ..
+                }
+            )),
+            "FLANGE should play a note on touch: {batch:?}"
+        );
+        assert_voice_fx(&batch, 0, "flanger_mix");
+        assert!(
+            batch.iter().all(|r| !matches!(
+                r,
+                Request::Fx { param, .. } if param == "flanger_rate"
+            )),
+            "curated FLANGE must not drive rate: {batch:?}"
+        );
+        assert_no_bus_fx(&batch);
+        assert!(model.fx_voice[3] > 0.5, "Y should raise flange amount");
     }
 
     #[test]
@@ -7857,6 +8338,62 @@ mod tests {
         model.finger_down(2, home.x + 4, home.y + 4, &mut out);
         assert_eq!(model.mode, UiMode::Home);
         host::set_dry_run(false);
+    }
+
+    #[test]
+    fn synth_keys_hide_when_mpk_is_connected() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Synth);
+        assert!(!model.hardware_keybed_connected());
+        let mut out = Outbox::new();
+        let key = model.layout.synth_keyboard_white_rect(0);
+        model.finger_down(1, key.x + 4, key.y + key.h - 8, &mut out);
+        assert!(out.take().iter().any(|r| matches!(r, Request::NoteOn { .. })));
+        model.finger_up(1, &mut out);
+        out.take();
+
+        model.apply_midi_ports(&MidiPortsReply {
+            inputs: vec!["MPK mini 3".into()],
+            outputs: vec!["U2MIDI PRO".into()],
+            input_connected: "MPK mini 3".into(),
+            ..MidiPortsReply::default()
+        });
+        assert!(model.hardware_keybed_connected());
+        assert!(
+            !model.layout.show_on_screen_keys,
+            "piano strip should yield to sliders/scope"
+        );
+        assert!(
+            model.layout.synth_play_h() > model.layout.synth_sliders.h,
+            "SYNTH sliders/scope should grow into the former keybed"
+        );
+        let grown = model.layout.synth_slider(0);
+        assert!(
+            model
+                .layout
+                .synth_keys
+                .contains(grown.x + 4, grown.y + grown.h - 4),
+            "former key area should become slider travel"
+        );
+        model.finger_down(2, key.x + 4, key.y + key.h - 8, &mut out);
+        assert!(
+            out.take().iter().all(|r| !matches!(r, Request::NoteOn { .. })),
+            "on-screen keys must stay silent while a keybed is connected"
+        );
+
+        model.apply_midi_ports(&MidiPortsReply {
+            inputs: vec!["U2MIDI PRO:U2MIDI PRO MIDI 1 20:0".into()],
+            outputs: vec!["U2MIDI PRO".into()],
+            input_connected: "U2MIDI PRO:U2MIDI PRO MIDI 1 20:0".into(),
+            ..MidiPortsReply::default()
+        });
+        assert!(!model.hardware_keybed_connected());
+        assert!(model.layout.show_on_screen_keys);
+        model.finger_down(3, key.x + 4, key.y + key.h - 8, &mut out);
+        assert!(
+            out.take().iter().any(|r| matches!(r, Request::NoteOn { .. })),
+            "keys should return when only a DIN interface is connected"
+        );
     }
 
     #[test]
@@ -8413,6 +8950,18 @@ mod tests {
     }
 
     #[test]
+    fn chords_progs_button_opens_progressions_overlay() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Chords);
+        let mut out = Outbox::new();
+        let cell = model.layout.chords_tool(3);
+        model.finger_down(1, cell.x + 4, cell.y + 4, &mut out);
+        model.finger_up(1, &mut out);
+        assert_eq!(model.chords_overlay, Some(ChordsOverlay::Changes));
+        assert_eq!(model.status_line, "pick progressions");
+    }
+
+    #[test]
     fn settings_update_opens_panel_without_blocking_check() {
         let mut model = NativeModel::new();
         model.set_mode(UiMode::Settings);
@@ -8533,6 +9082,37 @@ mod tests {
             } if param == "flanger_mix"
         )));
         assert!(model.fx_voice[3] > 0.5);
+    }
+
+    #[test]
+    fn synth_rate_slider_sends_voice_flanger_rate() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Synth);
+        model.morph_a = 2;
+        model.morph_b = 5;
+        let mut out = Outbox::new();
+        let track = model.layout.synth_slider(6);
+        model.finger_down(1, track.x + 4, track.y + 8, &mut out);
+        let batch = out.take();
+        assert!(
+            batch.iter().any(|r| matches!(
+                r,
+                Request::Fx {
+                    target: jambox_protocol::FxTargetSpec::Voice { index: 2 },
+                    param,
+                    ..
+                } if param == "flanger_rate"
+            )),
+            "RATE should write voice flanger_rate, got {batch:?}"
+        );
+        assert!(model.fx_flanger_rate > 0.5);
+        assert!(
+            batch.iter().all(|r| !matches!(
+                r,
+                Request::Fx { param, .. } if param == "flanger_mix"
+            )),
+            "RATE must not change mix"
+        );
     }
 
     #[test]
@@ -8949,6 +9529,46 @@ mod tests {
     }
 
     #[test]
+    fn settings_probe_toggles_and_writes_log() {
+        let _g = crate::probe::ENV_LOCK.lock().unwrap();
+        let dir = std::env::temp_dir().join(format!(
+            "pidi-probe-ui-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let path = dir.join("probe.log");
+        let _ = std::fs::create_dir_all(&dir);
+        std::env::set_var("PIDI_PROBE_LOG", &path);
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Settings);
+        model.status.xruns = 4;
+        model.status.callback_frames = 512;
+        model.status.callback_micros = 180;
+        let mut out = Outbox::new();
+        let btn = model.layout.settings_probe;
+        model.finger_down(1, btn.x + 4, btn.y + 4, &mut out);
+        model.finger_up(1, &mut out);
+        assert!(model.probe, "SET→PROBE should latch on");
+        assert!(model.status_line.contains("PROBE ON"));
+        assert!(model.capture_session().probe);
+        let body = std::fs::read_to_string(&path).expect("probe.log");
+        assert!(body.contains("xrun=4"), "{body}");
+        assert!(body.contains("cb=512/180us"), "{body}");
+        model.finger_down(2, btn.x + 4, btn.y + 4, &mut out);
+        model.finger_up(2, &mut out);
+        assert!(!model.probe);
+        assert!(model.status_line.contains("PROBE OFF"));
+        model.note_engine_link(true);
+        model.note_engine_link(false);
+        assert_eq!(model.probe_reconnects, 1);
+        std::env::remove_var("PIDI_PROBE_LOG");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn song_list_touch_scroll_works_without_move_events() {
         use std::path::PathBuf;
 
@@ -8992,6 +9612,32 @@ mod tests {
             "move stream should advance song_scroll"
         );
         model.finger_up(1, &mut out);
+    }
+
+    #[test]
+    fn seq_beep_button_toggles_cue_and_uploads() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Seq);
+        model.seq.seed_playing_backbone(
+            vec![crate::seq::RecEvent {
+                t: 0.0,
+                on: true,
+                channel: 9,
+                note: 36,
+                velocity: 100,
+            }],
+            1.0,
+        );
+        let mut out = Outbox::new();
+        let btn = model.layout.seq_cue;
+        model.finger_down(1, btn.x + 4, btn.y + 4, &mut out);
+        model.finger_up(1, &mut out);
+        assert!(model.seq.cue_beep, "BEEP should latch on");
+        let reqs = out.take();
+        assert!(
+            reqs.iter().any(|r| matches!(r, Request::ClipLoad { .. })),
+            "turning BEEP on should reload the looping clip, got {reqs:?}"
+        );
     }
 
     #[test]

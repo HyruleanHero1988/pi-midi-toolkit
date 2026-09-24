@@ -27,7 +27,7 @@ todos:
     content: "Phase 2: per-pad/note auto-retrigger with configurable interval"
     status: pending
   - id: phrase-loop
-    content: "Phase 3a: SEQ mode — backbone take + 808-style overdub layers with keep/drop/undo; quantize later"
+    content: "Phase 3a: SEQ mode — backbone take + 808-style overdub layers with keep/drop/undo; QNT BAR/BEAT/OFF"
     status: completed
   - id: songs-smf
     content: "Phase 3b: Songs mode — save/load .mid, tempo, play to soft-synth and/or USB→DIN"
@@ -89,7 +89,7 @@ Power on → SDL/KMSDRM kiosk (`pidi-native`) → modes. The soft-synth path sta
 | **Seq** | Jambox | Free-timing backbone loop + 808-style overdub layers (drums, keys, chords) |
 | **Phrases / Pads** | Jambox (+ MIDI out) | 16 clip-launch cells; touch **and** MPK pads |
 | **Kaoss** | Both | XY pad: scale notes + factory Kaoss CCs; LOCAL and/or USB→DIN |
-| **Chords** | Both | Omnichord-style buttons, strumplate, palette, CHANGES |
+| **Chords** | Both | Omnichord-style buttons, wide strumplate, 2×4 palette, progressions |
 | **Songs** | Both | `.mid` library; tempo; LOCAL and/or USB→DIN |
 | **Presets** | Jambox | Synth slots + session autosave |
 | **Map / Thru** | Remap | Channel / CC / velocity remap; ports; learn → Rust engine |
@@ -322,7 +322,7 @@ This is **not** MIDI-out thru. It is the creative local instrument. Real use alr
 
 ## Jambox track — how far can we push? (and how we know)
 
-The diagnostic framing did **not** paint a software dead-end. Limits will show up as **CPU, audio xruns, or latency feel** — measurable — not as “we called it Phase 0.”
+The diagnostic framing did **not** paint a software dead-end. Limits will show up as **CPU, audio xruns, or latency feel** — measurable — not as “we called it Phase 0.” SET→PROBE appends those counters to `probe.log` while you play.
 
 ### Effects (insert + kit group + bus) — **shipped in Python on `cursor/midi-tone-per-voice-fx-1052`**
 
