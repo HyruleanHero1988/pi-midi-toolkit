@@ -25,7 +25,7 @@ runtime.
 | PADS | Launch/stop from `phrases/pad-XX.json`; PLAY/EDIT; REC/TRIG/MODE/CLEAR; SEQ→PAD; OUT cycle; **QNT** BAR/BEAT/OFF |
 | SYNTH | Morph A/B wave pick, tone/level/atk/rel, vibrato, scope, kit macros, C4–B4 keys, **SAVE AS** (bake morph→`user-wavetables/` + `.fx.json`); Settings **FLANGE** insert on voice/bus |
 | SEQ | Backbone REC → engine loop clip; KEEP/DROP/UNDO; len×2/÷2/EXTEND; →PAD; PLAY/STOP/CLEAR/BPM; **QNT** BAR/BEAT/OFF. Top-chrome **REC/STOP** arms recording from any mode. Armed REC also captures SYNTH keys, drums, CHORDS, KAOSS notes, and incoming MIDI. First take auto-trims leading/trailing dead air (Tk parity). |
-| CHORDS | Omnichord-style circle-of-fifths buttons (MAJ/min/7 + combos), **strumplate**, 8-slot **palette**, **PROGS** (named progressions in the chosen key), LOCAL/USB/BOTH. Block chords (buttons/palette) and harp strums record into SEQ / pad REC while those are armed. |
+| CHORDS | Omnichord-style circle-of-fifths buttons (MAJ/min/7 + combos), wide **strumplate**, 2×4 **palette**, **PROGS** (named progressions in the chosen key), LOCAL/USB/BOTH. Block chords (buttons/palette) and harp strums record into SEQ / pad REC while those are armed. |
 | SONGS | List `songs/*.mid`, SMF→clip PLAY/STOP/LOOP, SAVE SEQ, OUT cycle |
 | PRESETS | 8 slots save/load synth params to `user-presets/` |
       <p class="lede">Appliance hub: panic, audio reopen, Wi‑Fi, font, software update, and doors into LOG / PORTS.</p>
@@ -39,6 +39,10 @@ in-process GitHub OTA). On a Windows host they report that those actions
 belong on the Pi. Bin deploy remains `deploy/build-pi-bins.sh` /
 `deploy/deploy.sh`.
 
+**SET→PROBE** appends one cheap health line every ~2s to `probe.log` (xruns,
+callback µs, reconnects, loadavg, throttle flags). Toggle it off the same
+button; leave it on during a play session if the box is choking.
+
 ## User data (do not wipe)
 
 All user-editable appliance content lives under one XDG-style root:
@@ -46,6 +50,7 @@ All user-editable appliance content lives under one XDG-style root:
 ```text
 ${PIDI_DATA_ROOT:-${XDG_DATA_HOME:-$HOME/.local/share}/pidi}/
   settings.json
+  probe.log             # SET→PROBE local health samples
   songs/
   phrases/              # pad-01.json …
   user-presets/

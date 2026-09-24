@@ -19,6 +19,7 @@ pub mod chords;
 pub mod model;
 pub mod paths;
 pub mod phrases;
+pub mod probe;
 pub mod presets;
 pub mod render;
 pub mod scene;

@@ -99,6 +99,14 @@ impl VoicePool {
         self.voices.iter().filter(|v| v.active).count()
     }
 
+    /// Voices that are still gated (not in release).
+    pub fn held_count(&self) -> usize {
+        self.voices
+            .iter()
+            .filter(|v| v.active && !v.releasing)
+            .count()
+    }
+
     /// Start (or retrigger) a live note on `group`'s wavetable.
     pub fn note_on(&mut self, channel: u8, note: u8, velocity: u8, group: usize) {
         self.start_note(channel, note, velocity, group, MixSource::Live, false, 1.0);
