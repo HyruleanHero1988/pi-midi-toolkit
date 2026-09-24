@@ -6,7 +6,7 @@
 //! - same-root and neighbour combos for M7, m7, dim, aug, sus4, add9
 //! - a wide Omnichord-style **strumplate** (vertical pluck lines; swipe
 //!   left → right, low → high). Range is Kaoss-style: start + 4-octave width,
-//!   then clamp so a high OCT+ start cannot become C5…C9.
+//!   then clamp at C8 so a high OCT+ start cannot become C5…C9.
 //!
 //! The 8-slot **palette** is a harmonic palette: press a stored chord to play it
 //! as a block (MOM releases on lift; HOLD latches), or load a named set of
@@ -33,9 +33,9 @@ pub const QUALITY_ROWS: usize = 3;
 pub const PALETTE_SLOTS: usize = 8;
 /// Desired harp width, same as Kaoss `1..4 OCT` (we use the wide setting).
 pub const STRUM_WIDTH_OCTAVES: u8 = 4;
-/// Hard top (C6). C5 is known-good on this synth; C7+ squeals. A start of C5
-/// + 4 octaves therefore becomes C5…C6, never C5…C9.
-pub const STRUM_CEILING: u8 = 84;
+/// Hard top of a normal keyboard (C8). C5 + 4 octaves would be C9; clamp there
+/// so a high OCT+ start becomes C5…C8, never C5…C9.
+pub const STRUM_CEILING: u8 = 108;
 /// Enough slots for a 4-note chord across 4 octaves (+ the top root).
 pub const STRUM_STRINGS_MAX: usize = 20;
 /// Insets within `Layout::chords_strum_play()` — must match `draw_chords`.
@@ -57,7 +57,7 @@ pub fn block_base_for_octave(octave: i8) -> u8 {
 
 pub fn strum_base_for_octave(octave: i8) -> u8 {
     let o = octave.clamp(OCTAVE_MIN, OCTAVE_MAX) as i16;
-    (i16::from(STRUM_BASE) + o * 12).clamp(24, 84) as u8
+    (i16::from(STRUM_BASE) + o * 12).clamp(24, STRUM_CEILING as i16) as u8
 }
 
 /// Filled harp for the current chord — variable length, like Kaoss `scale_notes`.
@@ -346,7 +346,7 @@ pub fn strum_strings(spec: ChordSpec) -> StrumPlate {
     strum_strings_at(spec, STRUM_BASE)
 }
 
-/// Chord tones in `[root, min(root + 4 octaves, C6)]` — same window math as
+/// Chord tones in `[root, min(root + 4 octaves, C8)]` — same window math as
 /// Kaoss `scale_notes` (`root..=top` with `top = root + width*12` clamped).
 pub fn strum_strings_at(spec: ChordSpec, base: u8) -> StrumPlate {
     let mut pcs = [0u8; 4];
@@ -633,29 +633,32 @@ mod tests {
             assert!(allowed.contains(&(*n % 12)), "out of chord: {n}");
         }
         assert_eq!(plate.first(), 48, "default C major starts at C3");
-        assert_eq!(plate.last(), STRUM_CEILING, "and stops at the C6 ceiling");
+        assert_eq!(plate.last(), 96, "factory C is four octaves: C3…C7");
         assert_eq!(
             plate.as_slice(),
-            &[48, 52, 55, 60, 64, 67, 72, 76, 79, 84]
+            &[48, 52, 55, 60, 64, 67, 72, 76, 79, 84, 88, 91, 96]
         );
     }
 
     #[test]
-    fn strum_high_start_caps_at_c6_not_c9() {
-        // OCT+2 start is C5 — 4 octaves would be C9; Kaoss-style clamp keeps C6.
+    fn strum_high_start_caps_at_c8_not_c9() {
+        // OCT+2 start is C5 — 4 octaves would be C9; clamp to the C8 keyboard top.
         let plate = ChordSpec::new(0, ChordQuality::Maj).strum_strings_at(72);
         assert_eq!(plate.first(), 72);
         assert_eq!(plate.last(), STRUM_CEILING);
-        assert_eq!(plate.as_slice(), &[72, 76, 79, 84]);
+        assert_eq!(
+            plate.as_slice(),
+            &[72, 76, 79, 84, 88, 91, 96, 100, 103, 108]
+        );
     }
 
     #[test]
     fn strum_every_major_is_root_up_and_capped() {
         let expected: &[(u8, &[u8])] = &[
-            (0, &[48, 52, 55, 60, 64, 67, 72, 76, 79, 84]), // C3…C6
-            (6, &[54, 58, 61, 66, 70, 73, 78, 82]),         // F#3…A#5
-            (7, &[55, 59, 62, 67, 71, 74, 79, 83]),         // G3…B5
-            (5, &[53, 57, 60, 65, 69, 72, 77, 81, 84]),     // F3…C6
+            (0, &[48, 52, 55, 60, 64, 67, 72, 76, 79, 84, 88, 91, 96]), // C3…C7
+            (6, &[54, 58, 61, 66, 70, 73, 78, 82, 85, 90, 94, 97, 102]), // F#3…F#7
+            (7, &[55, 59, 62, 67, 71, 74, 79, 83, 86, 91, 95, 98, 103]), // G3…G7
+            (5, &[53, 57, 60, 65, 69, 72, 77, 81, 84, 89, 93, 96, 101]), // F3…F7
         ];
         for (root, want) in expected {
             let got = ChordSpec::new(*root, ChordQuality::Maj).strum_strings();
