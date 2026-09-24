@@ -680,13 +680,13 @@ impl Layout {
             synth_sliders: Rect {
                 x: 24,
                 y: HUD_H + 72,
-                w: 480,
+                w: 536,
                 h: 160,
             },
             synth_scope: Rect {
-                x: 520,
+                x: 568,
                 y: HUD_H + 72,
-                w: 256,
+                w: 208,
                 h: 160,
             },
             kit_scope: Rect {
@@ -1817,8 +1817,10 @@ impl Layout {
         }
     }
 
+    pub const SYNTH_SLIDER_COUNT: usize = 7;
+
     pub fn synth_slider(&self, index: usize) -> Rect {
-        let n = 6i32;
+        let n = Self::SYNTH_SLIDER_COUNT as i32;
         let w = self.synth_sliders.w / n;
         Rect {
             x: self.synth_sliders.x + (index as i32) * w + 6,
@@ -2410,7 +2412,7 @@ impl Layout {
         if self.synth_oct_up.contains(px, py) {
             return Hit::SynthOctUp;
         }
-        for index in 0..6 {
+        for index in 0..Self::SYNTH_SLIDER_COUNT {
             if self.synth_slider(index).contains(px, py) {
                 return Hit::SynthSlider(index);
             }
@@ -3201,6 +3203,12 @@ mod tests {
         assert!(
             layout.synth_sliders.x + layout.synth_sliders.w <= layout.synth_scope.x,
             "sliders should not overlap the scope panel"
+        );
+        let rate = layout.synth_slider(Layout::SYNTH_SLIDER_COUNT - 1);
+        assert!(rate.x + rate.w <= layout.synth_scope.x);
+        assert_eq!(
+            layout.hit(UiMode::Synth, rate.x + 4, rate.y + rate.h / 2),
+            Hit::SynthSlider(6)
         );
     }
 
