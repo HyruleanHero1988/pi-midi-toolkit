@@ -7598,6 +7598,39 @@ mod tests {
     }
 
     #[test]
+    #[test]
+    fn kaoss_flange_plays_note_and_mix_not_rate() {
+        let mut model = NativeModel::new();
+        select_kaoss_program(&mut model, "flange");
+        model.morph_a = 0;
+        model.morph_b = 0;
+        let mut out = Outbox::new();
+        let k = model.layout.kaoss;
+        model.finger_down(1, k.x + k.w / 2, k.y + 4, &mut out);
+        let batch = out.take();
+        assert!(
+            batch.iter().any(|r| matches!(
+                r,
+                Request::Touch {
+                    phase: TouchPhase::Down,
+                    ..
+                }
+            )),
+            "FLANGE should play a note on touch: {batch:?}"
+        );
+        assert_voice_fx(&batch, 0, "flanger_mix");
+        assert!(
+            batch.iter().all(|r| !matches!(
+                r,
+                Request::Fx { param, .. } if param == "flanger_rate"
+            )),
+            "curated FLANGE must not drive rate: {batch:?}"
+        );
+        assert_no_bus_fx(&batch);
+        assert!(model.fx_voice[3] > 0.5, "Y should raise flange amount");
+    }
+
+    #[test]
     fn kaoss_echo_drums_sends_kit_group_not_voice() {
         let mut model = NativeModel::new();
         select_kaoss_program(&mut model, "echo");

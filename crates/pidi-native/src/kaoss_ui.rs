@@ -77,12 +77,13 @@ pub const KAOSS_PROGRAMS: &[KaossProgram] = &[
         x_param: Some("drive"),
         curated: true,
     },
+    // X = scale pitch (plays); Y = flange amount. Rate wobble is SHOW ALL.
     KaossProgram {
         id: "flange",
         label: "FLANGE",
-        note: false,
+        note: true,
         y_param: "flanger_mix",
-        x_param: Some("flanger_rate"),
+        x_param: None,
         curated: true,
     },
     KaossProgram {
@@ -190,6 +191,15 @@ pub const KAOSS_PROGRAMS: &[KaossProgram] = &[
         y_param: "tone_lfo",
         x_param: None,
         curated: true,
+    },
+    // Legacy rate-on-X pad; kept for SHOW ALL, not the curated flange.
+    KaossProgram {
+        id: "flange_rate",
+        label: "FL RATE",
+        note: false,
+        y_param: "flanger_mix",
+        x_param: Some("flanger_rate"),
+        curated: false,
     },
 ];
 
@@ -492,6 +502,13 @@ mod tests {
         assert!(KAOSS_PROGRAMS.iter().any(|p| {
             p.id == "wah" && p.curated && p.note && p.y_param == "tone_lfo"
         }));
+        let flange = KAOSS_PROGRAMS.iter().find(|p| p.id == "flange").unwrap();
+        assert!(flange.curated && flange.note);
+        assert_eq!(flange.y_param, "flanger_mix");
+        assert_eq!(flange.x_param, None);
+        let rate = KAOSS_PROGRAMS.iter().find(|p| p.id == "flange_rate").unwrap();
+        assert!(!rate.curated && !rate.note);
+        assert_eq!(rate.x_param, Some("flanger_rate"));
     }
 
     #[test]
