@@ -168,9 +168,13 @@ pub struct SessionState {
     /// Kit bus trim. Missing in old sessions → unity (1.0).
     #[serde(default = "default_drum_level")]
     pub drum_level: f32,
-    /// SEQ / songs clip trim (0..2, unity 1.0). Missing in old sessions → 1.0.
+    /// SEQ / songs key trim (0..2, unity 1.0). Missing in old sessions → 1.0.
     #[serde(default = "default_seq_level")]
     pub seq_level: f32,
+    #[serde(default = "default_seq_level")]
+    pub seq_drum_level: f32,
+    #[serde(default = "default_seq_level")]
+    pub seq_kaoss_level: f32,
     pub attack: f32,
     pub release: f32,
     pub morph_a: u16,
@@ -307,6 +311,8 @@ impl Default for SessionState {
             level: 0.8,
             drum_level: default_drum_level(),
             seq_level: default_seq_level(),
+            seq_drum_level: default_seq_level(),
+            seq_kaoss_level: default_seq_level(),
             attack: 0.05,
             release: 0.3,
             morph_a: 0,

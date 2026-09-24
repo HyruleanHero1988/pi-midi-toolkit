@@ -5,7 +5,7 @@
 //! preallocated clip handed over as a `Box`.
 
 use jambox_core::{
-    Clip, ClipEvent, ClipEventKind, Command, FxParam, FxTarget, LaunchMode, Quantize,
+    pack_xy, Clip, ClipEvent, ClipEventKind, Command, FxParam, FxTarget, LaunchMode, Quantize,
     RepeatDivision, SynthParam,
 };
 use jambox_protocol::{HelloReply, RepeatDivision as WireRepeatDivision, RepeatPhase, TouchPhase};
@@ -226,10 +226,34 @@ pub struct WireClipEvent {
     pub note: u8,
     #[serde(default)]
     pub velocity: u8,
+    #[serde(default)]
+    pub touch: Option<String>,
+    #[serde(default)]
+    pub x: Option<f32>,
+    #[serde(default)]
+    pub y: Option<f32>,
 }
 
 impl From<WireClipEvent> for ClipEvent {
     fn from(e: WireClipEvent) -> Self {
+        if let Some(phase) = e.touch.as_deref() {
+            let (px, py) = pack_xy(e.x.unwrap_or(0.0), e.y.unwrap_or(0.0));
+            let kind = match phase {
+                "down" => ClipEventKind::TouchDown {
+                    owner: e.channel,
+                    x: px,
+                    y: py,
+                    mode: e.note,
+                },
+                "move" => ClipEventKind::TouchMove {
+                    owner: e.channel,
+                    x: px,
+                    y: py,
+                },
+                _ => ClipEventKind::TouchUp { owner: e.channel },
+            };
+            return ClipEvent { tick: e.tick, kind };
+        }
         ClipEvent {
             tick: e.tick,
             kind: if e.on {

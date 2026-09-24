@@ -586,8 +586,8 @@ fn draw_chrome(scene: &mut Scene, model: &NativeModel) {
     scene.text_centered(power, "POWER", 0xfbf1c7, 2);
 
     let rec = layout.nav_chrome_rec();
-    let (rec_label, rec_bg) = chrome_rec_label(model);
-    scene.fill_rect(rec, rec_bg);
+    let (rec_label, rec_bg) = model.seq.chrome_rec_label();
+    scene.button(rec, rec_bg);
     scene.text_centered(rec, rec_label, 0xffffff, 2);
 
     for (i, mode) in JAM_MODES.iter().enumerate() {
@@ -741,14 +741,6 @@ fn chrome_status(model: &NativeModel) -> String {
     }
 }
 
-fn chrome_rec_label(model: &NativeModel) -> (&'static str, u32) {
-    match model.seq.state {
-        crate::seq::SeqState::RecBackbone | crate::seq::SeqState::Overdub => ("STOP", 0xcc241d),
-        crate::seq::SeqState::Empty => ("REC", 0x9d0006),
-        crate::seq::SeqState::Review => ("REC", 0xd79921),
-        _ => ("REC", 0x504945),
-    }
-}
 
 fn draw_kaoss(scene: &mut Scene, model: &NativeModel) {
     let layout = model.layout;
@@ -2967,15 +2959,19 @@ fn draw_fx(scene: &mut Scene, model: &NativeModel) {
 fn draw_mix(scene: &mut Scene, model: &NativeModel) {
     let layout = model.layout;
     scene.text_scaled(layout.content.x + 12, layout.content.y + 8, "MIX", 0xfbf1c7, 2);
-    const BUS: [(&str, u32); 3] = [
+    const BUS: [(&str, u32); 5] = [
         ("LIVE", 0x689d6a),
         ("KIT", 0xd79921),
-        ("SEQ", 0xb16286),
+        ("DRM", 0xfb4934),
+        ("KEY", 0xb16286),
+        ("KSS", 0x8ec07c),
     ];
     let bus_values = [
         model.synth_params[2],
         model.drum_level,
+        (model.seq_drum_level / 2.0).clamp(0.0, 1.0),
         (model.seq_level / 2.0).clamp(0.0, 1.0),
+        (model.seq_kaoss_level / 2.0).clamp(0.0, 1.0),
     ];
     for index in 0..Layout::MIX_BUS_COUNT {
         let track = layout.mix_bus_slider(index);
@@ -3366,5 +3362,37 @@ mod tests {
             .filter(|q| q.color == 0xfabd2f && q.w <= 12.0 && q.h <= 6.0)
             .count();
         assert_eq!(bolts, 0);
+    }
+
+    #[test]
+    fn chrome_rec_stays_armed_red_while_backbone_plays() {
+        let mut model = NativeModel::new();
+        model.seq.seed_playing_backbone(
+            vec![crate::seq::RecEvent {
+                t: 0.0,
+                on: true,
+                channel: 9,
+                note: 36,
+                velocity: 100,
+            }],
+            1.0,
+        );
+        let scene = build(&model);
+        let rec = model.layout.nav_chrome_rec();
+        let armed = scene.color.iter().any(|q| {
+            q.color == 0x9d0006
+                && (q.x - rec.x as f32).abs() < 3.0
+                && (q.y - rec.y as f32).abs() < 3.0
+        });
+        assert!(
+            armed,
+            "chrome REC should stay record-ready after the backbone"
+        );
+        let idle_gray = scene.color.iter().any(|q| {
+            q.color == 0x504945
+                && (q.x - rec.x as f32).abs() < 3.0
+                && (q.y - rec.y as f32).abs() < 3.0
+        });
+        assert!(!idle_gray, "chrome REC must not look disabled after backbone");
     }
 }

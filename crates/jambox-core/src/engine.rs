@@ -7,7 +7,7 @@
 use midi_core::MidiEvent;
 
 use crate::clip::{
-    Clip, ClipEventKind, ClipVoice, LaunchMode, SeqEvent, Sequencer, MAX_CLIPS,
+    Clip, ClipEventKind, ClipVoice, LaunchMode, SeqEvent, Sequencer, MAX_CLIPS, SEQ_KAOSS_MIX_SLOT,
 };
 use crate::mix::MixSource;
 use crate::command::{
@@ -213,6 +213,9 @@ pub struct JamboxEngine {
     sequencer: Sequencer,
     repeats: RepeatRack,
     kaoss: KaossMapper,
+    /// Recorded SEQ Kaoss gestures — separate so live fingers cannot steal them.
+    kaoss_seq: KaossMapper,
+    kaoss_seq_mode: [u8; crate::kaoss::MAX_TOUCH_VOICES],
 
     voice_fx: Vec<FxUnit>,
     drum_fx: Vec<FxUnit>,
@@ -269,6 +272,8 @@ impl JamboxEngine {
             sequencer: Sequencer::new(),
             repeats: RepeatRack::new(),
             kaoss: KaossMapper::new(),
+            kaoss_seq: KaossMapper::new(),
+            kaoss_seq_mode: [0; crate::kaoss::MAX_TOUCH_VOICES],
             voice_fx,
             drum_fx,
             drum_group_fx: FxUnit::new(sr),
@@ -502,26 +507,54 @@ impl JamboxEngine {
                             velocity,
                             slot: ev.slot as u8,
                         },
-                        MidiEvent::NoteOn {
+                        Some(MidiEvent::NoteOn {
                             channel,
                             note,
                             velocity,
-                        },
+                        }),
                     ),
                     ClipEventKind::NoteOff { channel, note } => (
                         Command::ClipNoteOff { channel, note },
-                        MidiEvent::NoteOff {
+                        Some(MidiEvent::NoteOff {
                             channel,
                             note,
                             velocity: 0,
+                        }),
+                    ),
+                    ClipEventKind::TouchDown { owner, x, y, mode } => (
+                        Command::ClipTouchDown {
+                            owner: owner as u32,
+                            x,
+                            y,
+                            slot: ev.slot as u8,
+                            mode,
                         },
+                        None,
+                    ),
+                    ClipEventKind::TouchMove { owner, x, y } => (
+                        Command::ClipTouchMove {
+                            owner: owner as u32,
+                            x,
+                            y,
+                            slot: ev.slot as u8,
+                        },
+                        None,
+                    ),
+                    ClipEventKind::TouchUp { owner } => (
+                        Command::ClipTouchUp {
+                            owner: owner as u32,
+                            slot: ev.slot as u8,
+                        },
+                        None,
                     ),
                 };
                 if self.clip_emit.includes_local() {
                     self.timeline.push((frame, command));
                 }
                 if self.clip_emit.includes_usb() {
-                    midi_out.push(frame, midi);
+                    if let Some(midi) = midi {
+                        midi_out.push(frame, midi);
+                    }
                 }
             }
 
@@ -787,7 +820,7 @@ impl JamboxEngine {
                 velocity,
                 slot,
             } => {
-                let mix = MixSource::clip(slot as usize);
+                let mix = MixSource::seq_family(slot as usize, channel);
                 let tone = self
                     .sequencer
                     .slot(slot as usize)
@@ -881,9 +914,15 @@ impl JamboxEngine {
                 }; MAX_BLOCK_COMMANDS];
                 let n = self.sequencer.stop_all(&mut flush);
                 for ev in flush.iter().take(n) {
-                    if let ClipEventKind::NoteOff { channel, note } = ev.kind {
-                        self.voices.note_off_recorded(channel, note);
-                        self.fm.note_off_recorded(channel, note);
+                    match ev.kind {
+                        ClipEventKind::NoteOff { channel, note } => {
+                            self.voices.note_off_recorded(channel, note);
+                            self.fm.note_off_recorded(channel, note);
+                        }
+                        ClipEventKind::TouchUp { owner } => {
+                            self.clip_touch_up(owner as u32, ev.slot as u8);
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -973,7 +1012,17 @@ impl JamboxEngine {
                 octaves,
             } => {
                 self.kaoss.configure(scale_index, key, root_midi, octaves);
+                self.kaoss_seq.configure(scale_index, key, root_midi, octaves);
             }
+            Command::ClipTouchDown {
+                owner,
+                x,
+                y,
+                slot,
+                mode,
+            } => self.clip_touch_down(owner, x, y, slot, mode),
+            Command::ClipTouchMove { owner, x, y, slot } => self.clip_touch_move(owner, x, y, slot),
+            Command::ClipTouchUp { owner, slot } => self.clip_touch_up(owner, slot),
             Command::SetEmitMode { target, mode } => {
                 let mode = EmitMode::from_u8(mode);
                 if target == 1 {
@@ -1013,35 +1062,119 @@ impl JamboxEngine {
     }
 
     fn apply_touch_delta(&mut self, delta: TouchDelta) {
+        self.apply_touch_delta_mix(delta, MixSource::Live, false, false);
+    }
+
+    fn apply_touch_delta_mix(
+        &mut self,
+        delta: TouchDelta,
+        mix: MixSource,
+        recorded: bool,
+        from_seq: bool,
+    ) {
         match delta {
             TouchDelta::Idle => {}
             TouchDelta::Start {
                 channel,
                 note,
                 velocity,
-            } => self.start_touch_note(channel, note, velocity),
+            } => self.sound_on(channel, note, velocity, mix),
             TouchDelta::Retune {
                 channel,
                 old_note,
                 new_note,
                 velocity,
             } => {
-                if channel != DRUM_CHANNEL && !self.kaoss.note_is_held(channel, old_note) {
-                    self.voices.note_off(channel, old_note);
+                let held = if from_seq {
+                    self.kaoss_seq.note_is_held(channel, old_note)
+                } else {
+                    self.kaoss.note_is_held(channel, old_note)
+                };
+                if channel != DRUM_CHANNEL && !held {
+                    if !self.voices.retune(channel, old_note, new_note, recorded) {
+                        if recorded {
+                            self.voices.note_off_recorded(channel, old_note);
+                        } else {
+                            self.voices.note_off(channel, old_note);
+                        }
+                        self.sound_on(channel, new_note, velocity, mix);
+                    }
+                } else {
+                    self.sound_on(channel, new_note, velocity, mix);
                 }
-                self.start_touch_note(channel, new_note, velocity);
             }
             TouchDelta::Stop { channel, note } => {
-                if channel != DRUM_CHANNEL && !self.kaoss.note_is_held(channel, note) {
-                    self.voices.note_off(channel, note);
+                let held = if from_seq {
+                    self.kaoss_seq.note_is_held(channel, note)
+                } else {
+                    self.kaoss.note_is_held(channel, note)
+                };
+                if channel != DRUM_CHANNEL && !held {
+                    if recorded {
+                        self.voices.note_off_recorded(channel, note);
+                    } else {
+                        self.voices.note_off(channel, note);
+                    }
                 }
             }
+        }
+    }
+
+    fn clip_touch_down(&mut self, owner: u32, x: u16, y: u16, slot: u8, mode: u8) {
+        let (xf, yf) = unpack_xy(x, y);
+        let mix = MixSource::seq_kaoss(slot as usize);
+        let vel = crate::kaoss::velocity_at_y(yf);
+        let idx = (owner as usize) % crate::kaoss::MAX_TOUCH_VOICES;
+        self.kaoss_seq_mode[idx] = mode;
+        let delta = self.kaoss_seq.down(owner, xf, yf, 0, vel);
+        self.apply_touch_delta_mix(delta, mix, true, true);
+        self.apply_clip_touch_y(owner, yf);
+    }
+
+    fn clip_touch_move(&mut self, owner: u32, x: u16, y: u16, slot: u8) {
+        let (xf, yf) = unpack_xy(x, y);
+        let mix = MixSource::seq_kaoss(slot as usize);
+        let vel = crate::kaoss::velocity_at_y(yf);
+        let delta = self.kaoss_seq.follow(owner, xf, yf, vel);
+        self.apply_touch_delta_mix(delta, mix, true, true);
+        self.apply_clip_touch_y(owner, yf);
+    }
+
+    fn clip_touch_up(&mut self, owner: u32, _slot: u8) {
+        let delta = self.kaoss_seq.up(owner);
+        self.apply_touch_delta_mix(
+            delta,
+            MixSource::seq_kaoss(SEQ_KAOSS_MIX_SLOT as usize),
+            true,
+            true,
+        );
+    }
+
+    fn apply_clip_touch_y(&mut self, owner: u32, y: f32) {
+        let Some((channel, note)) = self.kaoss_seq.note_for_owner(owner) else {
+            return;
+        };
+        let idx = (owner as usize) % crate::kaoss::MAX_TOUCH_VOICES;
+        if self.kaoss_seq_mode[idx] == 1 {
+            self.voices
+                .set_voice_bend(channel, note, true, KaossMapper::y_to_bend_semis(y));
+        } else {
+            self.voices.set_voice_tone(channel, note, true, y);
         }
     }
 
     fn release_kaoss(&mut self) {
         for delta in self.kaoss.stop_all() {
             self.apply_touch_delta(delta);
+        }
+        let deltas = self.kaoss_seq.stop_all();
+        for delta in deltas {
+            self.apply_touch_delta_mix(
+                delta,
+                MixSource::seq_kaoss(SEQ_KAOSS_MIX_SLOT as usize),
+                true,
+                true,
+            );
         }
     }
 
@@ -1185,7 +1318,7 @@ impl JamboxEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::clip::{Clip, ClipEvent, ClipVoice, LaunchMode};
+    use crate::clip::{Clip, ClipEvent, ClipVoice, LaunchMode, SEQ_CLIP_SLOT};
     use crate::kaoss::LatestTouch;
     use crate::transport::{Quantize, PPQ};
 
@@ -1889,6 +2022,41 @@ mod tests {
             &mut midi,
         );
         assert_eq!(e.active_touches(), 0);
+    }
+
+    #[test]
+    fn clip_kaoss_touch_sounds_on_the_kaoss_mix_bus() {
+        let mut e = engine();
+        let mut out = vec![0.0f32; 512];
+        let mut midi = MidiOutSink::new();
+        let (x, y) = crate::kaoss::pack_xy(0.2, 0.8);
+        e.render(
+            &mut out,
+            &[ScheduledCommand::now(Command::ClipTouchDown {
+                owner: 1,
+                x,
+                y,
+                slot: SEQ_CLIP_SLOT,
+                mode: 0,
+            })],
+            &mut midi,
+        );
+        assert!(
+            peak(&out) > 0.01,
+            "recorded Kaoss gesture should make sound"
+        );
+        apply_now(
+            &mut e,
+            Command::SetClipGain {
+                slot: SEQ_KAOSS_MIX_SLOT,
+                value: 0.0,
+            },
+        );
+        e.render(&mut out, &[], &mut midi);
+        assert!(
+            peak(&out) < 0.02,
+            "KSS fader at zero should mute the recorded pad"
+        );
     }
 
     #[test]

@@ -202,6 +202,7 @@ fn parse_smf(data: &[u8]) -> Option<(Vec<WireClipEvent>, u32, f32)> {
                         channel,
                         note: note & 0x7f,
                         velocity: if on { vel } else { 0 },
+                        ..Default::default()
                     });
                 }
                 0xa0 | 0xb0 | 0xe0 => i += 2,
@@ -466,6 +467,7 @@ mod tests {
                 channel: 0,
                 note: 60,
                 velocity: 100,
+                ..Default::default()
             },
             WireClipEvent {
                 tick: 480,
@@ -473,6 +475,7 @@ mod tests {
                 channel: 0,
                 note: 60,
                 velocity: 0,
+                ..Default::default()
             },
         ];
         assert!(write_smf_type0(&path, &events, 960, 120.0));

@@ -142,13 +142,13 @@ pub fn load_pad(path: &Path, bpm: f32) -> Option<PhrasePad> {
     let mut events: Vec<WireClipEvent> = file
         .events
         .iter()
-        .map(|e| WireClipEvent {
-            tick: seconds_to_ticks(e.t, bpm),
-            on: e.on,
-            channel: e.channel & 0x0f,
-            note: e.note & 0x7f,
-            velocity: e.velocity.min(127),
-        })
+        .map(|e| WireClipEvent::midi(
+            seconds_to_ticks(e.t, bpm),
+            e.on,
+            e.channel & 0x0f,
+            e.note & 0x7f,
+            e.velocity.min(127),
+        ))
         .collect();
     events.sort_by_key(|e| e.tick);
     let length_secs = if file.length > 0.0 {
@@ -371,6 +371,7 @@ mod tests {
                 channel: 0,
                 note: 60,
                 velocity: 100,
+                ..Default::default()
             }],
             gain: 2.0,
             ..PhrasePad::default()
@@ -393,6 +394,7 @@ mod tests {
                 channel: 9,
                 note: 36,
                 velocity: 100,
+                ..Default::default()
             }],
             1920,
             120.0,
@@ -414,6 +416,7 @@ mod tests {
                 channel: 0,
                 note: 36,
                 velocity: 100,
+                ..Default::default()
             }],
             1920,
             120.0,
@@ -438,6 +441,7 @@ mod tests {
                 channel: 0,
                 note: 36,
                 velocity: 100,
+                ..Default::default()
             }],
             1920,
             120.0,

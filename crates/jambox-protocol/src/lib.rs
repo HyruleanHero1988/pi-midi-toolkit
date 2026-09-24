@@ -249,7 +249,7 @@ pub enum FxTargetSpec {
     Bus,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct WireClipEvent {
     pub tick: u32,
     pub on: bool,
@@ -257,6 +257,39 @@ pub struct WireClipEvent {
     pub note: u8,
     #[serde(default)]
     pub velocity: u8,
+    /// "down" / "move" / "up" for a Kaoss gesture. Absent = MIDI note.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub touch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub x: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub y: Option<f32>,
+}
+
+impl WireClipEvent {
+    pub fn midi(tick: u32, on: bool, channel: u8, note: u8, velocity: u8) -> Self {
+        Self {
+            tick,
+            on,
+            channel,
+            note,
+            velocity,
+            ..Self::default()
+        }
+    }
+
+    pub fn gesture(tick: u32, phase: &str, owner: u8, x: f32, y: f32, mode: u8) -> Self {
+        Self {
+            tick,
+            on: phase != "up",
+            channel: owner,
+            note: mode,
+            velocity: 0,
+            touch: Some(phase.into()),
+            x: Some(x),
+            y: Some(y),
+        }
+    }
 }
 
 /// Morph + voice-insert snapshot carried on `clip_load`.

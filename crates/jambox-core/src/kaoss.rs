@@ -463,6 +463,18 @@ impl KaossMapper {
         note_at_x(x, &self.notes[..self.n_notes], self.n_notes)
     }
 
+    pub fn note_for_owner(&self, owner: u32) -> Option<(u8, u8)> {
+        self.voices
+            .iter()
+            .find(|v| v.active && v.owner == owner)
+            .map(|v| (v.channel, v.note))
+    }
+
+    /// Pad Y → ±12 semitones. Midline is unison (clip Kaoss bend playback).
+    pub fn y_to_bend_semis(y: f32) -> f32 {
+        (y.clamp(0.0, 1.0) - 0.5) * 24.0
+    }
+
     pub fn active_count(&self) -> usize {
         self.voices.iter().filter(|v| v.active).count()
     }

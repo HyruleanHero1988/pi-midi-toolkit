@@ -4,8 +4,10 @@
 //! - 12 roots in **circle-of-fifths** order (F C G D A E B F# Db Ab Eb Bb)
 //! - three rows: MAJOR / minor / 7th
 //! - same-root and neighbour combos for M7, m7, dim, aug, sus4, add9
-//! - a wide Omnichord-style **strumplate** of about two octaves of the selected chord
-//!   (vertical pluck lines; swipe left → right, low → high)
+//! - a wide Omnichord-style **strumplate** of about two and a half octaves
+//!   of the selected chord (vertical pluck lines; swipe left → right, low → high).
+//!   A real OM-27 / OM-108 spans four octaves; that puts the right half of this
+//!   synth in C6–C7 / G6–G7 and it squeals, so we stay midrange (C3…E5 on C).
 //!
 //! The 8-slot **palette** is a harmonic palette: press a stored chord to play it
 //! as a block (MOM releases on lift; HOLD latches), or load a named set of
@@ -31,6 +33,8 @@ pub const KEY_NAMES: [&str; 12] = [
 pub const QUALITY_ROWS: usize = 3;
 pub const PALETTE_SLOTS: usize = 8;
 /// Harp strings on the strum plate (matches the drawn lines).
+/// Eight close-position tones ≈ 2.5 octaves (C3…E5 on C). Four octaves
+/// matches a real Omnichord but squeals on the right half of this synth.
 pub const STRUM_STRINGS: usize = 8;
 /// Insets within `Layout::chords_strum_play()` — must match `draw_chords`.
 /// Left/right pad the vertical pluck lines (low on the left, high on the right).
@@ -148,7 +152,7 @@ impl ChordSpec {
         voicing_midi(self, base)
     }
 
-    /// 8 harp strings spanning about two octaves, low → high.
+    /// 8 harp strings spanning about 2.5 octaves, low → high.
     pub fn strum_strings(self) -> [u8; STRUM_STRINGS] {
         self.strum_strings_at(STRUM_BASE)
     }
@@ -337,7 +341,10 @@ pub fn strum_strings_at(spec: ChordSpec, base: u8) -> [u8; STRUM_STRINGS] {
         .copied()
         .filter(|&p| p != spec.root)
         .collect();
-    rest.sort_unstable();
+    // Interval from the root, not absolute 0..11. Sorting by pitch-class number
+    // puts wrapped tones (D in G, C# in F#) before the third, so the walk skips
+    // a whole octave per string and the right side of the plate screams.
+    rest.sort_by_key(|&p| (p + 12 - spec.root) % 12);
     for p in rest {
         if on < 4 {
             ordered[on] = p;
@@ -345,18 +352,23 @@ pub fn strum_strings_at(spec: ChordSpec, base: u8) -> [u8; STRUM_STRINGS] {
         }
     }
     let mut out = [base; STRUM_STRINGS];
-    let mut midi = base;
+    let mut midi = u16::from(base);
     // Align so the first string is the chord root at or above `base`.
-    while midi % 12 != spec.root {
+    while midi % 12 != u16::from(spec.root) {
         midi += 1;
     }
     for i in 0..STRUM_STRINGS {
-        let pc = ordered[i % on];
+        let pc = u16::from(ordered[i % on]);
         while midi % 12 != pc {
+            if midi >= 127 {
+                break;
+            }
             midi += 1;
         }
-        out[i] = midi.min(127);
-        midi += 1;
+        out[i] = midi.min(127) as u8;
+        if midi < 127 {
+            midi += 1;
+        }
     }
     out
 }
@@ -610,10 +622,44 @@ mod tests {
         let span = strings[STRUM_STRINGS - 1] as i16 - strings[0] as i16;
         assert!(
             span <= 30,
-            "strum should stay ~2 octaves, got {span} semis ({:?})",
+            "strum should stay ~2.5 octaves, got {span} semis ({:?})",
             strings
         );
         assert_eq!(strings[0], 48, "default C major starts at C3");
+        assert_eq!(strings[STRUM_STRINGS - 1], 76, "and ends on E5, not C7");
+    }
+
+    #[test]
+    fn strum_every_major_is_root_up_and_midrange() {
+        // G / F# / F used to sort D/C#/C before the third and jump to D8/C8.
+        let expected = [
+            (0, [48, 52, 55, 60, 64, 67, 72, 76]), // C3 … E5
+            (6, [54, 58, 61, 66, 70, 73, 78, 82]), // F#3 … A#5
+            (7, [55, 59, 62, 67, 71, 74, 79, 83]), // G3 … B5
+            (5, [53, 57, 60, 65, 69, 72, 77, 81]), // F3 … A5
+        ];
+        for (root, want) in expected {
+            let got = ChordSpec::new(root, ChordQuality::Maj).strum_strings();
+            assert_eq!(got, want, "root {root} strings {got:?}");
+            let span = got[STRUM_STRINGS - 1] as i16 - got[0] as i16;
+            assert!(span <= 30, "root {root} span {span}");
+        }
+        for root in 0u8..12 {
+            let strings = ChordSpec::new(root, ChordQuality::Maj).strum_strings();
+            assert_eq!(strings[0] % 12, root);
+            let span = strings[STRUM_STRINGS - 1] as i16 - strings[0] as i16;
+            assert!(
+                span <= 30,
+                "root {root} should stay ~2.5 octaves, got {span} {strings:?}"
+            );
+            for window in strings.windows(2) {
+                assert!(window[1] > window[0], "must climb {strings:?}");
+                assert!(
+                    (window[1] - window[0]) <= 7,
+                    "no skipped chord tone {strings:?}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -637,7 +683,8 @@ mod tests {
         let play_x = 8;
         let play_w = 784;
         let band_w =
-            ((play_w - STRUM_BAND_LEFT_INSET - STRUM_BAND_RIGHT_INSET).max(1) as f32) / 8.0;
+            ((play_w - STRUM_BAND_LEFT_INSET - STRUM_BAND_RIGHT_INSET).max(1) as f32)
+            / STRUM_STRINGS as f32;
         let left = play_x + STRUM_BAND_LEFT_INSET;
         let c = ChordSpec::new(0, ChordQuality::Maj);
         let s = c.strum_strings();

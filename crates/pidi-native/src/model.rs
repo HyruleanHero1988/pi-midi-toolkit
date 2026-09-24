@@ -13,7 +13,7 @@ use crate::phrases::{self, PhrasePad};
 use crate::presets::{self, PresetSnapshot};
 use crate::screensaver;
 use crate::scroll::{self, ScrollKind, TOUCH_SCROLL_THRESH_PX};
-use crate::seq::{SeqAction, SeqModel, SEQ_CLIP_SLOT};
+use crate::seq::{SeqAction, SeqModel, SEQ_CLIP_SLOT, SEQ_DRUM_MIX_SLOT, SEQ_KAOSS_MIX_SLOT};
 use crate::session::{self, ClipQuantize, OutMode, SessionState};
 use crate::songs::{self, SONG_CLIP_SLOT};
 use crate::voice_bake;
@@ -283,8 +283,10 @@ pub struct NativeModel {
     pub fx_target: FxEditTarget,
     /// Kit bus trim (FX DRUMS / MIX KIT). Independent of melody `synth_params[2]` (LEVEL).
     pub drum_level: f32,
-    /// SEQ / songs clip trim (MIX SEQ). Phrase pads use `phrases[i].gain`.
+    /// SEQ / songs key trim (MIX KEY). Phrase pads use `phrases[i].gain`.
     pub seq_level: f32,
+    pub seq_drum_level: f32,
+    pub seq_kaoss_level: f32,
     pub log_lines: Vec<String>,
     pub midi_in_filter: String,
     pub midi_out_filter: String,
@@ -503,6 +505,8 @@ impl NativeModel {
             fx_target: FxEditTarget::Bus,
             drum_level: 1.0,
             seq_level: 1.0,
+            seq_drum_level: 1.0,
+            seq_kaoss_level: 1.0,
             log_lines: Vec::new(),
             midi_in_filter: String::new(),
             midi_out_filter: String::new(),
@@ -1802,6 +1806,8 @@ impl NativeModel {
         self.synth_params = [s.morph, s.tone, s.level, s.attack, s.release];
         self.drum_level = s.drum_level.clamp(0.0, 1.0);
         self.seq_level = s.seq_level.clamp(0.0, 2.0);
+        self.seq_drum_level = s.seq_drum_level.clamp(0.0, 2.0);
+        self.seq_kaoss_level = s.seq_kaoss_level.clamp(0.0, 2.0);
         self.vibrato_always = s.vibrato_always.clamp(0.0, 1.0);
         self.vibrato_depth = s.vibrato_depth.clamp(0.0, 2.0);
         self.vibrato_rate = s.vibrato_rate.clamp(1.0, 9.0);
@@ -1881,6 +1887,8 @@ impl NativeModel {
         outbox.synth("level", self.synth_params[2]);
         outbox.synth("drum_level", self.drum_level);
         outbox.clip_gain(SEQ_CLIP_SLOT, self.seq_level);
+        outbox.clip_gain(SEQ_DRUM_MIX_SLOT, self.seq_drum_level);
+        outbox.clip_gain(SEQ_KAOSS_MIX_SLOT, self.seq_kaoss_level);
         outbox.synth("attack", self.synth_params[3]);
         outbox.synth("release", self.synth_params[4]);
         outbox.synth("vibrato_always", self.vibrato_always);
@@ -1921,6 +1929,8 @@ impl NativeModel {
             level: self.synth_params[2],
             drum_level: self.drum_level,
             seq_level: self.seq_level,
+            seq_drum_level: self.seq_drum_level,
+            seq_kaoss_level: self.seq_kaoss_level,
             attack: self.synth_params[3],
             release: self.synth_params[4],
             morph_a: self.morph_a,
@@ -4123,13 +4133,13 @@ impl NativeModel {
         let length_ticks = phrases::seconds_to_ticks(length_secs, self.bpm);
         let wire: Vec<WireClipEvent> = trimmed
             .iter()
-            .map(|e| WireClipEvent {
-                tick: phrases::seconds_to_ticks(e.t, self.bpm),
-                on: e.on,
-                channel: e.channel,
-                note: e.note,
-                velocity: e.velocity,
-            })
+            .map(|e| WireClipEvent::midi(
+                phrases::seconds_to_ticks(e.t, self.bpm),
+                e.on,
+                e.channel,
+                e.note,
+                e.velocity,
+            ))
             .collect();
         let mut pad = phrases::from_wire(wire, length_ticks.max(1), self.bpm, false);
         pad.tone = self.synth_params[1].clamp(0.0, 1.0);
@@ -4791,11 +4801,23 @@ impl NativeModel {
                 outbox.synth("drum_level", t);
                 self.status_line = format!("KIT {:.2}", t);
             }
-            Layout::MIX_SEQ => {
+            Layout::MIX_SEQ_DRUM => {
+                let gain = (t * 2.0).clamp(0.0, 2.0);
+                self.seq_drum_level = gain;
+                outbox.clip_gain(SEQ_DRUM_MIX_SLOT, gain);
+                self.status_line = format!("SEQ DRM {:.2}", gain);
+            }
+            Layout::MIX_SEQ_KEY => {
                 let gain = (t * 2.0).clamp(0.0, 2.0);
                 self.seq_level = gain;
                 outbox.clip_gain(SEQ_CLIP_SLOT, gain);
-                self.status_line = format!("SEQ {:.2}", gain);
+                self.status_line = format!("SEQ KEY {:.2}", gain);
+            }
+            Layout::MIX_SEQ_KAOSS => {
+                let gain = (t * 2.0).clamp(0.0, 2.0);
+                self.seq_kaoss_level = gain;
+                outbox.clip_gain(SEQ_KAOSS_MIX_SLOT, gain);
+                self.status_line = format!("SEQ KSS {:.2}", gain);
             }
             _ => return,
         }
@@ -5092,6 +5114,7 @@ impl NativeModel {
         if prog.note && !gated {
             self.kaoss_touch_edge(gesture, TouchPhase::Down, x, y, outbox);
             self.record_kaoss_note(true, x, y);
+            self.record_kaoss_gesture(crate::seq::GesturePhase::Down, gesture, x, y);
             self.kaoss_usb_note_on(x, y, outbox);
         } else if gated {
             // Shared clock; this gesture joins on the next tick. Mark ownership
@@ -5120,6 +5143,7 @@ impl NativeModel {
         let gated = prog.note && kaoss_ui::gate(self.kaoss_gate).beats > 0.0;
         if prog.note && !gated {
             self.kaoss_touch_edge(gesture, TouchPhase::Move, x, y, outbox);
+            self.record_kaoss_gesture(crate::seq::GesturePhase::Move, gesture, x, y);
             self.kaoss_usb_note_follow(x, y, outbox);
         } else if gated {
             // While the shared gate is in the on phase, slide this voice.
@@ -5130,6 +5154,7 @@ impl NativeModel {
             {
                 if self.fingers[slot].gate_on {
                     self.kaoss_touch_edge(gesture, TouchPhase::Move, x, y, outbox);
+                    self.record_kaoss_gesture(crate::seq::GesturePhase::Move, gesture, x, y);
                     self.kaoss_usb_note_follow(x, y, outbox);
                 }
             } else if self.kaoss_hold
@@ -5137,6 +5162,7 @@ impl NativeModel {
                 && self.kaoss_gate_gesture == Some(gesture)
             {
                 self.kaoss_touch_edge(gesture, TouchPhase::Move, x, y, outbox);
+                self.record_kaoss_gesture(crate::seq::GesturePhase::Move, gesture, x, y);
                 self.kaoss_usb_note_follow(x, y, outbox);
             }
         }
@@ -5185,6 +5211,7 @@ impl NativeModel {
             if was_gate_on {
                 self.kaoss_touch_edge(gesture, TouchPhase::Up, x, y, outbox);
                 self.record_kaoss_note(false, x, y);
+                self.record_kaoss_gesture(crate::seq::GesturePhase::Up, gesture, x, y);
             }
             if remaining == 0 {
                 self.kaoss_usb_note_off(outbox);
@@ -5203,6 +5230,7 @@ impl NativeModel {
         } else if prog.note {
             self.kaoss_touch_edge(gesture, TouchPhase::Up, x, y, outbox);
             self.record_kaoss_note(false, x, y);
+            self.record_kaoss_gesture(crate::seq::GesturePhase::Up, gesture, x, y);
             if remaining == 0 {
                 self.kaoss_usb_note_off(outbox);
             }
@@ -5303,15 +5331,18 @@ impl NativeModel {
             if want_on && !self.kaoss_gate_on {
                 self.kaoss_touch_edge(gesture, TouchPhase::Down, x, y, outbox);
                 self.record_kaoss_note(true, x, y);
+                self.record_kaoss_gesture(crate::seq::GesturePhase::Down, gesture, x, y);
                 self.kaoss_usb_note_on(x, y, outbox);
                 self.kaoss_gate_on = true;
             } else if !want_on && self.kaoss_gate_on {
                 self.kaoss_touch_edge(gesture, TouchPhase::Up, x, y, outbox);
                 self.record_kaoss_note(false, x, y);
+                self.record_kaoss_gesture(crate::seq::GesturePhase::Up, gesture, x, y);
                 self.kaoss_usb_note_off(outbox);
                 self.kaoss_gate_on = false;
             } else if want_on && self.kaoss_gate_on {
                 self.kaoss_touch_edge(gesture, TouchPhase::Move, x, y, outbox);
+                self.record_kaoss_gesture(crate::seq::GesturePhase::Move, gesture, x, y);
                 self.kaoss_usb_note_follow(x, y, outbox);
             }
             return;
@@ -5325,14 +5356,17 @@ impl NativeModel {
             if want_on && !was {
                 self.kaoss_touch_edge(gesture, TouchPhase::Down, x, y, outbox);
                 self.record_kaoss_note(true, x, y);
+                self.record_kaoss_gesture(crate::seq::GesturePhase::Down, gesture, x, y);
                 self.fingers[slot].gate_on = true;
                 usb_xy = (x, y);
             } else if !want_on && was {
                 self.kaoss_touch_edge(gesture, TouchPhase::Up, x, y, outbox);
                 self.record_kaoss_note(false, x, y);
+                self.record_kaoss_gesture(crate::seq::GesturePhase::Up, gesture, x, y);
                 self.fingers[slot].gate_on = false;
             } else if want_on && was {
                 self.kaoss_touch_edge(gesture, TouchPhase::Move, x, y, outbox);
+                self.record_kaoss_gesture(crate::seq::GesturePhase::Move, gesture, x, y);
                 usb_xy = (x, y);
             }
             any_on |= self.fingers[slot].gate_on;
@@ -5368,9 +5402,38 @@ impl NativeModel {
         } else {
             0
         };
-        self.seq
-            .push_note(on, self.kaoss_channel, note, velocity);
+        // SEQ captures the XY gesture instead of flattening to MIDI notes.
         self.push_pad_rec(on, self.kaoss_channel, note, velocity);
+    }
+
+    fn kaoss_gesture_mode(&self) -> u8 {
+        if kaoss_ui::program(self.kaoss_program).y_param == "pitch_bend" {
+            1
+        } else {
+            0
+        }
+    }
+
+    fn record_kaoss_gesture(
+        &mut self,
+        phase: crate::seq::GesturePhase,
+        owner: u32,
+        x: f32,
+        y: f32,
+    ) {
+        if !self.kaoss_out.includes_local() {
+            return;
+        }
+        if !kaoss_ui::program(self.kaoss_program).note {
+            return;
+        }
+        self.seq.push_gesture(
+            phase,
+            (owner % 32) as u8,
+            x,
+            y,
+            self.kaoss_gesture_mode(),
+        );
     }
 
     fn kaoss_touch_edge(
@@ -5785,6 +5848,8 @@ impl NativeModel {
                     self.seq.baked_tone.unwrap_or(1.0),
                 );
                 outbox.clip_gain(SEQ_CLIP_SLOT, self.seq_level);
+                outbox.clip_gain(SEQ_DRUM_MIX_SLOT, self.seq_drum_level);
+                outbox.clip_gain(SEQ_KAOSS_MIX_SLOT, self.seq_kaoss_level);
                 if launch {
                     outbox.clip_launch(SEQ_CLIP_SLOT, self.clip_quantize.wire());
                 }
@@ -6737,6 +6802,7 @@ impl NativeModel {
         let mode = if self.song_loop { "loop" } else { "oneshot" };
         outbox.clip_load(SONG_CLIP_SLOT, length_ticks, mode, events, 1.0);
         outbox.clip_gain(SONG_CLIP_SLOT, self.seq_level);
+        outbox.clip_gain(SEQ_DRUM_MIX_SLOT, self.seq_drum_level);
         outbox.clip_launch(SONG_CLIP_SLOT, self.clip_quantize.wire());
         self.song_playing = true;
         self.bpm = bpm.clamp(40.0, 240.0);
@@ -9281,6 +9347,44 @@ mod tests {
     }
 
     #[test]
+    fn mix_seq_drum_sends_clip_gain_on_drum_slot() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Mix);
+        let mut out = Outbox::new();
+        let track = model.layout.mix_bus_slider(Layout::MIX_SEQ_DRUM);
+        model.finger_down(1, track.x + 8, track.y + 4, &mut out);
+        let batch = out.take();
+        assert!(
+            batch.iter().any(|r| matches!(
+                r,
+                Request::ClipGain { slot, value }
+                    if *slot == SEQ_DRUM_MIX_SLOT && *value > 1.8
+            )),
+            "expected SEQ DRM clip_gain, got {batch:?}"
+        );
+        assert!(model.seq_drum_level > 1.8);
+    }
+
+    #[test]
+    fn mix_seq_kaoss_sends_clip_gain_on_kaoss_slot() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Mix);
+        let mut out = Outbox::new();
+        let track = model.layout.mix_bus_slider(Layout::MIX_SEQ_KAOSS);
+        model.finger_down(1, track.x + 8, track.y + 4, &mut out);
+        let batch = out.take();
+        assert!(
+            batch.iter().any(|r| matches!(
+                r,
+                Request::ClipGain { slot, value }
+                    if *slot == SEQ_KAOSS_MIX_SLOT && *value > 1.8
+            )),
+            "expected SEQ KSS clip_gain, got {batch:?}"
+        );
+        assert!(model.seq_kaoss_level > 1.8);
+    }
+
+    #[test]
     fn mix_pad_sends_clip_gain_without_reloading() {
         let dir = std::env::temp_dir().join(format!("pidi-mix-pad-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
@@ -9296,6 +9400,7 @@ mod tests {
                 channel: 0,
                 note: 60,
                 velocity: 100,
+                ..Default::default()
             }],
             gain: 1.0,
             ..phrases::PhrasePad::default()
@@ -9338,6 +9443,7 @@ mod tests {
                 channel: 0,
                 note: 60,
                 velocity: 80,
+                ..Default::default()
             }],
             gain: 1.0,
             ..phrases::PhrasePad::default()
@@ -9683,6 +9789,66 @@ mod tests {
             reqs.iter().any(|r| matches!(r, Request::ClipLoad { .. })),
             "turning BEEP on should reload the looping clip, got {reqs:?}"
         );
+    }
+
+    #[test]
+    fn chrome_rec_after_backbone_starts_overdub() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Drums);
+        model.seq.seed_playing_backbone(
+            vec![crate::seq::RecEvent {
+                t: 0.0,
+                on: true,
+                channel: 9,
+                note: 36,
+                velocity: 100,
+            }],
+            1.0,
+        );
+        assert_eq!(model.seq.state, crate::seq::SeqState::Playing);
+        assert_eq!(model.seq.chrome_rec_label(), ("REC", 0x9d0006));
+
+        let mut out = Outbox::new();
+        let rec = model.layout.nav_chrome_rec();
+        model.finger_down(1, rec.x + 4, rec.y + 4, &mut out);
+        model.finger_up(1, &mut out);
+        assert_eq!(model.seq.state, crate::seq::SeqState::Overdub);
+        assert!(model.seq.is_recording());
+        assert_eq!(model.seq.chrome_rec_label(), ("STOP", 0xcc241d));
+
+        let kick = model.layout.kit_pad_cell(4);
+        model.finger_down(2, kick.x + 4, kick.y + 4, &mut out);
+        assert_eq!(model.seq.recorded_on_notes(), vec![36]);
+    }
+
+    #[test]
+    fn kaoss_slide_records_seq_gestures_not_midi_notes() {
+        let mut model = model_on_kaoss();
+        model.kaoss_out = OutMode::Local;
+        assert!(matches!(
+            model.seq.toggle_record(),
+            crate::seq::SeqAction::Stop
+        ));
+        let mut out = Outbox::new();
+        let a = model.layout.kaoss_cell(1, 3);
+        let b = model.layout.kaoss_cell(10, 3);
+        model.finger_down(1, a.x + 4, a.y + 4, &mut out);
+        model.finger_move(1, b.x + 4, b.y + 4, &mut out);
+        model.finger_up(1, &mut out);
+        assert!(
+            model.seq.recorded_on_notes().is_empty(),
+            "Kaoss SEQ takes should not flatten to MIDI notes"
+        );
+        assert!(
+            model.seq.recorded_gesture_count() >= 2,
+            "slide should record down + move/up"
+        );
+        match model.seq.toggle_record() {
+            crate::seq::SeqAction::Upload { events, .. } => {
+                assert!(events.iter().any(|e| e.touch.as_deref() == Some("down")));
+            }
+            other => panic!("expected gesture upload, got {other:?}"),
+        }
     }
 
     #[test]

@@ -9,7 +9,7 @@ use jambox_protocol::WireClipEvent;
 use crate::phrases::{seconds_to_ticks, PPQ};
 
 /// SEQ / songs share the clip slot after the 16 phrase pads.
-pub use jambox_core::SEQ_CLIP_SLOT;
+pub use jambox_core::{SEQ_CLIP_SLOT, SEQ_DRUM_MIX_SLOT, SEQ_KAOSS_MIX_SLOT};
 pub const MAX_CYCLES: usize = 8;
 /// Clave on the drum kit — short enough to mark beat 1 without becoming the groove.
 pub const CUE_NOTE: u8 = 50;
@@ -36,16 +36,36 @@ pub struct RecEvent {
     pub velocity: u8,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GesturePhase {
+    Down,
+    Move,
+    Up,
+}
+
+/// Recorded Kaoss XY. Playback goes through the engine touch mapper.
+#[derive(Debug, Clone, Copy)]
+pub struct RecGesture {
+    pub t: f64,
+    pub phase: GesturePhase,
+    pub owner: u8,
+    pub x: f32,
+    pub y: f32,
+    /// 0 = Y is tone, 1 = Y is pitch bend.
+    pub mode: u8,
+}
+
 #[derive(Debug, Clone, Default)]
 struct SeqLayer {
     events: Vec<RecEvent>,
+    gestures: Vec<RecGesture>,
     span: usize,
     label: String,
 }
 
 impl SeqLayer {
     fn is_empty(&self) -> bool {
-        self.events.is_empty()
+        self.events.is_empty() && self.gestures.is_empty()
     }
 }
 
@@ -78,11 +98,12 @@ impl Sequence {
         spans.into_iter().max().unwrap_or(1)
     }
 
-    fn set_backbone(&mut self, events: Vec<RecEvent>, length: f64) {
+    fn set_backbone(&mut self, events: Vec<RecEvent>, gestures: Vec<RecGesture>, length: f64) {
         self.cycle_len = length.max(0.0);
         self.cycles = 1;
         self.layers = vec![SeqLayer {
             events,
+            gestures,
             span: 1,
             label: "backbone".into(),
         }];
@@ -158,19 +179,53 @@ impl Sequence {
         out
     }
 
+    fn flatten_gestures(&self, include_pending: bool) -> Vec<RecGesture> {
+        if self.cycle_len <= 0.0 {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        for layer in &self.layers {
+            out.extend(tile_gestures(layer, self.cycle_len, self.cycles));
+        }
+        if include_pending {
+            if let Some(p) = &self.pending {
+                out.extend(tile_gestures(p, self.cycle_len, self.cycles));
+            }
+        }
+        out.sort_by(|a, b| a.t.partial_cmp(&b.t).unwrap_or(std::cmp::Ordering::Equal));
+        out
+    }
+
     fn to_wire(&self, bpm: f32, include_pending: bool) -> (Vec<WireClipEvent>, u32) {
         let events = self.flatten(include_pending);
+        let gestures = self.flatten_gestures(include_pending);
         let length_ticks = seconds_to_ticks(self.total_len(), bpm).max(PPQ);
-        let wire = events
+        let mut wire: Vec<WireClipEvent> = events
             .iter()
-            .map(|e| WireClipEvent {
-                tick: seconds_to_ticks(e.t, bpm),
-                on: e.on,
-                channel: e.channel,
-                note: e.note,
-                velocity: e.velocity,
-            })
+            .map(|e| WireClipEvent::midi(
+                seconds_to_ticks(e.t, bpm),
+                e.on,
+                e.channel,
+                e.note,
+                e.velocity,
+            ))
             .collect();
+        for g in gestures {
+            let phase = match g.phase {
+                GesturePhase::Down => "down",
+                GesturePhase::Move => "move",
+                GesturePhase::Up => "up",
+            };
+            wire.push(WireClipEvent::gesture(
+                seconds_to_ticks(g.t, bpm),
+                phase,
+                g.owner,
+                g.x,
+                g.y,
+                g.mode,
+            ));
+        }
+        wire.sort_by_key(|e| e.tick);
         (wire, length_ticks)
     }
 
@@ -182,7 +237,12 @@ impl Sequence {
             } else {
                 layer.label.clone()
             };
-            parts.push(format!("{name}:{}ev×{}", layer.events.len(), layer.span));
+            let g = if layer.gestures.is_empty() {
+                String::new()
+            } else {
+                format!("+{}g", layer.gestures.len())
+            };
+            parts.push(format!("{name}:{}ev{g}×{}", layer.events.len(), layer.span));
         }
         if let Some(p) = &self.pending {
             if !p.events.is_empty() {
@@ -223,6 +283,29 @@ fn tile_layer(layer: &SeqLayer, cycle_len: f64, cycles: usize) -> Vec<RecEvent> 
     out
 }
 
+fn tile_gestures(layer: &SeqLayer, cycle_len: f64, cycles: usize) -> Vec<RecGesture> {
+    if cycle_len <= 0.0 || cycles == 0 || layer.gestures.is_empty() {
+        return Vec::new();
+    }
+    let span = layer.span.clamp(1, cycles);
+    let repeats = (cycles / span).max(1);
+    let period = span as f64 * cycle_len;
+    let mut out = Vec::new();
+    for rep in 0..repeats {
+        let offset = rep as f64 * period;
+        for g in &layer.gestures {
+            if g.t >= period - 1e-9 && rep + 1 < repeats {
+                continue;
+            }
+            out.push(RecGesture {
+                t: g.t + offset,
+                ..*g
+            });
+        }
+    }
+    out
+}
+
 fn cycles_for_take(take_len: f64, cycle_len: f64) -> usize {
     if cycle_len <= 0.0 {
         return 1;
@@ -256,7 +339,9 @@ pub struct SeqModel {
     pub baked_tone: Option<f32>,
     sequence: Sequence,
     take: Vec<RecEvent>,
+    take_gestures: Vec<RecGesture>,
     take_started: Option<std::time::Instant>,
+    last_gesture_t: f64,
 }
 
 impl Default for SeqModel {
@@ -277,7 +362,9 @@ impl SeqModel {
             baked_tone: None,
             sequence: Sequence::default(),
             take: Vec::new(),
+            take_gestures: Vec::new(),
             take_started: None,
+            last_gesture_t: -1.0,
         }
     }
 
@@ -296,7 +383,7 @@ impl SeqModel {
 
     #[cfg(test)]
     pub fn seed_playing_backbone(&mut self, events: Vec<RecEvent>, length: f64) {
-        self.sequence.set_backbone(events, length);
+        self.sequence.set_backbone(events, Vec::new(), length);
         self.state = SeqState::Playing;
         self.refresh_lines();
     }
@@ -304,6 +391,11 @@ impl SeqModel {
     #[cfg(test)]
     pub fn recorded_on_times(&self) -> Vec<f64> {
         self.take.iter().filter(|e| e.on).map(|e| e.t).collect()
+    }
+
+    #[cfg(test)]
+    pub fn recorded_gesture_count(&self) -> usize {
+        self.take_gestures.len()
     }
 
     pub fn is_playing(&self) -> bool {
@@ -356,6 +448,16 @@ impl SeqModel {
         }
     }
 
+    /// Top-chrome REC: dark red whenever a take can start, bright red while hot.
+    /// Playing/Stopped stay armed — gray here reads as "disabled" and hides overdub.
+    pub fn chrome_rec_label(&self) -> (&'static str, u32) {
+        match self.state {
+            SeqState::RecBackbone | SeqState::Overdub => ("STOP", 0xcc241d),
+            SeqState::Review => ("REC", 0xd79921),
+            SeqState::Empty | SeqState::Playing | SeqState::Stopped => ("REC", 0x9d0006),
+        }
+    }
+
     pub fn play_label(&self) -> (&'static str, u32) {
         if self.is_playing() && self.state != SeqState::Overdub {
             ("STOP", 0xd79921)
@@ -390,6 +492,33 @@ impl SeqModel {
         self.refresh_lines();
     }
 
+    pub fn push_gesture(&mut self, phase: GesturePhase, owner: u8, x: f32, y: f32, mode: u8) {
+        let Some(started) = self.take_started else {
+            return;
+        };
+        if !self.is_recording() {
+            return;
+        }
+        let t = started.elapsed().as_secs_f64();
+        if phase == GesturePhase::Move && t - self.last_gesture_t < 0.016 {
+            let dx = x - self.take_gestures.last().map(|g| g.x).unwrap_or(x);
+            let dy = y - self.take_gestures.last().map(|g| g.y).unwrap_or(y);
+            if dx.abs() + dy.abs() < 0.012 {
+                return;
+            }
+        }
+        self.last_gesture_t = t;
+        self.take_gestures.push(RecGesture {
+            t: t.max(0.0),
+            phase,
+            owner,
+            x: x.clamp(0.0, 1.0),
+            y: y.clamp(0.0, 1.0),
+            mode,
+        });
+        self.refresh_lines();
+    }
+
     pub fn toggle_record(&mut self) -> SeqAction {
         match self.state {
             SeqState::RecBackbone => self.finish_backbone(),
@@ -401,6 +530,8 @@ impl SeqModel {
 
     fn start_backbone(&mut self) -> SeqAction {
         self.take.clear();
+        self.take_gestures.clear();
+        self.last_gesture_t = -1.0;
         self.take_started = Some(std::time::Instant::now());
         self.state = SeqState::RecBackbone;
         self.refresh_lines();
@@ -409,16 +540,18 @@ impl SeqModel {
 
     fn finish_backbone(&mut self) -> SeqAction {
         self.take_started = None;
-        let (trimmed, length) = trim_take(&self.take);
+        let raw_g = std::mem::take(&mut self.take_gestures);
+        let (trimmed, gestures, length) = trim_take_with_gestures(&self.take, &raw_g);
         self.take.clear();
-        if trimmed.is_empty() || length <= 0.0 {
+        if (trimmed.is_empty() && gestures.is_empty()) || length <= 0.0 {
             self.state = SeqState::Empty;
             self.status = "empty take — try again".into();
             self.refresh_lines();
             return SeqAction::None;
         }
         let trimmed = close_open_notes(trimmed, length);
-        self.sequence.set_backbone(trimmed, length);
+        let gestures = close_open_gestures(gestures, length);
+        self.sequence.set_backbone(trimmed, gestures, length);
         self.state = SeqState::Playing;
         self.refresh_lines();
         let (events, length_ticks) = self.playback_wire(false);
@@ -437,9 +570,12 @@ impl SeqModel {
             let _ = self.sequence.keep_pending();
         }
         self.take.clear();
+        self.take_gestures.clear();
+        self.last_gesture_t = -1.0;
         self.take_started = Some(std::time::Instant::now());
         self.sequence.pending = Some(SeqLayer {
             events: Vec::new(),
+            gestures: Vec::new(),
             span: self.sequence.cycles.max(1),
             label: "pending".into(),
         });
@@ -456,7 +592,8 @@ impl SeqModel {
     pub fn finish_overdub(&mut self) -> SeqAction {
         self.take_started = None;
         let raw = std::mem::take(&mut self.take);
-        if raw.is_empty() {
+        let raw_g = std::mem::take(&mut self.take_gestures);
+        if raw.is_empty() && raw_g.is_empty() {
             self.sequence.pending = None;
             self.state = SeqState::Playing;
             self.status = "empty overdub — dropped".into();
@@ -467,7 +604,12 @@ impl SeqModel {
         // arm). Do NOT auto-trim — that would slam the first hit to t=0 and
         // destroy in-loop placement (Tk records phase, never trims overdubs).
         let span = if self.extend_mode {
-            let take_len = raw.iter().map(|e| e.t).fold(0.0_f64, f64::max) + 1e-3;
+            let take_len = raw
+                .iter()
+                .map(|e| e.t)
+                .chain(raw_g.iter().map(|g| g.t))
+                .fold(0.0_f64, f64::max)
+                + 1e-3;
             cycles_for_take(take_len, self.sequence.cycle_len)
         } else {
             1
@@ -478,20 +620,31 @@ impl SeqModel {
             self.sequence.cycle_len.max(0.05)
         };
         let closed = close_open_notes(raw, span_secs);
-        let events = if self.extend_mode {
-            closed
-        } else {
-            let cycle = self.sequence.cycle_len.max(1e-6);
-            closed
-                .into_iter()
-                .map(|mut e| {
-                    e.t %= cycle;
-                    e
-                })
-                .collect()
+        let closed_g = close_open_gestures(raw_g, span_secs);
+        let wrap = |t: f64| {
+            if self.extend_mode {
+                t
+            } else {
+                t % self.sequence.cycle_len.max(1e-6)
+            }
         };
+        let events = closed
+            .into_iter()
+            .map(|mut e| {
+                e.t = wrap(e.t);
+                e
+            })
+            .collect();
+        let gestures = closed_g
+            .into_iter()
+            .map(|mut g| {
+                g.t = wrap(g.t);
+                g
+            })
+            .collect();
         self.sequence.pending = Some(SeqLayer {
             events,
+            gestures,
             span,
             label: "pending".into(),
         });
@@ -594,6 +747,7 @@ impl SeqModel {
         if self.is_recording() {
             self.take_started = None;
             self.take.clear();
+            self.take_gestures.clear();
         }
         self.state = if self.sequence.is_empty() {
             SeqState::Empty
@@ -607,6 +761,7 @@ impl SeqModel {
     pub fn clear(&mut self) -> SeqAction {
         self.sequence.clear();
         self.take.clear();
+        self.take_gestures.clear();
         self.take_started = None;
         self.baked_tone = None;
         self.state = SeqState::Empty;
@@ -710,20 +865,20 @@ fn with_cue_beep(
     let off_tick = seconds_to_ticks(CUE_LEN_SEC, bpm)
         .max(1)
         .min(length_ticks.saturating_sub(1).max(1));
-    events.push(WireClipEvent {
-        tick: 0,
-        on: true,
-        channel: CUE_CHANNEL,
-        note: CUE_NOTE,
-        velocity: CUE_VELOCITY,
-    });
-    events.push(WireClipEvent {
-        tick: off_tick,
-        on: false,
-        channel: CUE_CHANNEL,
-        note: CUE_NOTE,
-        velocity: 0,
-    });
+    events.push(WireClipEvent::midi(
+        0,
+        true,
+        CUE_CHANNEL,
+        CUE_NOTE,
+        CUE_VELOCITY,
+    ));
+    events.push(WireClipEvent::midi(
+        off_tick,
+        false,
+        CUE_CHANNEL,
+        CUE_NOTE,
+        0,
+    ));
     events.sort_by(|a, b| {
         a.tick
             .cmp(&b.tick)
@@ -733,8 +888,52 @@ fn with_cue_beep(
     events
 }
 
-fn trim_take(events: &[RecEvent]) -> (Vec<RecEvent>, f64) {
-    trim_loop_take(events, 0.35, 0.05, 2.0)
+fn trim_take_with_gestures(
+    events: &[RecEvent],
+    gestures: &[RecGesture],
+) -> (Vec<RecEvent>, Vec<RecGesture>, f64) {
+    let (trimmed, length) = if events.is_empty() && !gestures.is_empty() {
+        let dummy: Vec<RecEvent> = gestures
+            .iter()
+            .filter(|g| g.phase == GesturePhase::Down)
+            .map(|g| RecEvent {
+                t: g.t,
+                on: true,
+                channel: 0,
+                note: 0,
+                velocity: 1,
+            })
+            .collect();
+        let (_, length) = trim_loop_take(&dummy, 0.35, 0.05, 2.0);
+        (Vec::new(), length)
+    } else {
+        trim_loop_take(events, 0.35, 0.05, 2.0)
+    };
+    if length <= 0.0 {
+        return (Vec::new(), Vec::new(), 0.0);
+    }
+    let t0 = events
+        .iter()
+        .filter(|e| e.on)
+        .map(|e| e.t)
+        .chain(
+            gestures
+                .iter()
+                .filter(|g| g.phase == GesturePhase::Down)
+                .map(|g| g.t),
+        )
+        .fold(f64::INFINITY, f64::min);
+    let t0 = if t0.is_finite() { t0 } else { 0.0 };
+    let shifted_g: Vec<RecGesture> = gestures
+        .iter()
+        .filter(|g| g.t >= t0 - 1e-6)
+        .map(|g| RecGesture {
+            t: (g.t - t0).max(0.0),
+            ..*g
+        })
+        .filter(|g| g.t <= length + 1e-6)
+        .collect();
+    (trimmed, shifted_g, length)
 }
 
 /// Trim leading/trailing dead space from a free-timing take (Tk `trim_loop_take`).
@@ -856,9 +1055,73 @@ pub fn close_open_notes(events: Vec<RecEvent>, span: f64) -> Vec<RecEvent> {
     out
 }
 
+fn close_open_gestures(mut gestures: Vec<RecGesture>, span: f64) -> Vec<RecGesture> {
+    if span <= 0.0 {
+        return gestures;
+    }
+    let mut open: std::collections::HashSet<u8> = std::collections::HashSet::new();
+    for g in &gestures {
+        match g.phase {
+            GesturePhase::Down => {
+                open.insert(g.owner);
+            }
+            GesturePhase::Up => {
+                open.remove(&g.owner);
+            }
+            GesturePhase::Move => {}
+        }
+    }
+    let end = (span - 1e-3).max(0.0);
+    for owner in open {
+        let mode = gestures
+            .iter()
+            .rev()
+            .find(|g| g.owner == owner)
+            .map(|g| g.mode)
+            .unwrap_or(0);
+        let (x, y) = gestures
+            .iter()
+            .rev()
+            .find(|g| g.owner == owner)
+            .map(|g| (g.x, g.y))
+            .unwrap_or((0.5, 0.5));
+        gestures.push(RecGesture {
+            t: end,
+            phase: GesturePhase::Up,
+            owner,
+            x,
+            y,
+            mode,
+        });
+    }
+    gestures.sort_by(|a, b| a.t.partial_cmp(&b.t).unwrap_or(std::cmp::Ordering::Equal));
+    gestures
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn kaoss_gesture_backbone_uploads_touch_events() {
+        let mut seq = SeqModel::new();
+        assert!(matches!(seq.toggle_record(), SeqAction::Stop));
+        seq.push_gesture(GesturePhase::Down, 1, 0.2, 0.8, 0);
+        std::thread::sleep(std::time::Duration::from_millis(40));
+        seq.push_gesture(GesturePhase::Move, 1, 0.7, 0.3, 0);
+        seq.push_gesture(GesturePhase::Up, 1, 0.7, 0.3, 0);
+        match seq.toggle_record() {
+            SeqAction::Upload { events, .. } => {
+                assert!(
+                    events.iter().any(|e| e.touch.as_deref() == Some("down")),
+                    "backbone should carry a Kaoss down, got {events:?}"
+                );
+                assert!(events.iter().any(|e| e.touch.as_deref() == Some("up")));
+            }
+            other => panic!("expected upload, got {other:?}"),
+        }
+        assert_eq!(seq.state, SeqState::Playing);
+    }
 
     #[test]
     fn backbone_then_overdub_keep() {
@@ -869,6 +1132,11 @@ mod tests {
         seq.push_note(false, 9, 36, 0);
         assert!(matches!(seq.toggle_record(), SeqAction::Upload { .. }));
         assert_eq!(seq.state, SeqState::Playing);
+        assert_eq!(
+            seq.chrome_rec_label(),
+            ("REC", 0x9d0006),
+            "chrome REC must stay record-ready after the backbone, not gray"
+        );
 
         assert!(matches!(seq.toggle_record(), SeqAction::Upload { .. }));
         assert_eq!(seq.state, SeqState::Overdub);
@@ -892,6 +1160,7 @@ mod tests {
                 note: 36,
                 velocity: 100,
             }],
+            Vec::new(),
             1.0,
         );
         seq.state = SeqState::Stopped;
@@ -1021,6 +1290,7 @@ mod tests {
                 note: 36,
                 velocity: 100,
             }],
+            Vec::new(),
             1.0,
         );
         seq.state = SeqState::Playing;
@@ -1057,6 +1327,7 @@ mod tests {
                 note: 36,
                 velocity: 100,
             }],
+            Vec::new(),
             1.0,
         );
         seq.state = SeqState::Stopped;

@@ -30,6 +30,8 @@ struct Voice {
     target_amp: f32,
     releasing: bool,
     age: u64,
+    /// Extra semitones on this voice only (Kaoss Y bend on a recorded take).
+    bend_semis: f32,
 }
 
 impl Voice {
@@ -49,6 +51,7 @@ impl Voice {
             target_amp: 0.0,
             releasing: false,
             age: 0,
+            bend_semis: 0.0,
         }
     }
 }
@@ -166,6 +169,7 @@ impl VoicePool {
             v.target_amp = target;
             v.releasing = false;
             v.age = self.serial;
+            v.bend_semis = 0.0;
             return;
         }
 
@@ -185,7 +189,29 @@ impl VoicePool {
             target_amp: target,
             releasing: false,
             age: self.serial,
+            bend_semis: 0.0,
         };
+    }
+
+    /// Change pitch of a held voice without resetting phase or envelope.
+    pub fn retune(&mut self, channel: u8, old_note: u8, new_note: u8, recorded: bool) -> bool {
+        if let Some(slot) = self.find_playing(channel, old_note, recorded) {
+            self.voices[slot].note = new_note;
+            return true;
+        }
+        false
+    }
+
+    pub fn set_voice_tone(&mut self, channel: u8, note: u8, recorded: bool, tone: f32) {
+        if let Some(slot) = self.find_playing(channel, note, recorded) {
+            self.voices[slot].tone = tone.clamp(0.0, 1.0);
+        }
+    }
+
+    pub fn set_voice_bend(&mut self, channel: u8, note: u8, recorded: bool, semis: f32) {
+        if let Some(slot) = self.find_playing(channel, note, recorded) {
+            self.voices[slot].bend_semis = semis.clamp(-24.0, 24.0);
+        }
     }
 
     pub fn note_off(&mut self, channel: u8, note: u8) {
@@ -331,7 +357,12 @@ impl VoicePool {
                 &mut live[..n]
             };
             audible = true;
-            let hz = midi_to_hz(v.note) * ctx.pitch_mul as f64;
+            let voice_mul = if v.bend_semis.abs() > 0.001 {
+                2f32.powf(v.bend_semis / 12.0)
+            } else {
+                1.0
+            };
+            let hz = midi_to_hz(v.note) * ctx.pitch_mul as f64 * voice_mul as f64;
             let phase_inc = hz * TABLE_SIZE as f64 / ctx.sample_rate as f64;
             let use_lfo = !v.recorded && ctx.tone_lfo_amount > 0.01;
             let static_tone = if v.recorded {
@@ -441,7 +472,12 @@ impl VoicePool {
                 &mut live[..n]
             };
             audible = true;
-            let hz = midi_to_hz(v.note) * ctx.pitch_mul as f64;
+            let voice_mul = if v.bend_semis.abs() > 0.001 {
+                2f32.powf(v.bend_semis / 12.0)
+            } else {
+                1.0
+            };
+            let hz = midi_to_hz(v.note) * ctx.pitch_mul as f64 * voice_mul as f64;
             let phase_inc = hz * TABLE_SIZE as f64 / ctx.sample_rate as f64;
             let use_lfo = !v.recorded && ctx.tone_lfo_amount > 0.01;
             let static_tone = if v.recorded {

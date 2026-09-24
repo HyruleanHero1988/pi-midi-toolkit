@@ -107,6 +107,24 @@ pub enum Command {
         channel: u8,
         note: u8,
     },
+    /// Replay a recorded Kaoss gesture through the clip touch mapper.
+    ClipTouchDown {
+        owner: u32,
+        x: u16,
+        y: u16,
+        slot: u8,
+        mode: u8,
+    },
+    ClipTouchMove {
+        owner: u32,
+        x: u16,
+        y: u16,
+        slot: u8,
+    },
+    ClipTouchUp {
+        owner: u32,
+        slot: u8,
+    },
     /// Release everything with its normal tail.
     AllNotesOff,
     /// Hard stop: kill voices, clips, and FX tails.

@@ -2079,11 +2079,15 @@ impl Layout {
     pub const FX_KEYS_LEVEL: usize = 4;
     pub const FX_DRUMS_LEVEL: usize = 5;
 
-    /// MIX page: LIVE / KIT / SEQ bus strips, then 16 pad faders.
-    pub const MIX_BUS_COUNT: usize = 3;
+    /// MIX page: LIVE / KIT / SEQ DRM / SEQ KEY / SEQ KSS, then 16 pad faders.
+    pub const MIX_BUS_COUNT: usize = 5;
     pub const MIX_LIVE: usize = 0;
     pub const MIX_KIT: usize = 1;
-    pub const MIX_SEQ: usize = 2;
+    pub const MIX_SEQ_DRUM: usize = 2;
+    pub const MIX_SEQ_KEY: usize = 3;
+    pub const MIX_SEQ_KAOSS: usize = 4;
+    /// Back-compat alias for the SEQ keys fader.
+    pub const MIX_SEQ: usize = Self::MIX_SEQ_KEY;
 
     /// Notes are returned relative to C4 (MIDI 60); the model applies `synth_octave`.
     pub const SYNTH_KEY_BASE: u8 = 60;
@@ -3019,10 +3023,10 @@ impl Layout {
 
     pub fn mix_bus_slider(&self, index: usize) -> Rect {
         let i = (index % Self::MIX_BUS_COUNT) as i32;
-        let w = 62;
-        let gap = 10;
+        let w = 48;
+        let gap = 6;
         Rect {
-            x: self.content.x + 12 + i * (w + gap),
+            x: self.content.x + 8 + i * (w + gap),
             y: self.content.y + 44,
             w,
             h: self.content.h - 60,
@@ -3033,7 +3037,7 @@ impl Layout {
         let i = (index % 16) as i32;
         let col = i % 4;
         let row = i / 4;
-        let left = self.content.x + 236;
+        let left = self.content.x + 288;
         let top = self.content.y + 44;
         let area_w = self.content.x + self.content.w - 12 - left;
         let area_h = self.content.h - 60;
@@ -3647,10 +3651,10 @@ mod tests {
             layout.hit(UiMode::Mix, b8.x + 4, b8.y + b8.h / 2),
             Hit::MixPad(15)
         );
-        let live = layout.mix_bus_slider(Layout::MIX_LIVE);
+        let last_bus = layout.mix_bus_slider(Layout::MIX_SEQ_KAOSS);
         assert!(
-            a1.x >= live.x + live.w,
-            "pad grid should sit to the right of LIVE/KIT/SEQ"
+            a1.x >= last_bus.x + last_bus.w,
+            "pad grid should sit to the right of the SEQ buses"
         );
     }
 }

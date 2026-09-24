@@ -8,18 +8,30 @@
 use crate::fx::FxParams;
 use crate::transport::{Quantize, Transport};
 
-/// Phrase pads 0..15, then SEQ/songs on [`SEQ_CLIP_SLOT`].
-pub const MAX_CLIPS: usize = 17;
+/// Phrase pads 0..15, SEQ clip on [`SEQ_CLIP_SLOT`], then SEQ mix buses.
+pub const MAX_CLIPS: usize = 19;
 /// Dedicated engine slot so SEQ does not overwrite phrase pad B8.
+/// This slot holds the looping clip. MIX routes its notes by family:
+/// keys stay here, drums use [`SEQ_DRUM_MIX_SLOT`], Kaoss uses [`SEQ_KAOSS_MIX_SLOT`].
 pub const SEQ_CLIP_SLOT: u8 = 16;
+/// Gain-only bus for SEQ / song drum hits (channel 10).
+pub const SEQ_DRUM_MIX_SLOT: u8 = 17;
+/// Gain-only bus for SEQ Kaoss gesture playback.
+pub const SEQ_KAOSS_MIX_SLOT: u8 = 18;
 /// Notes one clip may hold open at once (for clean stop / note-off flush).
 const MAX_SLOT_NOTES: usize = 24;
+/// Kaoss contacts one clip may hold open (matches `MAX_TOUCH_VOICES`).
+const MAX_SLOT_TOUCHES: usize = 5;
 
 /// What a clip event does. Kept `Copy` so scheduling never allocates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClipEventKind {
     NoteOn { channel: u8, note: u8, velocity: u8 },
     NoteOff { channel: u8, note: u8 },
+    /// Replay a Kaoss contact through the touch mapper (not a MIDI note).
+    TouchDown { owner: u8, x: u16, y: u16, mode: u8 },
+    TouchMove { owner: u8, x: u16, y: u16 },
+    TouchUp { owner: u8 },
 }
 
 /// One recorded event at a musical offset from the clip start.
@@ -145,6 +157,8 @@ pub struct ClipSlot {
     voice: ClipVoice,
     held: [(u8, u8); MAX_SLOT_NOTES],
     held_len: usize,
+    held_touch: [u8; MAX_SLOT_TOUCHES],
+    held_touch_len: usize,
 }
 
 impl Default for ClipSlot {
@@ -156,6 +170,8 @@ impl Default for ClipSlot {
             voice: ClipVoice::default(),
             held: [(0, 0); MAX_SLOT_NOTES],
             held_len: 0,
+            held_touch: [0; MAX_SLOT_TOUCHES],
+            held_touch_len: 0,
         }
     }
 }
@@ -165,6 +181,7 @@ impl ClipSlot {
         self.clip = clip.map(Box::new);
         self.state = SlotState::Idle;
         self.held_len = 0;
+        self.held_touch_len = 0;
     }
 
     /// Swap a pre-boxed clip. The audio thread must use this so the previous
@@ -174,6 +191,7 @@ impl ClipSlot {
         self.clip = clip;
         self.state = SlotState::Idle;
         self.held_len = 0;
+        self.held_touch_len = 0;
         previous
     }
 
@@ -181,6 +199,7 @@ impl ClipSlot {
     pub fn take_clip(&mut self) -> Option<Clip> {
         self.state = SlotState::Idle;
         self.held_len = 0;
+        self.held_touch_len = 0;
         self.clip.take().map(|b| *b)
     }
 
@@ -248,6 +267,24 @@ impl ClipSlot {
                 {
                     self.held.swap(pos, self.held_len - 1);
                     self.held_len -= 1;
+                }
+            }
+            ClipEventKind::TouchDown { owner, .. } => {
+                if self.held_touch_len < MAX_SLOT_TOUCHES
+                    && !self.held_touch[..self.held_touch_len].contains(&owner)
+                {
+                    self.held_touch[self.held_touch_len] = owner;
+                    self.held_touch_len += 1;
+                }
+            }
+            ClipEventKind::TouchMove { .. } => {}
+            ClipEventKind::TouchUp { owner } => {
+                if let Some(pos) = self.held_touch[..self.held_touch_len]
+                    .iter()
+                    .position(|h| *h == owner)
+                {
+                    self.held_touch.swap(pos, self.held_touch_len - 1);
+                    self.held_touch_len -= 1;
                 }
             }
         }
@@ -349,6 +386,20 @@ impl Sequencer {
             n += 1;
         }
         slot.held_len = 0;
+        for i in 0..slot.held_touch_len {
+            if n >= out.len() {
+                break;
+            }
+            out[n] = SeqEvent {
+                frame,
+                slot: index,
+                kind: ClipEventKind::TouchUp {
+                    owner: slot.held_touch[i],
+                },
+            };
+            n += 1;
+        }
+        slot.held_touch_len = 0;
         n
     }
 
@@ -742,8 +793,10 @@ mod tests {
 
     #[test]
     fn seq_lives_past_the_sixteen_phrase_pads() {
-        assert_eq!(MAX_CLIPS, 17);
+        assert_eq!(MAX_CLIPS, 19);
         assert_eq!(SEQ_CLIP_SLOT as usize, 16);
+        assert_eq!(SEQ_DRUM_MIX_SLOT as usize, 17);
+        assert_eq!(SEQ_KAOSS_MIX_SLOT as usize, 18);
         let seq = Sequencer::new();
         assert!(seq.slot(15).is_some());
         assert!(seq.slot(SEQ_CLIP_SLOT as usize).is_some());
