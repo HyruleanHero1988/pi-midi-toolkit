@@ -346,6 +346,8 @@ pub struct NativeModel {
     wifi_usb_on: bool,
     wifi_usb_job: Option<std::sync::mpsc::Receiver<(bool, bool, String)>>,
     pending_scan_after_power: bool,
+    /// SET → NET latch: keep the dongle up for SSH after leaving WIFI/UPDATE.
+    pub wifi_usb_hold: bool,
     mode_before_power: UiMode,
     pub screensaver: screensaver::IdleWatch,
     panel_backlight: screensaver::PanelBacklight,
@@ -553,6 +555,7 @@ impl NativeModel {
             wifi_usb_on: true,
             wifi_usb_job: None,
             pending_scan_after_power: false,
+            wifi_usb_hold: false,
             mode_before_power: UiMode::Kaoss,
             screensaver: screensaver::IdleWatch::new(screensaver::timeout_from_env()),
             panel_backlight: screensaver::PanelBacklight::new(),
@@ -1494,6 +1497,7 @@ impl NativeModel {
             self.update_panel_open,
             self.wifi_busy,
             self.update_busy,
+            self.wifi_usb_hold,
         ) || self.reload_ui_in.is_some()
     }
 
@@ -1855,6 +1859,7 @@ impl NativeModel {
         self.midi_out_filter = s.midi_out.clone();
         self.channel_map_bits = s.channel_map;
         self.probe = s.probe;
+        self.wifi_usb_hold = s.wifi_usb_hold;
         outbox.midi_select(
             Some(self.midi_in_filter.clone()),
             Some(self.midi_out_filter.clone()),
@@ -1956,6 +1961,7 @@ impl NativeModel {
             midi_out: self.midi_out_filter.clone(),
             channel_map: self.channel_map_bits,
             probe: self.probe,
+            wifi_usb_hold: self.wifi_usb_hold,
         }
     }
 
@@ -3436,6 +3442,18 @@ impl NativeModel {
             Hit::SettingsWifi => {
                 self.tap_ui(slot, id, gesture, px, py);
                 self.open_wifi_panel();
+            }
+            Hit::SettingsWifiUsb => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.wifi_usb_hold = !self.wifi_usb_hold;
+                self.status_line = if self.wifi_usb_hold {
+                    "Wi-Fi dongle on — SSH".into()
+                } else {
+                    "Wi-Fi dongle parked".into()
+                };
+                self.push_log(self.status_line.clone());
+                self.session_dirty = true;
+                self.mark_dirty();
             }
             Hit::SettingsUpdate => {
                 self.tap_ui(slot, id, gesture, px, py);
@@ -9015,6 +9033,24 @@ mod tests {
         model.finger_up(3, &mut out);
         assert!(model.update_panel_open);
         assert!(model.wifi_usb_wanted());
+    }
+
+    #[test]
+    fn settings_net_latches_wifi_dongle() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Settings);
+        let mut out = Outbox::new();
+        let net = model.layout.settings_wifi_usb;
+        model.finger_down(1, net.x + 4, net.y + 4, &mut out);
+        model.finger_up(1, &mut out);
+        assert!(model.wifi_usb_hold);
+        assert!(model.wifi_usb_wanted());
+        assert!(model.capture_session().wifi_usb_hold);
+
+        model.finger_down(2, net.x + 4, net.y + 4, &mut out);
+        model.finger_up(2, &mut out);
+        assert!(!model.wifi_usb_hold);
+        assert!(!model.wifi_usb_wanted());
     }
 
     #[test]

@@ -1590,6 +1590,7 @@ fn draw_chords(scene: &mut Scene, model: &NativeModel) {
         scene.text(play.x + 8, play.y + 2, &spec.name(), 0xfe8019);
     }
     let strings = chords::STRUM_STRINGS;
+    let spec_root = model.chords_current.map(|spec| spec.root);
     let strum_notes = model.chords_current.map(|spec| {
         spec.strum_strings_at(chords::strum_base_for_octave(model.chords_octave))
     });
@@ -1605,7 +1606,18 @@ fn draw_chords(scene: &mut Scene, model: &NativeModel) {
                 w: 3,
                 h: play.h - 32,
             },
-            if i % 4 == 0 { 0xebdbb2 } else { 0x504945 },
+            {
+                let is_root = strum_notes
+                    .as_ref()
+                    .zip(spec_root)
+                    .map(|(notes, root)| notes[i as usize] % 12 == root)
+                    .unwrap_or(i % 3 == 0);
+                if is_root {
+                    0xebdbb2
+                } else {
+                    0x504945
+                }
+            },
         );
         if let Some(ref notes) = strum_notes {
             // Band 0 is left (lowest note); band strings-1 is right (highest).
@@ -2840,6 +2852,16 @@ fn draw_settings(scene: &mut Scene, model: &NativeModel) {
     scene.text_centered(
         layout.settings_wifi,
         if wifi_busy { "WAIT" } else { "WIFI" },
+        0xffffff,
+        2,
+    );
+    scene.fill_rect(
+        layout.settings_wifi_usb,
+        if model.wifi_usb_hold { 0x689d6a } else { 0x3c3836 },
+    );
+    scene.text_centered(
+        layout.settings_wifi_usb,
+        if model.wifi_usb_hold { "NET ON" } else { "NET" },
         0xffffff,
         2,
     );

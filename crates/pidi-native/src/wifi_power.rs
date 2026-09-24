@@ -11,15 +11,16 @@ use std::sync::mpsc::{self, Receiver};
 #[cfg(target_os = "linux")]
 use crate::host;
 
-/// True while a panel or in-flight job still needs the radio.
+/// True while a panel, job, or the SET → NET latch still needs the radio.
 pub fn usb_wanted(
     wifi_open: bool,
     wifi_kb: bool,
     update_open: bool,
     wifi_busy: bool,
     update_busy: bool,
+    hold: bool,
 ) -> bool {
-    wifi_open || wifi_kb || update_open || wifi_busy || update_busy
+    hold || wifi_open || wifi_kb || update_open || wifi_busy || update_busy
 }
 
 pub fn parse_sysfs_loc(loc: &str) -> Option<(String, u8)> {
@@ -179,11 +180,12 @@ mod tests {
 
     #[test]
     fn wanted_only_for_wifi_or_update() {
-        assert!(!usb_wanted(false, false, false, false, false));
-        assert!(usb_wanted(true, false, false, false, false));
-        assert!(usb_wanted(false, false, true, false, false));
-        assert!(usb_wanted(false, false, false, true, false));
-        assert!(usb_wanted(false, true, false, false, false));
+        assert!(!usb_wanted(false, false, false, false, false, false));
+        assert!(usb_wanted(true, false, false, false, false, false));
+        assert!(usb_wanted(false, false, true, false, false, false));
+        assert!(usb_wanted(false, false, false, true, false, false));
+        assert!(usb_wanted(false, true, false, false, false, false));
+        assert!(usb_wanted(false, false, false, false, false, true));
     }
 
     #[test]

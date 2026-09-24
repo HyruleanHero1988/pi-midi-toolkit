@@ -256,6 +256,9 @@ pub struct SessionState {
     /// Lightweight probe log of engine/audio health. Missing in old sessions → off.
     #[serde(default)]
     pub probe: bool,
+    /// Keep the USB Wi-Fi dongle powered for SSH after leaving WIFI/UPDATE.
+    #[serde(default)]
+    pub wifi_usb_hold: bool,
 }
 
 fn default_drum_level() -> f32 {
@@ -344,6 +347,7 @@ impl Default for SessionState {
             channel_map: [0; 16],
             clip_quantize: ClipQuantize::Bar,
             probe: false,
+            wifi_usb_hold: false,
         }
     }
 }
@@ -411,6 +415,7 @@ mod tests {
         assert_eq!(s.kaoss_fx_target, KaossFxTarget::Voice);
         assert_eq!(s.clip_quantize, ClipQuantize::Bar);
         assert!(!s.probe);
+        assert!(!s.wifi_usb_hold);
         assert!((s.fx_flanger_rate - 0.35).abs() < 1e-6);
     }
 

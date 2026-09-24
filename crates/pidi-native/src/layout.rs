@@ -179,6 +179,7 @@ pub enum Hit {
     MixBus(usize),
     MixPad(usize),
     SettingsWifi,
+    SettingsWifiUsb,
     SettingsUpdate,
     SettingsFont,
     SettingsLog,
@@ -347,6 +348,7 @@ pub struct Layout {
     pub settings_fx_target: Rect,
     pub settings_fx: Rect,
     pub settings_wifi: Rect,
+    pub settings_wifi_usb: Rect,
     pub settings_font: Rect,
     pub settings_update: Rect,
     pub log_clear: Rect,
@@ -1091,7 +1093,13 @@ impl Layout {
             settings_wifi: Rect {
                 x: 280,
                 y: HUD_H + 220,
-                w: 240,
+                w: 116,
+                h: 72,
+            },
+            settings_wifi_usb: Rect {
+                x: 404,
+                y: HUD_H + 220,
+                w: 116,
                 h: 72,
             },
             settings_font: Rect {
@@ -2984,6 +2992,9 @@ impl Layout {
         }
         if self.settings_wifi.contains(px, py) {
             return Hit::SettingsWifi;
+        }
+        if self.settings_wifi_usb.contains(px, py) {
+            return Hit::SettingsWifiUsb;
         }
         if self.settings_font.contains(px, py) {
             return Hit::SettingsFont;
