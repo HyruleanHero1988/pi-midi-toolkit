@@ -60,6 +60,7 @@ pub enum Hit {
     PadsChannel,
     PadsSynth,
     PadsOut,
+    ClipQuantize,
     HomeTile(UiMode),
     Power,
     PowerShutdown,
@@ -255,6 +256,7 @@ pub struct Layout {
     pub pads_voice: Rect,
     pub pads_channel: Rect,
     pub pads_synth: Rect,
+    pub pads_qnt: Rect,
     pub synth_sliders: Rect,
     pub synth_keys: Rect,
     pub synth_scope: Rect,
@@ -320,6 +322,7 @@ pub struct Layout {
     pub seq_bpm_up: Rect,
     pub seq_bpm_down: Rect,
     pub seq_drums: Rect,
+    pub seq_qnt: Rect,
     pub preset_grid: Rect,
     pub preset_load: Rect,
     pub preset_save: Rect,
@@ -677,6 +680,12 @@ impl Layout {
                 w: 136,
                 h: 40,
             },
+            pads_qnt: Rect {
+                x: 16,
+                y: HUD_H + 8,
+                w: 112,
+                h: 40,
+            },
             synth_sliders: Rect {
                 x: 24,
                 y: HUD_H + 72,
@@ -935,6 +944,12 @@ impl Layout {
                 y: 0,
                 w: 0,
                 h: 0,
+            },
+            seq_qnt: Rect {
+                x: 12,
+                y: HUD_H + 306,
+                w: 160,
+                h: 44,
             },
             preset_grid: Rect {
                 x: 24,
@@ -2369,6 +2384,9 @@ impl Layout {
         if self.pads_out.w > 0 && self.pads_out.contains(px, py) {
             return Hit::PadsOut;
         }
+        if self.pads_qnt.contains(px, py) {
+            return Hit::ClipQuantize;
+        }
         if self.stop_all.contains(px, py) {
             return Hit::StopAllClips;
         }
@@ -3028,6 +3046,9 @@ impl Layout {
         }
         if self.seq_bpm_down.contains(px, py) {
             return Hit::SeqBpmDown;
+        }
+        if self.seq_qnt.contains(px, py) {
+            return Hit::ClipQuantize;
         }
         Hit::None
     }
