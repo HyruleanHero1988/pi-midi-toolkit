@@ -12,6 +12,9 @@ use crate::mix::MixSource;
 pub const DRUM_MODEL_COUNT: usize = 16;
 /// Simultaneous drum hits (full MPK Bank A+B).
 pub const MAX_DRUM_HITS: usize = 16;
+/// SEQ / song / pad drum hits sit under this so a full arrangement does not
+/// slam the 1.55 kit bus + master tanh the way a single live pad hit can.
+const DRUM_CLIP_HEADROOM: f32 = 0.55;
 
 /// Kit voices, in MPK factory pad order (notes 36–51).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -255,10 +258,13 @@ impl DrumKit {
 
     pub fn trigger_mix(&mut self, model: DrumModel, velocity: u8, mix: MixSource) {
         self.serial = self.serial.wrapping_add(1);
+        // Pitched sine bodies beat/buzz if two hits overlap. Retrigger the
+        // same model (808-style) so a four-on-the-floor is one kick, not a chord.
         let slot = self
             .hits
             .iter()
-            .position(|h| !h.active)
+            .position(|h| h.active && h.model == model && model_retriggers(model))
+            .or_else(|| self.hits.iter().position(|h| !h.active))
             .unwrap_or_else(|| self.oldest_slot());
 
         let m = self.macros[model.index()];
@@ -280,15 +286,14 @@ impl DrumKit {
         match model {
             Kick | KickTight | TomLo | TomMid | TomHi => {
                 let (base, end_lo, end_span, drop, body) = match model {
-                    // Start in the audible thump band (~100 Hz) and fall toward
-                    // ~50 Hz. Older 50→28 Hz tuning vanished on many speakers;
-                    // only the noise click remained.
+                    // Fast drop into a low floor. A long 65 Hz sine reads as a
+                    // buzz, especially when a second kick starts on top of it.
                     Kick => (
-                        115.0,
-                        55.0,
-                        22.0,
-                        0.028 + 0.065 * (1.0 - m.decay),
-                        0.12 + 0.55 * m.decay,
+                        148.0,
+                        42.0,
+                        16.0,
+                        0.014 + 0.032 * (1.0 - m.decay),
+                        0.055 + 0.22 * m.decay,
                     ),
                     KickTight => (
                         85.0,
@@ -441,7 +446,12 @@ impl DrumKit {
             let click_coef = decay_coef(0.0035, sr);
             let freq_coef = decay_coef(hit.freq_tau, sr);
             let vel = hit.velocity;
-            let mix_g = hit.mix.gain(self.mix_live, &self.mix_clips);
+            let mix_g = match hit.mix {
+                MixSource::Live => hit.mix.gain(self.mix_live, &self.mix_clips),
+                MixSource::Clip(_) => {
+                    hit.mix.gain(self.mix_live, &self.mix_clips) * DRUM_CLIP_HEADROOM
+                }
+            };
 
             for sample in out.iter_mut() {
                 let white = self.next_noise();
@@ -458,8 +468,17 @@ impl DrumKit {
                         hit.freq = hit.freq_end + (hit.freq - hit.freq_end) * freq_coef;
                         hit.phase += (hit.freq as f64 / sr as f64) * std::f64::consts::TAU;
                         let raw = (hit.phase.sin() as f32) * hit.body_env * hit.body_amp * vel;
-                        // Soft saturate so the sine body reads louder on small speakers.
-                        let body = (raw * 1.35).tanh();
+                        // Light fold only. Heavy tanh on a mid sine sounds like
+                        // a square buzz instead of a kick thump.
+                        let drive = if matches!(
+                            hit.model,
+                            DrumModel::Kick | DrumModel::KickTight
+                        ) {
+                            1.06
+                        } else {
+                            1.28
+                        };
+                        let body = (raw * drive).tanh();
                         let (click_amt, noise_scale) = match hit.model {
                             DrumModel::Kick => (0.055, 0.010),
                             DrumModel::KickTight => (0.050, 0.012),
@@ -613,6 +632,17 @@ fn cheap_square(phase: f64) -> f32 {
 }
 
 #[inline]
+fn model_retriggers(model: DrumModel) -> bool {
+    matches!(
+        model,
+        DrumModel::Kick
+            | DrumModel::KickTight
+            | DrumModel::TomLo
+            | DrumModel::TomMid
+            | DrumModel::TomHi
+    )
+}
+
 fn decay_coef(tau_sec: f32, sample_rate: f32) -> f32 {
     let n = (tau_sec.max(0.0005) * sample_rate).max(1.0);
     (-1.0 / n).exp()
@@ -627,6 +657,25 @@ mod tests {
         assert_eq!(drum_model_for_note(36), DrumModel::Kick);
         assert_eq!(drum_model_for_note(37), DrumModel::Snare);
         assert_eq!(drum_model_for_note(51), DrumModel::Ride);
+    }
+
+    #[test]
+    fn clip_hits_are_quieter_than_live_at_unity() {
+        fn peak(mix: MixSource) -> f32 {
+            let mut kit = DrumKit::new(48_000.0);
+            kit.set_mix_gains(1.0, [1.0; MAX_CLIPS]);
+            kit.trigger_mix(DrumModel::Kick, 120, mix);
+            let mut buf = vec![0.0f32; 2048];
+            kit.render_model(DrumModel::Kick, &mut buf);
+            buf.iter().fold(0.0f32, |m, v| m.max(v.abs()))
+        }
+        let live = peak(MixSource::Live);
+        let clip = peak(MixSource::clip(16));
+        assert!(live > 0.02, "live kick should speak, peak={live}");
+        assert!(
+            clip < live * 0.7,
+            "clip/song drums need headroom vs live pads (clip={clip} live={live})"
+        );
     }
 
     #[test]
@@ -689,6 +738,26 @@ mod tests {
             let peak = buf.iter().fold(0.0f32, |m, v| m.max(v.abs()));
             assert!(peak > 0.005, "{} was silent (peak {peak})", model.name());
         }
+    }
+
+    #[test]
+    fn kick_retrigger_does_not_stack_sines() {
+        let mut kit = DrumKit::new(48_000.0);
+        kit.trigger(DrumModel::Kick, 120);
+        kit.trigger(DrumModel::Kick, 120);
+        kit.trigger(DrumModel::HatClosed, 100);
+        assert_eq!(
+            kit.hits.iter().filter(|h| h.active && h.model == DrumModel::Kick).count(),
+            1,
+            "a second kick must replace the first, not beat against it"
+        );
+        assert_eq!(
+            kit.hits
+                .iter()
+                .filter(|h| h.active && h.model == DrumModel::HatClosed)
+                .count(),
+            1
+        );
     }
 
     #[test]

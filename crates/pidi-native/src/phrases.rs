@@ -56,8 +56,8 @@ impl Default for PhrasePad {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-struct FilePhrase {
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PhraseFile {
     #[serde(default = "version_default")]
     version: u32,
     #[serde(default)]
@@ -108,8 +108,8 @@ fn tone_default() -> f32 {
     1.0
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-struct FileEvent {
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileEvent {
     t: f64,
     on: bool,
     channel: u8,
@@ -136,19 +136,25 @@ pub fn load_bank(dir: &Path, bpm: f32) -> [PhrasePad; 16] {
 
 pub fn load_pad(path: &Path, bpm: f32) -> Option<PhrasePad> {
     let raw = fs::read_to_string(path).ok()?;
-    let file: FilePhrase = serde_json::from_str(&raw).ok()?;
+    let file: PhraseFile = serde_json::from_str(&raw).ok()?;
+    Some(pad_from_file(&file, bpm))
+}
+
+pub fn pad_from_file(file: &PhraseFile, bpm: f32) -> PhrasePad {
     let bpm = bpm.max(1.0);
     let gain = file.gain.clamp(0.1, 2.0);
     let mut events: Vec<WireClipEvent> = file
         .events
         .iter()
-        .map(|e| WireClipEvent::midi(
-            seconds_to_ticks(e.t, bpm),
-            e.on,
-            e.channel & 0x0f,
-            e.note & 0x7f,
-            e.velocity.min(127),
-        ))
+        .map(|e| {
+            WireClipEvent::midi(
+                seconds_to_ticks(e.t, bpm),
+                e.on,
+                e.channel & 0x0f,
+                e.note & 0x7f,
+                e.velocity.min(127),
+            )
+        })
         .collect();
     events.sort_by_key(|e| e.tick);
     let length_secs = if file.length > 0.0 {
@@ -162,7 +168,7 @@ pub fn load_pad(path: &Path, bpm: f32) -> Option<PhrasePad> {
     };
     let length_ticks = seconds_to_ticks(length_secs, bpm);
     let empty = events.is_empty() || length_ticks == 0;
-    Some(PhrasePad {
+    PhrasePad {
         empty,
         loop_mode: file.trigger_mode.eq_ignore_ascii_case("loop"),
         length_ticks,
@@ -180,14 +186,10 @@ pub fn load_pad(path: &Path, bpm: f32) -> Option<PhrasePad> {
         fx_delay_mix: file.fx_delay_mix.clamp(0.0, 1.0),
         fx_reverb_mix: file.fx_reverb_mix.clamp(0.0, 1.0),
         fx_flanger_mix: file.fx_flanger_mix.clamp(0.0, 1.0),
-    })
+    }
 }
 
-pub fn save_pad(dir: &Path, index: usize, pad: &PhrasePad, bpm: f32) -> bool {
-    if let Err(err) = fs::create_dir_all(dir) {
-        tracing::warn!(%err, "phrases: mkdir failed");
-        return false;
-    }
+pub fn file_from_pad(pad: &PhrasePad, bpm: f32) -> PhraseFile {
     let bpm = bpm.max(1.0);
     // Velocities stay as recorded; MIX / V± send `clip_gain` instead of rewriting MIDI.
     let events: Vec<FileEvent> = pad
@@ -201,7 +203,7 @@ pub fn save_pad(dir: &Path, index: usize, pad: &PhrasePad, bpm: f32) -> bool {
             velocity: e.velocity,
         })
         .collect();
-    let file = FilePhrase {
+    PhraseFile {
         version: 5,
         length: if pad.length_secs > 0.0 {
             pad.length_secs
@@ -230,7 +232,50 @@ pub fn save_pad(dir: &Path, index: usize, pad: &PhrasePad, bpm: f32) -> bool {
         fx_reverb_mix: pad.fx_reverb_mix.clamp(0.0, 1.0),
         fx_flanger_mix: pad.fx_flanger_mix.clamp(0.0, 1.0),
         events,
-    };
+    }
+}
+
+/// Occupied pads as `Some`, empty slots as `None`. Always 16 entries.
+pub fn snapshot_bank(pads: &[PhrasePad; 16], bpm: f32) -> Vec<Option<PhraseFile>> {
+    pads.iter()
+        .map(|pad| {
+            if pad.empty {
+                None
+            } else {
+                Some(file_from_pad(pad, bpm))
+            }
+        })
+        .collect()
+}
+
+pub fn bank_from_snapshot(files: &[Option<PhraseFile>], bpm: f32) -> [PhrasePad; 16] {
+    let mut out = std::array::from_fn(|_| PhrasePad::default());
+    for (i, slot) in files.iter().take(16).enumerate() {
+        if let Some(file) = slot {
+            out[i] = pad_from_file(file, bpm);
+        }
+    }
+    out
+}
+
+pub fn persist_bank(dir: &Path, pads: &[PhrasePad; 16], bpm: f32) -> bool {
+    let mut ok = true;
+    for i in 0..16 {
+        if pads[i].empty {
+            ok &= delete_pad(dir, i);
+        } else {
+            ok &= save_pad(dir, i, &pads[i], bpm);
+        }
+    }
+    ok
+}
+
+pub fn save_pad(dir: &Path, index: usize, pad: &PhrasePad, bpm: f32) -> bool {
+    if let Err(err) = fs::create_dir_all(dir) {
+        tracing::warn!(%err, "phrases: mkdir failed");
+        return false;
+    }
+    let file = file_from_pad(pad, bpm);
     let path = pad_path(dir, index);
     match serde_json::to_string_pretty(&file) {
         Ok(body) => fs::write(path, body + "\n").is_ok(),
@@ -462,5 +507,31 @@ mod tests {
         assert!((loaded.fx_delay_mix - 0.5).abs() < 1e-6);
         assert!((loaded.fx_flanger_mix - 0.2).abs() < 1e-6);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn snapshot_bank_keeps_empty_slots() {
+        let mut pads = std::array::from_fn(|_| PhrasePad::default());
+        pads[2] = from_wire(
+            vec![WireClipEvent {
+                tick: 0,
+                on: true,
+                channel: 0,
+                note: 60,
+                velocity: 90,
+                ..Default::default()
+            }],
+            1920,
+            120.0,
+            true,
+        );
+        let snap = snapshot_bank(&pads, 120.0);
+        assert_eq!(snap.len(), 16);
+        assert!(snap[0].is_none());
+        assert!(snap[2].is_some());
+        let restored = bank_from_snapshot(&snap, 120.0);
+        assert!(restored[0].empty);
+        assert!(!restored[2].empty);
+        assert_eq!(restored[2].events[0].note, 60);
     }
 }

@@ -1,9 +1,11 @@
-//! User presets (`user-presets/slot-N.json`) — synth/morph snapshot.
+//! User presets (`user-presets/slot-N.json`) — synth/morph plus pad bank.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+
+use crate::phrases::PhraseFile;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PresetSnapshot {
@@ -18,6 +20,13 @@ pub struct PresetSnapshot {
     pub morph_a: u16,
     #[serde(default = "default_morph_b")]
     pub morph_b: u16,
+    /// Tempo the pad bank was saved at. Needed so second-based events stay in time.
+    #[serde(default)]
+    pub bpm: Option<f32>,
+    /// 16 pad slots. `None` on the vec means an old synth-only preset (leave pads).
+    /// `None` inside the vec is an empty pad.
+    #[serde(default)]
+    pub phrases: Option<Vec<Option<PhraseFile>>>,
 }
 
 fn default_morph_b() -> u16 {
@@ -36,6 +45,8 @@ impl Default for PresetSnapshot {
             release: 0.3,
             morph_a: 0,
             morph_b: 1,
+            bpm: None,
+            phrases: None,
         }
     }
 }
@@ -107,6 +118,56 @@ mod tests {
         let loaded = load_slot(&dir, 0).unwrap();
         assert_eq!(loaded.name, "TEST");
         assert!((loaded.morph - 0.25).abs() < 1e-6);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn old_slot_without_phrases_still_loads() {
+        let dir = std::env::temp_dir().join(format!("pidi-preset-old-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            slot_path(&dir, 0),
+            r#"{"version":1,"name":"OLD","morph":0.2,"tone":0.3,"level":0.8,"attack":0.1,"release":0.2}"#,
+        )
+        .unwrap();
+        let loaded = load_slot(&dir, 0).unwrap();
+        assert_eq!(loaded.name, "OLD");
+        assert!(loaded.phrases.is_none());
+        assert!(loaded.bpm.is_none());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn slot_round_trips_phrases() {
+        use crate::phrases::{self, PhrasePad};
+        use jambox_protocol::WireClipEvent;
+
+        let dir = std::env::temp_dir().join(format!("pidi-preset-pads-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let mut pads = std::array::from_fn(|_| PhrasePad::default());
+        pads[0] = PhrasePad {
+            empty: false,
+            loop_mode: true,
+            length_ticks: 1920,
+            length_secs: 1.0,
+            events: vec![WireClipEvent::midi(0, true, 9, 36, 100)],
+            ..PhrasePad::default()
+        };
+        let mut p = PresetSnapshot::default();
+        p.version = 3;
+        p.name = "KIT".into();
+        p.bpm = Some(126.0);
+        p.phrases = Some(phrases::snapshot_bank(&pads, 126.0));
+        assert!(save_slot(&dir, 1, &p));
+        let loaded = load_slot(&dir, 1).unwrap();
+        assert_eq!(loaded.name, "KIT");
+        assert!((loaded.bpm.unwrap() - 126.0).abs() < 1e-6);
+        let bank = phrases::bank_from_snapshot(loaded.phrases.as_deref().unwrap(), 126.0);
+        assert!(!bank[0].empty);
+        assert!(bank[0].loop_mode);
+        assert_eq!(bank[0].events[0].note, 36);
+        assert!(bank[1].empty);
         let _ = fs::remove_dir_all(&dir);
     }
 }

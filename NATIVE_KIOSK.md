@@ -29,7 +29,7 @@ runtime.
 | CHORDS | Omnichord-style circle-of-fifths buttons (MAJ/min/7 + combos), wide **strumplate** with vertical pluck lines (swipe left→right), 2×4 **palette**, **PROGS** (named progressions in the chosen key), LOCAL/USB/BOTH. Block chords (buttons/palette) and harp strums record into SEQ / pad REC while those are armed. |
 | ARP | Authored relative-step arpeggiator (MPK Mini orders: UP / DOWN / IN↑ / IN↓ / EX↑ / EX↓ / RAND / ORD), time division, extra octaves, gate, LATCH. Play a root to run the pattern; once latched, the next key retargets the root without stopping the loop. Held-chord “keys are the pool” arp is a later separate mode. |
 | SONGS | List `songs/*.mid`, SMF→clip PLAY/STOP/LOOP, SAVE SEQ, OUT cycle |
-| PRESETS | 8 slots save/load synth params to `user-presets/` |
+| PRESETS | 8 slots save/load synth + pad bank to `user-presets/` |
       <p class="lede">Appliance hub: panic, audio reopen, Wi‑Fi, font, software update, and doors into LOG / PORTS.</p>
 | LOG | Engine counters + recent action lines |
 | Session | Autosave `settings.json` (synth/kaoss/tempo/OUT prefs) |

@@ -759,6 +759,26 @@ impl NativeModel {
         if mode == UiMode::Ports {
             outbox.midi_ports();
         }
+        if mode == UiMode::Songs {
+            self.refresh_song_list();
+            self.status_line = if self.song_files.is_empty() {
+                "no songs in songs/".into()
+            } else {
+                format!("{} songs", self.song_files.len())
+            };
+        }
+    }
+
+    fn refresh_song_list(&mut self) {
+        let dir = songs::songs_dir_from_env();
+        self.song_files = songs::list_songs(&dir);
+        if self.song_selected >= self.song_files.len() {
+            self.song_selected = self.song_files.len().saturating_sub(1);
+        }
+        self.song_scroll = self
+            .layout
+            .song_list_scroll(self.song_files.len())
+            .clamp_scroll(self.song_scroll);
     }
 
     fn tracks_nav_history(mode: UiMode) -> bool {
@@ -6450,14 +6470,48 @@ impl NativeModel {
         outbox.synth("attack", p.attack);
         outbox.synth("release", p.release);
         self.sync_wave_bank();
-        self.status_line = format!("loaded {}", p.name);
+        if let Some(files) = p.phrases.as_deref() {
+            let bpm = p.bpm.unwrap_or(self.bpm).clamp(40.0, 240.0);
+            self.bpm = bpm;
+            self.seq.bpm = bpm;
+            outbox.tempo(bpm);
+            self.apply_preset_phrases(files, bpm, outbox);
+            let n = self.phrases.iter().filter(|pad| !pad.empty).count();
+            self.status_line = format!("loaded {} · {} pads", p.name, n);
+        } else {
+            self.status_line = format!("loaded {}", p.name);
+        }
+    }
+
+    fn apply_preset_phrases(
+        &mut self,
+        files: &[Option<phrases::PhraseFile>],
+        bpm: f32,
+        outbox: &mut Outbox,
+    ) {
+        self.phrases = phrases::bank_from_snapshot(files, bpm);
+        self.phrase_playing = [false; 16];
+        self.phrases_loaded = true;
+        let dir = phrases::phrases_dir_from_env();
+        let _ = phrases::persist_bank(&dir, &self.phrases, bpm);
+        for slot in 0..16 {
+            outbox.clip_stop(slot as u8, "off");
+            self.send_phrase_clip(slot, outbox);
+        }
     }
 
     fn save_preset(&mut self, index: usize) {
+        let index = index.min(7);
         let dir = presets::presets_dir_from_env();
+        let name = presets::load_slot(&dir, index)
+            .map(|existing| existing.name)
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or_else(|| format!("SLOT {}", index + 1));
+        let phrases = phrases::snapshot_bank(&self.phrases, self.bpm);
+        let n = phrases.iter().filter(|pad| pad.is_some()).count();
         let preset = PresetSnapshot {
-            version: 2,
-            name: format!("SLOT {}", index + 1),
+            version: 3,
+            name,
             morph: self.synth_params[0],
             tone: self.synth_params[1],
             level: self.synth_params[2],
@@ -6465,11 +6519,13 @@ impl NativeModel {
             release: self.synth_params[4],
             morph_a: self.morph_a,
             morph_b: self.morph_b,
+            bpm: Some(self.bpm),
+            phrases: Some(phrases),
         };
-        if presets::save_slot(&dir, index.min(7), &preset) {
-            self.preset_occupied[index.min(7)] = true;
-            self.preset_selected = index.min(7);
-            self.status_line = format!("saved {}", preset.name);
+        if presets::save_slot(&dir, index, &preset) {
+            self.preset_occupied[index] = true;
+            self.preset_selected = index;
+            self.status_line = format!("saved {} · {} pads", preset.name, n);
         } else {
             self.status_line = "preset save failed".into();
         }
@@ -6952,7 +7008,7 @@ impl NativeModel {
         let dir = songs::songs_dir_from_env();
         let path = songs::next_seq_export_path(&dir);
         if songs::write_smf_type0(&path, &events, length_ticks, self.bpm) {
-            self.song_files = songs::list_songs(&dir);
+            self.refresh_song_list();
             if let Some(pos) = self.song_files.iter().position(|p| p == &path) {
                 self.song_selected = pos;
                 self.song_scroll = pos.saturating_sub(2);
@@ -6976,10 +7032,7 @@ impl NativeModel {
         }
         let path = self.song_files[self.song_selected].clone();
         if songs::delete_song(&path) {
-            self.song_files = songs::list_songs(&songs::songs_dir_from_env());
-            if self.song_selected >= self.song_files.len() && !self.song_files.is_empty() {
-                self.song_selected = self.song_files.len() - 1;
-            }
+            self.refresh_song_list();
             self.status_line = "song deleted".into();
         } else {
             self.status_line = "song delete failed".into();
@@ -7021,7 +7074,10 @@ impl NativeModel {
         };
         outbox.tempo(bpm);
         let mode = if self.song_loop { "loop" } else { "oneshot" };
-        outbox.clip_load(SONG_CLIP_SLOT, length_ticks, mode, events, 1.0);
+        // Imported SMF has no baked take tone. Follow the live brightness knob
+        // (1.0 bypasses the key filter and makes wavetable songs sound scratchy).
+        let tone = self.synth_params[1].clamp(0.0, 1.0);
+        outbox.clip_load(SONG_CLIP_SLOT, length_ticks, mode, events, tone);
         outbox.clip_gain(SONG_CLIP_SLOT, self.seq_level);
         outbox.clip_gain(SEQ_DRUM_MIX_SLOT, self.seq_drum_level);
         outbox.clip_launch(SONG_CLIP_SLOT, self.clip_quantize.wire());
@@ -9980,6 +10036,78 @@ mod tests {
         assert_eq!(model.probe_reconnects, 1);
         std::env::remove_var("PIDI_PROBE_LOG");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn song_play_uses_session_tone_not_wide_open() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("pidi-song-tone-{stamp}"));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("tone.mid");
+        let events = vec![
+            jambox_protocol::WireClipEvent::midi(0, true, 0, 60, 100),
+            jambox_protocol::WireClipEvent::midi(480, false, 0, 60, 0),
+        ];
+        assert!(crate::songs::write_smf_type0(&path, &events, 960, 120.0));
+        let mut model = NativeModel::new();
+        model.synth_params[1] = 0.25;
+        model.song_files = vec![path];
+        model.song_selected = 0;
+        let mut out = Outbox::new();
+        model.play_selected_song(&mut out);
+        let batch = out.take();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            batch.iter().any(|r| matches!(
+                r,
+                Request::ClipLoad {
+                    tone: Some(t),
+                    ..
+                } if (*t - 0.25).abs() < 1e-6
+            )),
+            "song play must follow the tone knob, got {batch:?}"
+        );
+        assert!(
+            batch.iter().all(|r| !matches!(
+                r,
+                Request::ClipLoad {
+                    tone: Some(t),
+                    ..
+                } if (*t - 1.0).abs() < 1e-6
+            )),
+            "song play must not force filter-open tone=1.0, got {batch:?}"
+        );
+    }
+
+    #[test]
+    fn songs_mode_rescans_library_on_enter() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("pidi-songs-rescan-{stamp}"));
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::write(dir.join("fresh-drop.mid"), b"MThd").expect("write mid");
+        std::env::set_var("PIDI_SONGS_DIR", &dir);
+        let mut model = NativeModel::new();
+        model.song_files.clear();
+        let mut out = Outbox::new();
+        model.switch_mode(UiMode::Songs, &mut out);
+        std::env::remove_var("PIDI_SONGS_DIR");
+        let names: Vec<String> = model
+            .song_files
+            .iter()
+            .filter_map(|p| p.file_name()?.to_str().map(|s| s.to_string()))
+            .collect();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            names.iter().any(|n| n == "fresh-drop.mid"),
+            "entering SONGS should pick up a newly dropped file, got {names:?}"
+        );
+        assert!(model.status_line.contains("songs"));
     }
 
     #[test]
