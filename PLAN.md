@@ -89,7 +89,7 @@ Power on → SDL/KMSDRM kiosk (`pidi-native`) → modes. The soft-synth path sta
 | **Seq** | Jambox | Free-timing backbone loop + 808-style overdub layers (drums, keys, chords) |
 | **Phrases / Pads** | Jambox (+ MIDI out) | 16 clip-launch cells; touch **and** MPK pads |
 | **Kaoss** | Both | XY pad: scale notes + factory Kaoss CCs; LOCAL and/or USB→DIN |
-| **Chords** | Both | Omnichord-style buttons, strumplate, palette, progressions |
+| **Chords** | Both | Omnichord-style buttons, wide strumplate, 2×4 palette, progressions |
 | **Songs** | Both | `.mid` library; tempo; LOCAL and/or USB→DIN |
 | **Presets** | Jambox | Synth slots + session autosave |
 | **Map / Thru** | Remap | Channel / CC / velocity remap; ports; learn → Rust engine |
