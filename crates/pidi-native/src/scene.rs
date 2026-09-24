@@ -1766,7 +1766,8 @@ fn draw_synth(scene: &mut Scene, model: &NativeModel) {
         return;
     }
 
-    const LABELS: [&str; 6] = ["MORPH", "TONE", "LEVEL", "ATK", "REL", "FLANGE"];
+    const LABELS: [&str; Layout::SYNTH_SLIDER_COUNT] =
+        ["MORPH", "TONE", "LEVEL", "ATK", "REL", "FLANGE", "RATE"];
 
     let a = waves::short_label(model.wave_label(model.morph_a));
     let b = waves::short_label(model.wave_label(model.morph_b));
@@ -1822,14 +1823,16 @@ fn draw_synth(scene: &mut Scene, model: &NativeModel) {
     // CRT-ish morph scope (live A/B blend from the loaded wave bank).
     draw_synth_scope(scene, model);
 
-    for index in 0..6 {
+    for index in 0..Layout::SYNTH_SLIDER_COUNT {
         let track = layout.synth_slider(index);
         scene.fill_rect(track, 0x20202c);
-        scene.text(track.x + 8, track.y + 6, LABELS[index], 0xc0c0d0);
+        scene.text(track.x + 4, track.y + 6, LABELS[index], 0xc0c0d0);
         let value = if index < 5 {
             model.synth_params[index]
-        } else {
+        } else if index == 5 {
             model.fx_voice[3]
+        } else {
+            model.fx_flanger_rate
         };
         let fill_h = (track.h as f32 * value) as i32;
         let fill = Rect {
@@ -1842,7 +1845,7 @@ fn draw_synth(scene: &mut Scene, model: &NativeModel) {
             fill,
             if index == 0 {
                 0xb16286
-            } else if index == 5 {
+            } else if index == 5 || index == 6 {
                 0xd79921
             } else {
                 0x689d6a

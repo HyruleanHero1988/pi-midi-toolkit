@@ -191,6 +191,9 @@ pub struct SessionState {
     /// Per-voice flanger wet (SYNTH FLANGE / FX→VOICE).
     #[serde(default)]
     pub fx_flanger: f32,
+    /// Per-voice flanger LFO rate. Missing in old sessions → engine default.
+    #[serde(default = "default_fx_flanger_rate")]
+    pub fx_flanger_rate: f32,
     /// Global bus flanger wet (FX→BUS FLANGE).
     #[serde(default)]
     pub fx_bus_flanger: f32,
@@ -287,6 +290,10 @@ fn default_vibrato_rate() -> f32 {
     5.0
 }
 
+fn default_fx_flanger_rate() -> f32 {
+    0.35
+}
+
 impl Default for SessionState {
     fn default() -> Self {
         Self {
@@ -311,6 +318,7 @@ impl Default for SessionState {
             kaoss_hold: false,
             fx_bus: [0.0, 0.0, 0.0],
             fx_flanger: 0.0,
+            fx_flanger_rate: default_fx_flanger_rate(),
             fx_bus_flanger: 0.0,
             kaoss_fx_target: KaossFxTarget::Voice,
             kaoss_show_all: false,
@@ -403,6 +411,16 @@ mod tests {
         assert_eq!(s.kaoss_fx_target, KaossFxTarget::Voice);
         assert_eq!(s.clip_quantize, ClipQuantize::Bar);
         assert!(!s.probe);
+        assert!((s.fx_flanger_rate - 0.35).abs() < 1e-6);
+    }
+
+    #[test]
+    fn session_roundtrip_includes_flanger_rate() {
+        let mut s = SessionState::default();
+        s.fx_flanger_rate = 0.8;
+        let json = serde_json::to_string(&s).unwrap();
+        let back: SessionState = serde_json::from_str(&json).unwrap();
+        assert!((back.fx_flanger_rate - 0.8).abs() < 1e-6);
     }
 
     #[test]

@@ -277,6 +277,8 @@ pub struct NativeModel {
     pub song_loop: bool,
     pub fx_bus: [f32; 4],
     pub fx_voice: [f32; 4],
+    /// Voice flanger LFO rate (0..1). Independent of SYNTH FLANGE mix.
+    pub fx_flanger_rate: f32,
     pub fx_drum: [f32; 4],
     pub fx_target: FxEditTarget,
     /// Kit bus trim (FX DRUMS / MIX KIT). Independent of melody `synth_params[2]` (LEVEL).
@@ -490,6 +492,7 @@ impl NativeModel {
             song_loop: false,
             fx_bus: [0.0, 0.0, 0.0, 0.0],
             fx_voice: [0.0, 0.0, 0.0, 0.0],
+            fx_flanger_rate: 0.35,
             fx_drum: [0.0, 0.0, 0.0, 0.0],
             fx_target: FxEditTarget::Bus,
             drum_level: 1.0,
@@ -1737,6 +1740,7 @@ impl NativeModel {
         ];
         // Voice flange (SYNTH / FX→VOICE); bus flange is independent global wet.
         self.fx_voice[3] = s.fx_flanger.clamp(0.0, 1.0);
+        self.fx_flanger_rate = s.fx_flanger_rate.clamp(0.0, 1.0);
         self.pads_out = s.pads_out;
         self.clip_quantize = s.clip_quantize;
         self.song_out = s.song_out;
@@ -1798,6 +1802,7 @@ impl NativeModel {
             outbox.fx_bus(name, self.fx_bus[i]);
         }
         self.push_voice_fx("flanger_mix", self.fx_voice[3], outbox);
+        self.push_voice_fx("flanger_rate", self.fx_flanger_rate, outbox);
         self.sync_wave_bank();
         self.push_kaoss_scale(outbox);
         if !s.mode.is_empty() {
@@ -1832,6 +1837,7 @@ impl NativeModel {
             kaoss_fx_target: self.kaoss_fx_target,
             fx_bus: [self.fx_bus[0], self.fx_bus[1], self.fx_bus[2]],
             fx_flanger: self.fx_voice[3],
+            fx_flanger_rate: self.fx_flanger_rate,
             fx_bus_flanger: self.fx_bus[3],
             kaoss_show_all: self.kaoss_show_all,
             kaoss_channel: self.kaoss_channel,
@@ -4175,6 +4181,16 @@ impl NativeModel {
             self.mark_dirty();
             return;
         }
+        if index == 6 {
+            if !Self::accept_slider_value(self.fx_flanger_rate, value, moving) {
+                return;
+            }
+            self.fx_flanger_rate = value;
+            self.push_voice_fx("flanger_rate", value, outbox);
+            self.status_line = format!("flange rate {:.2}", value);
+            self.mark_dirty();
+            return;
+        }
         if index >= 5 {
             return;
         }
@@ -5541,6 +5557,9 @@ impl NativeModel {
         if self.kaoss_fx_target.includes_voice() {
             if let Some(i) = Self::voice_fx_slider_index(name) {
                 self.fx_voice[i] = value;
+            }
+            if name == "flanger_rate" {
+                self.fx_flanger_rate = value;
             }
             self.push_voice_fx(name, value, outbox);
         }
@@ -8920,6 +8939,37 @@ mod tests {
             } if param == "flanger_mix"
         )));
         assert!(model.fx_voice[3] > 0.5);
+    }
+
+    #[test]
+    fn synth_rate_slider_sends_voice_flanger_rate() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Synth);
+        model.morph_a = 2;
+        model.morph_b = 5;
+        let mut out = Outbox::new();
+        let track = model.layout.synth_slider(6);
+        model.finger_down(1, track.x + 4, track.y + 8, &mut out);
+        let batch = out.take();
+        assert!(
+            batch.iter().any(|r| matches!(
+                r,
+                Request::Fx {
+                    target: jambox_protocol::FxTargetSpec::Voice { index: 2 },
+                    param,
+                    ..
+                } if param == "flanger_rate"
+            )),
+            "RATE should write voice flanger_rate, got {batch:?}"
+        );
+        assert!(model.fx_flanger_rate > 0.5);
+        assert!(
+            batch.iter().all(|r| !matches!(
+                r,
+                Request::Fx { param, .. } if param == "flanger_mix"
+            )),
+            "RATE must not change mix"
+        );
     }
 
     #[test]
