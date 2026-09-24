@@ -4,7 +4,7 @@
 //! - 12 roots in **circle-of-fifths** order (F C G D A E B F# Db Ab Eb Bb)
 //! - three rows: MAJOR / minor / 7th
 //! - same-root and neighbour combos for M7, m7, dim, aug, sus4, add9
-//! - a vertical **strumplate** of about two octaves of the selected chord
+//! - a wide Omnichord-style **strumplate** of about two octaves of the selected chord
 //!
 //! The 8-slot **palette** is a harmonic palette: press a stored chord to play it
 //! as a block (MOM releases on lift; HOLD latches), or load a named set of

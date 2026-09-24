@@ -1119,19 +1119,21 @@ impl Layout {
                 x: 8,
                 y: HUD_H + 82,
                 w: 560,
-                h: 218,
+                h: 150,
             },
-            chords_strum: Rect {
+            // 2×4 progressions sit in the former tall strumpad column.
+            chords_palette: Rect {
                 x: 576,
                 y: HUD_H + 82,
                 w: 216,
-                h: 218,
+                h: 150,
             },
-            chords_palette: Rect {
+            // Wide Omnichord-style plate under the fifths grid.
+            chords_strum: Rect {
                 x: 8,
-                y: HUD_H + 306,
+                y: HUD_H + 240,
                 w: SCREEN_W - 16,
-                h: 110,
+                h: 160,
             },
             power_blank_cycle,
             power_shutdown,
@@ -2158,13 +2160,16 @@ impl Layout {
     }
 
     pub fn chords_palette_slot(&self, slot: usize) -> Rect {
-        let n = 8i32;
-        let w = self.chords_palette.w / n;
+        let col = (slot % 4) as i32;
+        let row = (slot / 4) as i32;
+        let header = 20;
+        let w = self.chords_palette.w / 4;
+        let h = (self.chords_palette.h - header) / 2;
         Rect {
-            x: self.chords_palette.x + (slot as i32) * w + 3,
-            y: self.chords_palette.y + 22,
+            x: self.chords_palette.x + col * w + 3,
+            y: self.chords_palette.y + header + row * h + 2,
             w: w - 6,
-            h: self.chords_palette.h - 26,
+            h: h - 4,
         }
     }
 
@@ -2853,16 +2858,16 @@ impl Layout {
         if self.chords_oct_up().contains(px, py) {
             return Hit::ChordsOctUp;
         }
+        for slot in 0..8 {
+            if self.chords_palette_slot(slot).contains(px, py) {
+                return Hit::ChordsPalette { slot };
+            }
+        }
         // Octave label and other STRUM chrome have no tap action — they are
         // the run-up above the highest string so a down-strum can start there.
         if self.chords_strum.contains(px, py) {
             let y = self.chords_strum_touch_y(py);
             return Hit::ChordsStrum { y };
-        }
-        for slot in 0..8 {
-            if self.chords_palette_slot(slot).contains(px, py) {
-                return Hit::ChordsPalette { slot };
-            }
         }
         for row in 0..3 {
             for col in 0..12 {
@@ -3172,6 +3177,11 @@ mod tests {
         assert!(gap_below(layout.chords_toolbar, layout.chords_root_strip) >= 10);
         assert!(gap_below(layout.chords_root_strip, layout.chords_grid) >= 4);
         assert!(bottom(layout.chords_palette) <= bottom(layout.content));
+        assert!(bottom(layout.chords_strum) <= bottom(layout.content));
+        assert!(
+            gap_below(layout.chords_grid, layout.chords_strum) >= 6,
+            "strumpad must not overlap the fifths grid"
+        );
     }
 
     #[test]
@@ -3363,7 +3373,11 @@ mod tests {
             layout.chords_grid.y >= layout.chords_root_strip.y + layout.chords_root_strip.h + 2,
             "grid should sit below root labels"
         );
-        assert_eq!(layout.chords_grid.y, layout.chords_strum.y);
+        assert_eq!(layout.chords_grid.y, layout.chords_palette.y);
+        assert!(
+            layout.chords_strum.y >= layout.chords_grid.y + layout.chords_grid.h + 6,
+            "wide strumpad should sit below the fifths grid"
+        );
     }
 
     #[test]
@@ -3399,6 +3413,43 @@ mod tests {
                 assert!(y > 0.85, "octave label should start a down-strum, got {y}")
             }
             other => panic!("expected strum on octave label, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn chords_omnichord_strumpad_swaps_with_palette() {
+        let layout = Layout::new();
+        assert!(
+            layout.chords_strum.w > layout.chords_palette.w * 2,
+            "strumpad should be the wide play surface"
+        );
+        assert!(
+            layout.chords_strum.y >= layout.chords_palette.y + layout.chords_palette.h,
+            "strumpad sits below the 2×4 palette"
+        );
+        let a = layout.chords_palette_slot(0);
+        let b = layout.chords_palette_slot(3);
+        let c = layout.chords_palette_slot(4);
+        let d = layout.chords_palette_slot(7);
+        assert!(b.x > a.x, "top row is 4 slots across");
+        assert!(c.y > a.y, "second row sits under the first");
+        assert!(d.x > c.x && d.y == c.y);
+        for slot in 0..8 {
+            let cell = layout.chords_palette_slot(slot);
+            assert_on_screen(&format!("palette {slot}"), cell);
+            assert_eq!(
+                layout.hit(UiMode::Chords, cell.x + 4, cell.y + 4),
+                Hit::ChordsPalette { slot }
+            );
+            assert!(
+                cell.y + cell.h <= layout.chords_strum.y,
+                "palette slot {slot} must not overlap the strumpad"
+            );
+        }
+        let play = layout.chords_strum_play();
+        match layout.hit(UiMode::Chords, play.x + play.w / 2, play.y + play.h / 2) {
+            Hit::ChordsStrum { .. } => {}
+            other => panic!("center of wide plate should strum, got {other:?}"),
         }
     }
 
