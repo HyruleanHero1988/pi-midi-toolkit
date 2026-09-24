@@ -5324,8 +5324,10 @@ impl NativeModel {
                 self.mark_dirty();
             } else if prog.y_param == "vib" {
                 // Tk parity: Y raises depth and gates always-on vibrato.
+                // Bottom dead zone so a rest finger does not engage VIB.
+                let y = kaoss_ui::apply_zero_deadzone(y, kaoss_ui::ZERO_REST_DEADZONE);
                 self.vibrato_depth = (y * 2.0).clamp(0.0, 2.0);
-                self.vibrato_always = if y > 0.02 { 1.0 } else { 0.0 };
+                self.vibrato_always = if y > 0.0 { 1.0 } else { 0.0 };
                 outbox.synth("vibrato_depth", y.clamp(0.0, 1.0));
                 outbox.synth("vibrato_always", self.vibrato_always);
                 self.mark_dirty();
@@ -5345,8 +5347,9 @@ impl NativeModel {
                 self.apply_named_param(xp, x, outbox);
             }
             if prog.y_param == "vib" {
+                let y = kaoss_ui::apply_zero_deadzone(y, kaoss_ui::ZERO_REST_DEADZONE);
                 self.vibrato_depth = (y * 2.0).clamp(0.0, 2.0);
-                self.vibrato_always = if y > 0.02 { 1.0 } else { 0.0 };
+                self.vibrato_always = if y > 0.0 { 1.0 } else { 0.0 };
                 outbox.synth("vibrato_depth", y.clamp(0.0, 1.0));
                 outbox.synth("vibrato_always", self.vibrato_always);
             } else if prog.y_param == "tone_lfo" {
@@ -6770,6 +6773,44 @@ mod tests {
                     if param == "pitch_bend" && value.abs() < 0.5
             )),
             "midline should be near unison: {batch:?}"
+        );
+        // A few pixels off center still rest in the dead zone.
+        let near = k.y + k.h / 2 + (k.h as f32 * 0.03) as i32;
+        model.finger_move(1, k.x + k.w / 2, near, &mut out);
+        let batch = out.take();
+        assert!(
+            batch.iter().any(|r| matches!(
+                r,
+                Request::Synth { param, value, .. }
+                    if param == "pitch_bend" && value.abs() < 1e-3
+            )),
+            "near-center should stay unison: {batch:?}"
+        );
+    }
+
+    #[test]
+    fn kaoss_vib_bottom_rest_does_not_engage() {
+        let mut model = NativeModel::new();
+        model.kaoss_program = kaoss_ui::KAOSS_PROGRAMS
+            .iter()
+            .position(|p| p.id == "vib")
+            .expect("vib program");
+        let mut out = Outbox::new();
+        let k = model.layout.kaoss;
+        // Sit just above the bottom edge — inside the rest dead zone.
+        model.finger_down(1, k.x + k.w / 2, k.y + k.h - 6, &mut out);
+        assert!(
+            model.vibrato_always < 0.01,
+            "bottom rest should leave VIB off"
+        );
+        let batch = out.take();
+        assert!(
+            !batch.iter().any(|r| matches!(
+                r,
+                Request::Synth { param, value, .. }
+                    if param == "vibrato_always" && *value > 0.01
+            )),
+            "bottom rest must not gate vibrato: {batch:?}"
         );
     }
 
