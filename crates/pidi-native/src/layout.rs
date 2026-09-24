@@ -2195,10 +2195,10 @@ impl Layout {
         }
     }
 
-    /// Normalized strum Y for a touch pixel: 1 = highest string band.
-    pub fn chords_strum_touch_y(&self, py: i32) -> f32 {
+    /// Normalized strum position for a touch pixel: 1 = rightmost (highest) string.
+    pub fn chords_strum_touch(&self, px: i32) -> f32 {
         let play = self.chords_strum_play();
-        crate::chords::strum_y_from_play_py(play.y, play.h, py)
+        crate::chords::strum_pos_from_play_px(play.x, play.w, px)
     }
 
     pub fn chords_oct_down(&self) -> Rect {
@@ -2935,10 +2935,10 @@ impl Layout {
                 return Hit::ChordsPalette { slot };
             }
         }
-        // Octave label and other STRUM chrome have no tap action — they are
-        // the run-up above the highest string so a down-strum can start there.
+        // Octave label and other STRUM chrome have no tap action — they stay
+        // in the plate so a left→right swipe can start on the header.
         if self.chords_strum.contains(px, py) {
-            let y = self.chords_strum_touch_y(py);
+            let y = self.chords_strum_touch(px);
             return Hit::ChordsStrum { y };
         }
         for row in 0..3 {
@@ -3508,14 +3508,22 @@ mod tests {
             Hit::ChordsOctUp
         );
         let play = layout.chords_strum_play();
-        match layout.hit(UiMode::Chords, play.x + 4, play.y + chords::STRUM_BAND_TOP_INSET + 2) {
-            Hit::ChordsStrum { y } => assert!(y > 0.85, "top band should be high y, got {y}"),
-            other => panic!("expected strum at top, got {other:?}"),
+        let mid_y = play.y + play.h / 2;
+        match layout.hit(
+            UiMode::Chords,
+            play.x + chords::STRUM_BAND_LEFT_INSET + 2,
+            mid_y,
+        ) {
+            Hit::ChordsStrum { y } => assert!(y < 0.15, "left band should be low, got {y}"),
+            other => panic!("expected strum at left, got {other:?}"),
         }
-        let bottom_py = play.y + play.h - chords::STRUM_BAND_BOTTOM_INSET - 2;
-        match layout.hit(UiMode::Chords, play.x + 4, bottom_py) {
-            Hit::ChordsStrum { y } => assert!(y < 0.15, "bottom band should be low y, got {y}"),
-            other => panic!("expected strum at bottom, got {other:?}"),
+        match layout.hit(
+            UiMode::Chords,
+            play.x + play.w - chords::STRUM_BAND_RIGHT_INSET - 2,
+            mid_y,
+        ) {
+            Hit::ChordsStrum { y } => assert!(y > 0.85, "right band should be high, got {y}"),
+            other => panic!("expected strum at right, got {other:?}"),
         }
         let label = layout.chords_oct_label();
         match layout.hit(
@@ -3523,9 +3531,7 @@ mod tests {
             label.x + label.w / 2,
             label.y + label.h / 2,
         ) {
-            Hit::ChordsStrum { y } => {
-                assert!(y > 0.85, "octave label should start a down-strum, got {y}")
-            }
+            Hit::ChordsStrum { .. } => {}
             other => panic!("expected strum on octave label, got {other:?}"),
         }
     }

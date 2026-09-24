@@ -3734,7 +3734,7 @@ impl NativeModel {
                 self.apply_mix_pad(index, py, outbox);
             }
             Surface::ChordsStrum => {
-                let y = self.layout.chords_strum_touch_y(py);
+                let y = self.layout.chords_strum_touch(px);
                 self.fingers[slot].y = y;
                 self.chords_strum_to(y, outbox);
             }
@@ -8871,14 +8871,20 @@ mod tests {
     }
 
     #[test]
-    fn chords_strum_starts_from_octave_label() {
+    fn chords_strum_sweeps_left_to_right() {
         let mut model = NativeModel::new();
         model.set_mode(UiMode::Chords);
         model.chords_out = OutMode::Local;
         model.chords_current = Some(ChordSpec::new(0, chords::ChordQuality::Maj));
         let mut out = Outbox::new();
-        let label = model.layout.chords_oct_label();
-        model.finger_down(1, label.x + label.w / 2, label.y + label.h / 2, &mut out);
+        let play = model.layout.chords_strum_play();
+        let mid_y = play.y + play.h / 2;
+        model.finger_down(
+            1,
+            play.x + chords::STRUM_BAND_LEFT_INSET + 2,
+            mid_y,
+            &mut out,
+        );
         let first: Vec<u8> = out
             .take()
             .into_iter()
@@ -8893,13 +8899,16 @@ mod tests {
             .strum_strings_at(chords::strum_base_for_octave(0));
         assert_eq!(
             first,
-            vec![strings[chords::STRUM_STRINGS - 1]],
-            "octave label should sound the highest string"
+            vec![strings[0]],
+            "left of the plate should sound the lowest string"
         );
 
-        let play = model.layout.chords_strum_play();
-        let bottom_py = play.y + play.h - chords::STRUM_BAND_BOTTOM_INSET - 2;
-        model.finger_move(1, play.x + 4, bottom_py, &mut out);
+        model.finger_move(
+            1,
+            play.x + play.w - chords::STRUM_BAND_RIGHT_INSET - 2,
+            mid_y,
+            &mut out,
+        );
         let moved: Vec<u8> = out
             .take()
             .into_iter()
@@ -8909,8 +8918,8 @@ mod tests {
             })
             .collect();
         assert!(
-            moved.contains(&strings[0]),
-            "drag down from the label should reach the lowest string, got {moved:?}"
+            moved.contains(&strings[chords::STRUM_STRINGS - 1]),
+            "drag right should reach the highest string, got {moved:?}"
         );
     }
 

@@ -1593,31 +1593,25 @@ fn draw_chords(scene: &mut Scene, model: &NativeModel) {
     let strum_notes = model.chords_current.map(|spec| {
         spec.strum_strings_at(chords::strum_base_for_octave(model.chords_octave))
     });
-    let band_h = (play.h - chords::STRUM_BAND_TOP_INSET - chords::STRUM_BAND_BOTTOM_INSET).max(1)
+    let band_w = (play.w - chords::STRUM_BAND_LEFT_INSET - chords::STRUM_BAND_RIGHT_INSET).max(1)
         / strings as i32;
     for i in 0..strings {
         let i = i as i32;
-        let y = play.y + chords::STRUM_BAND_TOP_INSET + i * band_h;
+        let x = play.x + chords::STRUM_BAND_LEFT_INSET + i * band_w;
         scene.fill_rect(
             Rect {
-                x: play.x + 12,
-                y,
-                w: play.w - 24,
-                h: 3,
+                x,
+                y: play.y + 16,
+                w: 3,
+                h: play.h - 32,
             },
             if i % 4 == 0 { 0xebdbb2 } else { 0x504945 },
         );
         if let Some(ref notes) = strum_notes {
-            // Band 0 is top (highest note); band strings-1 is bottom (lowest).
-            let idx = strings - 1 - i as usize;
+            // Band 0 is left (lowest note); band strings-1 is right (highest).
+            let idx = i as usize;
             let label = crate::kaoss_ui::midi_note_label(notes[idx]);
-            scene.text_scaled(
-                play.x + play.w - 36,
-                y + band_h / 2 - 5,
-                &label,
-                0xa89984,
-                1,
-            );
+            scene.text_scaled(x - 4, play.y + play.h - 14, &label, 0xa89984, 1);
         }
     }
 
