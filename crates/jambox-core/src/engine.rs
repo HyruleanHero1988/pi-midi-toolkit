@@ -256,6 +256,7 @@ pub struct JamboxEngine {
     tone_lfo_rate_hz: f32,
     tone_lfo_phase: f64,
     bend_semis: f32,
+    bend_target_semis: f32,
     clip_emit: EmitMode,
     kaoss_emit: EmitMode,
     arp_emit: EmitMode,
@@ -366,6 +367,7 @@ impl JamboxEngine {
             tone_lfo_rate_hz: tone_lfo_hz_from_unit(0.5),
             tone_lfo_phase: 0.0,
             bend_semis: 0.0,
+            bend_target_semis: 0.0,
             clip_emit: EmitMode::Both,
             kaoss_emit: EmitMode::Local,
             arp_emit: EmitMode::Both,
@@ -738,6 +740,7 @@ impl JamboxEngine {
             tone_lfo_rate_hz,
             tone_lfo_phase,
             bend_semis,
+            bend_target_semis,
             ..
         } = self;
 
@@ -756,11 +759,14 @@ impl JamboxEngine {
             vib = (*vib_phase).sin() as f32 * *vib_depth_semis * vib_amt;
         }
 
+        let dt = n as f32 / sr.max(8000.0);
+        *bend_semis = crate::kaoss::slew_bend(*bend_semis, *bend_target_semis, dt);
         let pitch_mul = 2f32.powf((*bend_semis + vib) / 12.0);
         bank.rebuild_morph();
         let ctx = VoiceContext {
             sample_rate: sr,
             pitch_mul,
+            bend_slew_dt: dt,
             attack_sec: *attack_sec,
             release_sec: *release_sec,
             live_gain: *level,
@@ -1350,7 +1356,12 @@ impl JamboxEngine {
         let (xf, yf) = unpack_xy(x, y);
         let mix = MixSource::seq_kaoss(slot as usize);
         let vel = crate::kaoss::velocity_at_y(yf);
-        let delta = self.kaoss_seq.follow(owner, xf, yf, vel);
+        let idx = (owner as usize) % crate::kaoss::MAX_TOUCH_VOICES;
+        let delta = if self.kaoss_seq_mode[idx] == 1 {
+            self.kaoss_seq.follow_sticky(owner, xf, yf, vel)
+        } else {
+            self.kaoss_seq.follow(owner, xf, yf, vel)
+        };
         self.apply_touch_delta_mix(delta, mix, true, true);
         self.apply_clip_touch_y(owner, yf);
     }
@@ -1427,7 +1438,13 @@ impl JamboxEngine {
             SynthParam::VibratoAlways => self.vib_always = unit,
             SynthParam::ToneLfoRate => self.tone_lfo_rate_hz = tone_lfo_hz_from_unit(unit),
             SynthParam::ToneLfoAmount => self.tone_lfo_amount = unit,
-            SynthParam::PitchBend => self.bend_semis = value.clamp(-24.0, 24.0),
+            SynthParam::PitchBend => {
+                let value = value.clamp(-24.0, 24.0);
+                self.bend_target_semis = value;
+                if value.abs() < 0.01 || self.bend_semis.abs() < 0.01 {
+                    self.bend_semis = value;
+                }
+            }
             SynthParam::DrumPitch => {
                 macros.pitch = unit;
                 self.drums.set_macros(macros);

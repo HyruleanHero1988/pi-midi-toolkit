@@ -20,8 +20,8 @@ use crate::songs::{self, SONG_CLIP_SLOT};
 use crate::voice_bake;
 use crate::waves;
 use jambox_core::{
-    drum_model_for_note, kaoss_scale, note_at_x, scale_notes, velocity_at_y, DrumKit, DrumMacros,
-    DrumModel, DRUM_MODEL_COUNT, DRUM_PREVIEW_SAMPLES, DRUM_PREVIEW_SR,
+    drum_model_for_note, kaoss_scale, note_at_x, scale_notes, stick_note_x, velocity_at_y, DrumKit,
+    DrumMacros, DrumModel, DRUM_MODEL_COUNT, DRUM_PREVIEW_SAMPLES, DRUM_PREVIEW_SR,
 };
 use jambox_protocol::{
     MidiNotice, MidiPortsReply, RepeatDivision, RepeatPhase, StatusReply, TouchPhase,
@@ -268,6 +268,8 @@ pub struct NativeModel {
     pub kaoss_picker: Option<KaossPicker>,
     kaoss_hold_gesture: Option<u32>,
     kaoss_gate_gesture: Option<u32>,
+    /// Per-finger BEND note X so a vertical flick does not hop scale cells.
+    kaoss_bend_note_x: [Option<f32>; MAX_FINGERS],
     pub seq: SeqModel,
     pub preset_occupied: [bool; 8],
     pub preset_selected: usize,
@@ -492,6 +494,7 @@ impl NativeModel {
             kaoss_picker: None,
             kaoss_hold_gesture: None,
             kaoss_gate_gesture: None,
+            kaoss_bend_note_x: [None; MAX_FINGERS],
             seq: SeqModel::new(),
             preset_occupied: [false; 8],
             preset_selected: 0,
@@ -4008,6 +4011,7 @@ impl NativeModel {
             self.fingers[slot].py = py;
         }
         let finger = self.fingers[slot];
+        self.kaoss_bend_note_x[slot] = None;
         self.fingers[slot] = Finger::silent();
         match finger.surface {
             Surface::Kaoss => {
@@ -5274,6 +5278,7 @@ impl NativeModel {
     }
 
     fn begin_kaoss_touch(&mut self, gesture: u32, x: f32, y: f32, outbox: &mut Outbox) {
+        let x = self.kaoss_play_x(gesture, x);
         // Count excludes this contact only if it isn't registered yet — callers
         // always arm the Finger slot before invoking us, so subtract one.
         let others = self.kaoss_active_count().saturating_sub(1);
@@ -5324,6 +5329,7 @@ impl NativeModel {
     }
 
     fn move_kaoss_touch(&mut self, gesture: u32, x: f32, y: f32, outbox: &mut Outbox) {
+        let x = self.kaoss_play_x(gesture, x);
         self.kaoss_latched_xy = (x, y);
         self.push_kaoss_trail(x, y);
         let prog = kaoss_ui::program(self.kaoss_program);
@@ -5662,6 +5668,34 @@ impl NativeModel {
             self.kaoss_octaves
         );
         self.mark_dirty();
+    }
+
+    fn kaoss_n_notes(&self) -> usize {
+        let scale = kaoss_scale(self.kaoss_scale_index as usize);
+        let notes = scale_notes(
+            scale.degrees,
+            self.kaoss_key,
+            self.kaoss_root_midi(),
+            self.kaoss_octaves,
+        );
+        notes.iter().rposition(|&n| n != 0).map(|i| i + 1).unwrap_or(1)
+    }
+
+    fn kaoss_play_x(&mut self, gesture: u32, x: f32) -> f32 {
+        if kaoss_ui::program(self.kaoss_program).y_param != "pitch_bend" {
+            return x;
+        }
+        let n = self.kaoss_n_notes();
+        let slot = self
+            .fingers
+            .iter()
+            .position(|f| f.active && f.gesture == gesture);
+        let prev = slot.and_then(|s| self.kaoss_bend_note_x[s]).unwrap_or(x);
+        let stuck = stick_note_x(prev, x, n);
+        if let Some(s) = slot {
+            self.kaoss_bend_note_x[s] = Some(stuck);
+        }
+        stuck
     }
 
     /// MIDI note under pad X (scale + key + octave span).
@@ -7335,6 +7369,48 @@ mod tests {
                     if param == "pitch_bend" && value.abs() < 1e-3
             )),
             "near-center should stay unison: {batch:?}"
+        );
+    }
+
+    #[test]
+    fn kaoss_bend_vertical_flick_keeps_the_note() {
+        let mut model = model_on_kaoss();
+        model.kaoss_program = kaoss_ui::KAOSS_PROGRAMS
+            .iter()
+            .position(|p| p.id == "bend")
+            .expect("bend program");
+        let mut out = Outbox::new();
+        let k = model.layout.kaoss;
+        let mid_x = k.x + k.w / 2;
+        let n = 15; // default ionian C3..C5
+        let drift = (k.w as f32 / n as f32 * 0.2) as i32;
+        model.finger_down(1, mid_x, k.y + k.h / 2, &mut out);
+        let start_note = model.kaoss_note_at(0.5);
+        out.take();
+        // Flick to the top with a small X drift — used to hop a scale cell.
+        model.finger_move(1, mid_x + drift, k.y + 4, &mut out);
+        let batch = out.take();
+        let touch_xs: Vec<f32> = batch
+            .iter()
+            .filter_map(|r| match r {
+                Request::Touch { x, .. } => Some(*x),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            touch_xs.iter().all(|&x| model.kaoss_note_at(x) == start_note),
+            "vertical flick must stay on {start_note}, touch x={touch_xs:?}"
+        );
+        assert!(
+            !batch.iter().any(|r| matches!(
+                r,
+                Request::MidiEmit {
+                    kind,
+                    note: Some(n),
+                    ..
+                } if kind == "note_on" && *n != start_note
+            )),
+            "must not retrigger a new scale note: {batch:?}"
         );
     }
 

@@ -510,6 +510,7 @@ impl FmSynth {
         let ctx = VoiceContext {
             sample_rate,
             pitch_mul,
+            bend_slew_dt: 0.0,
             attack_sec: 0.0,
             release_sec: 0.0,
             live_gain: 1.0,

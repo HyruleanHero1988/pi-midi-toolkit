@@ -121,6 +121,21 @@ impl Outbox {
     }
 
     pub fn synth(&mut self, param: &str, value: f32) {
+        if param == "pitch_bend" {
+            for req in self.reliable.iter_mut().rev() {
+                if let Request::Synth {
+                    param: p,
+                    value: v,
+                    drum: None,
+                } = req
+                {
+                    if p == "pitch_bend" {
+                        *v = value;
+                        return;
+                    }
+                }
+            }
+        }
         self.synth_drum(param, value, None);
     }
 

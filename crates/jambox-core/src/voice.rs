@@ -32,6 +32,7 @@ struct Voice {
     age: u64,
     /// Extra semitones on this voice only (Kaoss Y bend on a recorded take).
     bend_semis: f32,
+    bend_target_semis: f32,
 }
 
 impl Voice {
@@ -52,6 +53,7 @@ impl Voice {
             releasing: false,
             age: 0,
             bend_semis: 0.0,
+            bend_target_semis: 0.0,
         }
     }
 }
@@ -62,6 +64,8 @@ pub struct VoiceContext {
     pub sample_rate: f32,
     /// Multiplier on frequency (pitch bend × vibrato).
     pub pitch_mul: f32,
+    /// Seconds in this render span — used to slew per-voice Kaoss bend.
+    pub bend_slew_dt: f32,
     pub attack_sec: f32,
     pub release_sec: f32,
     /// Live-keys MIX trim. Clip voices use `clip_gains`.
@@ -170,6 +174,7 @@ impl VoicePool {
             v.releasing = false;
             v.age = self.serial;
             v.bend_semis = 0.0;
+            v.bend_target_semis = 0.0;
             return;
         }
 
@@ -190,6 +195,7 @@ impl VoicePool {
             releasing: false,
             age: self.serial,
             bend_semis: 0.0,
+            bend_target_semis: 0.0,
         };
     }
 
@@ -210,7 +216,11 @@ impl VoicePool {
 
     pub fn set_voice_bend(&mut self, channel: u8, note: u8, recorded: bool, semis: f32) {
         if let Some(slot) = self.find_playing(channel, note, recorded) {
-            self.voices[slot].bend_semis = semis.clamp(-24.0, 24.0);
+            let semis = semis.clamp(-24.0, 24.0);
+            self.voices[slot].bend_target_semis = semis;
+            if semis.abs() < 0.01 || self.voices[slot].bend_semis.abs() < 0.01 {
+                self.voices[slot].bend_semis = semis;
+            }
         }
     }
 
@@ -357,6 +367,7 @@ impl VoicePool {
                 &mut live[..n]
             };
             audible = true;
+            v.bend_semis = crate::kaoss::slew_bend(v.bend_semis, v.bend_target_semis, ctx.bend_slew_dt);
             let voice_mul = if v.bend_semis.abs() > 0.001 {
                 2f32.powf(v.bend_semis / 12.0)
             } else {
@@ -472,6 +483,7 @@ impl VoicePool {
                 &mut live[..n]
             };
             audible = true;
+            v.bend_semis = crate::kaoss::slew_bend(v.bend_semis, v.bend_target_semis, ctx.bend_slew_dt);
             let voice_mul = if v.bend_semis.abs() > 0.001 {
                 2f32.powf(v.bend_semis / 12.0)
             } else {
@@ -590,6 +602,7 @@ mod tests {
         VoiceContext {
             sample_rate: 48_000.0,
             pitch_mul: 1.0,
+            bend_slew_dt: 0.0,
             attack_sec: 0.002,
             release_sec: 0.010,
             live_gain: 1.0,

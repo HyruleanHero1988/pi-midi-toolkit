@@ -205,11 +205,11 @@ pub const KAOSS_PROGRAMS: &[KaossProgram] = &[
 ];
 
 /// Full-pad Y travel maps to ± this many semitones (center Y = 0).
-pub const PITCH_BEND_RANGE_SEMIS: f32 = 12.0;
+pub const PITCH_BEND_RANGE_SEMIS: f32 = jambox_core::PITCH_BEND_RANGE_SEMIS;
 
 /// Half-width of the BEND rest band, in pad-Y units (0..1).
 /// `y` in `0.5 ± this` is unison so a finger can sit on the midline.
-pub const BEND_CENTER_DEADZONE: f32 = 0.08;
+pub const BEND_CENTER_DEADZONE: f32 = jambox_core::BEND_CENTER_DEADZONE;
 
 /// Bottom rest band for VIB (and similar 0-at-rest Y maps), in pad-Y units.
 pub const ZERO_REST_DEADZONE: f32 = 0.08;
@@ -217,18 +217,7 @@ pub const ZERO_REST_DEADZONE: f32 = 0.08;
 /// Collapse a center-zero axis through a dead band, then remap so the
 /// remaining travel still reaches 0 and 1 (no step at the dead-zone edge).
 pub fn apply_center_deadzone(y: f32, dead: f32) -> f32 {
-    let y = y.clamp(0.0, 1.0);
-    let dead = dead.clamp(0.0, 0.49);
-    if (y - 0.5).abs() <= dead {
-        return 0.5;
-    }
-    if y > 0.5 {
-        let t = (y - 0.5 - dead) / (0.5 - dead);
-        0.5 + 0.5 * t
-    } else {
-        let t = (0.5 - dead - y) / (0.5 - dead);
-        0.5 - 0.5 * t
-    }
+    jambox_core::apply_center_deadzone(y, dead)
 }
 
 /// Collapse a 0-at-rest axis through a bottom dead band, then remap 0..1.
@@ -243,9 +232,7 @@ pub fn apply_zero_deadzone(y: f32, dead: f32) -> f32 {
 
 /// Pad Y (0 = bottom, 1 = top) → pitch-bend semitones. Midline is unison.
 pub fn y_to_pitch_bend_semis(y: f32) -> f32 {
-    let shaped = apply_center_deadzone(y, BEND_CENTER_DEADZONE);
-    let centered = (shaped - 0.5) * 2.0; // -1 .. +1
-    centered * PITCH_BEND_RANGE_SEMIS
+    jambox_core::y_to_bend_semis(y)
 }
 
 /// MIDI 14-bit pitch wheel (8192 = center) for a pad-Y bend.

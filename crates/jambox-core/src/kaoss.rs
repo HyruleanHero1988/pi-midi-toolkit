@@ -308,6 +308,81 @@ impl LatestTouch {
     }
 }
 
+/// Full-pad Y travel maps to ± this many semitones (center Y = 0).
+pub const PITCH_BEND_RANGE_SEMIS: f32 = 12.0;
+
+/// Half-width of the BEND rest band, in pad-Y units (0..1).
+pub const BEND_CENTER_DEADZONE: f32 = 0.08;
+
+/// How far into a new scale cell a BEND swipe must travel before the note hops.
+/// Vertical flicks drift in X; this keeps them on one pitch.
+pub const BEND_NOTE_HYSTERESIS: f32 = 0.25;
+
+/// Fastest the live/global bend may travel (semitones per second).
+/// An octave in ~25 ms still tracks a flick; a 2–3 st zipper step becomes a glide.
+pub const BEND_SLEW_SEMIS_PER_SEC: f32 = 480.0;
+
+/// Collapse a center-zero axis through a dead band, then remap so the
+/// remaining travel still reaches 0 and 1 (no step at the dead-zone edge).
+pub fn apply_center_deadzone(y: f32, dead: f32) -> f32 {
+    let y = y.clamp(0.0, 1.0);
+    let dead = dead.clamp(0.0, 0.49);
+    if (y - 0.5).abs() <= dead {
+        return 0.5;
+    }
+    if y > 0.5 {
+        let t = (y - 0.5 - dead) / (0.5 - dead);
+        0.5 + 0.5 * t
+    } else {
+        let t = (0.5 - dead - y) / (0.5 - dead);
+        0.5 - 0.5 * t
+    }
+}
+
+/// Pad Y (0 = bottom, 1 = top) → pitch-bend semitones. Midline is unison.
+pub fn y_to_bend_semis(y: f32) -> f32 {
+    let shaped = apply_center_deadzone(y, BEND_CENTER_DEADZONE);
+    (shaped - 0.5) * 2.0 * PITCH_BEND_RANGE_SEMIS
+}
+
+/// Rate-limit a bend so sparse UI updates glide instead of stepping.
+pub fn slew_bend(current: f32, target: f32, dt_sec: f32) -> f32 {
+    if target.abs() < 0.01 && current.abs() < 0.01 {
+        return 0.0;
+    }
+    if current.abs() < 0.01 {
+        return target;
+    }
+    if target.abs() < 0.01 {
+        return 0.0;
+    }
+    let max_delta = (BEND_SLEW_SEMIS_PER_SEC * dt_sec.max(0.0)).max(0.0);
+    let err = target - current;
+    current + err.clamp(-max_delta, max_delta)
+}
+
+/// Keep X on the current scale cell until the finger is clearly in a new one.
+pub fn stick_note_x(prev_x: f32, x: f32, n_notes: usize) -> f32 {
+    let n = n_notes.max(1);
+    let prev = note_index_at_x(prev_x, n);
+    let new = note_index_at_x(x, n);
+    if new == prev {
+        return prev_x;
+    }
+    let pos = x.clamp(0.0, 1.0) * n as f32;
+    let frac = pos - pos.floor();
+    let committed = if new > prev {
+        frac >= BEND_NOTE_HYSTERESIS || new > prev + 1
+    } else {
+        frac <= 1.0 - BEND_NOTE_HYSTERESIS || prev > new + 1
+    };
+    if committed {
+        x
+    } else {
+        prev_x
+    }
+}
+
 /// Equal-width cell index; the last cell includes x = 1.
 pub fn note_index_at_x(x: f32, n_notes: usize) -> usize {
     let n = n_notes.max(1);
@@ -472,7 +547,7 @@ impl KaossMapper {
 
     /// Pad Y → ±12 semitones. Midline is unison (clip Kaoss bend playback).
     pub fn y_to_bend_semis(y: f32) -> f32 {
-        (y.clamp(0.0, 1.0) - 0.5) * 24.0
+        crate::kaoss::y_to_bend_semis(y)
     }
 
     pub fn active_count(&self) -> usize {
@@ -538,6 +613,25 @@ impl KaossMapper {
                 velocity,
             }
         }
+    }
+
+    /// Like [`follow`], but X must travel well into a new cell before the note hops.
+    pub fn follow_sticky(&mut self, owner: u32, x: f32, y: f32, velocity: u8) -> TouchDelta {
+        let Some(slot) = self
+            .voices
+            .iter()
+            .position(|v| v.active && v.owner == owner)
+        else {
+            return TouchDelta::Idle;
+        };
+        let old_note = self.voices[slot].note;
+        let n = self.n_notes.max(1);
+        let prev_idx = self.notes[..n]
+            .iter()
+            .position(|&note| note == old_note)
+            .unwrap_or(0);
+        let prev_x = (prev_idx as f32 + 0.5) / n as f32;
+        self.follow(owner, stick_note_x(prev_x, x, n), y, velocity)
     }
 
     pub fn follow(&mut self, owner: u32, x: f32, y: f32, velocity: u8) -> TouchDelta {
@@ -710,6 +804,50 @@ mod tests {
     fn follow_without_down_is_idle() {
         let mut mapper = KaossMapper::new();
         assert_eq!(mapper.follow(9, 0.5, 0.5, 100), TouchDelta::Idle);
+    }
+
+    #[test]
+    fn bend_deadzone_matches_the_ui_curve() {
+        assert!((y_to_bend_semis(0.5)).abs() < 1e-4);
+        assert!((y_to_bend_semis(1.0) - PITCH_BEND_RANGE_SEMIS).abs() < 1e-4);
+        assert!((y_to_bend_semis(0.0) + PITCH_BEND_RANGE_SEMIS).abs() < 1e-4);
+        assert!((y_to_bend_semis(0.5 + BEND_CENTER_DEADZONE * 0.5)).abs() < 1e-4);
+    }
+
+    #[test]
+    fn follow_sticky_ignores_a_barely_crossed_boundary() {
+        let mut mapper = KaossMapper::new();
+        assert!(matches!(
+            mapper.down(1, 0.02, 0.5, 0, 100),
+            TouchDelta::Start { note: 48, .. }
+        ));
+        let n = 15;
+        let just_into_second = 1.0 / n as f32 + 0.05 / n as f32;
+        assert_eq!(
+            mapper.follow_sticky(1, just_into_second, 0.9, 100),
+            TouchDelta::Idle
+        );
+    }
+
+    #[test]
+    fn stick_note_x_ignores_a_barely_crossed_boundary() {
+        // 15 ionian cells (C3..C5). Cell 0 is [0, 1/15).
+        let n = 15;
+        let in_first = 0.5 / n as f32;
+        let just_into_second = 1.0 / n as f32 + 0.05 / n as f32;
+        let stuck = stick_note_x(in_first, just_into_second, n);
+        assert_eq!(note_index_at_x(stuck, n), 0);
+        let well_into_second = 1.0 / n as f32 + 0.4 / n as f32;
+        let moved = stick_note_x(in_first, well_into_second, n);
+        assert_eq!(note_index_at_x(moved, n), 1);
+    }
+
+    #[test]
+    fn slew_bend_glides_instead_of_jumping() {
+        let jumped = slew_bend(0.5, 6.0, 0.003);
+        assert!(jumped > 0.5 && jumped < 4.0, "should glide, got {jumped}");
+        assert!((slew_bend(0.0, 12.0, 0.003) - 12.0).abs() < 1e-4);
+        assert!((slew_bend(8.0, 0.0, 0.003)).abs() < 1e-4);
     }
 
     #[test]
