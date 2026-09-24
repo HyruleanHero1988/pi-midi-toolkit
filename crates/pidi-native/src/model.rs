@@ -1910,6 +1910,17 @@ impl NativeModel {
         }
         self.midi_in_connected = ports.input_connected.clone();
         self.midi_out_connected = ports.output_connected.clone();
+        self.layout.show_on_screen_keys = !self.hardware_keybed_connected();
+    }
+
+    /// Hide on-screen piano keys when a known keybed is plugged in.
+    pub fn hardware_keybed_connected(&self) -> bool {
+        if midi_core::port_looks_like_keybed(&self.midi_in_connected) {
+            return true;
+        }
+        self.midi_inputs
+            .iter()
+            .any(|name| midi_core::port_looks_like_keybed(name))
     }
 
     fn write_midi_ports_file(&self) {
@@ -2638,6 +2649,9 @@ impl NativeModel {
                 self.apply_fm_slider(index, py, outbox);
             }
             Hit::SynthKey { note } => {
+                if self.hardware_keybed_connected() {
+                    return;
+                }
                 let note = self.transpose_synth_key(note);
                 self.fingers[slot] = Finger {
                     active: true,
@@ -8189,6 +8203,62 @@ mod tests {
         model.finger_down(2, home.x + 4, home.y + 4, &mut out);
         assert_eq!(model.mode, UiMode::Home);
         host::set_dry_run(false);
+    }
+
+    #[test]
+    fn synth_keys_hide_when_mpk_is_connected() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Synth);
+        assert!(!model.hardware_keybed_connected());
+        let mut out = Outbox::new();
+        let key = model.layout.synth_keyboard_white_rect(0);
+        model.finger_down(1, key.x + 4, key.y + key.h - 8, &mut out);
+        assert!(out.take().iter().any(|r| matches!(r, Request::NoteOn { .. })));
+        model.finger_up(1, &mut out);
+        out.take();
+
+        model.apply_midi_ports(&MidiPortsReply {
+            inputs: vec!["MPK mini 3".into()],
+            outputs: vec!["U2MIDI PRO".into()],
+            input_connected: "MPK mini 3".into(),
+            ..MidiPortsReply::default()
+        });
+        assert!(model.hardware_keybed_connected());
+        assert!(
+            !model.layout.show_on_screen_keys,
+            "piano strip should yield to sliders/scope"
+        );
+        assert!(
+            model.layout.synth_play_h() > model.layout.synth_sliders.h,
+            "SYNTH sliders/scope should grow into the former keybed"
+        );
+        let grown = model.layout.synth_slider(0);
+        assert!(
+            model
+                .layout
+                .synth_keys
+                .contains(grown.x + 4, grown.y + grown.h - 4),
+            "former key area should become slider travel"
+        );
+        model.finger_down(2, key.x + 4, key.y + key.h - 8, &mut out);
+        assert!(
+            out.take().iter().all(|r| !matches!(r, Request::NoteOn { .. })),
+            "on-screen keys must stay silent while a keybed is connected"
+        );
+
+        model.apply_midi_ports(&MidiPortsReply {
+            inputs: vec!["U2MIDI PRO:U2MIDI PRO MIDI 1 20:0".into()],
+            outputs: vec!["U2MIDI PRO".into()],
+            input_connected: "U2MIDI PRO:U2MIDI PRO MIDI 1 20:0".into(),
+            ..MidiPortsReply::default()
+        });
+        assert!(!model.hardware_keybed_connected());
+        assert!(model.layout.show_on_screen_keys);
+        model.finger_down(3, key.x + 4, key.y + key.h - 8, &mut out);
+        assert!(
+            out.take().iter().any(|r| matches!(r, Request::NoteOn { .. })),
+            "keys should return when only a DIN interface is connected"
+        );
     }
 
     #[test]
