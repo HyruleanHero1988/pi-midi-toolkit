@@ -534,4 +534,49 @@ mod tests {
         assert!(!restored[2].empty);
         assert_eq!(restored[2].events[0].note, 60);
     }
+
+    #[test]
+    fn persist_bank_deletes_pads_missing_from_the_snapshot() {
+        let dir = std::env::temp_dir().join(format!("pidi-preset-wipe-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let leftover = from_wire(
+            vec![WireClipEvent {
+                tick: 0,
+                on: true,
+                channel: 0,
+                note: 64,
+                velocity: 80,
+                ..Default::default()
+            }],
+            1920,
+            120.0,
+            false,
+        );
+        assert!(save_pad(&dir, 4, &leftover, 120.0));
+        assert!(pad_path(&dir, 4).is_file());
+
+        let mut pads = std::array::from_fn(|_| PhrasePad::default());
+        pads[0] = from_wire(
+            vec![WireClipEvent {
+                tick: 0,
+                on: true,
+                channel: 9,
+                note: 36,
+                velocity: 100,
+                ..Default::default()
+            }],
+            1920,
+            120.0,
+            true,
+        );
+        let snap = snapshot_bank(&pads, 120.0);
+        assert!(snap[4].is_none());
+        let restored = bank_from_snapshot(&snap, 120.0);
+        assert!(restored[4].empty);
+        assert!(persist_bank(&dir, &restored, 120.0));
+        assert!(!pad_path(&dir, 4).is_file(), "unpopulated preset slots must wipe live pads");
+        assert!(pad_path(&dir, 0).is_file());
+        let _ = fs::remove_dir_all(&dir);
+    }
 }

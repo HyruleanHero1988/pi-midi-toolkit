@@ -767,6 +767,10 @@ impl NativeModel {
                 format!("{} songs", self.song_files.len())
             };
         }
+        if mode == UiMode::Presets {
+            let dir = presets::presets_dir_from_env();
+            self.preset_occupied = presets::list_occupied(&dir);
+        }
     }
 
     fn refresh_song_list(&mut self) {
@@ -3302,24 +3306,15 @@ impl NativeModel {
                 self.status_line = "all off".into();
             }
             Hit::PresetSlot(index) => {
-                self.fingers[slot] = Finger {
-                    active: true,
-                    id,
-                    gesture,
-                    x: 0.0,
-                    y: 0.0,
-                    px,
-                    py,
-                    surface: Surface::UiTap,
-                    gate_on: false,
-                };
+                self.tap_ui(slot, id, gesture, px, py);
                 self.preset_selected = index;
-                self.status_line = if self.preset_occupied[index] {
-                    format!("slot {} selected — tap LOAD", index + 1)
+                let dir = presets::presets_dir_from_env();
+                self.preset_occupied = presets::list_occupied(&dir);
+                if self.preset_occupied[index] {
+                    self.load_preset(index, outbox);
                 } else {
-                    format!("slot {} empty", index + 1)
-                };
-                self.mark_dirty();
+                    self.status_line = format!("slot {} empty — SAVE first", index + 1);
+                }
             }
             Hit::PresetSave => {
                 self.fingers[slot] = Finger {
@@ -4131,7 +4126,17 @@ impl NativeModel {
         } else {
             outbox.clip_launch(index as u8, self.clip_quantize.wire());
             self.phrase_playing[index] = true;
-            self.status_line = format!("{} launch", phrases::pad_label(index));
+            self.status_line = match self.clip_quantize {
+                crate::session::ClipQuantize::Off => {
+                    format!("{} launch", phrases::pad_label(index))
+                }
+                crate::session::ClipQuantize::Beat => {
+                    format!("{} queued · next beat", phrases::pad_label(index))
+                }
+                crate::session::ClipQuantize::Bar => {
+                    format!("{} queued · next bar", phrases::pad_label(index))
+                }
+            };
         }
     }
 
