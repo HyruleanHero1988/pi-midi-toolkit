@@ -2080,7 +2080,7 @@ impl Layout {
         self.kit_pad_cell(index)
     }
 
-    /// Toolbar: OUT, HOLD, KEY, CHANGES, ARM.
+    /// Toolbar: OUT, HOLD, KEY, PROGS, ARM.
     pub fn chords_tool(&self, index: usize) -> Rect {
         let n = 5i32;
         let w = self.chords_toolbar.w / n;
