@@ -2,6 +2,7 @@
 //!
 //! MAP is the home-screen MIDI channel remap. PORTS (Settings) keep IN/OUT.
 
+use crate::arp::ArpUi;
 use crate::chords::{self, ChordSpec, Overlay as ChordsOverlay, QualityRow, PALETTE_SLOTS};
 use crate::client::Outbox;
 use crate::font::FontStyle;
@@ -304,6 +305,7 @@ pub struct NativeModel {
     pub song_out: OutMode,
     pub kaoss_out: OutMode,
     pub chords_out: OutMode,
+    pub arp: ArpUi,
     pub chords_hold: bool,
     pub chords_key: u8,
     /// Block chords + strumplate octave (−2..+2; 0 = C3 factory).
@@ -522,6 +524,7 @@ impl NativeModel {
             song_out: OutMode::Both,
             kaoss_out: OutMode::Local,
             chords_out: OutMode::Both,
+            arp: ArpUi::new(),
             chords_hold: true,
             chords_key: 0,
             chords_octave: 0,
@@ -739,8 +742,14 @@ impl NativeModel {
         if self.mode == UiMode::Chords && mode != UiMode::Chords {
             self.leave_chords_mode(outbox);
         }
+        if self.mode == UiMode::Arp && mode != UiMode::Arp {
+            self.leave_arp_mode(outbox);
+        }
         self.set_mode(mode);
         self.sync_melody_engine(outbox);
+        if mode == UiMode::Arp {
+            self.enter_arp_mode(outbox);
+        }
         if mode == UiMode::Fm {
             self.status_line = format!("FM · {}", jambox_core::fm_recipe(self.fm_recipe).title);
         }
@@ -759,6 +768,7 @@ impl NativeModel {
                 | UiMode::Pads
                 | UiMode::Kaoss
                 | UiMode::Chords
+                | UiMode::Arp
                 | UiMode::Songs
                 | UiMode::Presets
                 | UiMode::Fx
@@ -851,6 +861,50 @@ impl NativeModel {
             self.release_kaoss_gate(outbox);
             self.kaoss_touching = false;
         }
+    }
+
+    fn enter_arp_mode(&mut self, outbox: &mut Outbox) {
+        self.push_arp_config(outbox);
+        self.push_arp_pattern(outbox);
+        outbox.emit_mode("arp", self.arp.out.wire());
+        self.status_line = if self.arp.latch {
+            "ARP LATCH · play a root, then retarget".into()
+        } else {
+            "ARP · hold a root, LATCH to keep it".into()
+        };
+    }
+
+    fn leave_arp_mode(&mut self, outbox: &mut Outbox) {
+        outbox.set_arp(
+            false,
+            self.arp.latch,
+            self.arp.order.wire(),
+            self.arp.division.wire(),
+            self.arp.octaves,
+            self.arp.gate,
+        );
+        outbox.all_notes_off();
+    }
+
+    fn push_arp_config(&mut self, outbox: &mut Outbox) {
+        outbox.set_arp(
+            true,
+            self.arp.latch,
+            self.arp.order.wire(),
+            self.arp.division.wire(),
+            self.arp.octaves,
+            self.arp.gate,
+        );
+        outbox.emit_mode("arp", self.arp.out.wire());
+        self.session_dirty = true;
+    }
+
+    fn push_arp_pattern(&mut self, outbox: &mut Outbox) {
+        outbox.set_arp_len(self.arp.len);
+        for i in 0..self.arp.len {
+            outbox.set_arp_step(i, self.arp.steps[i as usize]);
+        }
+        self.session_dirty = true;
     }
 
     fn leave_chords_mode(&mut self, outbox: &mut Outbox) {
@@ -967,6 +1021,7 @@ impl NativeModel {
             "pad" | "pads" => UiMode::Pads,
             "kao" | "kaoss" => UiMode::Kaoss,
             "chd" | "chords" => UiMode::Chords,
+            "arp" => UiMode::Arp,
             "sng" | "songs" => UiMode::Songs,
             "pre" | "presets" => UiMode::Presets,
             "fx" => UiMode::Fx,
@@ -1850,6 +1905,22 @@ impl NativeModel {
         self.song_out = s.song_out;
         self.kaoss_out = s.kaoss_out;
         self.chords_out = s.chords_out;
+        self.arp.out = s.arp_out;
+        self.arp.latch = s.arp_latch;
+        if !s.arp_order.is_empty() {
+            self.arp.order = jambox_core::ArpOrder::from_name(&s.arp_order);
+        }
+        if !s.arp_division.is_empty() {
+            self.arp.division = jambox_core::ArpDivision::from_name(&s.arp_division);
+        }
+        self.arp.octaves = s.arp_octaves.min(jambox_core::MAX_ARP_OCTAVES);
+        self.arp.gate = s.arp_gate.clamp(1, 127);
+        if !s.arp_steps.is_empty() {
+            self.arp.len = (s.arp_steps.len() as u8).min(jambox_core::MAX_ARP_STEPS as u8);
+            for (i, interval) in s.arp_steps.iter().take(jambox_core::MAX_ARP_STEPS).enumerate() {
+                self.arp.steps[i] = (*interval).clamp(-24, 24);
+            }
+        }
         self.chords_hold = s.chords_hold;
         self.chords_key = s.chords_key.min(11);
         self.chords_octave = s.chords_octave.clamp(chords::OCTAVE_MIN, chords::OCTAVE_MAX);
@@ -1959,6 +2030,13 @@ impl NativeModel {
             song_out: self.song_out,
             kaoss_out: self.kaoss_out,
             chords_out: self.chords_out,
+            arp_out: self.arp.out,
+            arp_latch: self.arp.latch,
+            arp_order: self.arp.order.wire().into(),
+            arp_division: self.arp.division.wire().into(),
+            arp_octaves: self.arp.octaves,
+            arp_gate: self.arp.gate,
+            arp_steps: self.arp.steps[..self.arp.len as usize].to_vec(),
             chords_hold: self.chords_hold,
             chords_key: self.chords_key,
             chords_octave: self.chords_octave,
@@ -1995,19 +2073,23 @@ impl NativeModel {
         let vel = notice.velocity.unwrap_or(0) as u8;
         if kind == "note_on" || kind == "noteon" {
             if vel > 0 {
-                self.seq.push_note(true, notice.channel, note, vel);
-                self.push_pad_rec(true, notice.channel, note, vel);
+                if self.mode != UiMode::Arp {
+                    self.seq.push_note(true, notice.channel, note, vel);
+                    self.push_pad_rec(true, notice.channel, note, vel);
+                }
                 self.last_midi_activity =
                     format!("IN  ch{} n{} v{}", notice.channel + 1, note, vel);
                 self.push_log(format!("midi on ch{} n{} v{}", notice.channel, note, vel));
-            } else {
+            } else if self.mode != UiMode::Arp {
                 self.seq.push_note(false, notice.channel, note, 0);
                 self.push_pad_rec(false, notice.channel, note, 0);
                 self.push_log(format!("midi off ch{} n{}", notice.channel, note));
             }
         } else if kind == "note_off" || kind == "noteoff" {
-            self.seq.push_note(false, notice.channel, note, 0);
-            self.push_pad_rec(false, notice.channel, note, 0);
+            if self.mode != UiMode::Arp {
+                self.seq.push_note(false, notice.channel, note, 0);
+                self.push_pad_rec(false, notice.channel, note, 0);
+            }
             self.push_log(format!("midi off ch{} n{}", notice.channel, note));
         } else if kind == "control_change" || kind == "cc" {
             self.last_midi_activity = format!(
@@ -2784,8 +2866,10 @@ impl NativeModel {
                 // first contact sounds it; later ones just claim ownership.
                 if !self.synth_note_held_elsewhere(slot, note) {
                     outbox.note_on(0, note, 110);
-                    self.seq.push_note(true, 0, note, 110);
-                    self.push_pad_rec(true, 0, note, 110);
+                    if self.mode != UiMode::Arp {
+                        self.seq.push_note(true, 0, note, 110);
+                        self.push_pad_rec(true, 0, note, 110);
+                    }
                 }
             }
             Hit::KaossProg => {
@@ -3660,6 +3744,90 @@ impl NativeModel {
                 self.tap_ui(slot, id, gesture, px, py);
                 self.chords_overlay = None;
             }
+            Hit::ArpOrder(index) => {
+                self.tap_ui(slot, id, gesture, px, py);
+                if let Some(order) = jambox_core::ArpOrder::ALL.get(index).copied() {
+                    self.arp.order = order;
+                    self.push_arp_config(outbox);
+                    self.status_line = format!("ARP {}", order.label());
+                }
+            }
+            Hit::ArpLatch => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.arp.latch = !self.arp.latch;
+                self.push_arp_config(outbox);
+                self.status_line = if self.arp.latch {
+                    "LATCH on — release keeps the loop; next key retargets".into()
+                } else {
+                    "HOLD — lift keys to stop".into()
+                };
+            }
+            Hit::ArpDivision => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.arp.cycle_division();
+                self.push_arp_config(outbox);
+                self.status_line = format!("ARP {}", self.arp.division.label());
+            }
+            Hit::ArpOctDown => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.arp.bump_octaves(-1);
+                self.push_arp_config(outbox);
+                self.status_line = format!("ARP octaves {}", self.arp.octaves);
+            }
+            Hit::ArpOctUp => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.arp.bump_octaves(1);
+                self.push_arp_config(outbox);
+                self.status_line = format!("ARP octaves {}", self.arp.octaves);
+            }
+            Hit::ArpGate => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.arp.cycle_gate();
+                self.push_arp_config(outbox);
+                self.status_line = format!("ARP gate {}", self.arp.gate_label());
+            }
+            Hit::ArpOut => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.arp.out = self.arp.out.cycle();
+                self.push_arp_config(outbox);
+                self.status_line = format!("ARP {}", self.arp.out.label());
+            }
+            Hit::ArpStep(index) => {
+                self.tap_ui(slot, id, gesture, px, py);
+                if index >= self.arp.len as usize {
+                    self.arp.len = (index as u8 + 1).min(jambox_core::MAX_ARP_STEPS as u8);
+                }
+                self.arp.select_step(index);
+                self.push_arp_pattern(outbox);
+            }
+            Hit::ArpIntervalUp => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.arp.bump_interval(1);
+                self.push_arp_pattern(outbox);
+            }
+            Hit::ArpIntervalDown => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.arp.bump_interval(-1);
+                self.push_arp_pattern(outbox);
+            }
+            Hit::ArpAdd => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.arp.add_step();
+                self.push_arp_pattern(outbox);
+            }
+            Hit::ArpDel => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.arp.del_step();
+                self.push_arp_pattern(outbox);
+            }
+            Hit::ArpKeyOctDown => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.nudge_synth_octave(-1);
+            }
+            Hit::ArpKeyOctUp => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.nudge_synth_octave(1);
+            }
             Hit::ChordsButton { col, row } => {
                 if let Some(qrow) = QualityRow::from_index(row) {
                     self.fingers[slot] = Finger {
@@ -3767,20 +3935,29 @@ impl NativeModel {
                 self.chords_strum_to(y, outbox);
             }
             Surface::SynthKey { note } => {
-                if let Some(raw) = self.layout.synth_keyboard_note_at(px, py) {
+                let raw = if self.mode == UiMode::Arp {
+                    self.layout.arp_keyboard_note_at(px, py)
+                } else {
+                    self.layout.synth_keyboard_note_at(px, py)
+                };
+                if let Some(raw) = raw {
                     let new_note = self.transpose_synth_key(raw);
                     if new_note != note {
                         // Glissando must not kill a note another finger still holds
                         // (lift smear often parks the rising finger on the neighbor).
                         if !self.synth_note_held_elsewhere(slot, note) {
                             outbox.note_off(0, note);
-                            self.seq.push_note(false, 0, note, 0);
-                            self.push_pad_rec(false, 0, note, 0);
+                            if self.mode != UiMode::Arp {
+                                self.seq.push_note(false, 0, note, 0);
+                                self.push_pad_rec(false, 0, note, 0);
+                            }
                         }
                         if !self.synth_note_held_elsewhere(slot, new_note) {
                             outbox.note_on(0, new_note, 110);
-                            self.seq.push_note(true, 0, new_note, 110);
-                            self.push_pad_rec(true, 0, new_note, 110);
+                            if self.mode != UiMode::Arp {
+                                self.seq.push_note(true, 0, new_note, 110);
+                                self.push_pad_rec(true, 0, new_note, 110);
+                            }
                         }
                         self.fingers[slot].surface = Surface::SynthKey { note: new_note };
                     }
@@ -3856,8 +4033,10 @@ impl NativeModel {
                 // Finger already cleared above; remaining holders keep the note.
                 if !self.synth_note_held_elsewhere(slot, note) {
                     outbox.note_off(0, note);
-                    self.seq.push_note(false, 0, note, 0);
-                    self.push_pad_rec(false, 0, note, 0);
+                    if self.mode != UiMode::Arp {
+                        self.seq.push_note(false, 0, note, 0);
+                        self.push_pad_rec(false, 0, note, 0);
+                    }
                 }
             }
             Surface::FmGraph { from } => {
@@ -4108,7 +4287,11 @@ impl NativeModel {
     }
 
     fn finish_pad_record(&mut self, index: usize, outbox: &mut Outbox) {
-        let _started = self.pad_rec_started.take();
+        let wall = self
+            .pad_rec_started
+            .take()
+            .map(|t| t.elapsed().as_secs_f64())
+            .unwrap_or(0.0);
         let events = std::mem::take(&mut self.pad_rec_events);
         if events.is_empty() {
             self.status_line = format!("{} REC empty — dropped", phrases::pad_label(index));
@@ -4124,7 +4307,9 @@ impl NativeModel {
                 velocity: e.vel,
             })
             .collect();
-        let (trimmed, length_secs) = crate::seq::trim_loop_take(&take, 0.35, 0.05, 2.0);
+        let last = take.iter().map(|e| e.t).fold(0.0_f64, f64::max);
+        let (trimmed, length_secs) =
+            crate::seq::trim_loop_take_ended(&take, 0.35, 0.05, 2.0, Some(wall.max(last)));
         if trimmed.is_empty() || length_secs <= 0.0 {
             self.status_line = format!("{} REC empty — dropped", phrases::pad_label(index));
             return;
@@ -5863,7 +6048,7 @@ impl NativeModel {
     }
 
     /// Map a C4-relative keyboard note (60..71) onto the selected octave.
-    fn transpose_synth_key(&self, c4_note: u8) -> u8 {
+    pub(crate) fn transpose_synth_key(&self, c4_note: u8) -> u8 {
         let deg = c4_note.saturating_sub(Layout::SYNTH_KEY_BASE);
         self.synth_key_base().saturating_add(deg).min(127)
     }
@@ -6565,7 +6750,7 @@ impl NativeModel {
         };
         let base = chords::strum_base_for_octave(self.chords_octave);
         let strings = spec.strum_strings_at(base);
-        let note = chords::string_at(y, &strings);
+        let note = chords::string_at(y, strings.as_slice());
         if self.chords_strum_note == Some(note) {
             return;
         }
@@ -8983,7 +9168,7 @@ mod tests {
             .strum_strings_at(chords::strum_base_for_octave(0));
         assert_eq!(
             first,
-            vec![strings[0]],
+            vec![strings.first()],
             "left of the plate should sound the lowest string"
         );
 
@@ -9002,7 +9187,7 @@ mod tests {
             })
             .collect();
         assert!(
-            moved.contains(&strings[chords::STRUM_STRINGS - 1]),
+            moved.contains(&strings.last()),
             "drag right should reach the highest string, got {moved:?}"
         );
     }
@@ -9020,7 +9205,7 @@ mod tests {
         assert_eq!(model.chords_current.unwrap().name(), "G");
         let after = model.chords_current.unwrap().strum_strings_at(base);
         assert_ne!(before, after);
-        assert_eq!(after[0] % 12, 7, "lowest strum string should move to G");
+        assert_eq!(after.first() % 12, 7, "lowest strum string should move to G");
     }
 
     #[test]
@@ -9947,5 +10132,40 @@ mod tests {
         model.finger_down(1, ports.x + 8, ports.y + 8, &mut out);
         model.finger_up(1, &mut out);
         assert_eq!(model.mode, UiMode::Ports);
+    }
+
+    #[test]
+    fn arp_home_tile_enables_the_engine_and_latches_root_retarget() {
+        let mut model = NativeModel::new();
+        let mut out = Outbox::new();
+        let arp_idx = crate::layout::HOME_TILES
+            .iter()
+            .position(|(mode, _, _)| *mode == UiMode::Arp)
+            .expect("ARP tile");
+        let tile = model.layout.home_tile(arp_idx, 0);
+        model.finger_down(1, tile.x + 8, tile.y + 8, &mut out);
+        model.finger_up(1, &mut out);
+        assert_eq!(model.mode, UiMode::Arp);
+        let batch = out.take();
+        assert!(
+            batch.iter().any(|r| matches!(
+                r,
+                Request::SetArp {
+                    enabled: true,
+                    ..
+                }
+            )),
+            "entering ARP should arm the engine: {batch:?}"
+        );
+
+        let latch = model.layout.arp_tool(0);
+        model.finger_down(2, latch.x + 4, latch.y + 4, &mut out);
+        model.finger_up(2, &mut out);
+        assert!(model.arp.latch);
+        let batch = out.take();
+        assert!(batch.iter().any(|r| matches!(
+            r,
+            Request::SetArp { latch: true, .. }
+        )));
     }
 }

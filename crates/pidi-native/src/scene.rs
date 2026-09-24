@@ -296,6 +296,7 @@ pub fn build(model: &NativeModel) -> Scene {
             UiMode::Mix => draw_mix(&mut scene, model),
             UiMode::Log => draw_log(&mut scene, model),
             UiMode::Chords => draw_chords(&mut scene, model),
+            UiMode::Arp => draw_arp(&mut scene, model),
         }
         apply_content_shift(&mut scene, model.ui_shift, crate::layout::HUD_H);
     }
@@ -630,29 +631,25 @@ fn draw_power_warn(scene: &mut Scene, model: &NativeModel) {
     let pill_bg = if active { 0x9d0006 } else { 0x3c3836 };
     let fg = if active && flash_on { 0x1d2021 } else { 0xfbf1c7 };
 
+    // Overlay only — never grows HUD or shifts mode layout.
     let bar = model.layout.status_bar;
     let pill = crate::layout::Rect {
         x: bar.x + 4,
-        y: bar.y + 2,
-        w: 132,
-        h: bar.h - 4,
+        y: bar.y + 3,
+        w: 118,
+        h: (bar.h - 6).max(12),
     };
     scene.fill_rect(pill, pill_bg);
-    draw_lightning_bolt(scene, (pill.x + 6) as f32, (pill.y + 2) as f32, bolt);
-    scene.text(pill.x + 26, pill.y + 4, label, fg);
-
-    // Firmware-style corner bolt so FULL PAD / screensaver still show it.
-    draw_lightning_bolt(scene, (SCREEN_W - 22) as f32, 6.0, bolt);
+    draw_lightning_bolt(scene, (pill.x + 4) as f32, (pill.y + 3) as f32, bolt);
+    scene.text(pill.x + 20, pill.y + 2, label, fg);
 }
 
 fn draw_lightning_bolt(scene: &mut Scene, x: f32, y: f32, color: u32) {
-    scene.fill(x + 8.0, y, 6.0, 3.0, color);
-    scene.fill(x + 5.0, y + 2.0, 7.0, 3.0, color);
-    scene.fill(x + 2.0, y + 5.0, 8.0, 3.0, color);
-    scene.fill(x + 0.0, y + 8.0, 10.0, 3.0, color);
-    scene.fill(x + 6.0, y + 10.0, 7.0, 3.0, color);
-    scene.fill(x + 3.0, y + 13.0, 6.0, 3.0, color);
-    scene.fill(x + 5.0, y + 16.0, 4.0, 3.0, color);
+    scene.fill(x + 5.0, y, 4.0, 2.0, color);
+    scene.fill(x + 3.0, y + 2.0, 5.0, 2.0, color);
+    scene.fill(x + 1.0, y + 4.0, 6.0, 2.0, color);
+    scene.fill(x + 4.0, y + 6.0, 5.0, 2.0, color);
+    scene.fill(x + 2.0, y + 8.0, 4.0, 3.0, color);
 }
 
 fn chrome_status(model: &NativeModel) -> String {
@@ -672,6 +669,16 @@ fn chrome_status(model: &NativeModel) -> String {
             )
         }
         UiMode::Seq => format!("{:.0} BPM", model.bpm),
+        UiMode::Arp => {
+            return if model.status.arp_latched {
+                format!(
+                    "LATCHED {}",
+                    kaoss_ui::midi_note_label(model.status.arp_root)
+                )
+            } else {
+                format!("{:.0} BPM {}", model.bpm, model.arp.order.label())
+            };
+        }
         UiMode::Chords => {
             let name = model
                 .chords_current
@@ -1581,16 +1588,24 @@ fn draw_chords(scene: &mut Scene, model: &NativeModel) {
     if let Some(spec) = model.chords_current {
         scene.text(play.x + 8, play.y + 2, &spec.name(), 0xfe8019);
     }
-    let strings = chords::STRUM_STRINGS;
     let spec_root = model.chords_current.map(|spec| spec.root);
     let strum_notes = model.chords_current.map(|spec| {
         spec.strum_strings_at(chords::strum_base_for_octave(model.chords_octave))
     });
-    let band_w = (play.w - chords::STRUM_BAND_LEFT_INSET - chords::STRUM_BAND_RIGHT_INSET).max(1)
-        / strings as i32;
-    for i in 0..strings {
-        let i = i as i32;
-        let x = play.x + chords::STRUM_BAND_LEFT_INSET + i * band_w;
+    let n = strum_notes
+        .as_ref()
+        .map(|plate| plate.len())
+        .unwrap_or(8)
+        .max(1);
+    let left = play.x + chords::STRUM_BAND_LEFT_INSET;
+    let right = play.x + play.w - chords::STRUM_BAND_RIGHT_INSET;
+    let span = (right - left).max(1);
+    for i in 0..n {
+        let x = if n == 1 {
+            left
+        } else {
+            left + (i as i32 * span) / (n as i32 - 1)
+        };
         scene.fill_rect(
             Rect {
                 x,
@@ -1602,7 +1617,7 @@ fn draw_chords(scene: &mut Scene, model: &NativeModel) {
                 let is_root = strum_notes
                     .as_ref()
                     .zip(spec_root)
-                    .map(|(notes, root)| notes[i as usize] % 12 == root)
+                    .map(|(plate, root)| plate.as_slice()[i] % 12 == root)
                     .unwrap_or(i % 3 == 0);
                 if is_root {
                     0xebdbb2
@@ -1611,10 +1626,8 @@ fn draw_chords(scene: &mut Scene, model: &NativeModel) {
                 }
             },
         );
-        if let Some(ref notes) = strum_notes {
-            // Band 0 is left (lowest note); band strings-1 is right (highest).
-            let idx = i as usize;
-            let label = crate::kaoss_ui::midi_note_label(notes[idx]);
+        if let Some(ref plate) = strum_notes {
+            let label = crate::kaoss_ui::midi_note_label(plate.as_slice()[i]);
             scene.text_scaled(x - 4, play.y + play.h - 14, &label, 0xa89984, 1);
         }
     }
@@ -1639,6 +1652,107 @@ fn draw_chords(scene: &mut Scene, model: &NativeModel) {
             }
         }
     }
+}
+
+fn draw_arp(scene: &mut Scene, model: &NativeModel) {
+    use jambox_core::ArpOrder;
+
+    let layout = model.layout;
+    let latched = model.status.arp_latched || (model.arp.latch && model.status.arp_enabled);
+    let banner = layout.arp_banner();
+    scene.fill_rect(banner, if latched { 0x689d6a } else { 0x3c3836 });
+    let root = kaoss_ui::midi_note_label(if model.status.arp_root == 0 {
+        60
+    } else {
+        model.status.arp_root
+    });
+    let banner_text = if latched {
+        format!("LATCHED  ROOT {root}  ·  next key retargets")
+    } else {
+        format!("DEFINE  play a root · {root}")
+    };
+    scene.text_centered(banner, &banner_text, 0xfbf1c7, 2);
+
+    for (i, order) in ArpOrder::ALL.iter().enumerate() {
+        let cell = layout.arp_order(i);
+        let on = model.arp.order == *order;
+        scene.button(cell, if on { 0xd65d0e } else { 0x3c3836 });
+        scene.text_centered(cell, order.label(), 0xfbf1c7, 1);
+    }
+
+    let tools = [
+        if model.arp.latch { "LATCH" } else { "HOLD" },
+        model.arp.division.label(),
+        "OCT-",
+        &format!("OCT {}", model.arp.octaves),
+        &model.arp.gate_label(),
+        model.arp.out.short_label(),
+    ];
+    let tool_colors = [
+        if model.arp.latch { 0xb16286 } else { 0x3c3836 },
+        0x458588,
+        0x3c3836,
+        0x504945,
+        0x458588,
+        model.arp.out.color(),
+    ];
+    for i in 0..6 {
+        let cell = layout.arp_tool(i);
+        scene.button(cell, tool_colors[i]);
+        scene.text_centered(cell, tools[i], 0xfbf1c7, 1);
+    }
+
+    let live_step = model.status.arp_step as usize;
+    for i in 0..16 {
+        let cell = layout.arp_step(i, 16);
+        let live = (i as u8) < model.arp.len;
+        let selected = live && i == model.arp.selected;
+        let playing = model.status.arp_enabled && i == live_step;
+        let bg = if playing {
+            0xfe8019
+        } else if selected {
+            0xd65d0e
+        } else if live {
+            0x504945
+        } else {
+            0x1d2021
+        };
+        scene.button(cell, bg);
+        if live {
+            scene.text_centered(
+                cell,
+                &crate::arp::ArpUi::interval_label(model.arp.steps[i]),
+                0xfbf1c7,
+                2,
+            );
+        }
+    }
+
+    let edits = ["−", "+", "ADD", "DEL", "KEY-", "KEY+"];
+    for (i, label) in edits.iter().enumerate() {
+        let cell = layout.arp_edit(i);
+        scene.button(cell, 0x3c3836);
+        scene.text_centered(cell, label, 0xfbf1c7, 2);
+    }
+
+    if layout.show_on_screen_keys {
+        const WHITE_NOTES: [u8; 7] = [60, 62, 64, 65, 67, 69, 71];
+        for (i, note) in WHITE_NOTES.iter().enumerate() {
+            let cell = layout.arp_keyboard_white_rect(i);
+            let held = model.status.arp_root == model.transpose_synth_key(*note);
+            scene.fill_rect(cell, if held { 0xd65d0e } else { 0xebdbb2 });
+            scene.text_centered(
+                cell,
+                kaoss_ui::midi_note_label(model.transpose_synth_key(*note)).as_str(),
+                0x1d2021,
+                1,
+            );
+        }
+        for i in 0..5 {
+            scene.fill_rect(layout.arp_keyboard_black_rect(i), 0x1d2021);
+        }
+    }
+
 }
 
 fn draw_scroll_wave_grid(
@@ -2318,11 +2432,16 @@ fn draw_kit_repeat(scene: &mut Scene, model: &NativeModel) {
 
     scene.text(
         24,
-        HUD_H + 368,
+        layout.content.y + layout.content.h - 36,
         "OFF is one-shot · hold a pad to repeat",
         0xa89984,
     );
-    scene.text(24, HUD_H + 392, "BACK returns to pads", 0xa89984);
+    scene.text(
+        24,
+        layout.content.y + layout.content.h - 16,
+        "BACK returns to pads",
+        0xa89984,
+    );
 }
 
 fn draw_scope_wave(scene: &mut Scene, rect: Rect, samples: &[f32]) {
@@ -2883,15 +3002,6 @@ fn draw_settings(scene: &mut Scene, model: &NativeModel) {
         let c = layout.content;
         scene.text(c.x + 16, c.y + c.h - 28, &model.status_line, 0xfabd2f);
     }
-    if model.throttle.power_fault() {
-        let c = layout.content;
-        scene.text(
-            c.x + 16,
-            c.y + c.h - 50,
-            &model.throttle.log_line(),
-            0xfb4934,
-        );
-    }
 }
 
 fn draw_fx(scene: &mut Scene, model: &NativeModel) {
@@ -3054,7 +3164,7 @@ fn draw_log(scene: &mut Scene, model: &NativeModel) {
         ),
         0xa0a0b8,
     );
-    let mut log_y = c.y + 70;
+    let log_y = c.y + 70;
     if model.throttle.power_fault() {
         scene.text(
             c.x + 16,
@@ -3066,7 +3176,6 @@ fn draw_log(scene: &mut Scene, model: &NativeModel) {
                 0xfabd2f
             },
         );
-        log_y = c.y + 80;
     }
     for (i, line) in model
         .log_lines

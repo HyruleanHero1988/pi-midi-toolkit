@@ -539,9 +539,20 @@ impl SeqModel {
     }
 
     fn finish_backbone(&mut self) -> SeqAction {
+        let wall = self
+            .take_started
+            .map(|t| t.elapsed().as_secs_f64())
+            .unwrap_or(0.0);
+        let last = self
+            .take
+            .iter()
+            .map(|e| e.t)
+            .chain(self.take_gestures.iter().map(|g| g.t))
+            .fold(0.0_f64, f64::max);
         self.take_started = None;
         let raw_g = std::mem::take(&mut self.take_gestures);
-        let (trimmed, gestures, length) = trim_take_with_gestures(&self.take, &raw_g);
+        let (trimmed, gestures, length) =
+            trim_take_with_gestures(&self.take, &raw_g, Some(wall.max(last)));
         self.take.clear();
         if (trimmed.is_empty() && gestures.is_empty()) || length <= 0.0 {
             self.state = SeqState::Empty;
@@ -891,6 +902,7 @@ fn with_cue_beep(
 fn trim_take_with_gestures(
     events: &[RecEvent],
     gestures: &[RecGesture],
+    take_end: Option<f64>,
 ) -> (Vec<RecEvent>, Vec<RecGesture>, f64) {
     let (trimmed, length) = if events.is_empty() && !gestures.is_empty() {
         let dummy: Vec<RecEvent> = gestures
@@ -904,10 +916,10 @@ fn trim_take_with_gestures(
                 velocity: 1,
             })
             .collect();
-        let (_, length) = trim_loop_take(&dummy, 0.35, 0.05, 2.0);
+        let (_, length) = trim_loop_take_ended(&dummy, 0.35, 0.05, 2.0, take_end);
         (Vec::new(), length)
     } else {
-        trim_loop_take(events, 0.35, 0.05, 2.0)
+        trim_loop_take_ended(events, 0.35, 0.05, 2.0, take_end)
     };
     if length <= 0.0 {
         return (Vec::new(), Vec::new(), 0.0);
@@ -942,11 +954,23 @@ fn trim_take_with_gestures(
 /// - Trailing silence after the last note-on is capped to the largest inter-onset
 ///   gap (so a slow finger on STOP does not inflate the loop).
 /// - Note-offs after the last hit are kept; trail is measured from ons.
+/// - Notes still held at STOP are content: pass `take_end` so a held chord is
+///   not crushed into a ~350 ms attack loop.
 pub fn trim_loop_take(
     events: &[RecEvent],
     default_gap: f64,
     min_gap: f64,
     max_gap: f64,
+) -> (Vec<RecEvent>, f64) {
+    trim_loop_take_ended(events, default_gap, min_gap, max_gap, None)
+}
+
+pub fn trim_loop_take_ended(
+    events: &[RecEvent],
+    default_gap: f64,
+    min_gap: f64,
+    max_gap: f64,
+    take_end: Option<f64>,
 ) -> (Vec<RecEvent>, f64) {
     if events.is_empty() {
         return (Vec::new(), 0.0);
@@ -985,7 +1009,15 @@ pub fn trim_loop_take(
 
     let last_on = *ons.last().unwrap();
     let last_ev = events.iter().map(|e| e.t).fold(f64::NEG_INFINITY, f64::max);
-    let end_abs = (last_on + trail).max(last_ev + 0.01);
+    let hanging = notes_still_held(events);
+    let end_abs = if hanging {
+        match take_end {
+            Some(end) if end > t0 + min_gap => end.max(last_ev),
+            _ => (last_on + trail).max(last_ev + 0.01),
+        }
+    } else {
+        (last_on + trail).max(last_ev + 0.01)
+    };
     let length = (end_abs - t0).max(min_gap);
 
     let mut shifted: Vec<RecEvent> = events
@@ -1013,6 +1045,19 @@ pub fn trim_loop_take(
             })
     });
     (shifted, length)
+}
+
+fn notes_still_held(events: &[RecEvent]) -> bool {
+    let mut held = std::collections::HashSet::<(u8, u8)>::new();
+    for ev in events {
+        let key = (ev.channel, ev.note);
+        if ev.on {
+            held.insert(key);
+        } else {
+            held.remove(&key);
+        }
+    }
+    !held.is_empty()
 }
 
 /// Give every note-on a note-off inside `span` (a take can end mid-note).
@@ -1262,6 +1307,65 @@ mod tests {
             (length - 0.35).abs() < 0.05,
             "single-hit trail ≈ default, got {length}"
         );
+    }
+
+    #[test]
+    fn trim_held_chord_keeps_take_length() {
+        let events = vec![
+            RecEvent {
+                t: 0.20,
+                on: true,
+                channel: 0,
+                note: 72,
+                velocity: 110,
+            },
+            RecEvent {
+                t: 0.20,
+                on: true,
+                channel: 0,
+                note: 76,
+                velocity: 110,
+            },
+            RecEvent {
+                t: 0.21,
+                on: true,
+                channel: 0,
+                note: 79,
+                velocity: 110,
+            },
+        ];
+        let crushed = trim_loop_take(&events, 0.35, 0.05, 2.0);
+        assert!(
+            crushed.1 < 0.5,
+            "without take_end a held chord still caps to the default trail, got {}",
+            crushed.1
+        );
+        let (trimmed, length) = trim_loop_take_ended(&events, 0.35, 0.05, 2.0, Some(3.2));
+        assert!(
+            (length - 3.0).abs() < 0.05,
+            "held chord must keep the take, got {length}"
+        );
+        assert_eq!(trimmed.iter().filter(|e| e.on).count(), 3);
+    }
+
+    #[test]
+    fn held_chord_backbone_keeps_the_take_length() {
+        let mut seq = SeqModel::new();
+        assert!(matches!(seq.toggle_record(), SeqAction::Stop));
+        seq.push_note(true, 0, 72, 110);
+        seq.push_note(true, 0, 76, 110);
+        seq.push_note(true, 0, 79, 110);
+        std::thread::sleep(std::time::Duration::from_millis(800));
+        match seq.toggle_record() {
+            SeqAction::Upload { length_ticks, .. } => {
+                // 120 BPM, PPQ=480 → 0.8s is 768 ticks. The old trail cap was ~336.
+                assert!(
+                    length_ticks >= 600,
+                    "held chord must not crush to a ~350ms scratch loop, got {length_ticks} ticks"
+                );
+            }
+            other => panic!("expected upload, got {other:?}"),
+        }
     }
 
     #[test]

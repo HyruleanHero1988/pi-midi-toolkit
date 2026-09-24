@@ -24,7 +24,7 @@ pub const JAM_MODES: [UiMode; 6] = [
 ];
 
 /// Home grid entries (5-col). LOG / PORTS live under Settings.
-pub const HOME_TILES: [(UiMode, &'static str, u32); 13] = [
+pub const HOME_TILES: [(UiMode, &'static str, u32); 14] = [
     (UiMode::Synth, "SYNTH", 0x458588),
     (UiMode::Fm, "FM", 0x8ec07c),
     (UiMode::Drums, "DRUMS", 0x98971a),
@@ -32,6 +32,7 @@ pub const HOME_TILES: [(UiMode, &'static str, u32); 13] = [
     (UiMode::Pads, "PADS", 0xd79921),
     (UiMode::Kaoss, "KAOSS", 0xfe8019),
     (UiMode::Chords, "CHORDS", 0xcc241d),
+    (UiMode::Arp, "ARP", 0xd65d0e),
     (UiMode::Songs, "SONGS", 0x689d6a),
     (UiMode::Presets, "PRESETS", 0x83a598),
     (UiMode::Fx, "FX", 0xb16286),
@@ -212,6 +213,20 @@ pub enum Hit {
     ChordsKeyPick(u8),
     ChordsChangesPick(usize),
     ChordsOverlayClose,
+    ArpOrder(usize),
+    ArpLatch,
+    ArpDivision,
+    ArpOctDown,
+    ArpOctUp,
+    ArpGate,
+    ArpOut,
+    ArpStep(usize),
+    ArpIntervalUp,
+    ArpIntervalDown,
+    ArpAdd,
+    ArpDel,
+    ArpKeyOctDown,
+    ArpKeyOctUp,
     None,
 }
 
@@ -714,13 +729,13 @@ impl Layout {
                 x: 24,
                 y: HUD_H + 36,
                 w: 752,
-                h: 332,
+                h: content_h - 92,
             },
             kit_macros: Rect {
                 x: 24,
                 y: HUD_H + 172,
                 w: 752,
-                h: 200,
+                h: content_h - 240,
             },
             kit_divisions: Rect {
                 x: 24,
@@ -730,19 +745,19 @@ impl Layout {
             },
             kit_note_repeat: Rect {
                 x: 24,
-                y: HUD_H + 376,
+                y: HUD_H + content_h - 48,
                 w: 320,
                 h: 44,
             },
             kit_wave: Rect {
                 x: 352,
-                y: HUD_H + 376,
+                y: HUD_H + content_h - 48,
                 w: 196,
                 h: 44,
             },
             kit_all: Rect {
                 x: 556,
-                y: HUD_H + 376,
+                y: HUD_H + content_h - 48,
                 w: 220,
                 h: 44,
             },
@@ -2046,9 +2061,9 @@ impl Layout {
     pub fn kit_edit_play(&self) -> Rect {
         Rect {
             x: 24,
-            y: HUD_H + 384,
+            y: self.content.y + self.content.h - 56,
             w: 240,
-            h: 56,
+            h: 48,
         }
     }
 
@@ -2161,6 +2176,125 @@ impl Layout {
 
     pub fn seq_drum_cell(&self, index: usize) -> Rect {
         self.kit_pad_cell(index)
+    }
+
+    pub fn arp_banner(&self) -> Rect {
+        Rect {
+            x: self.content.x + 8,
+            y: self.content.y + 6,
+            w: self.content.w - 16,
+            h: 40,
+        }
+    }
+
+    pub fn arp_order(&self, index: usize) -> Rect {
+        let n = 8i32;
+        let w = (self.content.w - 16) / n;
+        Rect {
+            x: self.content.x + 8 + (index as i32).min(n - 1) * w,
+            y: self.arp_banner().y + self.arp_banner().h + 6,
+            w: w - 4,
+            h: 40,
+        }
+    }
+
+    pub fn arp_tool(&self, index: usize) -> Rect {
+        let n = 6i32;
+        let w = (self.content.w - 16) / n;
+        Rect {
+            x: self.content.x + 8 + (index as i32).min(n - 1) * w,
+            y: self.arp_order(0).y + 46,
+            w: w - 4,
+            h: 40,
+        }
+    }
+
+    pub fn arp_step(&self, index: usize, count: usize) -> Rect {
+        let n = count.max(1) as i32;
+        let y = self.arp_tool(0).y + 50;
+        let h = if self.show_on_screen_keys { 72 } else { 110 };
+        let w = (self.content.w - 16) / n;
+        Rect {
+            x: self.content.x + 8 + (index as i32).min(n - 1) * w,
+            y,
+            w: w - 4,
+            h,
+        }
+    }
+
+    pub fn arp_edit(&self, index: usize) -> Rect {
+        let n = 6i32;
+        let y = self.arp_step(0, 1).y + self.arp_step(0, 1).h + 6;
+        let w = (self.content.w - 16) / n;
+        Rect {
+            x: self.content.x + 8 + (index as i32).min(n - 1) * w,
+            y,
+            w: w - 4,
+            h: 40,
+        }
+    }
+
+    pub fn arp_keys(&self) -> Rect {
+        let top = self.arp_edit(0).y + self.arp_edit(0).h + 6;
+        let bottom = self.content.y + self.content.h - 6;
+        Rect {
+            x: self.content.x + 8,
+            y: top,
+            w: self.content.w - 16,
+            h: (bottom - top).max(48),
+        }
+    }
+
+    pub fn arp_keyboard_white_rect(&self, index: usize) -> Rect {
+        let keys = self.arp_keys();
+        let i = index.min(Self::SYNTH_WHITE_COUNT - 1) as i32;
+        let w = keys.w / Self::SYNTH_WHITE_COUNT as i32;
+        Rect {
+            x: keys.x + i * w + 1,
+            y: keys.y + 2,
+            w: w - 2,
+            h: keys.h - 4,
+        }
+    }
+
+    pub fn arp_keyboard_black_rect(&self, index: usize) -> Rect {
+        let keys = self.arp_keys();
+        let w = keys.w / Self::SYNTH_WHITE_COUNT as i32;
+        let bw = (w * 3) / 5;
+        let bh = (keys.h * 58) / 100;
+        let white_idx: i32 = match index {
+            0 => 0,
+            1 => 1,
+            2 => 3,
+            3 => 4,
+            _ => 5,
+        };
+        Rect {
+            x: keys.x + (white_idx + 1) * w - bw / 2,
+            y: keys.y + 2,
+            w: bw,
+            h: bh,
+        }
+    }
+
+    pub fn arp_keyboard_note_at(&self, px: i32, py: i32) -> Option<u8> {
+        if !self.show_on_screen_keys {
+            return None;
+        }
+        let keys = self.arp_keys();
+        if !keys.contains(px, py) {
+            return None;
+        }
+        const BLACKS: [(usize, u8); 5] = [(0, 61), (1, 63), (2, 66), (3, 68), (4, 70)];
+        for (i, note) in BLACKS {
+            if self.arp_keyboard_black_rect(i).contains(px, py) {
+                return Some(note);
+            }
+        }
+        let w = keys.w / Self::SYNTH_WHITE_COUNT as i32;
+        let white = ((px - keys.x) / w.max(1)).clamp(0, Self::SYNTH_WHITE_COUNT as i32 - 1) as usize;
+        const WHITE_NOTES: [u8; 7] = [60, 62, 64, 65, 67, 69, 71];
+        Some(WHITE_NOTES[white])
     }
 
     /// Toolbar: OUT, HOLD, KEY, PROGS, ARM.
@@ -2316,6 +2450,7 @@ impl Layout {
             UiMode::Map => self.hit_map_channels(px, py),
             UiMode::Ports => self.hit_map(px, py),
             UiMode::Chords => self.hit_chords(px, py),
+            UiMode::Arp => self.hit_arp(px, py),
         }
     }
 
@@ -2963,6 +3098,59 @@ impl Layout {
         Hit::None
     }
 
+    fn hit_arp(&self, px: i32, py: i32) -> Hit {
+        for i in 0..8 {
+            if self.arp_order(i).contains(px, py) {
+                return Hit::ArpOrder(i);
+            }
+        }
+        if self.arp_tool(0).contains(px, py) {
+            return Hit::ArpLatch;
+        }
+        if self.arp_tool(1).contains(px, py) {
+            return Hit::ArpDivision;
+        }
+        if self.arp_tool(2).contains(px, py) {
+            return Hit::ArpOctDown;
+        }
+        if self.arp_tool(3).contains(px, py) {
+            return Hit::ArpOctUp;
+        }
+        if self.arp_tool(4).contains(px, py) {
+            return Hit::ArpGate;
+        }
+        if self.arp_tool(5).contains(px, py) {
+            return Hit::ArpOut;
+        }
+        for i in 0..16 {
+            if self.arp_step(i, 16).contains(px, py) {
+                return Hit::ArpStep(i);
+            }
+        }
+        if self.arp_edit(0).contains(px, py) {
+            return Hit::ArpIntervalDown;
+        }
+        if self.arp_edit(1).contains(px, py) {
+            return Hit::ArpIntervalUp;
+        }
+        if self.arp_edit(2).contains(px, py) {
+            return Hit::ArpAdd;
+        }
+        if self.arp_edit(3).contains(px, py) {
+            return Hit::ArpDel;
+        }
+        if self.arp_edit(4).contains(px, py) {
+            return Hit::ArpKeyOctDown;
+        }
+        if self.arp_edit(5).contains(px, py) {
+            return Hit::ArpKeyOctUp;
+        }
+        if let Some(note) = self.arp_keyboard_note_at(px, py) {
+            return Hit::SynthKey { note };
+        }
+        Hit::None
+    }
+
     pub fn settings_fx_slider(&self, index: usize) -> Rect {
         // Inserts (drive / delay / reverb / flange) plus KEYS / DRUMS mix levels.
         let n = Self::FX_SLIDER_COUNT as i32;
@@ -3268,6 +3456,27 @@ mod tests {
     }
 
     #[test]
+    fn layout_audit_drums_footer_stays_on_screen() {
+        let layout = Layout::new();
+        assert_on_screen("kit wave", layout.kit_wave);
+        assert_on_screen("kit all", layout.kit_all);
+        assert_on_screen("kit note repeat", layout.kit_note_repeat);
+        assert_on_screen("kit play", layout.kit_edit_play());
+        assert!(
+            gap_below(layout.kit_grid, layout.kit_note_repeat) >= 4,
+            "drum pads should clear WAVE / REPEAT / ALL"
+        );
+        assert!(
+            gap_below(layout.kit_macros, layout.kit_edit_play()) >= 4,
+            "kit edit sliders should clear PLAY"
+        );
+        assert!(
+            bottom(layout.status_bar) <= layout.content.y,
+            "status / LOW PWR chrome must not eat content"
+        );
+    }
+
+    #[test]
     fn layout_audit_chords_vertical_stack() {
         let layout = Layout::new();
         assert!(gap_below(layout.chords_toolbar, layout.chords_root_strip) >= 10);
@@ -3458,7 +3667,11 @@ mod tests {
         );
         assert_on_screen("map ch1", ch1);
         assert_on_screen("map ch16", ch16);
-        let home_map = layout.home_tile(11, 0);
+        let map_idx = HOME_TILES
+            .iter()
+            .position(|(mode, _, _)| *mode == UiMode::Map)
+            .expect("MAP home tile");
+        let home_map = layout.home_tile(map_idx, 0);
         assert_eq!(
             layout.hit(UiMode::Home, home_map.x + 4, home_map.y + 4),
             Hit::HomeTile(UiMode::Map)

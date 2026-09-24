@@ -17,6 +17,7 @@ pub const NATIVE_FEATURES: &[&str] = &[
     "audio_reopen",
     "midi_ports",
     "channel_map",
+    "arp",
 ];
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -218,6 +219,24 @@ pub enum Request {
     ChannelMap {
         bits: [u16; 16],
     },
+    /// Enable and configure the key-relative arpeggiator.
+    SetArp {
+        enabled: bool,
+        latch: bool,
+        order: String,
+        division: String,
+        #[serde(default = "default_arp_octaves")]
+        octaves: u8,
+        #[serde(default = "default_arp_gate")]
+        gate: u8,
+    },
+    SetArpStep {
+        index: u8,
+        interval: i8,
+    },
+    SetArpLen {
+        len: u8,
+    },
 }
 
 const fn default_velocity() -> u8 {
@@ -238,6 +257,14 @@ const fn default_kaoss_root() -> u8 {
 
 const fn default_kaoss_octaves() -> u8 {
     2
+}
+
+const fn default_arp_octaves() -> u8 {
+    1
+}
+
+const fn default_arp_gate() -> u8 {
+    90
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -375,6 +402,14 @@ pub struct StatusReply {
     pub command_drops: u64,
     pub emergency_releases: u64,
     pub touch_overwrites: u64,
+    #[serde(default)]
+    pub arp_enabled: bool,
+    #[serde(default)]
+    pub arp_latched: bool,
+    #[serde(default)]
+    pub arp_root: u8,
+    #[serde(default)]
+    pub arp_step: u8,
 }
 
 #[cfg(test)]
@@ -498,6 +533,30 @@ mod tests {
         assert!(json.contains("channel_map"));
         let decoded: Request = serde_json::from_str(&json).unwrap();
         assert!(matches!(decoded, Request::ChannelMap { bits: b } if b[0] == 1 << 5));
+    }
+
+    #[test]
+    fn set_arp_round_trips() {
+        let request = Request::SetArp {
+            enabled: true,
+            latch: true,
+            order: "incl_up".into(),
+            division: "sixteenth".into(),
+            octaves: 2,
+            gate: 90,
+        };
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(json.contains("\"cmd\":\"set_arp\""));
+        let decoded: Request = serde_json::from_str(&json).unwrap();
+        assert!(matches!(
+            decoded,
+            Request::SetArp {
+                enabled: true,
+                latch: true,
+                octaves: 2,
+                ..
+            }
+        ));
     }
 
 }

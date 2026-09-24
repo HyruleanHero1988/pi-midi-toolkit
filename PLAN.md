@@ -529,9 +529,9 @@ Model: `tools/midi-tone/kaoss.py` (no Tk; color math is unit-tested). Tests: `te
 
 ## Phase 4 — Key-relative arpeggiator
 
-- Edit step sequence (intervals, gates, optional velocity steps)
-- Held/latched root transposes and runs from engine clock
-- Only after the sequencer / phrases exist so the product doesn’t overload one “sequence” concept
+- **ARP** home tile (ships first): authored relative steps, MPK Mini orders (UP / DOWN / inclusive / exclusive / random / order), time division, extra octaves, gate, latch. After latch, the next key retargets the root without stopping the loop.
+- Held-chord “keys are the pool” arp stays a **separate** later mode (do not collapse into one screen).
+- Pattern + walk run from the engine clock. UI stays off the MIDI hot path.
 
 ## Repo / stack
 

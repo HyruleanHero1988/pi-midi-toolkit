@@ -212,10 +212,33 @@ pub enum Command {
         root_midi: u8,
         octaves: u8,
     },
-    /// Clip (`target=0`) or kaoss (`target=1`) emit mode: Local/Usb/Both.
+    /// Clip (`target=0`), kaoss (`target=1`), or arp (`target=2`) emit mode.
     SetEmitMode {
         target: u8,
         mode: u8,
+    },
+    /// Enable/configure the key-relative arpeggiator.
+    SetArp {
+        enabled: bool,
+        latch: bool,
+        order: u8,
+        division: u8,
+        octaves: u8,
+        gate: u8,
+    },
+    SetArpStep {
+        index: u8,
+        interval: i8,
+    },
+    SetArpLen {
+        len: u8,
+    },
+    /// Internal event produced by the arpeggiator clock.
+    ArpVoice {
+        channel: u8,
+        note: u8,
+        velocity: u8,
+        on: bool,
     },
     /// Push raw MIDI bytes onto the engine USB/DIN out sink (no local voice).
     MidiEmit {

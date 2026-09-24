@@ -5,8 +5,8 @@
 //! preallocated clip handed over as a `Box`.
 
 use jambox_core::{
-    pack_xy, Clip, ClipEvent, ClipEventKind, Command, FxParam, FxTarget, LaunchMode, Quantize,
-    RepeatDivision, SynthParam,
+    pack_xy, ArpDivision, ArpOrder, Clip, ClipEvent, ClipEventKind, Command, FxParam, FxTarget,
+    LaunchMode, Quantize, RepeatDivision, SynthParam,
 };
 use jambox_protocol::{HelloReply, RepeatDivision as WireRepeatDivision, RepeatPhase, TouchPhase};
 use serde::{Deserialize, Serialize};
@@ -175,6 +175,23 @@ pub enum Request {
     ChannelMap {
         bits: [u16; 16],
     },
+    SetArp {
+        enabled: bool,
+        latch: bool,
+        order: String,
+        division: String,
+        #[serde(default = "default_arp_octaves")]
+        octaves: u8,
+        #[serde(default = "default_arp_gate")]
+        gate: u8,
+    },
+    SetArpStep {
+        index: u8,
+        interval: i8,
+    },
+    SetArpLen {
+        len: u8,
+    },
 }
 
 const fn default_velocity() -> u8 {
@@ -195,6 +212,14 @@ const fn default_kaoss_root() -> u8 {
 
 const fn default_kaoss_octaves() -> u8 {
     2
+}
+
+const fn default_arp_octaves() -> u8 {
+    1
+}
+
+const fn default_arp_gate() -> u8 {
+    90
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -399,6 +424,14 @@ pub struct StatusReply {
     pub command_drops: u64,
     pub emergency_releases: u64,
     pub touch_overwrites: u64,
+    #[serde(default)]
+    pub arp_enabled: bool,
+    #[serde(default)]
+    pub arp_latched: bool,
+    #[serde(default)]
+    pub arp_root: u8,
+    #[serde(default)]
+    pub arp_step: u8,
 }
 
 /// What the control thread decides to do with a request.
@@ -732,6 +765,7 @@ pub fn decode(request: Request) -> Result<Decoded, String> {
         Request::EmitMode { target, mode } => {
             let target = match target.to_ascii_lowercase().as_str() {
                 "kaoss" => 1u8,
+                "arp" => 2u8,
                 _ => 0u8,
             };
             let mode = match mode.to_ascii_lowercase().as_str() {
@@ -784,6 +818,25 @@ pub fn decode(request: Request) -> Result<Decoded, String> {
         Request::MidiPorts => Decoded::MidiPorts,
         Request::MidiSelect { input, output } => Decoded::MidiSelect { input, output },
         Request::ChannelMap { bits } => Decoded::ChannelMap { bits },
+        Request::SetArp {
+            enabled,
+            latch,
+            order,
+            division,
+            octaves,
+            gate,
+        } => Decoded::Command(Command::SetArp {
+            enabled,
+            latch,
+            order: ArpOrder::from_name(&order).as_u8(),
+            division: ArpDivision::from_name(&division).as_u8(),
+            octaves,
+            gate,
+        }),
+        Request::SetArpStep { index, interval } => {
+            Decoded::Command(Command::SetArpStep { index, interval })
+        }
+        Request::SetArpLen { len } => Decoded::Command(Command::SetArpLen { len }),
     })
 }
 
@@ -959,6 +1012,23 @@ mod tests {
         assert!(json.contains("\"midi\""));
         assert!(json.contains("control_change"));
         assert!(json.contains("71"));
+    }
+
+    #[test]
+    fn set_arp_decodes_to_a_plain_command() {
+        let d = decode_line(
+            r#"{"cmd":"set_arp","enabled":true,"latch":true,"order":"incl_up","division":"sixteenth","octaves":2,"gate":90}"#,
+        );
+        match d {
+            Decoded::Command(Command::SetArp {
+                enabled: true,
+                latch: true,
+                octaves: 2,
+                gate: 90,
+                ..
+            }) => {}
+            _ => panic!("wrong decode"),
+        }
     }
 
     #[test]

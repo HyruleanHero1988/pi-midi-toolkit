@@ -18,6 +18,9 @@ use crate::drums::{
 };
 use crate::fm::FmSynth;
 use crate::fx::{FxParams, FxUnit};
+use crate::arp::{
+    ArpDivision, ArpEvent, ArpOrder, Arpeggiator, MAX_ARP_EVENTS_PER_BLOCK,
+};
 use crate::kaoss::{unpack_xy, KaossMapper, LatestTouch, TouchDelta};
 use crate::repeat::{RepeatEvent, RepeatRack, MAX_REPEAT_EVENTS_PER_BLOCK};
 use crate::transport::Transport;
@@ -201,6 +204,10 @@ pub struct EngineStatus {
     pub active_repeats: u16,
     pub playing_clips: u16,
     pub peak: f32,
+    pub arp_enabled: bool,
+    pub arp_latched: bool,
+    pub arp_root: u8,
+    pub arp_step: u8,
 }
 
 pub struct JamboxEngine {
@@ -212,6 +219,7 @@ pub struct JamboxEngine {
     drums: DrumKit,
     sequencer: Sequencer,
     repeats: RepeatRack,
+    arp: Arpeggiator,
     kaoss: KaossMapper,
     /// Recorded SEQ Kaoss gestures — separate so live fingers cannot steal them.
     kaoss_seq: KaossMapper,
@@ -230,6 +238,7 @@ pub struct JamboxEngine {
     group_buf: Vec<f32>,
     seq_scratch: Vec<SeqEvent>,
     repeat_scratch: [RepeatEvent; MAX_REPEAT_EVENTS_PER_BLOCK],
+    arp_scratch: [ArpEvent; MAX_ARP_EVENTS_PER_BLOCK],
     timeline: Vec<(u32, Command)>,
 
     tone: f32,
@@ -249,7 +258,34 @@ pub struct JamboxEngine {
     bend_semis: f32,
     clip_emit: EmitMode,
     kaoss_emit: EmitMode,
+    arp_emit: EmitMode,
     status: EngineStatus,
+}
+
+/// Keep wet insert tanks moving after the last voice in a group goes idle,
+/// so a strum's delay / reverb can finish instead of getting chopped off.
+fn flush_fx_tails(
+    units: &mut [FxUnit],
+    already: &[usize],
+    already_n: usize,
+    extra_skip: Option<usize>,
+    scratch: &mut [f32],
+    dest: &mut [f32],
+    n: usize,
+) {
+    for (i, fx) in units.iter_mut().enumerate() {
+        if already[..already_n].contains(&i) || extra_skip == Some(i) {
+            continue;
+        }
+        if !fx.has_tail() {
+            continue;
+        }
+        scratch[..n].iter_mut().for_each(|s| *s = 0.0);
+        fx.process(&mut scratch[..n]);
+        for j in 0..n {
+            dest[j] += scratch[j];
+        }
+    }
 }
 
 impl JamboxEngine {
@@ -271,6 +307,7 @@ impl JamboxEngine {
             drums: DrumKit::new(sr),
             sequencer: Sequencer::new(),
             repeats: RepeatRack::new(),
+            arp: Arpeggiator::new(),
             kaoss: KaossMapper::new(),
             kaoss_seq: KaossMapper::new(),
             kaoss_seq_mode: [0; crate::kaoss::MAX_TOUCH_VOICES],
@@ -302,7 +339,16 @@ impl JamboxEngine {
                 note: 0,
                 velocity: 0,
             }; MAX_REPEAT_EVENTS_PER_BLOCK],
-            timeline: Vec::with_capacity(MAX_BLOCK_COMMANDS * 2 + MAX_REPEAT_EVENTS_PER_BLOCK),
+            arp_scratch: [ArpEvent {
+                frame: 0,
+                channel: 0,
+                note: 0,
+                velocity: 0,
+                on: false,
+            }; MAX_ARP_EVENTS_PER_BLOCK],
+            timeline: Vec::with_capacity(
+                MAX_BLOCK_COMMANDS * 2 + MAX_REPEAT_EVENTS_PER_BLOCK + MAX_ARP_EVENTS_PER_BLOCK,
+            ),
             tone: 1.0,
             level: 1.0,
             drum_level: 1.0,
@@ -320,6 +366,7 @@ impl JamboxEngine {
             bend_semis: 0.0,
             clip_emit: EmitMode::Both,
             kaoss_emit: EmitMode::Local,
+            arp_emit: EmitMode::Both,
             status: EngineStatus::default(),
         }
     }
@@ -407,6 +454,10 @@ impl JamboxEngine {
 
     pub fn kaoss_emit(&self) -> EmitMode {
         self.kaoss_emit
+    }
+
+    pub fn arp_emit(&self) -> EmitMode {
+        self.arp_emit
     }
 
     /// Make sure there is one FX insert per wavetable. Host thread (allocates).
@@ -575,6 +626,24 @@ impl JamboxEngine {
                     },
                 ));
             }
+
+            let arp_count = self.arp.collect(
+                &self.transport,
+                block_start,
+                frames as u32,
+                &mut self.arp_scratch,
+            );
+            for event in self.arp_scratch.iter().take(arp_count) {
+                self.timeline.push((
+                    event.frame.min(frames as u32 - 1),
+                    Command::ArpVoice {
+                        channel: event.channel,
+                        note: event.note,
+                        velocity: event.velocity,
+                        on: event.on,
+                    },
+                ));
+            }
         }
 
         self.timeline.sort_by_key(|(frame, _)| *frame);
@@ -620,6 +689,10 @@ impl JamboxEngine {
             active_repeats: self.repeats.active_count() as u16,
             playing_clips: self.sequencer.playing_count() as u16,
             peak,
+            arp_enabled: self.arp.enabled(),
+            arp_latched: self.arp.latched(),
+            arp_root: self.arp.root(),
+            arp_step: self.arp.cursor(),
         };
     }
 
@@ -724,6 +797,9 @@ impl JamboxEngine {
         // Recorded pads / SEQ: baked table + insert when locked, else live morph.
         let mut slots = [0usize; MAX_VOICES];
         let slot_count = voices.active_clip_slots(&mut slots);
+        let mut used_clip_fx = [0usize; MAX_VOICES];
+        let mut used_clip_fx_n = 0;
+        let mut unlocked_voice_fx = None;
         for &slot in slots.iter().take(slot_count) {
             group_buf[..n].iter_mut().for_each(|s| *s = 0.0);
             let locked = clip_baked[slot]
@@ -738,8 +814,11 @@ impl JamboxEngine {
             };
             voices.render_clip_slot(slot, table, &mut group_buf[..n], ctx);
             let fx = if locked {
+                used_clip_fx[used_clip_fx_n] = slot;
+                used_clip_fx_n += 1;
                 clip_fx.get_mut(slot)
             } else {
+                unlocked_voice_fx = Some(bank.nearer_index());
                 voice_fx.get_mut(bank.nearer_index())
             };
             if let Some(fx) = fx {
@@ -751,6 +830,24 @@ impl JamboxEngine {
                 key_bus[i] += group_buf[i];
             }
         }
+        flush_fx_tails(
+            voice_fx,
+            &groups,
+            group_count,
+            unlocked_voice_fx,
+            group_buf,
+            key_bus,
+            n,
+        );
+        flush_fx_tails(
+            clip_fx,
+            &used_clip_fx,
+            used_clip_fx_n,
+            None,
+            group_buf,
+            key_bus,
+            n,
+        );
 
         if *fm_enabled || fm.active_count() > 0 {
             group_buf[..n].iter_mut().for_each(|s| *s = 0.0);
@@ -778,6 +875,7 @@ impl JamboxEngine {
                 drum_bus[i] += group_buf[i];
             }
         }
+        flush_fx_tails(drum_fx, &models, model_count, None, group_buf, drum_bus, n);
         if !drum_group_fx.params().is_bypassed() {
             drum_group_fx.process(&mut drum_bus[..n]);
         }
@@ -807,9 +905,28 @@ impl JamboxEngine {
                 channel,
                 note,
                 velocity,
-            } => self.sound_on(channel, note, velocity, MixSource::Live),
+            } => {
+                if self.arp.enabled() && channel != DRUM_CHANNEL {
+                    if velocity == 0 {
+                        self.arp.note_off(note);
+                    } else if self.arp.note_on(note, velocity, channel, absolute_frame) {
+                        let step = self
+                            .transport
+                            .ticks_to_samples(self.arp.division().ticks())
+                            .round()
+                            .max(1.0) as u64;
+                        if let Some((ch, n, vel)) = self.arp.take_attack(absolute_frame, step) {
+                            self.apply_arp_voice(ch, n, vel, true, relative_frame, midi_out);
+                        }
+                    }
+                } else {
+                    self.sound_on(channel, note, velocity, MixSource::Live);
+                }
+            }
             Command::NoteOff { channel, note } => {
-                if channel != DRUM_CHANNEL {
+                if self.arp.enabled() && channel != DRUM_CHANNEL {
+                    self.arp.note_off(note);
+                } else if channel != DRUM_CHANNEL {
                     self.voices.note_off(channel, note);
                     self.fm.note_off(channel, note);
                 }
@@ -849,6 +966,7 @@ impl JamboxEngine {
                 self.voices.all_notes_off();
                 self.fm.all_notes_off();
                 self.repeats.stop_all();
+                self.arp.panic();
                 self.release_kaoss();
             }
             Command::Panic => {
@@ -856,6 +974,7 @@ impl JamboxEngine {
                 self.fm.silence();
                 self.drums.silence();
                 self.repeats.stop_all();
+                self.arp.panic();
                 self.release_kaoss();
                 let mut flush = [SeqEvent {
                     frame: 0,
@@ -1025,17 +1144,77 @@ impl JamboxEngine {
             Command::ClipTouchUp { owner, slot } => self.clip_touch_up(owner, slot),
             Command::SetEmitMode { target, mode } => {
                 let mode = EmitMode::from_u8(mode);
-                if target == 1 {
-                    self.kaoss_emit = mode;
-                } else {
-                    self.clip_emit = mode;
+                match target {
+                    1 => self.kaoss_emit = mode,
+                    2 => self.arp_emit = mode,
+                    _ => self.clip_emit = mode,
                 }
             }
+            Command::SetArp {
+                enabled,
+                latch,
+                order,
+                division,
+                octaves,
+                gate,
+            } => {
+                self.arp.set_order(ArpOrder::from_u8(order));
+                self.arp.set_division(ArpDivision::from_u8(division));
+                self.arp.set_octaves(octaves);
+                self.arp.set_gate(gate);
+                self.arp.set_latch(latch);
+                self.arp.set_enabled(enabled);
+            }
+            Command::SetArpStep { index, interval } => self.arp.set_step(index, interval),
+            Command::SetArpLen { len } => self.arp.set_len(len),
+            Command::ArpVoice {
+                channel,
+                note,
+                velocity,
+                on,
+            } => self.apply_arp_voice(channel, note, velocity, on, relative_frame, midi_out),
             Command::MidiEmit { status, d1, d2 } => {
                 if let Some(ev) = MidiEvent::parse(&[status, d1, d2]) {
                     midi_out.push(relative_frame, ev);
                 }
             }
+        }
+    }
+
+    fn apply_arp_voice(
+        &mut self,
+        channel: u8,
+        note: u8,
+        velocity: u8,
+        on: bool,
+        relative_frame: u32,
+        midi_out: &mut MidiOutSink,
+    ) {
+        if self.arp_emit.includes_local() {
+            if on {
+                self.sound_on(channel, note, velocity, MixSource::Live);
+            } else if channel != DRUM_CHANNEL {
+                self.voices.note_off(channel, note);
+                self.fm.note_off(channel, note);
+            }
+        }
+        if self.arp_emit.includes_usb() {
+            midi_out.push(
+                relative_frame,
+                if on {
+                    MidiEvent::NoteOn {
+                        channel,
+                        note,
+                        velocity,
+                    }
+                } else {
+                    MidiEvent::NoteOff {
+                        channel,
+                        note,
+                        velocity: 0,
+                    }
+                },
+            );
         }
     }
 
@@ -1810,6 +1989,86 @@ mod tests {
     }
 
     #[test]
+    fn voice_delay_keeps_echoing_after_the_note_ends() {
+        let mut e = engine();
+        apply_now(
+            &mut e,
+            Command::SetSynth {
+                param: SynthParam::Release,
+                value: 0.0,
+            },
+        );
+        apply_now(
+            &mut e,
+            Command::SetFx {
+                target: FxTarget::Voice(0),
+                param: FxParam::DelayTime,
+                value: 0.0,
+            },
+        );
+        apply_now(
+            &mut e,
+            Command::SetFx {
+                target: FxTarget::Voice(0),
+                param: FxParam::DelayFb,
+                value: 0.0,
+            },
+        );
+        apply_now(
+            &mut e,
+            Command::SetFx {
+                target: FxTarget::Voice(0),
+                param: FxParam::DelayMix,
+                value: 0.7,
+            },
+        );
+
+        let mut out = vec![0.0f32; 512];
+        let mut midi = MidiOutSink::new();
+        e.render(
+            &mut out,
+            &[ScheduledCommand::now(Command::NoteOn {
+                channel: 0,
+                note: 69,
+                velocity: 120,
+            })],
+            &mut midi,
+        );
+        assert!(peak(&out) > 0.01, "note should speak");
+
+        e.render(
+            &mut out,
+            &[ScheduledCommand::now(Command::NoteOff {
+                channel: 0,
+                note: 69,
+            })],
+            &mut midi,
+        );
+        for _ in 0..8 {
+            if e.status().active_voices == 0 {
+                break;
+            }
+            e.render(&mut out, &[], &mut midi);
+        }
+        assert_eq!(
+            e.status().active_voices, 0,
+            "dry voice must be gone before we listen for the echo"
+        );
+
+        // 50 ms delay; the note lived in the first ~20 ms, so the repeat
+        // lands just after the voice is reclaimed.
+        let mut tail = 0.0f32;
+        for _ in 0..12 {
+            e.render(&mut out, &[], &mut midi);
+            tail = tail.max(peak(&out));
+        }
+        assert!(
+            tail > 0.01,
+            "insert delay should keep ringing after the strum lifts, peak={tail}"
+        );
+    }
+
+    #[test]
     fn tone_lowpass_mid_is_brighter_than_dark() {
         let sr = 44100.0_f32;
         let src: Vec<f32> = (0..512)
@@ -2553,5 +2812,105 @@ mod tests {
         );
         assert_eq!(e.fm.active_count(), 0, "pad notes must not jump to FM");
         assert!(peak(&out) > 0.01);
+    }
+
+    #[test]
+    fn arp_swallows_the_held_root_and_emits_the_pattern() {
+        let mut e = engine();
+        apply_now(
+            &mut e,
+            Command::SetArp {
+                enabled: true,
+                latch: true,
+                order: crate::ArpOrder::Order.as_u8(),
+                division: crate::ArpDivision::Quarter.as_u8(),
+                octaves: 0,
+                gate: 64,
+            },
+        );
+        let mut out = vec![0.0f32; 512];
+        let mut midi = MidiOutSink::new();
+        e.render(
+            &mut out,
+            &[ScheduledCommand::now(Command::NoteOn {
+                channel: 0,
+                note: 60,
+                velocity: 120,
+            })],
+            &mut midi,
+        );
+        assert!(
+            e.status().arp_enabled,
+            "arp should report enabled after a root"
+        );
+        assert!(
+            e.status().active_voices >= 1,
+            "first arp step should sound immediately"
+        );
+        e.render(
+            &mut out,
+            &[ScheduledCommand::now(Command::NoteOff {
+                channel: 0,
+                note: 60,
+            })],
+            &mut midi,
+        );
+        assert!(
+            e.status().arp_latched,
+            "release must keep a latched arp running"
+        );
+        e.render(
+            &mut out,
+            &[ScheduledCommand::now(Command::NoteOn {
+                channel: 0,
+                note: 62,
+                velocity: 120,
+            })],
+            &mut midi,
+        );
+        assert_eq!(e.status().arp_root, 62);
+    }
+
+    #[test]
+    fn arp_does_not_thru_the_root_as_a_block_chord() {
+        let mut e = engine();
+        apply_now(
+            &mut e,
+            Command::SetArp {
+                enabled: true,
+                latch: false,
+                order: crate::ArpOrder::Up.as_u8(),
+                division: crate::ArpDivision::Quarter.as_u8(),
+                octaves: 0,
+                gate: 40,
+            },
+        );
+        let mut out = vec![0.0f32; 256];
+        let mut midi = MidiOutSink::new();
+        e.render(
+            &mut out,
+            &[
+                ScheduledCommand::now(Command::NoteOn {
+                    channel: 0,
+                    note: 60,
+                    velocity: 120,
+                }),
+                ScheduledCommand::now(Command::NoteOn {
+                    channel: 0,
+                    note: 64,
+                    velocity: 120,
+                }),
+                ScheduledCommand::now(Command::NoteOn {
+                    channel: 0,
+                    note: 67,
+                    velocity: 120,
+                }),
+            ],
+            &mut midi,
+        );
+        assert!(
+            e.status().active_voices <= 1,
+            "authored arp is monophonic — roots must not stack as a chord"
+        );
     }
 }

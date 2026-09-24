@@ -99,6 +99,10 @@ impl StatusCache {
             command_drops: self.dropped_commands,
             emergency_releases: self.emergency_releases,
             touch_overwrites,
+            arp_enabled: s.arp_enabled,
+            arp_latched: s.arp_latched,
+            arp_root: s.arp_root,
+            arp_step: s.arp_step,
         }
     }
 }

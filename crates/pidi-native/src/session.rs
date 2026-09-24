@@ -225,6 +225,20 @@ pub struct SessionState {
     #[serde(default)]
     pub chords_out: OutMode,
     #[serde(default)]
+    pub arp_out: OutMode,
+    #[serde(default)]
+    pub arp_latch: bool,
+    #[serde(default)]
+    pub arp_order: String,
+    #[serde(default)]
+    pub arp_division: String,
+    #[serde(default = "default_arp_octaves")]
+    pub arp_octaves: u8,
+    #[serde(default = "default_arp_gate")]
+    pub arp_gate: u8,
+    #[serde(default)]
+    pub arp_steps: Vec<i8>,
+    #[serde(default)]
     pub chords_hold: bool,
     #[serde(default)]
     pub chords_key: u8,
@@ -285,6 +299,14 @@ fn default_kaoss_out() -> OutMode {
     OutMode::Local
 }
 
+fn default_arp_octaves() -> u8 {
+    1
+}
+
+fn default_arp_gate() -> u8 {
+    90
+}
+
 fn default_kaoss_viz_style() -> String {
     "cells".into()
 }
@@ -340,6 +362,13 @@ impl Default for SessionState {
             song_out: OutMode::Both,
             kaoss_out: OutMode::Local,
             chords_out: OutMode::Both,
+            arp_out: OutMode::Both,
+            arp_latch: false,
+            arp_order: String::new(),
+            arp_division: String::new(),
+            arp_octaves: default_arp_octaves(),
+            arp_gate: default_arp_gate(),
+            arp_steps: vec![0, 4, 7],
             chords_hold: true,
             chords_key: 0,
             chords_octave: 0,

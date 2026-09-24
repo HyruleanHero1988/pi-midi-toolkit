@@ -50,6 +50,11 @@ impl FxParams {
             && self.reverb_mix <= 0.001
             && self.flanger_mix <= 0.001
     }
+
+    /// True when a wet mix would still be audible after the dry voice dies.
+    pub fn is_wet(&self) -> bool {
+        self.delay_mix > 0.001 || self.reverb_mix > 0.001 || self.flanger_mix > 0.001
+    }
 }
 
 /// One FX insert with its own delay line and reverb tank.
@@ -64,6 +69,8 @@ pub struct FxUnit {
     flanger: Vec<f32>,
     flanger_pos: usize,
     flanger_phase: f32,
+    /// Samples of silence still worth running so delay / reverb can finish.
+    tail_hold: u32,
 }
 
 impl FxUnit {
@@ -83,6 +90,7 @@ impl FxUnit {
             flanger: vec![0.0; flen.max(32)],
             flanger_pos: 0,
             flanger_phase: 0.0,
+            tail_hold: 0,
         }
     }
 
@@ -115,6 +123,12 @@ impl FxUnit {
         self.reverb_prev = 0.0;
         self.flanger_pos = 0;
         self.flanger_phase = 0.0;
+        self.tail_hold = 0;
+    }
+
+    /// Wet tanks still have something to say after the last dry voice went idle.
+    pub fn has_tail(&self) -> bool {
+        self.tail_hold > 0 && self.params.is_wet()
     }
 
     /// Process in place. Allocation-free; safe to call from the audio thread.
@@ -123,6 +137,7 @@ impl FxUnit {
             return;
         }
         let p = self.params;
+        let input_hot = buf.iter().any(|s| s.abs() > 1e-4);
 
         if p.drive > 0.001 {
             let amount = 1.0 + p.drive * 12.0;
@@ -210,7 +225,35 @@ impl FxUnit {
                 *s = *s * dry + wet * mix;
             }
         }
+
+        if input_hot && p.is_wet() {
+            self.tail_hold = tail_samples(&p, self.sample_rate);
+        } else {
+            self.tail_hold = self.tail_hold.saturating_sub(buf.len() as u32);
+        }
     }
+}
+
+/// How long to keep running after the last dry input, given current wet amounts.
+fn tail_samples(p: &FxParams, sample_rate: f32) -> u32 {
+    let mut sec = 0.0f32;
+    if p.delay_mix > 0.001 {
+        let delay_sec = 0.05 + p.delay_time * 0.70;
+        let fb = p.delay_fb.clamp(0.0, 0.92);
+        let repeats = if fb < 0.05 {
+            2.0
+        } else {
+            (0.002f32.ln() / fb.max(0.05).ln()).clamp(2.0, 24.0)
+        };
+        sec = sec.max(delay_sec * repeats);
+    }
+    if p.reverb_mix > 0.001 {
+        sec = sec.max(0.30 + p.reverb_size * 1.4);
+    }
+    if p.flanger_mix > 0.001 {
+        sec = sec.max(0.08);
+    }
+    (sec * sample_rate).ceil() as u32
 }
 
 #[cfg(test)]
@@ -327,5 +370,43 @@ mod tests {
         let mut buf = [0.4f32; 64];
         fx.process(&mut buf);
         assert!(buf.iter().all(|v| (*v - 0.4).abs() < 1e-5));
+    }
+
+    #[test]
+    fn wet_impulse_keeps_a_tail_flag() {
+        let mut fx = FxUnit::new(48_000.0);
+        fx.set_params(FxParams {
+            delay_time: 0.0,
+            delay_fb: 0.0,
+            delay_mix: 1.0,
+            ..FxParams::default()
+        });
+        let mut buf = [0.0f32; 64];
+        buf[0] = 1.0;
+        fx.process(&mut buf);
+        assert!(fx.has_tail(), "a wet hit should keep the tank spinning");
+        fx.reset();
+        assert!(!fx.has_tail(), "panic / reset must kill the leftover echo");
+    }
+
+    #[test]
+    fn tail_flag_expires_after_enough_silence() {
+        let mut fx = FxUnit::new(48_000.0);
+        fx.set_params(FxParams {
+            delay_time: 0.0,
+            delay_fb: 0.0,
+            delay_mix: 1.0,
+            ..FxParams::default()
+        });
+        let mut hit = [0.0f32; 64];
+        hit[0] = 1.0;
+        fx.process(&mut hit);
+        assert!(fx.has_tail());
+        let mut quiet = vec![0.0f32; 2048];
+        for _ in 0..16 {
+            quiet.fill(0.0);
+            fx.process(&mut quiet);
+        }
+        assert!(!fx.has_tail(), "a one-repeat delay should finish and go idle");
     }
 }

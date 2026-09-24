@@ -278,6 +278,33 @@ impl Outbox {
         });
     }
 
+    pub fn set_arp(
+        &mut self,
+        enabled: bool,
+        latch: bool,
+        order: &str,
+        division: &str,
+        octaves: u8,
+        gate: u8,
+    ) {
+        self.reliable.push_back(Request::SetArp {
+            enabled,
+            latch,
+            order: order.to_string(),
+            division: division.to_string(),
+            octaves,
+            gate,
+        });
+    }
+
+    pub fn set_arp_step(&mut self, index: u8, interval: i8) {
+        self.reliable.push_back(Request::SetArpStep { index, interval });
+    }
+
+    pub fn set_arp_len(&mut self, len: u8) {
+        self.reliable.push_back(Request::SetArpLen { len });
+    }
+
     pub fn status(&mut self) {
         self.reliable.push_back(Request::Status);
     }

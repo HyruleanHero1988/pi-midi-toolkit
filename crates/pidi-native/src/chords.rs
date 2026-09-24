@@ -4,10 +4,9 @@
 //! - 12 roots in **circle-of-fifths** order (F C G D A E B F# Db Ab Eb Bb)
 //! - three rows: MAJOR / minor / 7th
 //! - same-root and neighbour combos for M7, m7, dim, aug, sus4, add9
-//! - a wide Omnichord-style **strumplate** of about two and a half octaves
-//!   of the selected chord (vertical pluck lines; swipe left → right, low → high).
-//!   A real OM-27 / OM-108 spans four octaves; that puts the right half of this
-//!   synth in C6–C7 / G6–G7 and it squeals, so we stay midrange (C3…E5 on C).
+//! - a wide Omnichord-style **strumplate** (vertical pluck lines; swipe
+//!   left → right, low → high). Range is Kaoss-style: start + 4-octave width,
+//!   then clamp so a high OCT+ start cannot become C5…C9.
 //!
 //! The 8-slot **palette** is a harmonic palette: press a stored chord to play it
 //! as a block (MOM releases on lift; HOLD latches), or load a named set of
@@ -32,10 +31,13 @@ pub const KEY_NAMES: [&str; 12] = [
 
 pub const QUALITY_ROWS: usize = 3;
 pub const PALETTE_SLOTS: usize = 8;
-/// Harp strings on the strum plate (matches the drawn lines).
-/// Eight close-position tones ≈ 2.5 octaves (C3…E5 on C). Four octaves
-/// matches a real Omnichord but squeals on the right half of this synth.
-pub const STRUM_STRINGS: usize = 8;
+/// Desired harp width, same as Kaoss `1..4 OCT` (we use the wide setting).
+pub const STRUM_WIDTH_OCTAVES: u8 = 4;
+/// Hard top (C6). C5 is known-good on this synth; C7+ squeals. A start of C5
+/// + 4 octaves therefore becomes C5…C6, never C5…C9.
+pub const STRUM_CEILING: u8 = 84;
+/// Enough slots for a 4-note chord across 4 octaves (+ the top root).
+pub const STRUM_STRINGS_MAX: usize = 20;
 /// Insets within `Layout::chords_strum_play()` — must match `draw_chords`.
 /// Left/right pad the vertical pluck lines (low on the left, high on the right).
 pub const STRUM_BAND_LEFT_INSET: i32 = 18;
@@ -56,6 +58,33 @@ pub fn block_base_for_octave(octave: i8) -> u8 {
 pub fn strum_base_for_octave(octave: i8) -> u8 {
     let o = octave.clamp(OCTAVE_MIN, OCTAVE_MAX) as i16;
     (i16::from(STRUM_BASE) + o * 12).clamp(24, 84) as u8
+}
+
+/// Filled harp for the current chord — variable length, like Kaoss `scale_notes`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StrumPlate {
+    notes: [u8; STRUM_STRINGS_MAX],
+    len: usize,
+}
+
+impl StrumPlate {
+    pub fn as_slice(&self) -> &[u8] {
+        let n = self.len.clamp(1, STRUM_STRINGS_MAX);
+        &self.notes[..n]
+    }
+
+    pub fn first(self) -> u8 {
+        self.as_slice()[0]
+    }
+
+    pub fn last(self) -> u8 {
+        let notes = self.as_slice();
+        notes[notes.len() - 1]
+    }
+
+    pub fn len(self) -> usize {
+        self.as_slice().len()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -152,12 +181,12 @@ impl ChordSpec {
         voicing_midi(self, base)
     }
 
-    /// 8 harp strings spanning about 2.5 octaves, low → high.
-    pub fn strum_strings(self) -> [u8; STRUM_STRINGS] {
+    /// Chord tones in the Kaoss-style start+width window, low → high.
+    pub fn strum_strings(self) -> StrumPlate {
         self.strum_strings_at(STRUM_BASE)
     }
 
-    pub fn strum_strings_at(self, base: u8) -> [u8; STRUM_STRINGS] {
+    pub fn strum_strings_at(self, base: u8) -> StrumPlate {
         strum_strings_at(self, base)
     }
 
@@ -313,11 +342,13 @@ pub fn voicing_midi(spec: ChordSpec, base: u8) -> [Option<u8>; 4] {
     out
 }
 
-pub fn strum_strings(spec: ChordSpec) -> [u8; STRUM_STRINGS] {
+pub fn strum_strings(spec: ChordSpec) -> StrumPlate {
     strum_strings_at(spec, STRUM_BASE)
 }
 
-pub fn strum_strings_at(spec: ChordSpec, base: u8) -> [u8; STRUM_STRINGS] {
+/// Chord tones in `[root, min(root + 4 octaves, C6)]` — same window math as
+/// Kaoss `scale_notes` (`root..=top` with `top = root + width*12` clamped).
+pub fn strum_strings_at(spec: ChordSpec, base: u8) -> StrumPlate {
     let mut pcs = [0u8; 4];
     let mut n = 0usize;
     for pc in pitch_classes(spec).into_iter().flatten() {
@@ -330,70 +361,52 @@ pub fn strum_strings_at(spec: ChordSpec, base: u8) -> [u8; STRUM_STRINGS] {
         pcs[0] = spec.root;
         n = 1;
     }
-    // Sort so the plate always climbs: root, then the rest in pitch-class order
-    // wrapping after the root (Omnichord "from the root up").
-    let mut ordered = [0u8; 4];
-    let mut on = 0usize;
-    ordered[on] = spec.root;
-    on += 1;
-    let mut rest: Vec<u8> = pcs[..n]
-        .iter()
-        .copied()
-        .filter(|&p| p != spec.root)
-        .collect();
-    // Interval from the root, not absolute 0..11. Sorting by pitch-class number
-    // puts wrapped tones (D in G, C# in F#) before the third, so the walk skips
-    // a whole octave per string and the right side of the plate screams.
-    rest.sort_by_key(|&p| (p + 12 - spec.root) % 12);
-    for p in rest {
-        if on < 4 {
-            ordered[on] = p;
-            on += 1;
+    let mut start = u16::from(base);
+    while start < 128 && start % 12 != u16::from(spec.root) {
+        start += 1;
+    }
+    let start = start.min(127);
+    let top = (start + u16::from(STRUM_WIDTH_OCTAVES) * 12)
+        .min(u16::from(STRUM_CEILING))
+        .min(127);
+    let mut notes = [start as u8; STRUM_STRINGS_MAX];
+    let mut len = 0usize;
+    for midi in start..=top {
+        let pc = (midi % 12) as u8;
+        if pcs[..n].contains(&pc) && len < STRUM_STRINGS_MAX {
+            notes[len] = midi as u8;
+            len += 1;
         }
     }
-    let mut out = [base; STRUM_STRINGS];
-    let mut midi = u16::from(base);
-    // Align so the first string is the chord root at or above `base`.
-    while midi % 12 != u16::from(spec.root) {
-        midi += 1;
+    if len == 0 {
+        notes[0] = start as u8;
+        len = 1;
     }
-    for i in 0..STRUM_STRINGS {
-        let pc = u16::from(ordered[i % on]);
-        while midi % 12 != pc {
-            if midi >= 127 {
-                break;
-            }
-            midi += 1;
-        }
-        out[i] = midi.min(127) as u8;
-        if midi < 127 {
-            midi += 1;
-        }
-    }
-    out
+    StrumPlate { notes, len }
 }
 
 /// Normalized strum position from a pixel in the play rect: 1 = rightmost (highest) string.
+/// 0..1 is the inset plate itself so hit-testing does not need the live string count.
 pub fn strum_pos_from_play_px(play_x: i32, play_w: i32, px: i32) -> f32 {
-    let band_w = ((play_w - STRUM_BAND_LEFT_INSET - STRUM_BAND_RIGHT_INSET).max(1) as f32)
-        / STRUM_STRINGS as f32;
     let left = (play_x + STRUM_BAND_LEFT_INSET) as f32;
-    let right = left + (STRUM_STRINGS as f32 - 1.0) * band_w;
-    if (px as f32) <= left {
+    let right = (play_x + play_w - STRUM_BAND_RIGHT_INSET) as f32;
+    if px as f32 <= left {
         return 0.0;
     }
-    if (px as f32) >= right {
+    if px as f32 >= right {
         return 1.0;
     }
-    let t = (px as f32 - left) / (right - left).max(1.0);
-    t.clamp(0.0, 1.0)
+    ((px as f32 - left) / (right - left).max(1.0)).clamp(0.0, 1.0)
 }
 
-/// Map normalized strum position (1 = highest string) onto the harp table.
-pub fn string_at(y: f32, strings: &[u8; STRUM_STRINGS]) -> u8 {
-    let t = y.clamp(0.0, 1.0) * (STRUM_STRINGS.saturating_sub(1)) as f32;
+/// Map normalized strum position (1 = highest string) onto the live harp table.
+pub fn string_at(y: f32, strings: &[u8]) -> u8 {
+    if strings.is_empty() {
+        return STRUM_BASE;
+    }
+    let t = y.clamp(0.0, 1.0) * (strings.len().saturating_sub(1)) as f32;
     let i = t.round() as usize;
-    strings[i.min(STRUM_STRINGS - 1)]
+    strings[i.min(strings.len() - 1)]
 }
 
 /// One step of a named progression, relative to the chosen key.
@@ -613,50 +626,52 @@ mod tests {
     #[test]
     fn strum_climbs_and_stays_in_chord() {
         let c = ChordSpec::new(0, ChordQuality::Maj);
-        let strings = c.strum_strings();
-        assert!(strings[0] < strings[STRUM_STRINGS - 1]);
+        let plate = c.strum_strings();
+        assert!(plate.first() < plate.last());
         let allowed = [0u8, 4, 7];
-        for n in strings {
-            assert!(allowed.contains(&(n % 12)), "out of chord: {n}");
+        for n in plate.as_slice() {
+            assert!(allowed.contains(&(*n % 12)), "out of chord: {n}");
         }
-        let span = strings[STRUM_STRINGS - 1] as i16 - strings[0] as i16;
-        assert!(
-            span <= 30,
-            "strum should stay ~2.5 octaves, got {span} semis ({:?})",
-            strings
+        assert_eq!(plate.first(), 48, "default C major starts at C3");
+        assert_eq!(plate.last(), STRUM_CEILING, "and stops at the C6 ceiling");
+        assert_eq!(
+            plate.as_slice(),
+            &[48, 52, 55, 60, 64, 67, 72, 76, 79, 84]
         );
-        assert_eq!(strings[0], 48, "default C major starts at C3");
-        assert_eq!(strings[STRUM_STRINGS - 1], 76, "and ends on E5, not C7");
     }
 
     #[test]
-    fn strum_every_major_is_root_up_and_midrange() {
-        // G / F# / F used to sort D/C#/C before the third and jump to D8/C8.
-        let expected = [
-            (0, [48, 52, 55, 60, 64, 67, 72, 76]), // C3 … E5
-            (6, [54, 58, 61, 66, 70, 73, 78, 82]), // F#3 … A#5
-            (7, [55, 59, 62, 67, 71, 74, 79, 83]), // G3 … B5
-            (5, [53, 57, 60, 65, 69, 72, 77, 81]), // F3 … A5
+    fn strum_high_start_caps_at_c6_not_c9() {
+        // OCT+2 start is C5 — 4 octaves would be C9; Kaoss-style clamp keeps C6.
+        let plate = ChordSpec::new(0, ChordQuality::Maj).strum_strings_at(72);
+        assert_eq!(plate.first(), 72);
+        assert_eq!(plate.last(), STRUM_CEILING);
+        assert_eq!(plate.as_slice(), &[72, 76, 79, 84]);
+    }
+
+    #[test]
+    fn strum_every_major_is_root_up_and_capped() {
+        let expected: &[(u8, &[u8])] = &[
+            (0, &[48, 52, 55, 60, 64, 67, 72, 76, 79, 84]), // C3…C6
+            (6, &[54, 58, 61, 66, 70, 73, 78, 82]),         // F#3…A#5
+            (7, &[55, 59, 62, 67, 71, 74, 79, 83]),         // G3…B5
+            (5, &[53, 57, 60, 65, 69, 72, 77, 81, 84]),     // F3…C6
         ];
         for (root, want) in expected {
-            let got = ChordSpec::new(root, ChordQuality::Maj).strum_strings();
-            assert_eq!(got, want, "root {root} strings {got:?}");
-            let span = got[STRUM_STRINGS - 1] as i16 - got[0] as i16;
-            assert!(span <= 30, "root {root} span {span}");
+            let got = ChordSpec::new(*root, ChordQuality::Maj).strum_strings();
+            assert_eq!(got.as_slice(), *want, "root {root} strings {got:?}");
+            assert!(got.last() <= STRUM_CEILING);
         }
         for root in 0u8..12 {
-            let strings = ChordSpec::new(root, ChordQuality::Maj).strum_strings();
-            assert_eq!(strings[0] % 12, root);
-            let span = strings[STRUM_STRINGS - 1] as i16 - strings[0] as i16;
-            assert!(
-                span <= 30,
-                "root {root} should stay ~2.5 octaves, got {span} {strings:?}"
-            );
-            for window in strings.windows(2) {
-                assert!(window[1] > window[0], "must climb {strings:?}");
+            let plate = ChordSpec::new(root, ChordQuality::Maj).strum_strings();
+            assert_eq!(plate.first() % 12, root);
+            assert!(plate.last() <= STRUM_CEILING, "root {root} {plate:?}");
+            let notes = plate.as_slice();
+            for window in notes.windows(2) {
+                assert!(window[1] > window[0], "must climb {notes:?}");
                 assert!(
                     (window[1] - window[0]) <= 7,
-                    "no skipped chord tone {strings:?}"
+                    "no skipped chord tone {notes:?}"
                 );
             }
         }
@@ -674,25 +689,28 @@ mod tests {
     fn string_at_right_is_highest() {
         let c = ChordSpec::new(0, ChordQuality::Maj);
         let s = c.strum_strings();
-        assert_eq!(string_at(1.0, &s), s[STRUM_STRINGS - 1], "pad right → high");
-        assert_eq!(string_at(0.0, &s), s[0], "pad left → low");
+        assert_eq!(string_at(1.0, s.as_slice()), s.last(), "pad right → high");
+        assert_eq!(string_at(0.0, s.as_slice()), s.first(), "pad left → low");
     }
 
     #[test]
     fn strum_touch_x_tracks_drawn_bands() {
         let play_x = 8;
         let play_w = 784;
-        let band_w =
-            ((play_w - STRUM_BAND_LEFT_INSET - STRUM_BAND_RIGHT_INSET).max(1) as f32)
-            / STRUM_STRINGS as f32;
         let left = play_x + STRUM_BAND_LEFT_INSET;
+        let right = play_x + play_w - STRUM_BAND_RIGHT_INSET;
         let c = ChordSpec::new(0, ChordQuality::Maj);
         let s = c.strum_strings();
-        for band in 0..STRUM_STRINGS {
-            let px = (left as f32 + band as f32 * band_w + band_w * 0.5) as i32;
+        let n = s.len();
+        for band in 0..n {
+            let px = if n == 1 {
+                left
+            } else {
+                left + (band as i32 * (right - left)) / (n as i32 - 1)
+            };
             let pos = strum_pos_from_play_px(play_x, play_w, px);
-            let note = string_at(pos, &s);
-            let expected = s[band];
+            let note = string_at(pos, s.as_slice());
+            let expected = s.as_slice()[band];
             assert_eq!(
                 note, expected,
                 "band {band} px={px} pos={pos:.2} expected {} got {}",
@@ -721,6 +739,7 @@ mod tests {
         );
         let s0 = c.strum_strings_at(strum_base_for_octave(0));
         let s1 = c.strum_strings_at(strum_base_for_octave(1));
-        assert_eq!(s1[0] - s0[0], 12);
+        assert_eq!(s1.first() - s0.first(), 12);
+        assert!(s1.last() <= STRUM_CEILING);
     }
 }

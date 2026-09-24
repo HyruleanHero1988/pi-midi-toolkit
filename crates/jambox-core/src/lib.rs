@@ -14,6 +14,7 @@
 
 #![forbid(unsafe_code)]
 
+mod arp;
 mod clip;
 mod command;
 mod drums;
@@ -27,6 +28,10 @@ mod transport;
 mod voice;
 mod wavetable;
 
+pub use arp::{
+    walk_notes, ArpDivision, ArpEvent, ArpOrder, Arpeggiator, MAX_ARP_EVENTS_PER_BLOCK,
+    MAX_ARP_OCTAVES, MAX_ARP_POOL, MAX_ARP_STEPS,
+};
 pub use clip::{
     Clip, ClipEvent, ClipEventKind, ClipSlot, ClipVoice, LaunchMode, Sequencer, MAX_CLIPS,
     SEQ_CLIP_SLOT, SEQ_DRUM_MIX_SLOT, SEQ_KAOSS_MIX_SLOT,

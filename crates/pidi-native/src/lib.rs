@@ -16,6 +16,7 @@ pub mod kaoss_viz;
 pub mod layout;
 pub mod mode;
 pub mod chords;
+pub mod arp;
 pub mod model;
 pub mod paths;
 pub mod phrases;
