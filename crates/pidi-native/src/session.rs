@@ -203,6 +203,9 @@ pub struct SessionState {
     /// Per-input MIDI channel fan-out. `0` = identity for that input (0–15).
     #[serde(default)]
     pub channel_map: [u16; 16],
+    /// Lightweight probe log of engine/audio health. Missing in old sessions → off.
+    #[serde(default)]
+    pub probe: bool,
 }
 
 fn default_drum_level() -> f32 {
@@ -284,6 +287,7 @@ impl Default for SessionState {
             midi_in: String::new(),
             midi_out: String::new(),
             channel_map: [0; 16],
+            probe: false,
         }
     }
 }
@@ -345,6 +349,16 @@ mod tests {
         assert!((s.drum_level - 1.0).abs() < 1e-6);
         assert!((s.seq_level - 1.0).abs() < 1e-6);
         assert_eq!(s.kaoss_fx_target, KaossFxTarget::Voice);
+        assert!(!s.probe);
+    }
+
+    #[test]
+    fn session_roundtrip_includes_probe() {
+        let mut s = SessionState::default();
+        s.probe = true;
+        let json = serde_json::to_string(&s).unwrap();
+        let back: SessionState = serde_json::from_str(&json).unwrap();
+        assert!(back.probe);
     }
 
     #[test]

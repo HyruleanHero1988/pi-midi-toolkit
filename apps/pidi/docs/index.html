@@ -348,6 +348,7 @@
         <tr><th>VIB</th><td>Y = vibrato depth. Lift restores the previous depth.</td></tr>
         <tr><th>WAH</th><td>Y = tone oscillation rate (auto-wah LFO on the filter). Bottom = slow sweep, top = fast wobble. Lift restores the sticky tone.</td></tr>
         <tr><th>BEND</th><td>Y = pitch bend about the pad midline (center = unison, ±12 st). Curated.</td></tr>
+        <tr><th>FLANGE</th><td>Y = flanger mix. Curated. X plays the scale; no rate wobble on this pad.</td></tr>
         <tr><th>LEVEL / DECAY / ATTACK / GRIT / DELAY</th><td>Y = volume / release / attack / drive / delay mix. Behind SHOW ALL.</td></tr>
       </table>
       <h3>FX programs — no pitch from the pad</h3>
@@ -355,10 +356,10 @@
         <tr><th>FILTER</th><td>X = TONE, Y = MORPH (momentary unless HOLD).</td></tr>
         <tr><th>ECHO</th><td>X = delay time, Y = delay mix. Lands on the SET pad-FX target (voice / drums / both).</td></tr>
         <tr><th>DRIVE</th><td>X = drive, Y = reverb. Same pad-FX target as ECHO.</td></tr>
-        <tr><th>FLANGE</th><td>X = flanger rate, Y = flanger mix. Curated. Latch a note first (LEAD + HOLD), then pick FLANGE.</td></tr>
+        <tr><th>FL RATE</th><td>SHOW ALL. X = flanger rate, Y = flanger mix. Latch a note first if you still want the old wobble pad.</td></tr>
         <tr><th>SPACE / RESO / WASH / CRUSH / SWEEP / SWELL</th><td>SHOW ALL extras — delay/reverb/drive pairs. Lift restores unless HOLD is on.</td></tr>
       </table>
-      <p class="note"><strong>FILTER / FLANGE / ECHO do not play notes.</strong> If you open them on an empty pad you hear silence. Latch a sound first, then sculpt. Pad FX follows SET → VOICE / DRUMS / BOTH. For <em>different</em> reverb on keys vs kit, use FX MODE sliders (TARGET: VOICE vs TARGET: DRUMS) — those inserts are independent.</p>
+      <p class="note"><strong>FILTER / ECHO do not play notes.</strong> If you open them on an empty pad you hear silence. Latch a sound first, then sculpt. Pad FX follows SET → VOICE / DRUMS / BOTH. For <em>different</em> reverb on keys vs kit, use FX MODE sliders (TARGET: VOICE vs TARGET: DRUMS) — those inserts are independent.</p>
     </section>
 
     <section class="screen" id="kaoss-scales">
@@ -429,8 +430,8 @@
       </figure>
       <table>
         <tr><th>12×3 grid</th><td>Columns F C G D A E B F# Db Ab Eb Bb. Rows MAJ / min / 7. Same-root and neighbour combos give M7, m7, dim, aug, sus4, add9. Lifting a combo together keeps it on the strum pad — fingers do not have to come up in the same instant.</td></tr>
-        <tr><th>STRUM</th><td>Four octaves of the selected chord, low→high. Slide to harp; buttons/palette play a block voicing (piano-style).</td></tr>
-        <tr><th>PALETTE</th><td>Eight slots. Empty tap or ARM stores the current chord. Filled press plays that chord as a block (MOM while held, HOLD latches).</td></tr>
+        <tr><th>STRUM</th><td>Wide plate under the fifths grid. Slide to harp (low→high); buttons/palette play a block voicing (piano-style).</td></tr>
+        <tr><th>PALETTE</th><td>2×4 grid to the right of the fifths buttons. Empty tap or ARM stores the current chord. Filled press plays that chord as a block (MOM while held, HOLD latches).</td></tr>
         <tr><th>HOLD / MOM</th><td>HOLD keeps the last block chord ringing (memory). MOM only sounds while your finger is down.</td></tr>
         <tr><th>OUT</th><td>LOCAL / USB / BOTH through the current synth voice (or MIDI out).</td></tr>
         <tr><th>KEY / PROGS / ARM</th><td>Pick the key, load a named progression into the palette, or arm the next empty slot.</td></tr>
@@ -535,6 +536,7 @@
         <tr><th>LOG / MAP</th><td>Engine log, MIDI thru.</td></tr>
         <tr><th>WIFI</th><td>Join the saved NetworkManager profile or <code>.wifi-credentials</code>.</td></tr>
         <tr><th>FONT</th><td>RETRO bitmap vs SMOOTH TTF.</td></tr>
+        <tr><th>PROBE</th><td>Toggle a cheap local health log (<code>probe.log</code>): callback µs, xruns, reconnects, load, throttle. Safe to leave on while playing.</td></tr>
         <tr><th>UPDATE</th><td>CHECK GitHub <code>master</code>, then overlay the repo and copy committed <code>dist/armv7</code> onto <code>bin/</code> (midi-engine, jambox-engine, pidi-native). Does not cargo-build on the Pi.</td></tr>
       </table>
     </section>
@@ -547,7 +549,7 @@
         <figcaption>07 — LOG</figcaption>
       </figure>
       <table>
-        <tr><th>Counters</th><td>Callback frames/µs, xruns, command drops, emergency releases, active repeats.</td></tr>
+        <tr><th>Counters</th><td>Callback frames/µs, xruns, command drops, emergency releases, active repeats. SET→PROBE also writes these to <code>probe.log</code>.</td></tr>
         <tr><th>CLEAR / ALL OFF</th><td>Wipe the on-screen log, or panic.</td></tr>
       </table>
     </section>

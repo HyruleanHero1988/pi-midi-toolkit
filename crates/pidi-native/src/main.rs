@@ -135,7 +135,7 @@ fn main() {
         for notice in client.midi_inbox.drain(..) {
             model.on_midi_notice(&notice);
         }
-        model.connected = client.connected;
+        model.note_engine_link(client.connected);
         model.status = client.last_status;
         model.apply_midi_ports(&client.last_midi_ports);
         model.tick(dt, &mut client.outbox);

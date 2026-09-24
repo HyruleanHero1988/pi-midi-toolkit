@@ -382,6 +382,12 @@ pub struct NativeModel {
     pub throttle: crate::throttle::ThrottleState,
     last_throttle_poll: Instant,
     logged_undervolt: bool,
+    /// SET→PROBE: append engine health to `probe.log` every couple of seconds.
+    pub probe: bool,
+    pub probe_reconnects: u64,
+    last_probe_write: Instant,
+    last_logged_xruns: u64,
+    last_logged_drops: u64,
 }
 
 impl Default for NativeModel {
@@ -566,6 +572,11 @@ impl NativeModel {
             throttle: crate::throttle::ThrottleState::default(),
             last_throttle_poll: Instant::now(),
             logged_undervolt: false,
+            probe: false,
+            probe_reconnects: 0,
+            last_probe_write: Instant::now(),
+            last_logged_xruns: 0,
+            last_logged_drops: 0,
         };
         // Ensure ~/.local/share/pidi/{songs,phrases,…} exist on first boot.
         let _ = crate::paths::data_root();
@@ -1082,6 +1093,7 @@ impl NativeModel {
         self.poll_update_job();
         self.poll_wifi_job();
         self.poll_throttle();
+        self.tick_probe();
         self.tick_ota_reload(dt);
         if self.mode == UiMode::Drums && self.kit_edit_open && self.kit_wave_dirty {
             self.rebuild_kit_wave();
@@ -1125,6 +1137,60 @@ impl NativeModel {
             self.logged_undervolt = true;
             self.push_log(next.log_line());
             self.mark_dirty();
+        }
+    }
+
+    /// Track engine socket drops so probe.log can attribute reconnect storms.
+    pub fn note_engine_link(&mut self, connected: bool) {
+        if self.connected && !connected {
+            self.probe_reconnects = self.probe_reconnects.saturating_add(1);
+            if self.probe {
+                self.push_log(format!("probe engine link down ({})", self.probe_reconnects));
+            }
+        }
+        self.connected = connected;
+    }
+
+    fn tick_probe(&mut self) {
+        if !self.probe {
+            return;
+        }
+        if self.frame > 1
+            && self.last_probe_write.elapsed().as_secs_f32() < crate::probe::INTERVAL_SEC
+        {
+            return;
+        }
+        self.write_probe_sample();
+    }
+
+    fn write_probe_sample(&mut self) {
+        let thr = format!("thr={:#x}", self.throttle.flags);
+        let line = crate::probe::format_line(
+            self.connected,
+            self.probe_reconnects,
+            self.status.callback_frames,
+            self.status.callback_micros,
+            self.status.callback_peak_micros,
+            self.status.xruns,
+            self.status.command_drops,
+            self.status.emergency_releases,
+            self.status.active_voices,
+            self.status.active_drums,
+            self.status.playing_clips,
+            self.status.peak,
+            &thr,
+        );
+        let wrote = crate::probe::append(&line);
+        let xrun_jump = self.status.xruns > self.last_logged_xruns;
+        let drop_jump = self.status.command_drops > self.last_logged_drops;
+        self.last_logged_xruns = self.status.xruns;
+        self.last_logged_drops = self.status.command_drops;
+        self.last_probe_write = Instant::now();
+        if wrote && (xrun_jump || drop_jump) {
+            self.push_log(format!(
+                "probe xrun={} drop={}",
+                self.status.xruns, self.status.command_drops
+            ));
         }
     }
 
@@ -1687,6 +1753,7 @@ impl NativeModel {
         self.midi_in_filter = s.midi_in.clone();
         self.midi_out_filter = s.midi_out.clone();
         self.channel_map_bits = s.channel_map;
+        self.probe = s.probe;
         outbox.midi_select(
             Some(self.midi_in_filter.clone()),
             Some(self.midi_out_filter.clone()),
@@ -1784,6 +1851,7 @@ impl NativeModel {
             midi_in: self.midi_in_filter.clone(),
             midi_out: self.midi_out_filter.clone(),
             channel_map: self.channel_map_bits,
+            probe: self.probe,
         }
     }
 
@@ -3307,6 +3375,19 @@ impl NativeModel {
                 self.push_nav_history(UiMode::Ports);
                 self.switch_mode(UiMode::Ports, outbox);
             }
+            Hit::SettingsProbe => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.probe = !self.probe;
+                if self.probe {
+                    self.status_line = "PROBE ON — writing probe.log".into();
+                    self.push_log("probe on");
+                    self.write_probe_sample();
+                } else {
+                    self.status_line = "PROBE OFF".into();
+                    self.push_log("probe off");
+                }
+                self.mark_dirty();
+            }
             Hit::MapThruOn => {
                 self.tap_ui(slot, id, gesture, px, py);
                 self.start_host_job(HostTask::MapThruOn);
@@ -4795,6 +4876,35 @@ impl NativeModel {
             .count()
     }
 
+    /// Sounding notes come from live contacts, not only the last start/stop edge.
+    fn reconcile_kaoss_from_fingers(&mut self, outbox: &mut Outbox) {
+        let prog = kaoss_ui::program(self.kaoss_program);
+        if !prog.note || kaoss_ui::gate(self.kaoss_gate).beats > 0.0 {
+            return;
+        }
+        let live: Vec<(f32, f32)> = self
+            .fingers
+            .iter()
+            .filter(|f| f.active && f.surface == Surface::Kaoss)
+            .map(|f| (f.x, f.y))
+            .collect();
+        if live.is_empty() {
+            return;
+        }
+        let held: Vec<u8> = live
+            .iter()
+            .map(|&(x, _)| self.kaoss_note_at(x))
+            .collect();
+        if let Some(current) = self.kaoss_usb_note {
+            if held.contains(&current) {
+                return;
+            }
+        }
+        if let Some(&(x, y)) = live.last() {
+            self.kaoss_usb_note_follow(x, y, outbox);
+        }
+    }
+
     fn begin_kaoss_touch(&mut self, gesture: u32, x: f32, y: f32, outbox: &mut Outbox) {
         // Count excludes this contact only if it isn't registered yet — callers
         // always arm the Finger slot before invoking us, so subtract one.
@@ -4938,6 +5048,7 @@ impl NativeModel {
                 self.kaoss_usb_note_off(outbox);
             }
         }
+        self.reconcile_kaoss_from_fingers(outbox);
         self.kaoss_touching = remaining > 0;
         if remaining == 0 {
             self.kaoss_usb_pad_up(outbox);
@@ -7177,6 +7288,140 @@ mod tests {
     }
 
     #[test]
+    fn kaoss_lifting_one_finger_leaves_the_other_touch() {
+        let mut model = NativeModel::new();
+        assert!(kaoss_ui::program(model.kaoss_program).note);
+        let mut out = Outbox::new();
+        let a = model.layout.kaoss_cell(1, 3);
+        let b = model.layout.kaoss_cell(10, 3);
+        model.finger_down(1, a.x + 4, a.y + 4, &mut out);
+        model.finger_down(2, b.x + 4, b.y + 4, &mut out);
+        let downs: Vec<u32> = out
+            .take()
+            .iter()
+            .filter_map(|r| match r {
+                Request::Touch {
+                    phase: TouchPhase::Down,
+                    gesture,
+                    ..
+                } => Some(*gesture),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(downs.len(), 2);
+
+        model.finger_up(1, &mut out);
+        let lift = out.take();
+        let ups: Vec<u32> = lift
+            .iter()
+            .filter_map(|r| match r {
+                Request::Touch {
+                    phase: TouchPhase::Up,
+                    gesture,
+                    ..
+                } => Some(*gesture),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            ups,
+            vec![downs[0]],
+            "lifting finger 1 must not Touch-Up finger 2: {lift:?}"
+        );
+        let mut buf = [(0.0, 0.0); MAX_FINGERS];
+        assert_eq!(model.copy_kaoss_fingers(&mut buf), 1);
+
+        model.finger_up(2, &mut out);
+        let end = out.take();
+        assert!(end.iter().any(|r| matches!(
+            r,
+            Request::Touch {
+                phase: TouchPhase::Up,
+                gesture,
+                ..
+            } if *gesture == downs[1]
+        )));
+    }
+
+    #[test]
+    fn kaoss_smear_lift_does_not_touch_up_the_held_finger() {
+        let mut model = NativeModel::new();
+        let mut out = Outbox::new();
+        let a = model.layout.kaoss_cell(1, 3);
+        let b = model.layout.kaoss_cell(10, 3);
+        model.finger_down(1, a.x + 4, a.y + 4, &mut out);
+        model.finger_down(2, b.x + 4, b.y + 4, &mut out);
+        let downs: Vec<u32> = out
+            .take()
+            .iter()
+            .filter_map(|r| match r {
+                Request::Touch {
+                    phase: TouchPhase::Down,
+                    gesture,
+                    ..
+                } => Some(*gesture),
+                _ => None,
+            })
+            .collect();
+
+        model.finger_move(1, b.x + 4, b.y + 4, &mut out);
+        out.take();
+        model.finger_up(1, &mut out);
+        let lift = out.take();
+        assert!(
+            lift.iter().all(|r| !matches!(
+                r,
+                Request::Touch {
+                    phase: TouchPhase::Up,
+                    gesture,
+                    ..
+                } if *gesture == downs[1]
+            )),
+            "smear-lift must not send Up for the remaining finger: {lift:?}"
+        );
+        let mut buf = [(0.0, 0.0); MAX_FINGERS];
+        assert_eq!(model.copy_kaoss_fingers(&mut buf), 1);
+    }
+
+    #[test]
+    fn kaoss_usb_reconciles_to_the_remaining_finger() {
+        let mut model = NativeModel::new();
+        model.kaoss_out = OutMode::Usb;
+        let mut out = Outbox::new();
+        let a = model.layout.kaoss_cell(1, 3);
+        let b = model.layout.kaoss_cell(10, 3);
+        model.finger_down(1, a.x + 4, a.y + 4, &mut out);
+        model.finger_down(2, b.x + 4, b.y + 4, &mut out);
+        out.take();
+
+        let keep = model.kaoss_note_at(model.layout.kaoss.pad_xy(a.x + 4, a.y + 4).0);
+        model.finger_up(2, &mut out);
+        let lift = out.take();
+        assert!(
+            lift.iter().any(|r| matches!(
+                r,
+                Request::MidiEmit {
+                    kind,
+                    note: Some(n),
+                    ..
+                } if kind == "note_on" && *n == keep
+            )),
+            "USB out should retarget the remaining finger's note: {lift:?}"
+        );
+        assert!(
+            lift.iter().all(|r| !matches!(
+                r,
+                Request::MidiEmit {
+                    kind,
+                    note: Some(n),
+                    ..
+                } if kind == "note_off" && *n == keep
+            )),
+            "USB must not note-off the remaining pitch: {lift:?}"
+        );
+    }
+
+    #[test]
     fn curated_program_pick_stores_absolute_index() {
         let mut model = NativeModel::new();
         model.kaoss_show_all = false;
@@ -7368,6 +7613,38 @@ mod tests {
         assert_no_bus_fx(&batch);
         assert_no_drum_group_fx(&batch);
         assert!(model.fx_voice[1] > 0.5, "Y should raise voice delay mix");
+    }
+
+    #[test]
+    fn kaoss_flange_plays_note_and_mix_not_rate() {
+        let mut model = NativeModel::new();
+        select_kaoss_program(&mut model, "flange");
+        model.morph_a = 0;
+        model.morph_b = 0;
+        let mut out = Outbox::new();
+        let k = model.layout.kaoss;
+        model.finger_down(1, k.x + k.w / 2, k.y + 4, &mut out);
+        let batch = out.take();
+        assert!(
+            batch.iter().any(|r| matches!(
+                r,
+                Request::Touch {
+                    phase: TouchPhase::Down,
+                    ..
+                }
+            )),
+            "FLANGE should play a note on touch: {batch:?}"
+        );
+        assert_voice_fx(&batch, 0, "flanger_mix");
+        assert!(
+            batch.iter().all(|r| !matches!(
+                r,
+                Request::Fx { param, .. } if param == "flanger_rate"
+            )),
+            "curated FLANGE must not drive rate: {batch:?}"
+        );
+        assert_no_bus_fx(&batch);
+        assert!(model.fx_voice[3] > 0.5, "Y should raise flange amount");
     }
 
     #[test]
@@ -8939,6 +9216,46 @@ mod tests {
         model.finger_down(1, px, py, &mut out);
         model.finger_up(1, &mut out);
         assert_eq!(model.mode, UiMode::Settings);
+    }
+
+    #[test]
+    fn settings_probe_toggles_and_writes_log() {
+        let _g = crate::probe::ENV_LOCK.lock().unwrap();
+        let dir = std::env::temp_dir().join(format!(
+            "pidi-probe-ui-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let path = dir.join("probe.log");
+        let _ = std::fs::create_dir_all(&dir);
+        std::env::set_var("PIDI_PROBE_LOG", &path);
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Settings);
+        model.status.xruns = 4;
+        model.status.callback_frames = 512;
+        model.status.callback_micros = 180;
+        let mut out = Outbox::new();
+        let btn = model.layout.settings_probe;
+        model.finger_down(1, btn.x + 4, btn.y + 4, &mut out);
+        model.finger_up(1, &mut out);
+        assert!(model.probe, "SET→PROBE should latch on");
+        assert!(model.status_line.contains("PROBE ON"));
+        assert!(model.capture_session().probe);
+        let body = std::fs::read_to_string(&path).expect("probe.log");
+        assert!(body.contains("xrun=4"), "{body}");
+        assert!(body.contains("cb=512/180us"), "{body}");
+        model.finger_down(2, btn.x + 4, btn.y + 4, &mut out);
+        model.finger_up(2, &mut out);
+        assert!(!model.probe);
+        assert!(model.status_line.contains("PROBE OFF"));
+        model.note_engine_link(true);
+        model.note_engine_link(false);
+        assert_eq!(model.probe_reconnects, 1);
+        std::env::remove_var("PIDI_PROBE_LOG");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -43,6 +43,19 @@ printf '{"cmd":"status"}\n'                                        | nc -U /tmp/
 
 systemd units: [`deploy/jambox-engine.service`](deploy/jambox-engine.service) and [`deploy/pidi-native.service`](deploy/pidi-native.service).
 
+## Probe / diagnostics
+
+If the Pi chokes while playing, SET → **PROBE** writes a cheap local sample
+every ~2 seconds to `~/.local/share/pidi/probe.log` (or `$PIDI_DATA_ROOT/probe.log`):
+
+```
+load  callback µs  xruns  command drops  reconnects  voices  clips  peak  throttle
+```
+
+Toggle the same button to stop. Leave it on during a play session — it is
+file I/O every 2s, not extra DSP. Open SET → LOG for the live counters.
+Related: backlog card “Investigate periodic sound dropouts” uses this log.
+
 ## Kiosk tests (no Pi, no audio device)
 
 ```bash

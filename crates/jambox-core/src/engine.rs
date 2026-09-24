@@ -1026,13 +1026,13 @@ impl JamboxEngine {
                 new_note,
                 velocity,
             } => {
-                if channel != DRUM_CHANNEL {
+                if channel != DRUM_CHANNEL && !self.kaoss.note_is_held(channel, old_note) {
                     self.voices.note_off(channel, old_note);
                 }
                 self.start_touch_note(channel, new_note, velocity);
             }
             TouchDelta::Stop { channel, note } => {
-                if channel != DRUM_CHANNEL {
+                if channel != DRUM_CHANNEL && !self.kaoss.note_is_held(channel, note) {
                     self.voices.note_off(channel, note);
                 }
             }
@@ -1889,6 +1889,93 @@ mod tests {
             &mut midi,
         );
         assert_eq!(e.active_touches(), 0);
+    }
+
+    #[test]
+    fn lifting_one_kaoss_finger_leaves_the_other_sounding() {
+        let mut e = engine();
+        let mut out = vec![0.0f32; 512];
+        let mut midi = MidiOutSink::new();
+        let (x_low, y) = crate::kaoss::pack_xy(0.0, 0.8);
+        let (x_high, _) = crate::kaoss::pack_xy(1.0, 0.8);
+        e.render(
+            &mut out,
+            &[
+                ScheduledCommand::now(Command::TouchDown {
+                    owner: 1,
+                    x: x_low,
+                    y,
+                    channel: 0,
+                    velocity: 120,
+                }),
+                ScheduledCommand::now(Command::TouchDown {
+                    owner: 2,
+                    x: x_high,
+                    y,
+                    channel: 0,
+                    velocity: 120,
+                }),
+            ],
+            &mut midi,
+        );
+        assert_eq!(e.active_touches(), 2);
+        assert_eq!(e.voices.held_count(), 2);
+        e.render(
+            &mut out,
+            &[ScheduledCommand::now(Command::TouchUp { owner: 1 })],
+            &mut midi,
+        );
+        assert_eq!(e.active_touches(), 1);
+        assert_eq!(e.voices.held_count(), 1);
+        assert!(peak(&out) > 0.01);
+    }
+
+    #[test]
+    fn smearing_one_kaoss_finger_onto_another_does_not_steal() {
+        let mut e = engine();
+        let mut out = vec![0.0f32; 512];
+        let mut midi = MidiOutSink::new();
+        let (x_low, y) = crate::kaoss::pack_xy(0.0, 0.8);
+        let (x_high, _) = crate::kaoss::pack_xy(1.0, 0.8);
+        e.render(
+            &mut out,
+            &[
+                ScheduledCommand::now(Command::TouchDown {
+                    owner: 1,
+                    x: x_low,
+                    y,
+                    channel: 0,
+                    velocity: 120,
+                }),
+                ScheduledCommand::now(Command::TouchDown {
+                    owner: 2,
+                    x: x_high,
+                    y,
+                    channel: 0,
+                    velocity: 120,
+                }),
+            ],
+            &mut midi,
+        );
+        e.sync_touches(&[LatestTouch {
+            owner: 1,
+            x: 1.0,
+            y: 0.8,
+            channel: 0,
+            velocity: 120,
+        }]);
+        e.render(
+            &mut out,
+            &[ScheduledCommand::now(Command::TouchUp { owner: 1 })],
+            &mut midi,
+        );
+        assert_eq!(e.active_touches(), 1);
+        assert_eq!(
+            e.voices.held_count(),
+            1,
+            "the remaining finger's note must keep sounding after a smear lift"
+        );
+        assert!(peak(&out) > 0.01);
     }
 
     #[test]
