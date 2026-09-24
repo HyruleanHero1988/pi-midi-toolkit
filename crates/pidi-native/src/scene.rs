@@ -1803,8 +1803,8 @@ fn draw_synth(scene: &mut Scene, model: &NativeModel) {
         format!("C{octave}")
     };
     scene.text_scaled(
-        layout.synth_scope.x + 6,
-        layout.synth_scope.y + 4,
+        layout.synth_scope_rect().x + 6,
+        layout.synth_scope_rect().y + 4,
         &format!(
             "{} {:.1}st {:.0}Hz {}",
             oct_label,
@@ -1876,7 +1876,7 @@ fn draw_on_screen_keyboard(scene: &mut Scene, layout: &Layout, model: &NativeMod
 }
 
 fn draw_synth_scope(scene: &mut Scene, model: &NativeModel) {
-    let rect = model.layout.synth_scope;
+    let rect = model.layout.synth_scope_rect();
     scene.fill_rect(rect, 0x1a1a12);
     // Grid
     for i in 1..4 {

@@ -1836,6 +1836,7 @@ impl NativeModel {
         }
         self.midi_in_connected = ports.input_connected.clone();
         self.midi_out_connected = ports.output_connected.clone();
+        self.layout.show_on_screen_keys = !self.hardware_keybed_connected();
     }
 
     /// Hide on-screen piano keys when a known keybed is plugged in.
@@ -7881,6 +7882,22 @@ mod tests {
             ..MidiPortsReply::default()
         });
         assert!(model.hardware_keybed_connected());
+        assert!(
+            !model.layout.show_on_screen_keys,
+            "piano strip should yield to sliders/scope"
+        );
+        assert!(
+            model.layout.synth_play_h() > model.layout.synth_sliders.h,
+            "SYNTH sliders/scope should grow into the former keybed"
+        );
+        let grown = model.layout.synth_slider(0);
+        assert!(
+            model
+                .layout
+                .synth_keys
+                .contains(grown.x + 4, grown.y + grown.h - 4),
+            "former key area should become slider travel"
+        );
         model.finger_down(2, key.x + 4, key.y + key.h - 8, &mut out);
         assert!(
             out.take().iter().all(|r| !matches!(r, Request::NoteOn { .. })),
@@ -7894,6 +7911,7 @@ mod tests {
             ..MidiPortsReply::default()
         });
         assert!(!model.hardware_keybed_connected());
+        assert!(model.layout.show_on_screen_keys);
         model.finger_down(3, key.x + 4, key.y + key.h - 8, &mut out);
         assert!(
             out.take().iter().any(|r| matches!(r, Request::NoteOn { .. })),

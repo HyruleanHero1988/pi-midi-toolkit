@@ -357,6 +357,8 @@ pub struct Layout {
     pub update_close: Rect,
     pub update_check: Rect,
     pub update_apply: Rect,
+    /// When false, SYNTH/FM sliders and scopes grow into the piano strip.
+    pub show_on_screen_keys: bool,
 }
 
 impl Default for Layout {
@@ -1140,6 +1142,7 @@ impl Layout {
             update_close,
             update_check,
             update_apply,
+            show_on_screen_keys: true,
         }
     }
 
@@ -1807,14 +1810,34 @@ impl Layout {
         }
     }
 
+    fn synth_play_bottom(&self) -> i32 {
+        self.synth_keys.y + self.synth_keys.h
+    }
+
+    /// Slider / scope height. Grows into the piano strip when keys are hidden.
+    pub fn synth_play_h(&self) -> i32 {
+        if self.show_on_screen_keys {
+            self.synth_sliders.h
+        } else {
+            (self.synth_play_bottom() - self.synth_sliders.y).max(self.synth_sliders.h)
+        }
+    }
+
+    pub fn synth_scope_rect(&self) -> Rect {
+        let mut r = self.synth_scope;
+        r.h = self.synth_play_h();
+        r
+    }
+
     pub fn synth_slider(&self, index: usize) -> Rect {
         let n = 6i32;
         let w = self.synth_sliders.w / n;
+        let h = self.synth_play_h();
         Rect {
             x: self.synth_sliders.x + (index as i32) * w + 6,
             y: self.synth_sliders.y + 28,
             w: w - 12,
-            h: self.synth_sliders.h - 36,
+            h: h - 36,
         }
     }
 
@@ -1868,13 +1891,22 @@ impl Layout {
         }
     }
 
+    fn fm_expanded_h(&self, y: i32, compact: i32, bottom_pad: i32) -> i32 {
+        if self.show_on_screen_keys {
+            compact
+        } else {
+            (self.synth_play_bottom() - y - bottom_pad).max(compact)
+        }
+    }
+
     /// 2×2 operator graph. Swipe one circle into another to patch.
     pub fn fm_graph(&self) -> Rect {
+        let y = self.content.y + 74;
         Rect {
             x: 12,
-            y: self.content.y + 74,
+            y,
             w: 400,
-            h: 158,
+            h: self.fm_expanded_h(y, 158, 0),
         }
     }
 
@@ -1908,11 +1940,12 @@ impl Layout {
     }
 
     pub fn fm_scope(&self) -> Rect {
+        let y = self.content.y + 74;
         Rect {
             x: 420,
-            y: self.content.y + 74,
+            y,
             w: 168,
-            h: 158,
+            h: self.fm_expanded_h(y, 158, 0),
         }
     }
 
@@ -1921,11 +1954,14 @@ impl Layout {
         let area_x = 600;
         let area_w = 188;
         let w = area_w / n;
+        let y = self.content.y + 92;
+        // Room for the clang-ratio label under the tracks when keys are gone.
+        let pad = if self.show_on_screen_keys { 0 } else { 22 };
         Rect {
             x: area_x + (index as i32) * w + 6,
-            y: self.content.y + 92,
+            y,
             w: w - 12,
-            h: 132,
+            h: self.fm_expanded_h(y, 132, pad),
         }
     }
 
@@ -2044,7 +2080,7 @@ impl Layout {
     }
 
     pub fn synth_keyboard_note_at(&self, px: i32, py: i32) -> Option<u8> {
-        if !self.synth_keys.contains(px, py) {
+        if !self.show_on_screen_keys || !self.synth_keys.contains(px, py) {
             return None;
         }
         const BLACKS: [(usize, u8); 5] = [(0, 61), (1, 63), (2, 66), (3, 68), (4, 70)];
@@ -3181,6 +3217,33 @@ mod tests {
             layout.synth_sliders.x + layout.synth_sliders.w <= layout.synth_scope.x,
             "sliders should not overlap the scope panel"
         );
+    }
+
+    #[test]
+    fn hidden_keys_expand_synth_and_fm_into_the_piano_strip() {
+        let mut layout = Layout::new();
+        let compact_slider = layout.synth_slider(0).h;
+        let compact_scope = layout.synth_scope_rect().h;
+        let compact_fm = layout.fm_graph().h;
+        let key = layout.synth_keyboard_white_rect(0);
+        layout.show_on_screen_keys = false;
+        let slider = layout.synth_slider(0);
+        assert!(slider.h > compact_slider);
+        assert!(layout.synth_scope_rect().h > compact_scope);
+        assert!(layout.fm_graph().h > compact_fm);
+        assert!(
+            layout
+                .synth_keys
+                .contains(slider.x + 4, slider.y + slider.h - 4),
+            "expanded slider travel should occupy the former piano strip"
+        );
+        assert_eq!(layout.synth_keyboard_note_at(key.x + 4, key.y + 8), None);
+        match layout.hit(UiMode::Synth, slider.x + 4, slider.y + slider.h - 4) {
+            Hit::SynthSlider(0) => {}
+            other => panic!("former key strip should hit a slider, got {other:?}"),
+        }
+        let bottom = layout.synth_keys.y + layout.synth_keys.h;
+        assert!(layout.synth_scope_rect().y + layout.synth_scope_rect().h >= bottom - 2);
     }
 
     #[test]
