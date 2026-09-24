@@ -1847,6 +1847,13 @@ fn draw_synth(scene: &mut Scene, model: &NativeModel) {
         );
     }
 
+    draw_on_screen_keyboard(scene, &layout, model);
+}
+
+fn draw_on_screen_keyboard(scene: &mut Scene, layout: &Layout, model: &NativeModel) {
+    if model.hardware_keybed_connected() {
+        return;
+    }
     for index in 0..Layout::SYNTH_WHITE_COUNT {
         let key = layout.synth_keyboard_white_rect(index);
         scene.fill_rect(key, 0xf2f2ea);
@@ -1957,25 +1964,7 @@ fn draw_fm(scene: &mut Scene, model: &NativeModel) {
         0xa89984,
     );
 
-    for index in 0..Layout::SYNTH_WHITE_COUNT {
-        let key = layout.synth_keyboard_white_rect(index);
-        scene.fill_rect(key, 0xf2f2ea);
-        scene.fill_rect(
-            Rect {
-                x: key.x,
-                y: key.y + key.h - 2,
-                w: key.w,
-                h: 2,
-            },
-            0xc0c0b8,
-        );
-    }
-    const BLACK_LABELS: [&str; 5] = ["C#", "D#", "F#", "G#", "A#"];
-    for index in 0..5 {
-        let key = layout.synth_keyboard_black_rect(index);
-        scene.fill_rect(key, 0x1a1a22);
-        scene.text_scaled(key.x + 4, key.y + 4, BLACK_LABELS[index], 0xd0d0d8, 1);
-    }
+    draw_on_screen_keyboard(scene, &layout, model);
 }
 
 fn draw_fm_graph(scene: &mut Scene, model: &NativeModel) {
