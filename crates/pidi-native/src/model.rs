@@ -2455,7 +2455,7 @@ impl NativeModel {
                     surface: Surface::KitSlider { index },
                     gate_on: false,
                 };
-                self.apply_kit_slider(index, py, outbox);
+                self.apply_kit_slider(index, py, false, outbox);
             }
             Hit::KitWave => {
                 self.tap_ui(slot, id, gesture, px, py);
@@ -2513,7 +2513,7 @@ impl NativeModel {
                     surface: Surface::SynthSlider { index },
                     gate_on: false,
                 };
-                self.apply_synth_slider(index, px, py, outbox);
+                self.apply_synth_slider(index, px, py, false, outbox);
             }
             Hit::FmRecipe(index) => {
                 self.tap_ui(slot, id, gesture, px, py);
@@ -3485,14 +3485,14 @@ impl NativeModel {
                 self.move_kaoss_touch(self.fingers[slot].gesture, x, y, outbox);
             }
             Surface::SynthSlider { index } => {
-                self.apply_synth_slider(index, px, py, outbox);
+                self.apply_synth_slider(index, px, py, true, outbox);
             }
             Surface::FmSlider { index } => {
                 self.apply_fm_slider(index, py, outbox);
             }
             Surface::FmGraph { .. } => {}
             Surface::KitSlider { index } => {
-                self.apply_kit_slider(index, py, outbox);
+                self.apply_kit_slider(index, py, true, outbox);
             }
             Surface::FxSlider { index } => {
                 self.apply_fx_slider(index, py, outbox);
@@ -4007,13 +4007,38 @@ impl NativeModel {
     }
 
     const SYNTH_PARAM_NAMES: [&'static str; 5] = ["morph", "tone", "level", "attack", "release"];
+    /// Ignore a captured-slider sample that jumps more than this in one event.
+    /// Capacitive panels (and a finger leaving the track) used to clamp to 0 or 1.
+    const SLIDER_JUMP: f32 = 0.40;
 
-
-    fn apply_synth_slider(&mut self, index: usize, _px: i32, py: i32, outbox: &mut Outbox) {
-        let track = self.layout.synth_slider(index);
+    fn vertical_slider_t(track: Rect, py: i32) -> Option<f32> {
+        if py < track.y || py >= track.y + track.h {
+            return None;
+        }
         let y = 1.0 - ((py - track.y) as f32 / track.h.max(1) as f32);
-        let value = y.clamp(0.0, 1.0);
+        Some(y.clamp(0.0, 1.0))
+    }
+
+    fn accept_slider_value(prev: f32, next: f32, moving: bool) -> bool {
+        !moving || (next - prev).abs() <= Self::SLIDER_JUMP
+    }
+
+    fn apply_synth_slider(
+        &mut self,
+        index: usize,
+        _px: i32,
+        py: i32,
+        moving: bool,
+        outbox: &mut Outbox,
+    ) {
+        let track = self.layout.synth_slider(index);
+        let Some(value) = Self::vertical_slider_t(track, py) else {
+            return;
+        };
         if index == 5 {
+            if !Self::accept_slider_value(self.fx_voice[3], value, moving) {
+                return;
+            }
             self.fx_voice[3] = value;
             self.push_voice_fx("flanger_mix", value, outbox);
             self.status_line = format!("voice flange {:.2}", value);
@@ -4021,6 +4046,9 @@ impl NativeModel {
             return;
         }
         if index >= 5 {
+            return;
+        }
+        if !Self::accept_slider_value(self.synth_params[index], value, moving) {
             return;
         }
         self.synth_params[index] = value;
@@ -4384,13 +4412,22 @@ impl NativeModel {
         self.mark_dirty();
     }
 
-    fn apply_kit_slider(&mut self, index: usize, py: i32, outbox: &mut Outbox) {
+    fn apply_kit_slider(&mut self, index: usize, py: i32, moving: bool, outbox: &mut Outbox) {
         if index >= 4 {
             return;
         }
         let track = self.layout.kit_edit_slider(index);
-        let y = 1.0 - ((py - track.y) as f32 / track.h.max(1) as f32);
-        let value = y.clamp(0.0, 1.0);
+        let Some(value) = Self::vertical_slider_t(track, py) else {
+            return;
+        };
+        let prev = if self.kit_all_drums {
+            self.drum_group_macros[index]
+        } else {
+            self.drum_macros[self.selected_drum_model().index()][index]
+        };
+        if !Self::accept_slider_value(prev, value, moving) {
+            return;
+        }
         let name = Self::DRUM_MACRO_NAMES[index];
         if self.kit_all_drums {
             self.drum_group_macros[index] = value;
@@ -7005,6 +7042,34 @@ mod tests {
                 ..
             } if param == "morph"
         )));
+    }
+
+    #[test]
+    fn synth_tone_slider_ignores_snap_jumps() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Synth);
+        let mut out = Outbox::new();
+        let track = model.layout.synth_slider(1);
+        model.finger_down(1, track.x + 4, track.y + track.h / 2, &mut out);
+        out.take();
+        let mid = model.synth_params[1];
+        assert!((mid - 0.5).abs() < 0.08, "down on midline, got {mid}");
+
+        // Wild coordinate (lift / capacitive glitch) used to clamp to 1.0.
+        model.finger_move(1, track.x + 4, 0, &mut out);
+        assert!(
+            (model.synth_params[1] - mid).abs() < 1e-4,
+            "outside-track jump must not snap tone, got {}",
+            model.synth_params[1]
+        );
+
+        // A small slide still works.
+        model.finger_move(1, track.x + 4, track.y + track.h / 2 - 12, &mut out);
+        assert!(
+            model.synth_params[1] > mid + 0.02,
+            "small slide should raise tone, got {}",
+            model.synth_params[1]
+        );
     }
 
     #[test]
