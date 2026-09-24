@@ -5,10 +5,13 @@
 //! loop late: the worst a stalled UI can do is delay a *launch request*, never the
 //! timing of notes already playing.
 
+use crate::fx::FxParams;
 use crate::transport::{Quantize, Transport};
 
-/// Phrase pad grid (MPK Bank A + Bank B).
-pub const MAX_CLIPS: usize = 16;
+/// Phrase pads 0..15, then SEQ/songs on [`SEQ_CLIP_SLOT`].
+pub const MAX_CLIPS: usize = 17;
+/// Dedicated engine slot so SEQ does not overwrite phrase pad B8.
+pub const SEQ_CLIP_SLOT: u8 = 16;
 /// Notes one clip may hold open at once (for clean stop / note-off flush).
 const MAX_SLOT_NOTES: usize = 24;
 
@@ -64,6 +67,56 @@ pub enum LaunchMode {
     Loop,
 }
 
+/// Voice + insert FX captured when a take was written.
+///
+/// Locked clips play this snapshot and ignore live morph, voice FX, and FM.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ClipVoice {
+    pub locked: bool,
+    pub morph_a: u16,
+    pub morph_b: u16,
+    pub morph: f32,
+    pub tone: f32,
+    pub drive: f32,
+    pub delay_mix: f32,
+    pub reverb_mix: f32,
+    pub flanger_mix: f32,
+}
+
+impl Default for ClipVoice {
+    fn default() -> Self {
+        Self {
+            locked: false,
+            morph_a: 0,
+            morph_b: 1,
+            morph: 0.5,
+            tone: 1.0,
+            drive: 0.0,
+            delay_mix: 0.0,
+            reverb_mix: 0.0,
+            flanger_mix: 0.0,
+        }
+    }
+}
+
+impl ClipVoice {
+    pub fn from_tone(tone: f32) -> Self {
+        Self {
+            tone: tone.clamp(0.0, 1.0),
+            ..Self::default()
+        }
+    }
+
+    pub fn fx_params(self) -> FxParams {
+        let mut params = FxParams::default();
+        params.drive = self.drive.clamp(0.0, 1.0);
+        params.delay_mix = self.delay_mix.clamp(0.0, 1.0);
+        params.reverb_mix = self.reverb_mix.clamp(0.0, 1.0);
+        params.flanger_mix = self.flanger_mix.clamp(0.0, 1.0);
+        params
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SlotState {
     Idle,
@@ -88,8 +141,8 @@ pub struct ClipSlot {
     clip: Option<Box<Clip>>,
     state: SlotState,
     mode: LaunchMode,
-    /// Brightness captured when the take was written. Live tone does not follow.
-    playback_tone: f32,
+    /// Morph / tone / voice FX captured with the take.
+    voice: ClipVoice,
     held: [(u8, u8); MAX_SLOT_NOTES],
     held_len: usize,
 }
@@ -100,7 +153,7 @@ impl Default for ClipSlot {
             clip: None,
             state: SlotState::Idle,
             mode: LaunchMode::Loop,
-            playback_tone: 1.0,
+            voice: ClipVoice::default(),
             held: [(0, 0); MAX_SLOT_NOTES],
             held_len: 0,
         }
@@ -144,11 +197,27 @@ impl ClipSlot {
     }
 
     pub fn playback_tone(&self) -> f32 {
-        self.playback_tone
+        self.voice.tone
     }
 
     pub fn set_playback_tone(&mut self, tone: f32) {
-        self.playback_tone = tone.clamp(0.0, 1.0);
+        self.voice.tone = tone.clamp(0.0, 1.0);
+    }
+
+    pub fn voice(&self) -> ClipVoice {
+        self.voice
+    }
+
+    pub fn set_voice(&mut self, voice: ClipVoice) {
+        self.voice = ClipVoice {
+            morph: voice.morph.clamp(0.0, 1.0),
+            tone: voice.tone.clamp(0.0, 1.0),
+            drive: voice.drive.clamp(0.0, 1.0),
+            delay_mix: voice.delay_mix.clamp(0.0, 1.0),
+            reverb_mix: voice.reverb_mix.clamp(0.0, 1.0),
+            flanger_mix: voice.flanger_mix.clamp(0.0, 1.0),
+            ..voice
+        };
     }
 
     pub fn is_active(&self) -> bool {
@@ -669,5 +738,15 @@ mod tests {
         let cleared = slot.swap_boxed(None).expect("second clip");
         assert!(!cleared.is_empty());
         assert!(slot.clip().is_none());
+    }
+
+    #[test]
+    fn seq_lives_past_the_sixteen_phrase_pads() {
+        assert_eq!(MAX_CLIPS, 17);
+        assert_eq!(SEQ_CLIP_SLOT as usize, 16);
+        let seq = Sequencer::new();
+        assert!(seq.slot(15).is_some());
+        assert!(seq.slot(SEQ_CLIP_SLOT as usize).is_some());
+        assert!(seq.slot(MAX_CLIPS).is_none());
     }
 }

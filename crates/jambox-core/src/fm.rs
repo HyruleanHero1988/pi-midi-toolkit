@@ -8,6 +8,7 @@
 //! Bounded for the Pi 2: 8 voices, sine table lookup, no allocation after
 //! [`FmSynth::new`].
 
+use crate::clip::MAX_CLIPS;
 use crate::voice::{midi_to_hz, tone_svf_sample, VoiceContext};
 
 const SINE_SIZE: usize = 2048;
@@ -511,6 +512,8 @@ impl FmSynth {
             pitch_mul,
             attack_sec: 0.0,
             release_sec: 0.0,
+            live_gain: 1.0,
+            clip_gains: [1.0; MAX_CLIPS],
             live_tone: 1.0,
             tone_lfo_amount: 0.0,
             tone_lfo_rate_hz: 5.0,
@@ -606,7 +609,7 @@ impl FmSynth {
                         sample_rate,
                     );
                 }
-                *sample += mix * VOICE_AMP;
+                *sample += mix * VOICE_AMP * if v.recorded { 1.0 } else { ctx.live_gain };
             }
             v.tone_lp = tone_lp;
             v.tone_bp = tone_bp;

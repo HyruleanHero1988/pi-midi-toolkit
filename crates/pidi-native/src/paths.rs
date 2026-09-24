@@ -62,9 +62,6 @@ pub fn phrases_dir() -> PathBuf {
     if let Ok(p) = std::env::var("PIDI_PHRASES_DIR") {
         return PathBuf::from(p);
     }
-    if let Ok(p) = std::env::var("MIDI_TONE_PHRASES_DIR") {
-        return PathBuf::from(p);
-    }
     data_root().join("phrases")
 }
 

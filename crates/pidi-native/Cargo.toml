@@ -26,6 +26,9 @@ sdl2 = { version = "0.37", optional = true, default-features = false, features =
 glow = { version = "0.16", optional = true }
 fontdue = "=0.9.3"
 hound = "3.5"
+ureq = { version = "2.12", default-features = false, features = ["tls", "json"] }
+flate2 = "1.0"
+tar = "0.4"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = { workspace = true }

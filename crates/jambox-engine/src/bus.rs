@@ -34,6 +34,8 @@ pub struct ClipUpdate {
     /// Baked brightness for this take. `None` leaves the slot's tone alone
     /// (clear still resets to open).
     pub tone: Option<f32>,
+    /// Morph + voice FX snapshot. `None` leaves the slot's voice alone.
+    pub voice: Option<jambox_core::ClipVoice>,
 }
 
 /// Musical snapshot plus the host callback counters (not DSP state).
@@ -197,6 +199,7 @@ mod tests {
             clip: Some(clip),
             mode: None,
             tone: None,
+            voice: None,
         });
         let update = audio.clips.pop().unwrap();
         audio.garbage.push(update.clip.unwrap()).unwrap();

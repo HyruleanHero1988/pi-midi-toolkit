@@ -9,6 +9,7 @@ pub mod smooth_font;
 #[cfg(feature = "sdl")]
 pub mod gles;
 pub mod host;
+pub mod ota;
 pub mod input;
 pub mod kaoss_ui;
 pub mod kaoss_viz;
@@ -26,6 +27,7 @@ pub mod screensaver;
 pub mod seq;
 pub mod session;
 pub mod songs;
+pub mod throttle;
 pub mod voice_bake;
 pub mod waves;
 pub mod wifi;

@@ -97,6 +97,9 @@ pub enum Request {
         /// Brightness captured when the take was written. Live tone does not follow.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tone: Option<f32>,
+        /// Morph + voice FX snapshot. Locked clips ignore live FOLLOW / FM.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        voice: Option<WireClipVoice>,
         events: Vec<WireClipEvent>,
     },
     ClipClear {
@@ -117,6 +120,11 @@ pub enum Request {
         quantize: Option<String>,
     },
     StopAllClips,
+    /// Per-slot mix trim (phrase pads 0..15, SEQ/songs on slot 16). 0..2, unity 1.0.
+    ClipGain {
+        slot: u8,
+        value: f32,
+    },
     Status,
     Midi {
         kind: String,
@@ -249,6 +257,27 @@ pub struct WireClipEvent {
     pub note: u8,
     #[serde(default)]
     pub velocity: u8,
+}
+
+/// Morph + voice-insert snapshot carried on `clip_load`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct WireClipVoice {
+    #[serde(default)]
+    pub locked: bool,
+    #[serde(default)]
+    pub morph_a: u16,
+    #[serde(default)]
+    pub morph_b: u16,
+    #[serde(default)]
+    pub morph: f32,
+    #[serde(default)]
+    pub drive: f32,
+    #[serde(default)]
+    pub delay_mix: f32,
+    #[serde(default)]
+    pub reverb_mix: f32,
+    #[serde(default)]
+    pub flanger_mix: f32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -396,6 +425,24 @@ mod tests {
     }
 
     #[test]
+    fn clip_gain_round_trips() {
+        let request = Request::ClipGain {
+            slot: 16,
+            value: 0.5,
+        };
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(json.contains("\"cmd\":\"clip_gain\""));
+        let decoded: Request = serde_json::from_str(&json).unwrap();
+        assert!(matches!(
+            decoded,
+            Request::ClipGain {
+                slot: 16,
+                value,
+            } if (value - 0.5).abs() < 1e-6
+        ));
+    }
+
+    #[test]
     fn midi_ports_round_trips() {
         let request = Request::MidiPorts;
         let json = serde_json::to_string(&request).unwrap();
@@ -419,4 +466,5 @@ mod tests {
         let decoded: Request = serde_json::from_str(&json).unwrap();
         assert!(matches!(decoded, Request::ChannelMap { bits: b } if b[0] == 1 << 5));
     }
+
 }

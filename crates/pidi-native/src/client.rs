@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use jambox_protocol::{
     MidiNotice, MidiPortsReply, RepeatDivision, RepeatPhase, Request, Response, StatusReply,
-    TouchPhase, WireClipEvent, PROTOCOL_VERSION,
+    TouchPhase, WireClipEvent, WireClipVoice, PROTOCOL_VERSION,
 };
 use tracing::{info, warn};
 
@@ -152,17 +152,37 @@ impl Outbox {
         events: Vec<WireClipEvent>,
         tone: f32,
     ) {
+        self.clip_load_voice(slot, length_ticks, mode, events, tone, None);
+    }
+
+    pub fn clip_load_voice(
+        &mut self,
+        slot: u8,
+        length_ticks: u32,
+        mode: &str,
+        events: Vec<WireClipEvent>,
+        tone: f32,
+        voice: Option<WireClipVoice>,
+    ) {
         self.reliable.push_back(Request::ClipLoad {
             slot,
             length_ticks,
             mode: Some(mode.to_string()),
             tone: Some(tone.clamp(0.0, 1.0)),
+            voice,
             events,
         });
     }
 
     pub fn clip_clear(&mut self, slot: u8) {
         self.reliable.push_back(Request::ClipClear { slot });
+    }
+
+    pub fn clip_gain(&mut self, slot: u8, value: f32) {
+        self.reliable.push_back(Request::ClipGain {
+            slot,
+            value: value.clamp(0.0, 2.0),
+        });
     }
 
     pub fn clip_launch(&mut self, slot: u8, quantize: &str) {

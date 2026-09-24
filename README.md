@@ -6,7 +6,7 @@ low-latency MIDI thru/remap to a hardware synth. **Not** related to play-my-synt
 **North star:** power on → kiosk → modes (Synth / Seq / Pads / Kaoss / Chords / Map / Log). See [PLAN.md](PLAN.md).
 
 - **Kiosk UI (active):** [`crates/pidi-native`](crates/pidi-native) — SDL/KMSDRM + GLES2 over `jambox-engine`. See [NATIVE_KIOSK.md](NATIVE_KIOSK.md) and the [native screen reference](docs/index.html).
-- **Shared Pi assets:** [`apps/pidi`](apps/pidi) — wavetables, OTA `updater.py`, power/HW scripts (not a UI)
+- **Shared Pi assets:** [`apps/pidi`](apps/pidi) — wavetables, power/HW scripts (not a UI). SET→UPDATE runs in-process in `pidi-native` (`ota.rs`).
 - **Thru engine:** Rust `midi-engine` — channel/CC/velocity remap via CLI + JSON presets (Map mode in the native kiosk)
 - **Target hardware:** Pi 2 + any class-compliant USB MIDI keyboard or USB-MIDI-DIN interface (MPK mini, U2MIDI PRO, …)
 
@@ -125,6 +125,17 @@ sudo bash deploy/setup-pi.sh
 ```
 
 ### From the PC (daily)
+
+PowerShell (lab Pi; uses `apps/pidi/.pi-credentials`):
+
+```powershell
+python deploy_master.py          # deploy master
+python deploy/deploy-branch.py   # deploy the current checkout
+```
+
+These overlay the repo, install committed `dist/armv7` engines, and restart
+`jambox-engine` + `pidi-native`. Rebuild bins first with
+`.\deploy\build-pi-bins.ps1` when crates changed.
 
 Cross-compile is preferred for Pi 2. **SET→UPDATE** installs committed
 `dist/armv7/{midi-engine,jambox-engine,pidi-native}` onto `bin/`. A green

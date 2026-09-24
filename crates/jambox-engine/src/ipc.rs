@@ -329,12 +329,14 @@ pub fn handle_line(
             clip,
             mode,
             tone,
+            voice,
         }) => {
             if control.send_clip(ClipUpdate {
                 slot,
                 clip,
                 mode,
                 tone,
+                voice,
             }) {
                 Response::Ok
             } else {

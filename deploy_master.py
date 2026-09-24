@@ -18,7 +18,6 @@ ROOT = pathlib.Path(__file__).resolve().parent
 CREDS_PATH = ROOT / "apps" / "pidi" / ".pi-credentials"
 STAGE = ROOT / "dist" / "armv7"
 REMOTE_REPO = "/home/ray/pi-midi-toolkit"
-REMOTE_KIOSK = "/home/ray/midi-tone"
 DATA = "/home/ray/.local/share/pidi"
 
 KEEP_REPO = {
@@ -37,19 +36,6 @@ KEEP_REPO = {
     "apps/pidi/.pi-credentials",
     "apps/pidi/.update-credentials",
     "apps/pidi/version.json",
-}
-
-KEEP_KIOSK = {
-    "settings.json",
-    "songs",
-    "phrases",
-    "user-presets",
-    "user-wavetables",
-    ".venv",
-    ".pi-credentials",
-    ".update-credentials",
-    "version.json",
-    "bin",
 }
 
 TAR_SKIP_PARTS = {
@@ -174,14 +160,11 @@ def sftp_put_file(client: paramiko.SSHClient, local: pathlib.Path, remote: str, 
 
 def overlay_script() -> str:
     keep_repo = " ".join(f"'{x}'" for x in sorted(KEEP_REPO))
-    keep_kiosk = " ".join(f"'{x}'" for x in sorted(KEEP_KIOSK))
     return f"""#!/bin/bash
 set -euo pipefail
 SRC="$1"
 DEST_REPO="$2"
-DEST_KIOSK="$3"
 KEEP_REPO=({keep_repo})
-KEEP_KIOSK=({keep_kiosk})
 
 should_skip() {{
   local rel="$1"
@@ -220,7 +203,6 @@ overlay() {{
 }}
 
 overlay "$SRC" "$DEST_REPO" "${{KEEP_REPO[@]}}"
-overlay "$SRC/apps/pidi" "$DEST_KIOSK" "${{KEEP_KIOSK[@]}}"
 echo "overlay complete"
 """
 
@@ -249,7 +231,7 @@ def main() -> int:
     try:
         run(
             client,
-            f"mkdir -p {REMOTE_REPO}/bin {REMOTE_KIOSK}/bin "
+            f"mkdir -p {REMOTE_REPO}/bin "
             f"{DATA}/{{songs,phrases,user-presets,user-wavetables,takes}}",
         )
         sftp_put_bytes(client, tar_data, remote_tar)
@@ -257,32 +239,30 @@ def main() -> int:
 
         overlay_path = f"/tmp/pi-overlay-{stamp}.sh"
         sftp_put_bytes(client, overlay_script().encode(), overlay_path)
-        run(client, f"chmod +x '{overlay_path}' && bash '{overlay_path}' '{remote_src}' '{REMOTE_REPO}' '{REMOTE_KIOSK}'")
+        run(client, f"chmod +x '{overlay_path}' && bash '{overlay_path}' '{remote_src}' '{REMOTE_REPO}'")
 
         run(
             client,
-            f"find {REMOTE_REPO}/apps/pidi -name '*.sh' -type f -print0 2>/dev/null | xargs -0 sed -i 's/\\r$//' || true; "
-            f"find {REMOTE_KIOSK} -name '*.sh' -type f -print0 2>/dev/null | xargs -0 sed -i 's/\\r$//' || true",
+            f"find {REMOTE_REPO}/apps/pidi -name '*.sh' -type f -print0 2>/dev/null | xargs -0 sed -i 's/\\r$//' || true",
         )
 
         sudo(client, password, "systemctl stop pidi-native jambox-engine 2>/dev/null || true")
         for name in ("jambox-engine", "pidi-native", "midi-engine"):
             sftp_put_file(client, STAGE / name, f"{REMOTE_REPO}/bin/{name}")
-            sftp_put_file(client, STAGE / name, f"{REMOTE_KIOSK}/bin/{name}")
 
+        components = {
+            "pidi-native": sha256_file(STAGE / "pidi-native")[:16],
+        }
         version = {
             "sha": sha,
             "branch": "master",
             "source": "ssh-deploy",
             "repo_url": "local",
             "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            "components": {
-                "ui": sha256_file(ROOT / "apps" / "pidi" / "midi_tone.py")[:16],
-                "engines": sha256_file(STAGE / "pidi-native")[:16],
-            },
+            "components": components,
         }
         version_json = json.dumps(version, indent=2) + "\n"
-        for dest in (f"{REMOTE_KIOSK}/version.json", f"{REMOTE_REPO}/apps/pidi/version.json"):
+        for dest in (f"{DATA}/version.json", f"{REMOTE_REPO}/version.json"):
             sftp_put_bytes(client, version_json.encode(), dest + ".tmp")
             run(client, f"mv -f '{dest}.tmp' '{dest}'")
 
@@ -304,7 +284,7 @@ def main() -> int:
         run(
             client,
             f"ls -la {REMOTE_REPO}/bin/; "
-            f"head -5 {REMOTE_KIOSK}/version.json; "
+            f"head -5 {DATA}/version.json; "
             f"systemctl is-active jambox-engine pidi-native",
         )
         run(client, "journalctl -u jambox-engine -u pidi-native -n 20 --no-pager 2>&1")

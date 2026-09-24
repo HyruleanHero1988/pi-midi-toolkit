@@ -24,7 +24,7 @@ use jambox_core::{
 };
 use jambox_protocol::{
     MidiNotice, MidiPortsReply, RepeatDivision, RepeatPhase, StatusReply, TouchPhase,
-    WireClipEvent,
+    WireClipEvent, WireClipVoice,
 };
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, TryRecvError};
@@ -279,6 +279,10 @@ pub struct NativeModel {
     pub fx_voice: [f32; 4],
     pub fx_drum: [f32; 4],
     pub fx_target: FxEditTarget,
+    /// Kit bus trim (FX DRUMS / MIX KIT). Independent of melody `synth_params[2]` (LEVEL).
+    pub drum_level: f32,
+    /// SEQ / songs clip trim (MIX SEQ). Phrase pads use `phrases[i].gain`.
+    pub seq_level: f32,
     pub log_lines: Vec<String>,
     pub midi_in_filter: String,
     pub midi_out_filter: String,
@@ -374,6 +378,10 @@ pub struct NativeModel {
     /// In-flight SET/MAP host subprocess (UPDATE/WIFI/THRU). Polled from tick.
     host_rx: Option<Receiver<(String, Vec<String>)>>,
     host_busy: Option<HostTask>,
+    /// Pi firmware throttle / under-voltage flags (sticky for the session).
+    pub throttle: crate::throttle::ThrottleState,
+    last_throttle_poll: Instant,
+    logged_undervolt: bool,
 }
 
 impl Default for NativeModel {
@@ -477,6 +485,8 @@ impl NativeModel {
             fx_voice: [0.0, 0.0, 0.0, 0.0],
             fx_drum: [0.0, 0.0, 0.0, 0.0],
             fx_target: FxEditTarget::Bus,
+            drum_level: 1.0,
+            seq_level: 1.0,
             log_lines: Vec::new(),
             midi_in_filter: String::new(),
             midi_out_filter: String::new(),
@@ -553,6 +563,9 @@ impl NativeModel {
             session_loaded: false,
             host_rx: None,
             host_busy: None,
+            throttle: crate::throttle::ThrottleState::default(),
+            last_throttle_poll: Instant::now(),
+            logged_undervolt: false,
         };
         // Ensure ~/.local/share/pidi/{songs,phrases,…} exist on first boot.
         let _ = crate::paths::data_root();
@@ -627,19 +640,13 @@ impl NativeModel {
         let dir = phrases::phrases_dir_from_env();
         self.phrases = phrases::load_bank(&dir, self.bpm);
         let mut n = 0usize;
-        for (slot, pad) in self.phrases.iter().enumerate() {
-            if pad.empty {
+        for slot in 0..16 {
+            if self.phrases[slot].empty {
                 outbox.clip_clear(slot as u8);
                 continue;
             }
             n += 1;
-            outbox.clip_load(
-                slot as u8,
-                pad.length_ticks,
-                if pad.loop_mode { "loop" } else { "oneshot" },
-                pad.events.clone(),
-                pad.tone,
-            );
+            self.send_phrase_clip(slot, outbox);
         }
         self.status_line = format!("phrases {}/16 from {}", n, dir.display());
     }
@@ -700,8 +707,7 @@ impl NativeModel {
             self.leave_kaoss_mode(outbox);
         }
         if self.mode == UiMode::Chords && mode != UiMode::Chords {
-            self.chords_block_off(outbox);
-            self.chords_strum_off(outbox);
+            self.leave_chords_mode(outbox);
         }
         self.set_mode(mode);
         self.sync_melody_engine(outbox);
@@ -726,6 +732,7 @@ impl NativeModel {
                 | UiMode::Songs
                 | UiMode::Presets
                 | UiMode::Fx
+                | UiMode::Mix
                 | UiMode::Map
                 | UiMode::Ports
                 | UiMode::Log
@@ -814,6 +821,32 @@ impl NativeModel {
             self.release_kaoss_gate(outbox);
             self.kaoss_touching = false;
         }
+    }
+
+    fn leave_chords_mode(&mut self, outbox: &mut Outbox) {
+        let ids: Vec<i32> = self
+            .fingers
+            .iter()
+            .filter(|f| {
+                f.active
+                    && matches!(
+                        f.surface,
+                        Surface::ChordsButton { .. }
+                            | Surface::ChordsPalette { .. }
+                            | Surface::ChordsStrum
+                    )
+            })
+            .map(|f| f.id)
+            .collect();
+        for id in ids {
+            self.finger_up(id, outbox);
+        }
+        // HOLD latches the last block across modes; MOM (and a leftover
+        // strum swipe) still silence when leaving the page.
+        if !self.chords_hold {
+            self.chords_block_off(outbox);
+        }
+        self.chords_strum_off(outbox);
     }
 
     fn close_kaoss_settings(&mut self) {
@@ -906,6 +939,7 @@ impl NativeModel {
             "sng" | "songs" => UiMode::Songs,
             "pre" | "presets" => UiMode::Presets,
             "fx" => UiMode::Fx,
+            "mix" => UiMode::Mix,
             "map" => UiMode::Map,
             "port" | "ports" => UiMode::Ports,
             "log" => UiMode::Log,
@@ -1047,6 +1081,7 @@ impl NativeModel {
         self.poll_host_job();
         self.poll_update_job();
         self.poll_wifi_job();
+        self.poll_throttle();
         self.tick_ota_reload(dt);
         if self.mode == UiMode::Drums && self.kit_edit_open && self.kit_wave_dirty {
             self.rebuild_kit_wave();
@@ -1069,6 +1104,28 @@ impl NativeModel {
         self.host_rx = Some(task.spawn());
         self.host_busy = Some(task);
         self.mark_dirty();
+    }
+
+    fn poll_throttle(&mut self) {
+        if self.frame > 1 && self.last_throttle_poll.elapsed() < Duration::from_secs(2) {
+            return;
+        }
+        self.last_throttle_poll = Instant::now();
+        let mut next = crate::throttle::read_throttle();
+        if self.throttle.power_fault() {
+            next.flags |= crate::throttle::UV_OCCURRED;
+        }
+        let became_fault = next.power_fault() && !self.throttle.power_fault();
+        let became_now = next.power_fault_now() && !self.throttle.power_fault_now();
+        if next != self.throttle {
+            self.throttle = next;
+            self.mark_dirty();
+        }
+        if (became_fault || became_now) && !self.logged_undervolt {
+            self.logged_undervolt = true;
+            self.push_log(next.log_line());
+            self.mark_dirty();
+        }
     }
 
     fn poll_host_job(&mut self) {
@@ -1574,6 +1631,8 @@ impl NativeModel {
         self.seq.bpm = self.bpm;
         self.seq.cue_beep = s.seq_cue_beep;
         self.synth_params = [s.morph, s.tone, s.level, s.attack, s.release];
+        self.drum_level = s.drum_level.clamp(0.0, 1.0);
+        self.seq_level = s.seq_level.clamp(0.0, 2.0);
         self.vibrato_always = s.vibrato_always.clamp(0.0, 1.0);
         self.vibrato_depth = s.vibrato_depth.clamp(0.0, 2.0);
         self.vibrato_rate = s.vibrato_rate.clamp(1.0, 9.0);
@@ -1647,6 +1706,8 @@ impl NativeModel {
         outbox.synth("morph", self.synth_params[0]);
         outbox.synth("tone", self.synth_params[1]);
         outbox.synth("level", self.synth_params[2]);
+        outbox.synth("drum_level", self.drum_level);
+        outbox.clip_gain(SEQ_CLIP_SLOT, self.seq_level);
         outbox.synth("attack", self.synth_params[3]);
         outbox.synth("release", self.synth_params[4]);
         outbox.synth("vibrato_always", self.vibrato_always);
@@ -1684,6 +1745,8 @@ impl NativeModel {
             morph: self.synth_params[0],
             tone: self.synth_params[1],
             level: self.synth_params[2],
+            drum_level: self.drum_level,
+            seq_level: self.seq_level,
             attack: self.synth_params[3],
             release: self.synth_params[4],
             morph_a: self.morph_a,
@@ -2394,7 +2457,7 @@ impl NativeModel {
                     surface: Surface::KitSlider { index },
                     gate_on: false,
                 };
-                self.apply_kit_slider(index, py, outbox);
+                self.apply_kit_slider(index, py, false, outbox);
             }
             Hit::KitWave => {
                 self.tap_ui(slot, id, gesture, px, py);
@@ -2452,7 +2515,7 @@ impl NativeModel {
                     surface: Surface::SynthSlider { index },
                     gate_on: false,
                 };
-                self.apply_synth_slider(index, px, py, outbox);
+                self.apply_synth_slider(index, px, py, false, outbox);
             }
             Hit::FmRecipe(index) => {
                 self.tap_ui(slot, id, gesture, px, py);
@@ -3143,6 +3206,34 @@ impl NativeModel {
                 };
                 self.apply_fx_slider(index, py, outbox);
             }
+            Hit::MixBus(index) => {
+                self.fingers[slot] = Finger {
+                    active: true,
+                    id,
+                    gesture,
+                    x: 0.0,
+                    y: 0.0,
+                    px,
+                    py,
+                    surface: Surface::MixBus { index },
+                    gate_on: false,
+                };
+                self.apply_mix_bus(index, py, outbox);
+            }
+            Hit::MixPad(index) => {
+                self.fingers[slot] = Finger {
+                    active: true,
+                    id,
+                    gesture,
+                    x: 0.0,
+                    y: 0.0,
+                    px,
+                    py,
+                    surface: Surface::MixPad { index },
+                    gate_on: false,
+                };
+                self.apply_mix_pad(index, py, outbox);
+            }
             Hit::SettingsWifi => {
                 self.tap_ui(slot, id, gesture, px, py);
                 self.open_wifi_panel();
@@ -3297,7 +3388,7 @@ impl NativeModel {
             Hit::ChordsChanges => {
                 self.tap_ui(slot, id, gesture, px, py);
                 self.chords_overlay = Some(ChordsOverlay::Changes);
-                self.status_line = "pick changes".into();
+                self.status_line = "pick progressions".into();
             }
             Hit::ChordsArm => {
                 self.tap_ui(slot, id, gesture, px, py);
@@ -3412,17 +3503,23 @@ impl NativeModel {
                 self.move_kaoss_touch(self.fingers[slot].gesture, x, y, outbox);
             }
             Surface::SynthSlider { index } => {
-                self.apply_synth_slider(index, px, py, outbox);
+                self.apply_synth_slider(index, px, py, true, outbox);
             }
             Surface::FmSlider { index } => {
                 self.apply_fm_slider(index, py, outbox);
             }
             Surface::FmGraph { .. } => {}
             Surface::KitSlider { index } => {
-                self.apply_kit_slider(index, py, outbox);
+                self.apply_kit_slider(index, py, true, outbox);
             }
             Surface::FxSlider { index } => {
                 self.apply_fx_slider(index, py, outbox);
+            }
+            Surface::MixBus { index } => {
+                self.apply_mix_bus(index, py, outbox);
+            }
+            Surface::MixPad { index } => {
+                self.apply_mix_pad(index, py, outbox);
             }
             Surface::ChordsStrum => {
                 let y = self.layout.chords_strum_touch_y(py);
@@ -3556,6 +3653,8 @@ impl NativeModel {
             | Surface::FmSlider { .. }
             | Surface::KitSlider { .. }
             | Surface::FxSlider { .. }
+            | Surface::MixBus { .. }
+            | Surface::MixPad { .. }
             | Surface::UiTap => {}
         }
     }
@@ -3585,11 +3684,6 @@ impl NativeModel {
             self.phrase_playing[index] = false;
             self.status_line = format!("{} stop", phrases::pad_label(index));
         } else {
-            let pad = &self.phrases[index];
-            if pad.voice_locked {
-                outbox.morph_pair(pad.morph_a, pad.morph_b);
-                outbox.synth("morph", pad.morph);
-            }
             outbox.clip_launch(index as u8, "bar");
             self.phrase_playing[index] = true;
             self.status_line = format!("{} launch", phrases::pad_label(index));
@@ -3622,20 +3716,14 @@ impl NativeModel {
             return;
         }
         self.phrases[index].loop_mode = !self.phrases[index].loop_mode;
+        self.send_phrase_clip(index, outbox);
+        let dir = phrases::phrases_dir_from_env();
+        let _ = phrases::save_pad(&dir, index, &self.phrases[index], self.bpm);
         let mode = if self.phrases[index].loop_mode {
             "loop"
         } else {
             "oneshot"
         };
-        outbox.clip_load(
-            index as u8,
-            self.phrases[index].length_ticks,
-            mode,
-            self.phrases[index].events.clone(),
-            self.phrases[index].tone,
-        );
-        let dir = phrases::phrases_dir_from_env();
-        let _ = phrases::save_pad(&dir, index, &self.phrases[index], self.bpm);
         self.status_line = format!(
             "{} → {}",
             phrases::pad_label(index),
@@ -3748,21 +3836,11 @@ impl NativeModel {
         };
         let mut pad = phrases::from_wire(events, length_ticks, self.seq.bpm, true);
         pad.tone = self.seq.baked_tone.unwrap_or(self.synth_params[1].clamp(0.0, 1.0));
+        self.apply_live_voice_snapshot(&mut pad);
         self.phrases[index] = pad;
         let dir = phrases::phrases_dir_from_env();
         let _ = phrases::save_pad(&dir, index, &self.phrases[index], self.bpm);
-        let mode = if self.phrases[index].loop_mode {
-            "loop"
-        } else {
-            "oneshot"
-        };
-        outbox.clip_load(
-            index as u8,
-            self.phrases[index].length_ticks,
-            mode,
-            self.phrases[index].events.clone(),
-            self.phrases[index].tone,
-        );
+        self.send_phrase_clip(index, outbox);
         self.pads_selected = index;
         self.pads_edit = false;
         self.hide_pads_edit_chrome();
@@ -3825,16 +3903,11 @@ impl NativeModel {
             .collect();
         let mut pad = phrases::from_wire(wire, length_ticks.max(1), self.bpm, false);
         pad.tone = self.synth_params[1].clamp(0.0, 1.0);
+        self.apply_live_voice_snapshot(&mut pad);
         self.phrases[index] = pad;
         let dir = phrases::phrases_dir_from_env();
         let _ = phrases::save_pad(&dir, index, &self.phrases[index], self.bpm);
-        outbox.clip_load(
-            index as u8,
-            self.phrases[index].length_ticks,
-            "oneshot",
-            self.phrases[index].events.clone(),
-            self.phrases[index].tone,
-        );
+        self.send_phrase_clip(index, outbox);
         self.pads_selected = index;
         self.status_line = format!("{} recorded", phrases::pad_label(index));
         self.push_log(format!("pad rec {}", phrases::pad_label(index)));
@@ -3878,39 +3951,112 @@ impl NativeModel {
         if (new_gain - old).abs() < 0.001 {
             return;
         }
-        // Rescale event velocities relative to gain change.
-        let ratio = new_gain / old.max(0.01);
-        for ev in &mut self.phrases[index].events {
-            if ev.on && ev.velocity > 0 {
-                ev.velocity = ((f32::from(ev.velocity) * ratio).round() as u32).clamp(1, 127) as u8;
-            }
-        }
         self.phrases[index].gain = new_gain;
-        let mode = if self.phrases[index].loop_mode {
-            "loop"
-        } else {
-            "oneshot"
-        };
-        outbox.clip_load(
-            index as u8,
-            self.phrases[index].length_ticks,
-            mode,
-            self.phrases[index].events.clone(),
-            self.phrases[index].tone,
-        );
+        outbox.clip_gain(index as u8, new_gain);
         let dir = phrases::phrases_dir_from_env();
         let _ = phrases::save_pad(&dir, index, &self.phrases[index], self.bpm);
         self.status_line = format!("{} gain {:.1}", phrases::pad_label(index), new_gain);
+        self.mark_dirty();
+    }
+
+    fn send_phrase_clip(&self, index: usize, outbox: &mut Outbox) {
+        if index >= 16 {
+            return;
+        }
+        let pad = &self.phrases[index];
+        if pad.empty {
+            outbox.clip_clear(index as u8);
+            return;
+        }
+        outbox.clip_load_voice(
+            index as u8,
+            pad.length_ticks,
+            if pad.loop_mode { "loop" } else { "oneshot" },
+            pad.events.clone(),
+            pad.tone,
+            Some(Self::phrase_clip_voice(pad)),
+        );
+        outbox.clip_gain(index as u8, pad.gain);
+    }
+
+    fn apply_live_voice_snapshot(&self, pad: &mut PhrasePad) {
+        pad.voice_locked = true;
+        pad.morph_a = self.morph_a;
+        pad.morph_b = self.morph_b;
+        pad.morph = self.synth_params[0].clamp(0.0, 1.0);
+        pad.fx_drive = self.fx_voice[0].clamp(0.0, 1.0);
+        pad.fx_delay_mix = self.fx_voice[1].clamp(0.0, 1.0);
+        pad.fx_reverb_mix = self.fx_voice[2].clamp(0.0, 1.0);
+        pad.fx_flanger_mix = self.fx_voice[3].clamp(0.0, 1.0);
+    }
+
+    fn apply_live_voice_snapshot_at(&mut self, index: usize) {
+        let morph_a = self.morph_a;
+        let morph_b = self.morph_b;
+        let morph = self.synth_params[0].clamp(0.0, 1.0);
+        let fx = [
+            self.fx_voice[0].clamp(0.0, 1.0),
+            self.fx_voice[1].clamp(0.0, 1.0),
+            self.fx_voice[2].clamp(0.0, 1.0),
+            self.fx_voice[3].clamp(0.0, 1.0),
+        ];
+        let pad = &mut self.phrases[index];
+        pad.voice_locked = true;
+        pad.morph_a = morph_a;
+        pad.morph_b = morph_b;
+        pad.morph = morph;
+        pad.fx_drive = fx[0];
+        pad.fx_delay_mix = fx[1];
+        pad.fx_reverb_mix = fx[2];
+        pad.fx_flanger_mix = fx[3];
+    }
+
+    fn phrase_clip_voice(pad: &PhrasePad) -> WireClipVoice {
+        WireClipVoice {
+            locked: pad.voice_locked,
+            morph_a: pad.morph_a,
+            morph_b: pad.morph_b,
+            morph: pad.morph,
+            drive: pad.fx_drive,
+            delay_mix: pad.fx_delay_mix,
+            reverb_mix: pad.fx_reverb_mix,
+            flanger_mix: pad.fx_flanger_mix,
+        }
     }
 
     const SYNTH_PARAM_NAMES: [&'static str; 5] = ["morph", "tone", "level", "attack", "release"];
+    /// Ignore a captured-slider sample that jumps more than this in one event.
+    /// Capacitive panels (and a finger leaving the track) used to clamp to 0 or 1.
+    const SLIDER_JUMP: f32 = 0.40;
 
-
-    fn apply_synth_slider(&mut self, index: usize, _px: i32, py: i32, outbox: &mut Outbox) {
-        let track = self.layout.synth_slider(index);
+    fn vertical_slider_t(track: Rect, py: i32) -> Option<f32> {
+        if py < track.y || py >= track.y + track.h {
+            return None;
+        }
         let y = 1.0 - ((py - track.y) as f32 / track.h.max(1) as f32);
-        let value = y.clamp(0.0, 1.0);
+        Some(y.clamp(0.0, 1.0))
+    }
+
+    fn accept_slider_value(prev: f32, next: f32, moving: bool) -> bool {
+        !moving || (next - prev).abs() <= Self::SLIDER_JUMP
+    }
+
+    fn apply_synth_slider(
+        &mut self,
+        index: usize,
+        _px: i32,
+        py: i32,
+        moving: bool,
+        outbox: &mut Outbox,
+    ) {
+        let track = self.layout.synth_slider(index);
+        let Some(value) = Self::vertical_slider_t(track, py) else {
+            return;
+        };
         if index == 5 {
+            if !Self::accept_slider_value(self.fx_voice[3], value, moving) {
+                return;
+            }
             self.fx_voice[3] = value;
             self.push_voice_fx("flanger_mix", value, outbox);
             self.status_line = format!("voice flange {:.2}", value);
@@ -3918,6 +4064,9 @@ impl NativeModel {
             return;
         }
         if index >= 5 {
+            return;
+        }
+        if !Self::accept_slider_value(self.synth_params[index], value, moving) {
             return;
         }
         self.synth_params[index] = value;
@@ -4281,13 +4430,22 @@ impl NativeModel {
         self.mark_dirty();
     }
 
-    fn apply_kit_slider(&mut self, index: usize, py: i32, outbox: &mut Outbox) {
+    fn apply_kit_slider(&mut self, index: usize, py: i32, moving: bool, outbox: &mut Outbox) {
         if index >= 4 {
             return;
         }
         let track = self.layout.kit_edit_slider(index);
-        let y = 1.0 - ((py - track.y) as f32 / track.h.max(1) as f32);
-        let value = y.clamp(0.0, 1.0);
+        let Some(value) = Self::vertical_slider_t(track, py) else {
+            return;
+        };
+        let prev = if self.kit_all_drums {
+            self.drum_group_macros[index]
+        } else {
+            self.drum_macros[self.selected_drum_model().index()][index]
+        };
+        if !Self::accept_slider_value(prev, value, moving) {
+            return;
+        }
         let name = Self::DRUM_MACRO_NAMES[index];
         if self.kit_all_drums {
             self.drum_group_macros[index] = value;
@@ -4333,12 +4491,26 @@ impl NativeModel {
     }
 
     fn apply_fx_slider(&mut self, index: usize, py: i32, outbox: &mut Outbox) {
-        if index >= 4 {
+        if index >= Layout::FX_SLIDER_COUNT {
             return;
         }
         let track = self.layout.settings_fx_slider(index);
         let y = 1.0 - ((py - track.y) as f32 / track.h.max(1) as f32);
         let value = y.clamp(0.0, 1.0);
+        if index == Layout::FX_KEYS_LEVEL {
+            self.synth_params[2] = value;
+            outbox.synth("level", value);
+            self.status_line = format!("keys {:.2}", value);
+            self.mark_dirty();
+            return;
+        }
+        if index == Layout::FX_DRUMS_LEVEL {
+            self.drum_level = value;
+            outbox.synth("drum_level", value);
+            self.status_line = format!("drums {:.2}", value);
+            self.mark_dirty();
+            return;
+        }
         let name = Self::FX_PARAM_NAMES[index];
         match self.fx_target {
             FxEditTarget::Bus => {
@@ -4357,6 +4529,51 @@ impl NativeModel {
                 self.status_line = format!("drums {name} {:.2}", value);
             }
         }
+        self.mark_dirty();
+    }
+
+    fn mix_slider_value(track: Rect, py: i32) -> f32 {
+        let y = 1.0 - ((py - track.y) as f32 / track.h.max(1) as f32);
+        y.clamp(0.0, 1.0)
+    }
+
+    fn apply_mix_bus(&mut self, index: usize, py: i32, outbox: &mut Outbox) {
+        let track = self.layout.mix_bus_slider(index);
+        let t = Self::mix_slider_value(track, py);
+        match index {
+            Layout::MIX_LIVE => {
+                self.synth_params[2] = t;
+                outbox.synth("level", t);
+                self.status_line = format!("LIVE {:.2}", t);
+            }
+            Layout::MIX_KIT => {
+                self.drum_level = t;
+                outbox.synth("drum_level", t);
+                self.status_line = format!("KIT {:.2}", t);
+            }
+            Layout::MIX_SEQ => {
+                let gain = (t * 2.0).clamp(0.0, 2.0);
+                self.seq_level = gain;
+                outbox.clip_gain(SEQ_CLIP_SLOT, gain);
+                self.status_line = format!("SEQ {:.2}", gain);
+            }
+            _ => return,
+        }
+        self.mark_dirty();
+    }
+
+    fn apply_mix_pad(&mut self, index: usize, py: i32, outbox: &mut Outbox) {
+        if index >= 16 || self.phrases[index].empty {
+            return;
+        }
+        let track = self.layout.mix_pad_cell(index);
+        let t = Self::mix_slider_value(track, py);
+        let gain = (t * 2.0).clamp(0.1, 2.0);
+        self.phrases[index].gain = gain;
+        outbox.clip_gain(index as u8, gain);
+        let dir = phrases::phrases_dir_from_env();
+        let _ = phrases::save_pad(&dir, index, &self.phrases[index], self.bpm);
+        self.status_line = format!("{} {:.1}", phrases::pad_label(index), gain);
         self.mark_dirty();
     }
 
@@ -5125,8 +5342,10 @@ impl NativeModel {
                 self.mark_dirty();
             } else if prog.y_param == "vib" {
                 // Tk parity: Y raises depth and gates always-on vibrato.
+                // Bottom dead zone so a rest finger does not engage VIB.
+                let y = kaoss_ui::apply_zero_deadzone(y, kaoss_ui::ZERO_REST_DEADZONE);
                 self.vibrato_depth = (y * 2.0).clamp(0.0, 2.0);
-                self.vibrato_always = if y > 0.02 { 1.0 } else { 0.0 };
+                self.vibrato_always = if y > 0.0 { 1.0 } else { 0.0 };
                 outbox.synth("vibrato_depth", y.clamp(0.0, 1.0));
                 outbox.synth("vibrato_always", self.vibrato_always);
                 self.mark_dirty();
@@ -5146,8 +5365,9 @@ impl NativeModel {
                 self.apply_named_param(xp, x, outbox);
             }
             if prog.y_param == "vib" {
+                let y = kaoss_ui::apply_zero_deadzone(y, kaoss_ui::ZERO_REST_DEADZONE);
                 self.vibrato_depth = (y * 2.0).clamp(0.0, 2.0);
-                self.vibrato_always = if y > 0.02 { 1.0 } else { 0.0 };
+                self.vibrato_always = if y > 0.0 { 1.0 } else { 0.0 };
                 outbox.synth("vibrato_depth", y.clamp(0.0, 1.0));
                 outbox.synth("vibrato_always", self.vibrato_always);
             } else if prog.y_param == "tone_lfo" {
@@ -5291,6 +5511,7 @@ impl NativeModel {
                     events,
                     self.seq.baked_tone.unwrap_or(1.0),
                 );
+                outbox.clip_gain(SEQ_CLIP_SLOT, self.seq_level);
                 if launch {
                     outbox.clip_launch(SEQ_CLIP_SLOT, "bar");
                 }
@@ -5708,6 +5929,7 @@ impl NativeModel {
 
     fn factory_reset_synth(&mut self, outbox: &mut Outbox) {
         self.synth_params = [0.5, 0.5, 0.8, 0.05, 0.3];
+        self.drum_level = 1.0;
         self.vibrato_always = 0.0;
         self.vibrato_depth = 0.5;
         self.vibrato_rate = 5.0;
@@ -5717,6 +5939,7 @@ impl NativeModel {
         outbox.synth("morph", self.synth_params[0]);
         outbox.synth("tone", self.synth_params[1]);
         outbox.synth("level", self.synth_params[2]);
+        outbox.synth("drum_level", self.drum_level);
         outbox.synth("attack", self.synth_params[3]);
         outbox.synth("release", self.synth_params[4]);
         self.push_vibrato_params(outbox);
@@ -5737,13 +5960,11 @@ impl NativeModel {
         }
         self.phrases[index].voice_locked = !self.phrases[index].voice_locked;
         if self.phrases[index].voice_locked {
-            self.phrases[index].morph_a = self.morph_a;
-            self.phrases[index].morph_b = self.morph_b;
-            self.phrases[index].morph = self.synth_params[0];
+            self.apply_live_voice_snapshot_at(index);
         }
         let dir = phrases::phrases_dir_from_env();
         let _ = phrases::save_pad(&dir, index, &self.phrases[index], self.bpm);
-        let _ = outbox;
+        self.send_phrase_clip(index, outbox);
         self.status_line = if self.phrases[index].voice_locked {
             format!("{} VOICE LOCK", phrases::pad_label(index))
         } else {
@@ -6242,6 +6463,7 @@ impl NativeModel {
         outbox.tempo(bpm);
         let mode = if self.song_loop { "loop" } else { "oneshot" };
         outbox.clip_load(SONG_CLIP_SLOT, length_ticks, mode, events, 1.0);
+        outbox.clip_gain(SONG_CLIP_SLOT, self.seq_level);
         outbox.clip_launch(SONG_CLIP_SLOT, "bar");
         self.song_playing = true;
         self.bpm = bpm.clamp(40.0, 240.0);
@@ -6570,6 +6792,44 @@ mod tests {
             )),
             "midline should be near unison: {batch:?}"
         );
+        // A few pixels off center still rest in the dead zone.
+        let near = k.y + k.h / 2 + (k.h as f32 * 0.03) as i32;
+        model.finger_move(1, k.x + k.w / 2, near, &mut out);
+        let batch = out.take();
+        assert!(
+            batch.iter().any(|r| matches!(
+                r,
+                Request::Synth { param, value, .. }
+                    if param == "pitch_bend" && value.abs() < 1e-3
+            )),
+            "near-center should stay unison: {batch:?}"
+        );
+    }
+
+    #[test]
+    fn kaoss_vib_bottom_rest_does_not_engage() {
+        let mut model = NativeModel::new();
+        model.kaoss_program = kaoss_ui::KAOSS_PROGRAMS
+            .iter()
+            .position(|p| p.id == "vib")
+            .expect("vib program");
+        let mut out = Outbox::new();
+        let k = model.layout.kaoss;
+        // Sit just above the bottom edge — inside the rest dead zone.
+        model.finger_down(1, k.x + k.w / 2, k.y + k.h - 6, &mut out);
+        assert!(
+            model.vibrato_always < 0.01,
+            "bottom rest should leave VIB off"
+        );
+        let batch = out.take();
+        assert!(
+            !batch.iter().any(|r| matches!(
+                r,
+                Request::Synth { param, value, .. }
+                    if param == "vibrato_always" && *value > 0.01
+            )),
+            "bottom rest must not gate vibrato: {batch:?}"
+        );
     }
 
     #[test]
@@ -6844,6 +7104,34 @@ mod tests {
     }
 
     #[test]
+    fn synth_tone_slider_ignores_snap_jumps() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Synth);
+        let mut out = Outbox::new();
+        let track = model.layout.synth_slider(1);
+        model.finger_down(1, track.x + 4, track.y + track.h / 2, &mut out);
+        out.take();
+        let mid = model.synth_params[1];
+        assert!((mid - 0.5).abs() < 0.08, "down on midline, got {mid}");
+
+        // Wild coordinate (lift / capacitive glitch) used to clamp to 1.0.
+        model.finger_move(1, track.x + 4, 0, &mut out);
+        assert!(
+            (model.synth_params[1] - mid).abs() < 1e-4,
+            "outside-track jump must not snap tone, got {}",
+            model.synth_params[1]
+        );
+
+        // A small slide still works.
+        model.finger_move(1, track.x + 4, track.y + track.h / 2 - 12, &mut out);
+        assert!(
+            model.synth_params[1] > mid + 0.02,
+            "small slide should raise tone, got {}",
+            model.synth_params[1]
+        );
+    }
+
+    #[test]
     fn five_contacts_are_tracked() {
         let mut model = NativeModel::new();
         let mut out = Outbox::new();
@@ -6907,7 +7195,7 @@ mod tests {
     }
 
     #[test]
-    fn locked_pad_launch_sends_morph_pair() {
+    fn locked_pad_launch_does_not_stomp_live_morph() {
         let mut model = NativeModel::new();
         let mut out = Outbox::new();
         model.phrases[0].empty = false;
@@ -6918,16 +7206,56 @@ mod tests {
         model.phrases[0].length_ticks = 960;
         model.toggle_phrase(0, &mut out);
         let batch = out.take();
-        assert!(batch
-            .iter()
-            .any(|r| matches!(r, Request::MorphPair { a: 2, b: 3 })));
-        assert!(batch.iter().any(|r| matches!(
-            r,
-            Request::Synth { param, value, .. } if param == "morph" && (*value - 0.25).abs() < 1e-6
-        )));
+        assert!(
+            batch
+                .iter()
+                .all(|r| !matches!(r, Request::MorphPair { .. })),
+            "locked pad playback must not rewrite the live morph: {batch:?}"
+        );
         assert!(batch
             .iter()
             .any(|r| matches!(r, Request::ClipLaunch { slot: 0, .. })));
+    }
+
+    #[test]
+    fn pad_record_snapshots_voice_and_fx() {
+        let mut model = NativeModel::new();
+        model.pads_edit = true;
+        model.pads_selected = 0;
+        model.morph_a = 2;
+        model.morph_b = 3;
+        model.synth_params[0] = 0.4;
+        model.synth_params[1] = 0.25;
+        model.fx_voice = [0.1, 0.55, 0.35, 0.2];
+        let mut out = Outbox::new();
+        model.set_mode(UiMode::Pads);
+        let rec = model.layout.pads_rec;
+        model.finger_down(1, rec.x + 4, rec.y + 4, &mut out);
+        model.finger_up(1, &mut out);
+        assert!(model.pads_recording.is_some());
+        model.push_pad_rec_at(true, 0, 60, 100, 0.0);
+        model.push_pad_rec_at(false, 0, 60, 0, 0.4);
+        model.finger_down(2, rec.x + 4, rec.y + 4, &mut out);
+        model.finger_up(2, &mut out);
+        let pad = &model.phrases[0];
+        assert!(!pad.empty);
+        assert!(pad.voice_locked);
+        assert_eq!((pad.morph_a, pad.morph_b), (2, 3));
+        assert!((pad.morph - 0.4).abs() < 1e-6);
+        assert!((pad.tone - 0.25).abs() < 1e-6);
+        assert!((pad.fx_delay_mix - 0.55).abs() < 1e-6);
+        assert!((pad.fx_flanger_mix - 0.2).abs() < 1e-6);
+        let batch = out.take();
+        assert!(
+            batch.iter().any(|r| matches!(
+                r,
+                Request::ClipLoad {
+                    voice: Some(v),
+                    ..
+                } if v.locked && v.morph_a == 2 && (v.delay_mix - 0.55).abs() < 1e-6
+            )),
+            "recorded pad should upload a locked voice snapshot: {batch:?}"
+        );
     }
 
     #[test]
@@ -7853,6 +8181,100 @@ mod tests {
     }
 
     #[test]
+    fn chords_hold_survives_switch_to_kaoss() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Chords);
+        model.chords_out = OutMode::Local;
+        model.chords_hold = true;
+        model.chords_palette[0] = Some(ChordSpec::new(0, chords::ChordQuality::Maj));
+        let mut out = Outbox::new();
+        let cell = model.layout.chords_palette_slot(0);
+        model.finger_down(1, cell.x + 4, cell.y + 4, &mut out);
+        out.take();
+        model.finger_up(1, &mut out);
+        out.take();
+        assert!(model.chords_block.iter().any(|n| n.is_some()));
+
+        let kaoss = model.layout.nav_jam(4);
+        model.finger_down(2, kaoss.x + 4, kaoss.y + 4, &mut out);
+        let switch = out.take();
+        assert_eq!(model.mode, UiMode::Kaoss);
+        assert!(
+            switch
+                .iter()
+                .all(|r| !matches!(r, Request::NoteOff { .. })),
+            "HOLD chord must keep sounding in KAOSS, got {switch:?}"
+        );
+        assert!(model.chords_block.iter().any(|n| n.is_some()));
+    }
+
+    #[test]
+    fn chords_mom_silences_when_leaving() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Chords);
+        model.chords_out = OutMode::Local;
+        model.chords_hold = false;
+        model.chords_palette[0] = Some(ChordSpec::new(0, chords::ChordQuality::Maj));
+        let mut out = Outbox::new();
+        let cell = model.layout.chords_palette_slot(0);
+        model.finger_down(1, cell.x + 4, cell.y + 4, &mut out);
+        out.take();
+        assert!(model.chords_block.iter().any(|n| n.is_some()));
+
+        let kaoss = model.layout.nav_jam(4);
+        model.finger_down(2, kaoss.x + 4, kaoss.y + 4, &mut out);
+        let switch = out.take();
+        assert_eq!(model.mode, UiMode::Kaoss);
+        assert!(
+            switch.iter().any(|r| matches!(r, Request::NoteOff { .. })),
+            "MOM chord should drop when leaving CHORDS, got {switch:?}"
+        );
+        assert!(model.chords_block.iter().all(|n| n.is_none()));
+    }
+
+    #[test]
+    fn kaoss_hold_survives_switch_to_chords() {
+        let mut model = NativeModel::new();
+        model.kaoss_out = OutMode::Local;
+        model.kaoss_hold = true;
+        model.kaoss_program = kaoss_ui::KAOSS_PROGRAMS
+            .iter()
+            .position(|p| p.id == "lead")
+            .expect("lead");
+        let mut out = Outbox::new();
+        let cell = model.layout.kaoss_cell(4, 3);
+        model.finger_down(1, cell.x + 4, cell.y + 4, &mut out);
+        let down = out.take();
+        let hold_gesture = down.iter().find_map(|r| match r {
+            Request::Touch {
+                phase: TouchPhase::Down,
+                gesture,
+                ..
+            } => Some(*gesture),
+            _ => None,
+        });
+        model.finger_up(1, &mut out);
+        out.take();
+        assert!(model.kaoss_hold_gesture.is_some());
+
+        let chords = model.layout.nav_jam(5);
+        model.finger_down(2, chords.x + 4, chords.y + 4, &mut out);
+        let switch = out.take();
+        assert_eq!(model.mode, UiMode::Chords);
+        assert!(
+            switch.iter().all(|r| !matches!(
+                r,
+                Request::Touch {
+                    phase: TouchPhase::Up,
+                    ..
+                }
+            )),
+            "HOLD drone must keep sounding in CHORDS, got {switch:?}"
+        );
+        assert_eq!(model.kaoss_hold_gesture, hold_gesture);
+    }
+
+    #[test]
     fn chords_record_into_seq_backbone() {
         let mut model = NativeModel::new();
         model.set_mode(UiMode::Chords);
@@ -7999,6 +8421,18 @@ mod tests {
     }
 
     #[test]
+    fn chords_progs_button_opens_progressions_overlay() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Chords);
+        let mut out = Outbox::new();
+        let cell = model.layout.chords_tool(3);
+        model.finger_down(1, cell.x + 4, cell.y + 4, &mut out);
+        model.finger_up(1, &mut out);
+        assert_eq!(model.chords_overlay, Some(ChordsOverlay::Changes));
+        assert_eq!(model.status_line, "pick progressions");
+    }
+
+    #[test]
     fn settings_update_opens_panel_without_blocking_check() {
         let mut model = NativeModel::new();
         model.set_mode(UiMode::Settings);
@@ -8116,6 +8550,183 @@ mod tests {
             "expected bus flanger_mix, got {batch:?}"
         );
         assert!(model.fx_bus[3] > 0.5);
+    }
+
+    #[test]
+    fn fx_menu_level_sends_keys_gain() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Fx);
+        let mut out = Outbox::new();
+        let track = model.layout.settings_fx_slider(Layout::FX_KEYS_LEVEL);
+        model.finger_down(1, track.x + 8, track.y + 4, &mut out);
+        let batch = out.take();
+        assert!(
+            batch.iter().any(|r| matches!(
+                r,
+                Request::Synth { param, value, .. }
+                    if param == "level" && *value > 0.9
+            )),
+            "expected keys level, got {batch:?}"
+        );
+        assert!(model.synth_params[2] > 0.9);
+    }
+
+    #[test]
+    fn fx_menu_drums_sends_kit_gain() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Fx);
+        let mut out = Outbox::new();
+        let track = model.layout.settings_fx_slider(Layout::FX_DRUMS_LEVEL);
+        // Bottom of the slider → near 0.
+        model.finger_down(1, track.x + 8, track.y + track.h - 4, &mut out);
+        let batch = out.take();
+        assert!(
+            batch.iter().any(|r| matches!(
+                r,
+                Request::Synth { param, value, .. }
+                    if param == "drum_level" && *value < 0.1
+            )),
+            "expected drum_level, got {batch:?}"
+        );
+        assert!(model.drum_level < 0.1);
+    }
+
+    #[test]
+    fn mix_live_sends_keys_level() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Mix);
+        let mut out = Outbox::new();
+        let track = model.layout.mix_bus_slider(Layout::MIX_LIVE);
+        model.finger_down(1, track.x + 8, track.y + 4, &mut out);
+        let batch = out.take();
+        assert!(
+            batch.iter().any(|r| matches!(
+                r,
+                Request::Synth { param, value, .. }
+                    if param == "level" && *value > 0.9
+            )),
+            "expected LIVE level, got {batch:?}"
+        );
+        assert!(model.synth_params[2] > 0.9);
+    }
+
+    #[test]
+    fn mix_kit_sends_drum_level() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Mix);
+        let mut out = Outbox::new();
+        let track = model.layout.mix_bus_slider(Layout::MIX_KIT);
+        model.finger_down(1, track.x + 8, track.y + track.h - 4, &mut out);
+        let batch = out.take();
+        assert!(
+            batch.iter().any(|r| matches!(
+                r,
+                Request::Synth { param, value, .. }
+                    if param == "drum_level" && *value < 0.1
+            )),
+            "expected KIT drum_level, got {batch:?}"
+        );
+        assert!(model.drum_level < 0.1);
+    }
+
+    #[test]
+    fn mix_seq_sends_clip_gain_on_seq_slot() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Mix);
+        let mut out = Outbox::new();
+        let track = model.layout.mix_bus_slider(Layout::MIX_SEQ);
+        model.finger_down(1, track.x + 8, track.y + 4, &mut out);
+        let batch = out.take();
+        assert!(
+            batch.iter().any(|r| matches!(
+                r,
+                Request::ClipGain { slot, value }
+                    if *slot == SEQ_CLIP_SLOT && *value > 1.8
+            )),
+            "expected SEQ clip_gain, got {batch:?}"
+        );
+        assert!(model.seq_level > 1.8);
+    }
+
+    #[test]
+    fn mix_pad_sends_clip_gain_without_reloading() {
+        let dir = std::env::temp_dir().join(format!("pidi-mix-pad-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        std::env::set_var("PIDI_PHRASES_DIR", &dir);
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Mix);
+        model.phrases[0] = phrases::PhrasePad {
+            empty: false,
+            length_ticks: 1920,
+            events: vec![WireClipEvent {
+                tick: 0,
+                on: true,
+                channel: 0,
+                note: 60,
+                velocity: 100,
+            }],
+            gain: 1.0,
+            ..phrases::PhrasePad::default()
+        };
+        model.phrases[0].empty = false;
+        let mut out = Outbox::new();
+        let cell = model.layout.mix_pad_cell(0);
+        model.finger_down(1, cell.x + 4, cell.y + 4, &mut out);
+        let batch = out.take();
+        assert!(
+            batch.iter().any(|r| matches!(
+                r,
+                Request::ClipGain { slot: 0, value } if *value > 1.5
+            )),
+            "expected pad clip_gain, got {batch:?}"
+        );
+        assert!(
+            batch.iter().all(|r| !matches!(r, Request::ClipLoad { .. })),
+            "MIX must not rewrite clip events: {batch:?}"
+        );
+        assert!(model.phrases[0].gain > 1.5);
+        assert_eq!(model.phrases[0].events[0].velocity, 100);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pads_vol_sends_clip_gain_not_clip_load() {
+        let dir = std::env::temp_dir().join(format!("pidi-mix-vol-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        std::env::set_var("PIDI_PHRASES_DIR", &dir);
+        let mut model = NativeModel::new();
+        model.pads_edit = true;
+        model.pads_selected = 0;
+        model.phrases[0] = phrases::PhrasePad {
+            empty: false,
+            length_ticks: 1920,
+            events: vec![WireClipEvent {
+                tick: 0,
+                on: true,
+                channel: 0,
+                note: 60,
+                velocity: 80,
+            }],
+            gain: 1.0,
+            ..phrases::PhrasePad::default()
+        };
+        model.phrases[0].empty = false;
+        let mut out = Outbox::new();
+        model.nudge_pad_gain(phrases::PHRASE_GAIN_STEP, &mut out);
+        let batch = out.take();
+        assert!(
+            batch.iter().any(|r| matches!(
+                r,
+                Request::ClipGain { slot: 0, value } if (*value - 1.1).abs() < 1e-4
+            )),
+            "expected clip_gain 1.1, got {batch:?}"
+        );
+        assert!(
+            batch.iter().all(|r| !matches!(r, Request::ClipLoad { .. })),
+            "V+/- must not rewrite clip events: {batch:?}"
+        );
+        assert_eq!(model.phrases[0].events[0].velocity, 80);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

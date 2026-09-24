@@ -865,196 +865,34 @@ pub struct UpdateCheckResult {
 
 /// Fast local stamp for the Update panel — file reads only (no network).
 pub fn update_local_status() -> String {
-    let root = find_repo_root();
-    let mut parts = Vec::new();
-
-    for candidate in [
-        root.join("apps/pidi/version.json"),
-        root.join("version.json"),
-        PathBuf::from("/home/ray/midi-tone/version.json"),
-        PathBuf::from("/home/ray/pi-midi-toolkit/apps/pidi/version.json"),
-    ] {
-        if let Some(line) = read_version_json_line(&candidate) {
-            parts.push(line);
-            break;
-        }
-    }
-
-    let ver = root.join("dist/armv7/VERSION");
-    if let Ok(text) = std::fs::read_to_string(&ver) {
-        let mut sha = None;
-        let mut glibc = None;
-        for line in text.lines() {
-            if let Some(rest) = line.strip_prefix("git_sha=") {
-                sha = Some(rest.trim().chars().take(7).collect::<String>());
-            }
-            if let Some(rest) = line.strip_prefix("host_glibc=") {
-                glibc = Some(rest.trim().to_string());
-            }
-        }
-        if let Some(s) = sha {
-            parts.push(format!("engines {s}"));
-        }
-        if let Some(g) = glibc {
-            parts.push(format!("glibc {g}"));
-        }
-    }
-
-    if parts.is_empty() {
-        "Running: unknown — tap CHECK for GitHub".into()
-    } else {
-        format!("Running: {}", parts.join(" · "))
-    }
-}
-
-fn read_version_json_line(path: &PathBuf) -> Option<String> {
-    let text = std::fs::read_to_string(path).ok()?;
-    let sha = text
-        .lines()
-        .find_map(|l| {
-            let t = l.trim().trim_matches(',');
-            t.strip_prefix("\"sha\"")
-                .or_else(|| t.strip_prefix("\"sha\":"))
-                .map(|s| s.trim().trim_matches(':').trim().trim_matches('"').to_string())
-                .filter(|s| !s.is_empty() && s != "null")
-        })
-        .or_else(|| {
-            // crude: "sha": "abcdef..."
-            let idx = text.find("\"sha\"")?;
-            let after = &text[idx + 5..];
-            let q1 = after.find('"')?;
-            let rest = &after[q1 + 1..];
-            let q2 = rest.find('"')?;
-            Some(rest[..q2].to_string())
-        })?;
-    let short: String = sha.chars().take(7).collect();
-    let branch = text.find("\"branch\"").and_then(|idx| {
-        let after = &text[idx + 8..];
-        let q1 = after.find('"')?;
-        let rest = &after[q1 + 1..];
-        let q2 = rest.find('"')?;
-        Some(rest[..q2].to_string())
-    });
-    Some(match branch {
-        Some(b) if !b.is_empty() => format!("{short} ({b})"),
-        _ => short,
-    })
+    crate::ota::local_status_line()
 }
 
 pub fn update_check_detailed() -> UpdateCheckResult {
-    let root = find_repo_root();
-    let mut lines = Vec::new();
-
-    let updater = root.join("apps/pidi/pidi/updater.py");
-    if updater.is_file() {
-        let (code, stdout, stderr) = run_capture(
-            Command::new("python3")
-                .arg(&updater)
-                .arg("--check")
-                .current_dir(&root),
-            60,
-        );
-        if !stdout.is_empty() {
-            lines.push(truncate_lines(&stdout, 12, 600));
-        }
-        if !stderr.is_empty() {
-            lines.push(truncate_lines(&stderr, 6, 300));
-        }
-        let blob = format!("{stdout}\n{stderr}");
-        let available = blob.to_ascii_lowercase().contains("update available")
-            || blob.contains("No local version stamp");
-        let status = if code == 0 {
-            if available {
-                "UPDATE available — tap INSTALL".into()
-            } else if blob.to_ascii_lowercase().contains("already on") {
-                "up to date".into()
-            } else {
-                stdout.lines().next().unwrap_or("CHECK ok").to_string()
-            }
-        } else {
-            stdout
-                .lines()
-                .next()
-                .or_else(|| stderr.lines().next())
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| format!("CHECK failed (exit {code})"))
-        };
-        return UpdateCheckResult {
-            status,
-            lines,
-            available: code == 0 && available,
-            ok: code == 0,
-            reload_kiosk: false,
-        };
-    }
-
-    // Fallback: git fetch + compare HEAD to upstream (still network — caller must be async).
-    let (fc, _, ferr) = run_capture(
-        Command::new("git")
-            .args(["fetch", "--quiet"])
-            .current_dir(&root),
-        45,
-    );
-    if fc != 0 && !ferr.is_empty() {
-        lines.push(truncate_lines(&ferr, 4, 200));
-    }
-    let (hc, head, _) = run_capture(
-        Command::new("git")
-            .args(["rev-parse", "--short", "HEAD"])
-            .current_dir(&root),
-        5,
-    );
-    let (uc, upstream, _) = run_capture(
-        Command::new("git")
-            .args(["rev-parse", "--short", "@{u}"])
-            .current_dir(&root),
-        5,
-    );
-    if hc == 0 && uc == 0 {
-        lines.push(format!("HEAD {head}  upstream {upstream}"));
-        let available = head != upstream;
-        let status = if available {
-            format!("behind? {head} vs {upstream}")
-        } else {
-            format!("up to date ({head})")
-        };
-        return UpdateCheckResult {
-            status,
-            lines,
-            available,
-            ok: true,
-            reload_kiosk: false,
-        };
-    }
-    UpdateCheckResult {
-        status: "UPDATE: no updater.py / git upstream".into(),
-        lines,
-        available: false,
-        ok: false,
-        reload_kiosk: false,
-    }
+    crate::ota::check()
 }
 
 pub fn update_apply() -> UpdateCheckResult {
-    let root = find_repo_root();
-    let updater = root.join("apps/pidi/pidi/updater.py");
-    if !updater.is_file() {
-        return UpdateCheckResult {
-            status: "UPDATE: updater.py missing".into(),
-            lines: Vec::new(),
-            available: false,
-            ok: false,
-            reload_kiosk: false,
-        };
-    }
-    let (code, stdout, stderr) = run_capture(
-        Command::new("python3")
-            .arg(&updater)
-            .arg("--apply")
-            .current_dir(&root),
-        600,
-    );
-    update_apply_result(code, &stdout, &stderr)
+    crate::ota::apply()
+}
+
+fn useful_update_error(stderr: &str, stdout: &str) -> String {
+    let skip = |t: &str| {
+        t.is_empty()
+            || t.starts_with("Traceback")
+            || t.starts_with("File ")
+            || t.starts_with("  ")
+    };
+    stderr
+        .lines()
+        .rev()
+        .chain(stdout.lines().rev())
+        .map(str::trim)
+        .find(|t| !skip(t))
+        .or_else(|| stderr.lines().next())
+        .or_else(|| stdout.lines().next())
+        .unwrap_or("see LOG")
+        .to_string()
 }
 
 pub(crate) fn update_apply_result(code: i32, stdout: &str, stderr: &str) -> UpdateCheckResult {
@@ -1082,11 +920,7 @@ pub(crate) fn update_apply_result(code: i32, stdout: &str, stderr: &str) -> Upda
     } else {
         format!(
             "INSTALL failed (exit {code}): {}",
-            stderr
-                .lines()
-                .next()
-                .or_else(|| stdout.lines().next())
-                .unwrap_or("see LOG")
+            useful_update_error(stderr, stdout)
         )
     };
     UpdateCheckResult {
@@ -1158,7 +992,6 @@ pub fn pi_power(action: &str) -> (String, Vec<String>) {
     #[cfg(target_os = "linux")]
     {
         let candidates = [
-            PathBuf::from("/home/ray/midi-tone/scripts/session/pi-power.sh"),
             find_repo_root().join("apps/pidi/scripts/session/pi-power.sh"),
             PathBuf::from("apps/pidi/scripts/session/pi-power.sh"),
         ];
@@ -1260,5 +1093,30 @@ mod tests {
         assert!(!result.ok);
         assert!(!result.reload_kiosk);
         assert!(result.status.contains("INSTALL failed"));
+    }
+
+    #[test]
+    fn host_has_no_python3_updater() {
+        let src = include_str!("host.rs");
+        let code = src.split("mod tests").next().unwrap_or(src);
+        assert!(!code.contains("python3"), "OTA must stay in-process");
+        assert!(!code.contains("updater.py"), "Python updater is gone");
+        assert!(!code.contains("/home/ray/midi-tone"));
+    }
+
+    #[test]
+    fn apply_result_failed_prefers_update_error_over_traceback() {
+        let result = update_apply_result(
+            1,
+            "",
+            "Traceback (most recent call last):\n  File \"updater.py\", line 1\nUpdateError: downloaded archive was not a full pi-midi-toolkit tree\n",
+        );
+        assert!(!result.ok);
+        assert!(
+            result.status.contains("downloaded archive was not a full pi-midi-toolkit tree"),
+            "{}",
+            result.status
+        );
+        assert!(!result.status.contains("Traceback"));
     }
 }
