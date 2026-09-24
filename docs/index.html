@@ -214,7 +214,7 @@
         <tr><th>OCT − / +</th><td>Transpose the on-screen keyboard.</td></tr>
         <tr><th>MORPH TONE LEVEL ATK REL FLANGE RATE</th><td>Vertical sliders. Morph is A→B; tone is the Chamberlin LPF. FLANGE is voice flanger mix; RATE is the flanger LFO speed.</td></tr>
         <tr><th>Scope</th><td>Live picture of the morph cycle.</td></tr>
-        <tr><th>Keys</th><td>One octave. Notes record into SEQ / pad REC while those are armed.</td></tr>
+        <tr><th>Keys</th><td>One octave. Hidden when a USB keybed is connected (MPK, Keystep, …); sliders and the scope grow into that strip. Stay visible for DIN interfaces (U2MIDI). Notes record into SEQ / pad REC while those are armed.</td></tr>
       </table>
     </section>
 
@@ -280,8 +280,10 @@
         <tr><th>KEEP / DROP / UNDO</th><td>Commit, discard, or peel the last layer.</td></tr>
         <tr><th>LEN ×2 / LEN ÷2</th><td>Double or half the loop.</td></tr>
         <tr><th>WRAP / EXTEND</th><td>WRAP stays inside the length; EXTEND can grow the cycle while overdubbing.</td></tr>
+        <tr><th>BEEP</th><td>Optional clave click at the start of each loop so a four-on-the-floor (or any even groove) still tells you where 1 is. Playback only — SAVE SEQ and &gt;PAD do not bake it in.</td></tr>
         <tr><th>&gt;PAD</th><td>Arm, then tap a PADS slot to copy the loop onto a phrase.</td></tr>
         <tr><th>− BPM / + BPM</th><td>Tempo. Chrome also shows BPM.</td></tr>
+        <tr><th>QNT</th><td>BAR / BEAT / OFF launch/stop grid (shared with PADS). Default BAR so layered takes lock to the clock.</td></tr>
       </table>
     </section>
 
@@ -294,6 +296,7 @@
       </figure>
       <table>
         <tr><th>Grid A1–B8</th><td>Tap a filled pad to launch / toggle. Green = sounding, blue/teal = clip ready, gray = empty. LOOP vs ONE is the subtitle.</td></tr>
+        <tr><th>QNT</th><td>BAR / BEAT / OFF. Two pads hit in the same bar (or beat) start together on the engine clock. Same control on SEQ.</td></tr>
         <tr><th>STOP</th><td>Stop every playing phrase.</td></tr>
         <tr><th>OUT</th><td>LOCAL / USB / BOTH (on the edit footer; PLAY keeps routing).</td></tr>
       </table>

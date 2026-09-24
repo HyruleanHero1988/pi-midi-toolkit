@@ -8,6 +8,27 @@ pub fn is_virtual_port_name(name: &str) -> bool {
     n.contains("through") || n.contains("jambox")
 }
 
+/// Controllers known to already have piano keys (hide the on-screen keyboard).
+const KEYBED_HINTS: &[&str] = &[
+    "mpk",
+    "keystation",
+    "oxygen",
+    "lpk",
+    "minilab",
+    "launchkey",
+    "keystep",
+    "seaboard",
+];
+
+/// True when this ALSA/`midir` name looks like a hardware keybed.
+pub fn port_looks_like_keybed(name: &str) -> bool {
+    if name.is_empty() || is_virtual_port_name(name) {
+        return false;
+    }
+    let n = name.to_ascii_lowercase();
+    KEYBED_HINTS.iter().any(|hint| n.contains(hint))
+}
+
 /// Drop the ALSA `client:port` suffix and prefer the name after the first colon.
 pub fn short_port_label(name: &str) -> &str {
     let trimmed = match name.rsplit_once(' ') {
@@ -135,5 +156,14 @@ mod tests {
         assert!(second.contains("MPK"));
         let third = cycle_port_filter(&second, &names);
         assert!(third.is_empty());
+    }
+
+    #[test]
+    fn keybed_names_match_mpk_not_din() {
+        assert!(port_looks_like_keybed("MPK mini 3"));
+        assert!(port_looks_like_keybed("Keystation Mini 32"));
+        assert!(!port_looks_like_keybed("U2MIDI PRO:U2MIDI PRO MIDI 1 20:0"));
+        assert!(!port_looks_like_keybed("Midi Through:Midi Through Port-0 14:0"));
+        assert!(!port_looks_like_keybed(""));
     }
 }

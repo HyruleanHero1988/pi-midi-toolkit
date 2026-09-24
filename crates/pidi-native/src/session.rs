@@ -68,6 +68,50 @@ impl OutMode {
     }
 }
 
+/// Launch/stop grid for Pads / SEQ / Songs. Maps onto `jambox_core::Quantize`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ClipQuantize {
+    Off,
+    Beat,
+    #[default]
+    Bar,
+}
+
+impl ClipQuantize {
+    pub fn cycle(self) -> Self {
+        match self {
+            Self::Bar => Self::Beat,
+            Self::Beat => Self::Off,
+            Self::Off => Self::Bar,
+        }
+    }
+
+    pub fn wire(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Beat => "beat",
+            Self::Bar => "bar",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Off => "QNT OFF",
+            Self::Beat => "QNT BEAT",
+            Self::Bar => "QNT BAR",
+        }
+    }
+
+    pub fn color(self) -> u32 {
+        match self {
+            Self::Off => 0x3c3836,
+            Self::Beat => 0x458588,
+            Self::Bar => 0x689d6a,
+        }
+    }
+}
+
 /// Where KAOSS pad FX (echo / reverb / drive / flange) lands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
@@ -194,6 +238,9 @@ pub struct SessionState {
     /// sessions used 0 = PINK — migrated on load when style was `"mono"`.
     #[serde(default)]
     pub kaoss_mono_color: usize,
+    /// SEQ loop-start clave click (playback only).
+    #[serde(default)]
+    pub seq_cue_beep: bool,
     /// USB MIDI input name substring. Empty = first hardware port.
     #[serde(default)]
     pub midi_in: String,
@@ -203,6 +250,9 @@ pub struct SessionState {
     /// Per-input MIDI channel fan-out. `0` = identity for that input (0–15).
     #[serde(default)]
     pub channel_map: [u16; 16],
+    /// Clip launch/stop grid. Missing in old sessions → bar (current default).
+    #[serde(default)]
+    pub clip_quantize: ClipQuantize,
     /// Lightweight probe log of engine/audio health. Missing in old sessions → off.
     #[serde(default)]
     pub probe: bool,
@@ -288,9 +338,11 @@ impl Default for SessionState {
             screensaver_sec: crate::screensaver::DEFAULT_TIMEOUT_SEC,
             kaoss_viz_style: default_kaoss_viz_style(),
             kaoss_mono_color: 0,
+            seq_cue_beep: false,
             midi_in: String::new(),
             midi_out: String::new(),
             channel_map: [0; 16],
+            clip_quantize: ClipQuantize::Bar,
             probe: false,
         }
     }
@@ -326,6 +378,10 @@ mod tests {
         assert_eq!(OutMode::Local.cycle(), OutMode::Usb);
         assert_eq!(OutMode::Usb.cycle(), OutMode::Both);
         assert_eq!(OutMode::Both.cycle(), OutMode::Local);
+        assert_eq!(ClipQuantize::Bar.cycle(), ClipQuantize::Beat);
+        assert_eq!(ClipQuantize::Beat.cycle(), ClipQuantize::Off);
+        assert_eq!(ClipQuantize::Off.cycle(), ClipQuantize::Bar);
+        assert_eq!(ClipQuantize::Bar.wire(), "bar");
     }
 
     #[test]
@@ -349,9 +405,11 @@ mod tests {
         assert_eq!(s.song_out, OutMode::Both);
         assert_eq!(s.kaoss_out, OutMode::Local);
         assert_eq!(s.font_style, FontStyle::Retro);
+        assert!(!s.seq_cue_beep);
         assert!((s.drum_level - 1.0).abs() < 1e-6);
         assert!((s.seq_level - 1.0).abs() < 1e-6);
         assert_eq!(s.kaoss_fx_target, KaossFxTarget::Voice);
+        assert_eq!(s.clip_quantize, ClipQuantize::Bar);
         assert!(!s.probe);
         assert!((s.fx_flanger_rate - 0.35).abs() < 1e-6);
     }
@@ -372,6 +430,15 @@ mod tests {
         let json = serde_json::to_string(&s).unwrap();
         let back: SessionState = serde_json::from_str(&json).unwrap();
         assert!(back.probe);
+    }
+
+    #[test]
+    fn session_roundtrip_includes_seq_cue_beep() {
+        let mut s = SessionState::default();
+        s.seq_cue_beep = true;
+        let json = serde_json::to_string(&s).unwrap();
+        let back: SessionState = serde_json::from_str(&json).unwrap();
+        assert!(back.seq_cue_beep);
     }
 
     #[test]

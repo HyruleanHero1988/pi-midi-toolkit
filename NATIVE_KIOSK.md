@@ -22,9 +22,9 @@ runtime.
 |---|---|
 | KAOSS + drums | Full-width pad (Tk layout); axes/cursor; scale/key/oct/gate pickers, HOLD, FULL PAD, CELLS/GLOW, trail/ripples, WIPE FX, CH, OUT; Kaoss CC#12/13/92 when OUT is USB/BOTH. On-screen drums live on SEQ. |
 | Nav shell / HOME | Top chrome (PiDI / HOME / POWER / jam tabs); Home 5-col HOME_TILES (Mix + MAP; scroll if needed) |
-| PADS | Launch/stop from `phrases/pad-XX.json`; PLAY/EDIT; REC/TRIG/MODE/CLEAR; SEQ→PAD; OUT cycle |
+| PADS | Launch/stop from `phrases/pad-XX.json`; PLAY/EDIT; REC/TRIG/MODE/CLEAR; SEQ→PAD; OUT cycle; **QNT** BAR/BEAT/OFF |
 | SYNTH | Morph A/B wave pick, tone/level/atk/rel, **FLANGE** mix + **RATE**, vibrato, scope, kit macros, C4–B4 keys, **SAVE AS** (bake morph→`user-wavetables/` + `.fx.json`); Settings **FLANGE** insert on voice/bus |
-| SEQ | Backbone REC → engine loop clip; KEEP/DROP/UNDO; len×2/÷2/EXTEND; →PAD; PLAY/STOP/CLEAR/BPM. Top-chrome **REC/STOP** arms recording from any mode. Armed REC also captures SYNTH keys, drums, CHORDS, KAOSS notes, and incoming MIDI. First take auto-trims leading/trailing dead air (Tk parity). |
+| SEQ | Backbone REC → engine loop clip; KEEP/DROP/UNDO; len×2/÷2/EXTEND; →PAD; PLAY/STOP/CLEAR/BPM; **QNT** BAR/BEAT/OFF. Top-chrome **REC/STOP** arms recording from any mode. Armed REC also captures SYNTH keys, drums, CHORDS, KAOSS notes, and incoming MIDI. First take auto-trims leading/trailing dead air (Tk parity). |
 | CHORDS | Omnichord-style circle-of-fifths buttons (MAJ/min/7 + combos), wide **strumplate**, 2×4 **palette**, **PROGS** (named progressions in the chosen key), LOCAL/USB/BOTH. Block chords (buttons/palette) and harp strums record into SEQ / pad REC while those are armed. |
 | SONGS | List `songs/*.mid`, SMF→clip PLAY/STOP/LOOP, SAVE SEQ, OUT cycle |
 | PRESETS | 8 slots save/load synth params to `user-presets/` |
