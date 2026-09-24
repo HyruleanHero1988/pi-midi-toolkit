@@ -709,7 +709,9 @@ fn chrome_status(model: &NativeModel) -> String {
             }
         }
         UiMode::Settings => {
-            if model.status_line.is_empty() {
+            if model.probe && model.status_line.is_empty() {
+                "PROBE ON".into()
+            } else if model.status_line.is_empty() {
                 "SETTINGS".into()
             } else {
                 model.status_line.chars().take(24).collect()
@@ -2828,6 +2830,16 @@ fn draw_settings(scene: &mut Scene, model: &NativeModel) {
     scene.text_centered(layout.settings_log, "LOG", 0xffffff, 2);
     scene.fill_rect(layout.settings_map, 0x83a598);
     scene.text_centered(layout.settings_map, "PORTS", 0xffffff, 2);
+    scene.fill_rect(
+        layout.settings_probe,
+        if model.probe { 0x689d6a } else { 0x504945 },
+    );
+    scene.text_centered(
+        layout.settings_probe,
+        if model.probe { "PROBE ON" } else { "PROBE" },
+        0xffffff,
+        2,
+    );
     let wifi_busy = model.host_busy() == Some(crate::host::HostTask::Wifi);
     scene.fill_rect(
         layout.settings_wifi,
@@ -3021,13 +3033,14 @@ fn draw_log(scene: &mut Scene, model: &NativeModel) {
         c.x + 16,
         c.y + 40,
         &format!(
-            "cb {}/{}us  xrun {}  drop {}  rel {}  rpt {}",
+            "cb {}/{}us  xrun {}  drop {}  rel {}  rpt {}{}",
             model.status.callback_frames,
             model.status.callback_micros,
             model.status.xruns,
             model.status.command_drops,
             model.status.emergency_releases,
             model.status.active_repeats,
+            if model.probe { "  PROBE" } else { "" },
         ),
         0xa0a0b8,
     );

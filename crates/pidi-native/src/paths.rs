@@ -5,6 +5,7 @@
 //! ```text
 //! ${PIDI_DATA_ROOT:-${XDG_DATA_HOME:-$HOME/.local/share}/pidi}/
 //!   settings.json
+//!   probe.log         (optional; SET→PROBE)
 //!   songs/
 //!   phrases/
 //!   user-presets/

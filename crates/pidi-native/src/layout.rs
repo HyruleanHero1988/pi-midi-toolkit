@@ -181,6 +181,7 @@ pub enum Hit {
     SettingsFont,
     SettingsLog,
     SettingsMap,
+    SettingsProbe,
     UpdateClose,
     UpdateCheck,
     UpdateApply,
@@ -303,6 +304,7 @@ pub struct Layout {
     pub kaoss_settings_btn: Rect,
     pub settings_log: Rect,
     pub settings_map: Rect,
+    pub settings_probe: Rect,
     pub seq_rec: Rect,
     pub seq_play: Rect,
     pub seq_keep: Rect,
@@ -1087,6 +1089,12 @@ impl Layout {
             },
             settings_map: Rect {
                 x: 24,
+                y: HUD_H + 308,
+                w: 240,
+                h: 72,
+            },
+            settings_probe: Rect {
+                x: 280,
                 y: HUD_H + 308,
                 w: 240,
                 h: 72,
@@ -2901,6 +2909,9 @@ impl Layout {
         }
         if self.settings_map.contains(px, py) {
             return Hit::SettingsMap;
+        }
+        if self.settings_probe.contains(px, py) {
+            return Hit::SettingsProbe;
         }
         if self.settings_wifi.contains(px, py) {
             return Hit::SettingsWifi;

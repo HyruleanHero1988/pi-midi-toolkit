@@ -382,6 +382,12 @@ pub struct NativeModel {
     pub throttle: crate::throttle::ThrottleState,
     last_throttle_poll: Instant,
     logged_undervolt: bool,
+    /// SET→PROBE: append engine health to `probe.log` every couple of seconds.
+    pub probe: bool,
+    pub probe_reconnects: u64,
+    last_probe_write: Instant,
+    last_logged_xruns: u64,
+    last_logged_drops: u64,
 }
 
 impl Default for NativeModel {
@@ -566,6 +572,11 @@ impl NativeModel {
             throttle: crate::throttle::ThrottleState::default(),
             last_throttle_poll: Instant::now(),
             logged_undervolt: false,
+            probe: false,
+            probe_reconnects: 0,
+            last_probe_write: Instant::now(),
+            last_logged_xruns: 0,
+            last_logged_drops: 0,
         };
         // Ensure ~/.local/share/pidi/{songs,phrases,…} exist on first boot.
         let _ = crate::paths::data_root();
@@ -1082,6 +1093,7 @@ impl NativeModel {
         self.poll_update_job();
         self.poll_wifi_job();
         self.poll_throttle();
+        self.tick_probe();
         self.tick_ota_reload(dt);
         if self.mode == UiMode::Drums && self.kit_edit_open && self.kit_wave_dirty {
             self.rebuild_kit_wave();
@@ -1125,6 +1137,60 @@ impl NativeModel {
             self.logged_undervolt = true;
             self.push_log(next.log_line());
             self.mark_dirty();
+        }
+    }
+
+    /// Track engine socket drops so probe.log can attribute reconnect storms.
+    pub fn note_engine_link(&mut self, connected: bool) {
+        if self.connected && !connected {
+            self.probe_reconnects = self.probe_reconnects.saturating_add(1);
+            if self.probe {
+                self.push_log(format!("probe engine link down ({})", self.probe_reconnects));
+            }
+        }
+        self.connected = connected;
+    }
+
+    fn tick_probe(&mut self) {
+        if !self.probe {
+            return;
+        }
+        if self.frame > 1
+            && self.last_probe_write.elapsed().as_secs_f32() < crate::probe::INTERVAL_SEC
+        {
+            return;
+        }
+        self.write_probe_sample();
+    }
+
+    fn write_probe_sample(&mut self) {
+        let thr = format!("thr={:#x}", self.throttle.flags);
+        let line = crate::probe::format_line(
+            self.connected,
+            self.probe_reconnects,
+            self.status.callback_frames,
+            self.status.callback_micros,
+            self.status.callback_peak_micros,
+            self.status.xruns,
+            self.status.command_drops,
+            self.status.emergency_releases,
+            self.status.active_voices,
+            self.status.active_drums,
+            self.status.playing_clips,
+            self.status.peak,
+            &thr,
+        );
+        let wrote = crate::probe::append(&line);
+        let xrun_jump = self.status.xruns > self.last_logged_xruns;
+        let drop_jump = self.status.command_drops > self.last_logged_drops;
+        self.last_logged_xruns = self.status.xruns;
+        self.last_logged_drops = self.status.command_drops;
+        self.last_probe_write = Instant::now();
+        if wrote && (xrun_jump || drop_jump) {
+            self.push_log(format!(
+                "probe xrun={} drop={}",
+                self.status.xruns, self.status.command_drops
+            ));
         }
     }
 
@@ -1686,6 +1752,7 @@ impl NativeModel {
         self.midi_in_filter = s.midi_in.clone();
         self.midi_out_filter = s.midi_out.clone();
         self.channel_map_bits = s.channel_map;
+        self.probe = s.probe;
         outbox.midi_select(
             Some(self.midi_in_filter.clone()),
             Some(self.midi_out_filter.clone()),
@@ -1782,6 +1849,7 @@ impl NativeModel {
             midi_in: self.midi_in_filter.clone(),
             midi_out: self.midi_out_filter.clone(),
             channel_map: self.channel_map_bits,
+            probe: self.probe,
         }
     }
 
@@ -3288,6 +3356,19 @@ impl NativeModel {
                 self.tap_ui(slot, id, gesture, px, py);
                 self.push_nav_history(UiMode::Ports);
                 self.switch_mode(UiMode::Ports, outbox);
+            }
+            Hit::SettingsProbe => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.probe = !self.probe;
+                if self.probe {
+                    self.status_line = "PROBE ON — writing probe.log".into();
+                    self.push_log("probe on");
+                    self.write_probe_sample();
+                } else {
+                    self.status_line = "PROBE OFF".into();
+                    self.push_log("probe off");
+                }
+                self.mark_dirty();
             }
             Hit::MapThruOn => {
                 self.tap_ui(slot, id, gesture, px, py);
@@ -8921,6 +9002,46 @@ mod tests {
         model.finger_down(1, px, py, &mut out);
         model.finger_up(1, &mut out);
         assert_eq!(model.mode, UiMode::Settings);
+    }
+
+    #[test]
+    fn settings_probe_toggles_and_writes_log() {
+        let _g = crate::probe::ENV_LOCK.lock().unwrap();
+        let dir = std::env::temp_dir().join(format!(
+            "pidi-probe-ui-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let path = dir.join("probe.log");
+        let _ = std::fs::create_dir_all(&dir);
+        std::env::set_var("PIDI_PROBE_LOG", &path);
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Settings);
+        model.status.xruns = 4;
+        model.status.callback_frames = 512;
+        model.status.callback_micros = 180;
+        let mut out = Outbox::new();
+        let btn = model.layout.settings_probe;
+        model.finger_down(1, btn.x + 4, btn.y + 4, &mut out);
+        model.finger_up(1, &mut out);
+        assert!(model.probe, "SET→PROBE should latch on");
+        assert!(model.status_line.contains("PROBE ON"));
+        assert!(model.capture_session().probe);
+        let body = std::fs::read_to_string(&path).expect("probe.log");
+        assert!(body.contains("xrun=4"), "{body}");
+        assert!(body.contains("cb=512/180us"), "{body}");
+        model.finger_down(2, btn.x + 4, btn.y + 4, &mut out);
+        model.finger_up(2, &mut out);
+        assert!(!model.probe);
+        assert!(model.status_line.contains("PROBE OFF"));
+        model.note_engine_link(true);
+        model.note_engine_link(false);
+        assert_eq!(model.probe_reconnects, 1);
+        std::env::remove_var("PIDI_PROBE_LOG");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
