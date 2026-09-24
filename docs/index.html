@@ -539,6 +539,7 @@
         <tr><th>FX: BUS / VOICE / DRUMS</th><td>Which insert the four sliders edit.</td></tr>
         <tr><th>DRIVE DELAY REVERB FLANGE</th><td>Vertical mix sliders. Flanger is also a KAOSS program (Y = mix, X = rate).</td></tr>
         <tr><th>LOG / PORTS</th><td>Engine log, USB MIDI IN/OUT picker and THRU.</td></tr>
+        <tr><th>PROBE</th><td>Toggle a cheap local health log (<code>probe.log</code>): callback µs, xruns, reconnects, load, throttle. Safe to leave on while playing.</td></tr>
         <tr><th>WIFI</th><td>Join the saved NetworkManager profile or <code>.wifi-credentials</code>.</td></tr>
         <tr><th>FONT</th><td>RETRO bitmap vs SMOOTH TTF.</td></tr>
         <tr><th>UPDATE</th><td>CHECK GitHub <code>master</code>, then overlay the repo and copy committed <code>dist/armv7</code> onto <code>bin/</code> (midi-engine, jambox-engine, pidi-native). Does not cargo-build on the Pi.</td></tr>
@@ -553,7 +554,7 @@
         <figcaption>07 — LOG</figcaption>
       </figure>
       <table>
-        <tr><th>Counters</th><td>Callback frames/µs, xruns, command drops, emergency releases, active repeats.</td></tr>
+        <tr><th>Counters</th><td>Callback frames/µs, xruns, command drops, emergency releases, active repeats. SET→PROBE also writes these to <code>probe.log</code>.</td></tr>
         <tr><th>CLEAR / ALL OFF</th><td>Wipe the on-screen log, or panic.</td></tr>
       </table>
     </section>

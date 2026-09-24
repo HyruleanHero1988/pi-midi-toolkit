@@ -322,7 +322,7 @@ This is **not** MIDI-out thru. It is the creative local instrument. Real use alr
 
 ## Jambox track — how far can we push? (and how we know)
 
-The diagnostic framing did **not** paint a software dead-end. Limits will show up as **CPU, audio xruns, or latency feel** — measurable — not as “we called it Phase 0.”
+The diagnostic framing did **not** paint a software dead-end. Limits will show up as **CPU, audio xruns, or latency feel** — measurable — not as “we called it Phase 0.” SET→PROBE appends those counters to `probe.log` while you play.
 
 ### Effects (insert + kit group + bus) — **shipped in Python on `cursor/midi-tone-per-voice-fx-1052`**
 

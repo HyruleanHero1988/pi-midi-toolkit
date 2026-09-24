@@ -39,6 +39,10 @@ in-process GitHub OTA). On a Windows host they report that those actions
 belong on the Pi. Bin deploy remains `deploy/build-pi-bins.sh` /
 `deploy/deploy.sh`.
 
+**SET→PROBE** appends one cheap health line every ~2s to `probe.log` (xruns,
+callback µs, reconnects, loadavg, throttle flags). Toggle it off the same
+button; leave it on during a play session if the box is choking.
+
 ## User data (do not wipe)
 
 All user-editable appliance content lives under one XDG-style root:
@@ -46,6 +50,7 @@ All user-editable appliance content lives under one XDG-style root:
 ```text
 ${PIDI_DATA_ROOT:-${XDG_DATA_HOME:-$HOME/.local/share}/pidi}/
   settings.json
+  probe.log             # SET→PROBE local health samples
   songs/
   phrases/              # pad-01.json …
   user-presets/
