@@ -19,6 +19,14 @@ arbeau-belle.mid       Arbeau Belle qui tiens ma Vie    Public Domain
 blue-danube.mid        Strauss Blue Danube (theme)      CC-BY-SA 4.0
 satie-gym1.mid         Satie Gymnopédie 1               Public Domain
 
+Original dance sketches for FX / kiosk practice (not Mutopia):
+
+night-meter.mid        Night Meter (house)              original
+grid-salt.mid          Grid Salt (techno)               original
+puddle-skip.mid        Puddle Skip (UKG / 2-step)       original
+glass-ladder.mid       Glass Ladder (trance-leaning)    original
+pager-party.mid        Pager Party (electro bounce)     original
+
 On launch, midi-tone copies any missing files from this folder into ./songs/
 (never overwrites). Optional online refresh: ./venv/bin/python fetch_songs.py --all
 

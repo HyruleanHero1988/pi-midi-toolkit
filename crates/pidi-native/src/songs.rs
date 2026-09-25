@@ -14,6 +14,29 @@ pub fn songs_dir_from_env() -> PathBuf {
     crate::paths::songs_dir()
 }
 
+/// Original dance / sketch demos stay at the top of SONGS for FX practice.
+const PINNED_SONGS: [&str; 7] = [
+    "night-meter",
+    "grid-salt",
+    "puddle-skip",
+    "glass-ladder",
+    "pager-party",
+    "taxi-glow",
+    "porch-light",
+];
+
+fn song_stem(path: &Path) -> String {
+    path.file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase()
+}
+
+fn pin_rank(path: &Path) -> Option<usize> {
+    let stem = song_stem(path);
+    PINNED_SONGS.iter().position(|name| *name == stem.as_str())
+}
+
 pub fn list_songs(dir: &Path) -> Vec<PathBuf> {
     let Ok(rd) = fs::read_dir(dir) else {
         return Vec::new();
@@ -30,10 +53,16 @@ pub fn list_songs(dir: &Path) -> Vec<PathBuf> {
         })
         .collect();
     files.sort_by(|a, b| {
-        a.file_name()
-            .unwrap_or_default()
-            .to_ascii_lowercase()
-            .cmp(&b.file_name().unwrap_or_default().to_ascii_lowercase())
+        match (pin_rank(a), pin_rank(b)) {
+            (Some(i), Some(j)) => i.cmp(&j),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => a
+                .file_name()
+                .unwrap_or_default()
+                .to_ascii_lowercase()
+                .cmp(&b.file_name().unwrap_or_default().to_ascii_lowercase()),
+        }
     });
     files
 }
@@ -486,5 +515,35 @@ mod tests {
         assert!(len >= 480);
         assert!((bpm - 120.0).abs() < 0.5);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pinned_demos_sort_ahead_of_the_library() {
+        let dir = std::env::temp_dir().join(format!(
+            "pidi-songs-pin-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = fs::create_dir_all(&dir);
+        for name in ["zelda.mid", "bach-air.mid", "porch-light.mid", "taxi-glow.mid", "night-meter.mid"] {
+            fs::write(dir.join(name), b"MThd").unwrap();
+        }
+        let names: Vec<String> = list_songs(&dir)
+            .iter()
+            .filter_map(|p| p.file_name()?.to_str().map(|s| s.to_string()))
+            .collect();
+        let _ = fs::remove_dir_all(&dir);
+        assert_eq!(
+            names,
+            vec![
+                "night-meter.mid",
+                "taxi-glow.mid",
+                "porch-light.mid",
+                "bach-air.mid",
+                "zelda.mid",
+            ]
+        );
     }
 }
