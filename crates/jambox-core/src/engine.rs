@@ -18,6 +18,7 @@ use crate::drums::{
 };
 use crate::fm::FmSynth;
 use crate::fx::{FxParams, FxUnit};
+use crate::punch::{boost_send_mix, PunchRack, PUNCH_PAD_COUNT};
 use crate::arp::{
     ArpDivision, ArpEvent, ArpOrder, Arpeggiator, MAX_ARP_EVENTS_PER_BLOCK,
 };
@@ -229,6 +230,7 @@ pub struct JamboxEngine {
     drum_fx: Vec<FxUnit>,
     drum_group_fx: FxUnit,
     bus_fx: FxUnit,
+    punch: PunchRack,
     clip_fx: Vec<FxUnit>,
     clip_table: [[f32; TABLE_SIZE]; MAX_CLIPS],
     clip_baked: [bool; MAX_CLIPS],
@@ -318,6 +320,7 @@ impl JamboxEngine {
             drum_fx,
             drum_group_fx: FxUnit::new(sr),
             bus_fx: FxUnit::new(sr),
+            punch: PunchRack::new(sr),
             clip_fx: (0..MAX_CLIPS).map(|_| FxUnit::new(sr)).collect(),
             clip_table: [[0.0; TABLE_SIZE]; MAX_CLIPS],
             clip_baked: [false; MAX_CLIPS],
@@ -496,6 +499,11 @@ impl JamboxEngine {
         let bus = self.bus_fx.params();
         self.bus_fx = FxUnit::new(sr);
         self.bus_fx.set_params(bus);
+        let punch_amounts: [f32; PUNCH_PAD_COUNT] = std::array::from_fn(|i| self.punch.amount(i as u8));
+        self.punch = PunchRack::new(sr);
+        for (i, amount) in punch_amounts.iter().enumerate() {
+            self.punch.set_amount(i as u8, *amount);
+        }
         self.voices.silence();
         self.fm.silence();
         self.drums.silence();
@@ -719,6 +727,7 @@ impl JamboxEngine {
             drum_fx,
             drum_group_fx,
             bus_fx,
+            punch,
             clip_fx,
             clip_table,
             clip_baked,
@@ -893,9 +902,26 @@ impl JamboxEngine {
         for i in 0..n {
             out[i] = key_bus[i] + drum_bus[i];
         }
+        let send = punch.send_amount();
+        let saved_bus = if send > 0.001 {
+            let mut boosted = bus_fx.params();
+            let saved = boosted;
+            boosted.delay_mix = boost_send_mix(boosted.delay_mix, send);
+            boosted.reverb_mix = boost_send_mix(boosted.reverb_mix, send);
+            boosted.flanger_mix = boost_send_mix(boosted.flanger_mix, send);
+            bus_fx.set_params(boosted);
+            Some(saved)
+        } else {
+            None
+        };
         if !bus_fx.params().is_bypassed() {
             bus_fx.process(out);
         }
+        if let Some(saved) = saved_bus {
+            bus_fx.set_params(saved);
+        }
+        // Always write the punch ring so a repeat/tape hit has history.
+        punch.process(out, transport.bpm() as f32);
 
         for s in out.iter_mut() {
             *s = (*s * OUTPUT_MAKEUP).tanh() * 0.97;
@@ -1012,6 +1038,7 @@ impl JamboxEngine {
                 }
                 self.drum_group_fx.reset();
                 self.bus_fx.reset();
+                self.punch.reset();
             }
             Command::SetSynth { param, value } => self.set_synth(param, value),
             Command::SetDrumMacro {
@@ -1024,6 +1051,7 @@ impl JamboxEngine {
                 param,
                 value,
             } => self.set_fx(target, param, value),
+            Command::SetPunchFx { slot, amount } => self.punch.set_amount(slot, amount),
             Command::SetMorphPair { a, b } => {
                 self.bank.set_morph_pair(a as usize, b as usize);
             }
@@ -2039,6 +2067,36 @@ mod tests {
         assert!((e.fx_params(FxTarget::Drum(0)).delay_mix - 0.7).abs() < 1e-6);
         assert_eq!(e.fx_params(FxTarget::Bus).delay_mix, 0.0);
         assert_eq!(e.fx_params(FxTarget::Voice(0)).delay_mix, 0.0);
+    }
+
+    #[test]
+    fn punch_crush_changes_a_held_note() {
+        let mut dry = engine();
+        let mut wet = engine();
+        apply_now(
+            &mut wet,
+            Command::SetPunchFx {
+                slot: crate::PUNCH_CRUSH,
+                amount: 1.0,
+            },
+        );
+        let cmds = [ScheduledCommand::now(Command::NoteOn {
+            channel: 0,
+            note: 69,
+            velocity: 120,
+        })];
+        let mut dry_buf = vec![0.0f32; 1024];
+        let mut wet_buf = vec![0.0f32; 1024];
+        let mut midi = MidiOutSink::new();
+        dry.render(&mut dry_buf, &cmds, &mut midi);
+        wet.render(&mut wet_buf, &cmds, &mut midi);
+        let diff: f32 = dry_buf
+            .iter()
+            .zip(wet_buf.iter())
+            .map(|(a, b)| (a - b).abs())
+            .sum();
+        assert!(diff > 1.0, "crush should grit the master, diff={diff}");
+        assert!(peak(&wet_buf) > 0.01);
     }
 
     #[test]

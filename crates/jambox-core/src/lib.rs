@@ -23,6 +23,7 @@ mod fm;
 mod fx;
 mod kaoss;
 mod mix;
+mod punch;
 mod repeat;
 mod transport;
 mod voice;
@@ -39,6 +40,11 @@ pub use clip::{
 pub use mix::MixSource;
 pub use command::{
     Command, EmitMode, FxParam, FxTarget, ScheduledCommand, SynthParam, MAX_BLOCK_COMMANDS,
+};
+pub use punch::{
+    boost_send_mix, punch_index_for_knob_cc, punch_index_for_pad_note, PunchRack, PUNCH_CRUSH,
+    PUNCH_DROP, PUNCH_HPF, PUNCH_KNOB_CCS, PUNCH_LABELS, PUNCH_LPF, PUNCH_PAD_COUNT,
+    PUNCH_PAD_NOTES, PUNCH_RPT, PUNCH_SEND, PUNCH_SLICE, PUNCH_TAPE,
 };
 pub use drums::{
     drum_model_for_note, preview_drum, DrumKit, DrumMacros, DrumModel, DRUM_MODEL_COUNT,

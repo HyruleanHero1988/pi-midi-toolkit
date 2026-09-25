@@ -79,6 +79,11 @@ pub enum Request {
         param: String,
         value: f32,
     },
+    /// EP-style punch-in pad. `slot` 0..7, `amount` 0 = off.
+    PunchFx {
+        slot: u8,
+        amount: f32,
+    },
     MorphPair {
         a: u16,
         b: u16,

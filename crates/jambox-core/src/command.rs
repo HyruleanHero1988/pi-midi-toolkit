@@ -144,6 +144,11 @@ pub enum Command {
         param: FxParam,
         value: f32,
     },
+    /// One EP-style punch-in pad. `slot` is 0..7 (RPT..CRUSH). `amount` 0 = off.
+    SetPunchFx {
+        slot: u8,
+        amount: f32,
+    },
     SetMorphPair {
         a: u16,
         b: u16,

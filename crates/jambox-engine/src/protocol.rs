@@ -44,6 +44,10 @@ pub enum Request {
         param: String,
         value: f32,
     },
+    PunchFx {
+        slot: u8,
+        amount: f32,
+    },
     MorphPair {
         a: u16,
         b: u16,
@@ -686,6 +690,7 @@ pub fn decode(request: Request) -> Result<Decoded, String> {
                 value,
             })
         }
+        Request::PunchFx { slot, amount } => Decoded::Command(Command::SetPunchFx { slot, amount }),
         Request::MorphPair { a, b } => Decoded::Command(Command::SetMorphPair { a, b }),
         Request::Tempo { bpm } => Decoded::Command(Command::SetTempo { bpm }),
         Request::BeatsPerBar { beats } => Decoded::Command(Command::SetBeatsPerBar { beats }),
@@ -884,6 +889,18 @@ mod tests {
                 velocity,
             }) => {
                 assert!(channel <= 15 && note <= 127 && velocity <= 127);
+            }
+            _ => panic!("wrong decode"),
+        }
+    }
+
+    #[test]
+    fn punch_fx_decodes_to_the_master_bus_command() {
+        let d = decode_line(r#"{"cmd":"punch_fx","slot":1,"amount":0.8}"#);
+        match d {
+            Decoded::Command(Command::SetPunchFx { slot, amount }) => {
+                assert_eq!(slot, 1);
+                assert!((amount - 0.8).abs() < 1e-6);
             }
             _ => panic!("wrong decode"),
         }

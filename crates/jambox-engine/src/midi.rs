@@ -16,7 +16,9 @@ use midir::{MidiInput, MidiInputConnection, MidiOutput, MidiOutputConnection};
 use tracing::{info, warn};
 
 use crate::bus::{MidiInSide, MidiOutSide};
-use jambox_core::{Command, FxParam, FxTarget, SynthParam};
+use jambox_core::{
+    punch_index_for_knob_cc, punch_index_for_pad_note, Command, FxParam, FxTarget, SynthParam,
+};
 
 /// How often the output thread checks the ring.
 const OUT_POLL: Duration = Duration::from_micros(500);
@@ -37,6 +39,7 @@ pub const MODE_KEYS: u8 = 0;
 pub const MODE_DRUMS: u8 = 1;
 pub const MODE_FX: u8 = 2;
 pub const MODE_FM: u8 = 3;
+pub const MODE_PUNCH: u8 = 4;
 
 pub const FX_VOICE: u8 = 0;
 pub const FX_DRUM: u8 = 1;
@@ -80,10 +83,15 @@ impl MidiMap {
         self.mode.store(MODE_FM, Ordering::Relaxed);
     }
 
+    pub fn set_punch(&self) {
+        self.mode.store(MODE_PUNCH, Ordering::Relaxed);
+    }
+
     pub fn apply_knob_map(&self, mode: &str, fx_kind: Option<&str>, fx_index: u16) {
         match mode {
             "drums" => self.set_drums(),
             "fm" => self.set_fm(),
+            "punch" => self.set_punch(),
             "fx" => {
                 let kind = match fx_kind.unwrap_or("voice") {
                     "drum" => FX_DRUM,
@@ -113,12 +121,26 @@ impl MidiMap {
                 channel,
                 note,
                 velocity,
-            } => Some(Command::NoteOn {
-                channel,
-                note,
-                velocity,
-            }),
-            MidiEvent::NoteOff { channel, note, .. } => Some(Command::NoteOff { channel, note }),
+            } => {
+                if self.mode.load(Ordering::Relaxed) == MODE_PUNCH
+                    && punch_index_for_pad_note(note).is_some()
+                {
+                    return None;
+                }
+                Some(Command::NoteOn {
+                    channel,
+                    note,
+                    velocity,
+                })
+            }
+            MidiEvent::NoteOff { channel, note, .. } => {
+                if self.mode.load(Ordering::Relaxed) == MODE_PUNCH
+                    && punch_index_for_pad_note(note).is_some()
+                {
+                    return None;
+                }
+                Some(Command::NoteOff { channel, note })
+            }
             MidiEvent::PitchBend { value, .. } => {
                 // ±2 semitones, same as Python `_bend_range`.
                 let semis = ((value as f32) - 8192.0) / 8192.0 * 2.0;
@@ -144,6 +166,10 @@ impl MidiMap {
             });
         }
         let mode = self.mode.load(Ordering::Relaxed);
+        if mode == MODE_PUNCH && punch_index_for_knob_cc(controller).is_some() {
+            // Amounts / arming live in the kiosk so a disarmed slide stays dry.
+            return None;
+        }
         if mode == MODE_FX {
             let param = match controller {
                 CC_MORPH => FxParam::Drive,
@@ -680,6 +706,33 @@ mod tests {
                 value: 0.0
             }
         );
+    }
+
+    #[test]
+    fn punch_mode_eats_mpk_pads_and_knobs() {
+        let map = MidiMap::default();
+        map.set_punch();
+        assert!(map
+            .interpret(MidiEvent::NoteOn {
+                channel: 9,
+                note: 40,
+                velocity: 100,
+            })
+            .is_none());
+        assert!(map
+            .interpret(MidiEvent::ControlChange {
+                channel: 0,
+                controller: 70,
+                value: 64,
+            })
+            .is_none());
+        assert!(map
+            .interpret(MidiEvent::NoteOn {
+                channel: 0,
+                note: 60,
+                velocity: 100,
+            })
+            .is_some());
     }
 
     #[test]
