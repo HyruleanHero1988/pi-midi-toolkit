@@ -190,7 +190,7 @@
         <tr><th>SYNTH / DRUMS / SEQ / PADS / KAOSS / CHORDS</th><td>Performance cluster. SYN SEQ PAD KAO CHD also stay as jam tabs.</td></tr>
         <tr><th>SONGS</th><td>Play Standard MIDI Files locally and/or USB→DIN.</td></tr>
         <tr><th>PRESETS</th><td>Eight named slots for a session snapshot, plus FACTORY.</td></tr>
-        <tr><th>FX</th><td>Inserts plus keys vs kit trims.</td></tr>
+        <tr><th>FX</th><td>Inserts plus keys vs kit trims, and EP-style punch-in pads.</td></tr>
         <tr><th>MIX</th><td>LIVE / KIT / SEQ buses and per-pad clip faders.</td></tr>
         <tr><th>SETTINGS</th><td>WIFI, UPDATE, FONT, plus tiles through to LOG and MAP. Mix/insert FX live on the FX tile.</td></tr>
       </table>
@@ -467,14 +467,15 @@
 
     <section class="screen" id="songs">
       <h2>SONGS</h2>
-      <p class="lede">Browse <code>songs/</code> MIDI files, set tempo, play locally and/or USB MIDI out.</p>
+      <p class="lede">Browse <code>songs/</code> MIDI files, set tempo, play locally and/or USB MIDI out. Open the visualizer to watch notes fall onto a keyboard that lights as they sound.</p>
       <figure>
         <img src="screens/05-songs.png" alt="SONGS screen" width="800" height="480" />
         <figcaption>05 — SONGS</figcaption>
       </figure>
       <table>
-        <tr><th>List + ▲ / ▼</th><td>Tap a <code>.mid</code> row; page with the chunky arrows.</td></tr>
+        <tr><th>List</th><td>Tap a <code>.mid</code> row; flick to scroll the full-height list.</td></tr>
         <tr><th>PLAY / STOP</th><td>Start or stop song playback.</td></tr>
+        <tr><th>VIZ</th><td>Fullscreen falling notes of the selected SMF. Keys and drum pads light as notes sound. The top strip is the whole file; a sliding frame marks the span currently on the roll.</td></tr>
         <tr><th>SAVE SEQ</th><td>Export the current sequencer arrangement into <code>songs/</code>.</td></tr>
         <tr><th>OUT</th><td>LOCAL / USB / BOTH.</td></tr>
         <tr><th>LOOP</th><td>Repeat the file when it ends.</td></tr>
@@ -496,18 +497,26 @@
 
     <section class="screen" id="fx">
       <h2>FX</h2>
-      <p class="lede">Global mix page. Inserts follow the BUS / VOICE / DRUMS target; LEVEL and DRUMS are always the keys vs kit trims.</p>
+      <p class="lede">Inserts follow the BUS / VOICE / DRUMS target. The right-hand pads are EP-style punch-in FX on the master bus. LEVEL and DRUMS stay the keys vs kit trims.</p>
       <figure>
-        <img src="screens/25-fx.png" alt="FX screen with insert sliders plus keys and drums levels" width="800" height="480" />
-        <figcaption>25 — FX (LEVEL = melodies, DRUMS = kit bus)</figcaption>
+        <img src="screens/25-fx.png" alt="FX screen with insert sliders and punch-in pads" width="800" height="480" />
+        <figcaption>25 — FX (inserts left, punch pads right)</figcaption>
       </figure>
       <table>
-        <tr><th>TARGET: BUS / VOICE / DRUMS</th><td>Which insert the first four sliders edit. Bus is the master wet after keys + drums are summed.</td></tr>
+        <tr><th>TARGET: BUS / VOICE / DRUMS</th><td>Which insert the sliders edit. Bus is the master wet after keys + drums are summed.</td></tr>
         <tr><th>DRIVE DELAY REVERB FLANGE</th><td>Insert mix. Voice flange mirrors SYNTH FLANGE; bus flange is independent global wet.</td></tr>
         <tr><th>LEVEL</th><td>Melody / keys bus. Same fader as SYNTH LEVEL. Does not duck the kit.</td></tr>
         <tr><th>DRUMS</th><td>Shared kit bus trim. Balance drums against melodies here without opening DRUM MODE.</td></tr>
+        <tr><th>RPT</th><td>Beat repeat. Y picks the loop grid: 1/4 → 1/8 → 1/16 → 1/32.</td></tr>
+        <tr><th>TAPE</th><td>Tape drag. Higher Y slows the master more; it never parks or goes silent.</td></tr>
+        <tr><th>LPF / HPF</th><td>Master filters. Higher Y cuts deeper.</td></tr>
+        <tr><th>SEND</th><td>Punches the current bus insert wet (delay / reverb / flange) toward full.</td></tr>
+        <tr><th>SLICE</th><td>Amplitude gate. Y picks the chop grid, same divisions as RPT.</td></tr>
+        <tr><th>DROP</th><td>Varispeed pitch-down. Full press is about an octave and a half.</td></tr>
+        <tr><th>CRUSH</th><td>Bitcrush + downsample. Higher Y is dirtier.</td></tr>
+        <tr><th>CLEAR</th><td>Turns every punch pad off. Stored amounts stay put.</td></tr>
       </table>
-      <p class="note">Pad vs pad and SEQ vs live sit on the MIX page. FX stays inserts plus the two live buses.</p>
+      <p class="note">Each punch pad is a slider plus an on/off. Slide Y to set the amount whether the pad is armed or not. Tap to turn that pad on or off at the stored value. CLEAR / panic only disarm — they do not reset the sliders. Several pads can sit on at once — filters / crush / slice layer on top of repeat, tape, or drop. With an MPK mini on factory MPC (Prog Select → Pad 1), knobs 1–8 set those eight amounts and Bank A pads toggle them. Keys still play; leave FX to get the synth / drum knob map back. Scramble / granular / pitch-random from the EP-40 notes are not in this pass.</p>
     </section>
 
     <section class="screen" id="mix">
@@ -539,6 +548,7 @@
         <tr><th>WIFI</th><td>Join the saved NetworkManager profile or <code>.wifi-credentials</code>.</td></tr>
         <tr><th>FONT</th><td>RETRO bitmap vs SMOOTH TTF.</td></tr>
         <tr><th>PROBE</th><td>Toggle a cheap local health log (<code>probe.log</code>): callback µs, xruns, reconnects, load, throttle. Safe to leave on while playing.</td></tr>
+        <tr><th>PWR</th><td>Show the LOW PWR / THROTTLE badge when the Pi reports under-voltage. Off by default — the badge is sticky after any sag this boot.</td></tr>
         <tr><th>UPDATE</th><td>CHECK GitHub <code>master</code>, then overlay the repo and copy committed <code>dist/armv7</code> onto <code>bin/</code> (midi-engine, jambox-engine, pidi-native). Does not cargo-build on the Pi.</td></tr>
       </table>
     </section>
@@ -599,7 +609,7 @@
         <tr><th>Knob 6</th><td>Vibrato rate</td></tr>
         <tr><th>Knob 8</th><td>Synth bus level</td></tr>
       </table>
-      <p class="note">FX page LEVEL / DRUMS are the keys vs kit mix (independent of the insert target). Pitch bend and the mod wheel still affect the voice. Joystick Y is CC1 = vibrato.</p>
+      <p class="note">On the FX page those eight knobs become punch amounts (RPT → CRUSH) and Bank A pads (notes 40–43 / 36–39) toggle the matching punch pads. FX page LEVEL / DRUMS sliders stay the keys vs kit mix. Pitch bend and the mod wheel still affect the voice. Joystick Y is CC1 = vibrato.</p>
     </section>
   </main>
 

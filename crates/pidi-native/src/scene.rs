@@ -7,6 +7,8 @@ use crate::font::{self, FontStyle, GLYPH_H, GLYPH_STRIDE, GLYPH_W};
 use crate::kaoss_ui;
 use crate::kaoss_viz;
 use crate::layout::{Layout, Rect, HUD_H};
+use crate::piano_roll;
+use crate::song_viz;
 use crate::mode::UiMode;
 use crate::model::{NativeModel, RepeatDivisionChoice, LED_COLS, LED_ROWS};
 use crate::phrases;
@@ -264,9 +266,14 @@ pub fn build(model: &NativeModel) -> Scene {
     let mut scene = Scene {
         clear: 0x111111,
         font_style: model.font_style.resolved(),
-        color: Vec::with_capacity(200),
+        color: Vec::with_capacity(if model.song_viz_open { 900 } else { 200 }),
         glyphs: Vec::with_capacity(240),
     };
+    if model.song_viz_open && !model.screensaver_active() && !model.power_menu_open {
+        draw_song_viz(&mut scene, model);
+        draw_power_warn(&mut scene, model);
+        return scene;
+    }
     draw_chrome(&mut scene, model);
     if model.screensaver_active() {
         draw_screensaver(&mut scene, model);
@@ -616,6 +623,9 @@ fn draw_chrome(scene: &mut Scene, model: &NativeModel) {
 }
 
 fn draw_power_warn(scene: &mut Scene, model: &NativeModel) {
+    if !model.power_warn {
+        return;
+    }
     let Some(label) = model.throttle.badge_label() else {
         return;
     };
@@ -2613,7 +2623,7 @@ fn draw_presets(scene: &mut Scene, model: &NativeModel) {
 fn draw_songs(scene: &mut Scene, model: &NativeModel) {
     let layout = model.layout;
     scene.fill_rect(layout.song_list, 0x1c1c28);
-    for row in 0..5 {
+    for row in 0..layout.song_visible_rows() {
         let idx = model.song_scroll + row;
         let cell = layout.song_row(row);
         if idx >= model.song_files.len() {
@@ -2637,73 +2647,406 @@ fn draw_songs(scene: &mut Scene, model: &NativeModel) {
             0x3a5040
         },
     );
-    scene.text(
-        layout.song_play.x + 60,
-        layout.song_play.y + 20,
-        "PLAY",
-        0xffffff,
-    );
+    scene.text_centered(layout.song_play, "PLAY", 0xffffff, 2);
     scene.fill_rect(layout.song_stop, 0x3c3836);
-    scene.text(
-        layout.song_stop.x + 60,
-        layout.song_stop.y + 20,
-        "STOP",
-        0xffffff,
-    );
+    scene.text_centered(layout.song_stop, "STOP", 0xffffff, 2);
     scene.fill_rect(
         layout.song_loop,
         if model.song_loop { 0x458588 } else { 0x282838 },
     );
-    scene.text(
-        layout.song_loop.x + 20,
-        layout.song_loop.y + 16,
-        "LOOP",
-        0xffffff,
-    );
+    scene.text_centered(layout.song_loop, "LOOP", 0xffffff, 2);
     scene.fill_rect(layout.song_delete, 0x9d0006);
-    scene.text(
-        layout.song_delete.x + 24,
-        layout.song_delete.y + 16,
-        "DEL",
-        0xffffff,
-    );
+    scene.text_centered(layout.song_delete, "DEL", 0xffffff, 2);
     scene.fill_rect(layout.song_bpm_down, 0x282838);
-    scene.text(
-        layout.song_bpm_down.x + 16,
-        layout.song_bpm_down.y + 16,
-        "BPM-",
-        0xffffff,
-    );
+    scene.text_centered(layout.song_bpm_down, "BPM-", 0xffffff, 2);
     scene.fill_rect(layout.song_bpm_up, 0x282838);
-    scene.text(
-        layout.song_bpm_up.x + 16,
-        layout.song_bpm_up.y + 16,
-        "BPM+",
-        0xffffff,
+    scene.text_centered(layout.song_bpm_up, "BPM+", 0xffffff, 2);
+    scene.fill_rect(
+        layout.song_viz,
+        if model.song_viz_open {
+            0x689d6a
+        } else {
+            0x3d4f6a
+        },
     );
-    scene.fill_rect(layout.song_prev, 0x282838);
-    scene.text(
-        layout.song_prev.x + 28,
-        layout.song_prev.y + 20,
-        "UP",
-        0xffffff,
-    );
-    scene.fill_rect(layout.song_next, 0x282838);
-    scene.text(
-        layout.song_next.x + 16,
-        layout.song_next.y + 20,
-        "DOWN",
-        0xffffff,
-    );
+    scene.text_centered(layout.song_viz, "VIZ", 0xffffff, 2);
     scene.fill_rect(layout.song_save_seq, 0x458588);
-    scene.text(
-        layout.song_save_seq.x + 48,
-        layout.song_save_seq.y + 14,
-        "SAVE SEQ",
-        0xffffff,
-    );
+    scene.text_centered(layout.song_save_seq, "SAVE SEQ", 0xffffff, 2);
     scene.fill_rect(layout.song_out, model.song_out.color());
     scene.text_centered(layout.song_out, model.song_out.short_label(), 0xffffff, 2);
+}
+
+fn draw_song_viz(scene: &mut Scene, model: &NativeModel) {
+    scene.clear = 0x07080f;
+    scene.fill(0.0, 0.0, SCREEN_W as f32, SCREEN_H as f32, 0x07080f);
+
+    let title = Layout::song_viz_title();
+    let name = if model.song_viz_name().is_empty() {
+        "midi"
+    } else {
+        model.song_viz_name()
+    };
+    scene.text(title.x + 4, title.y + 12, name, 0xfbf1c7);
+
+    scene.fill_rect(
+        Layout::song_viz_play(),
+        if model.song_playing {
+            0x689d6a
+        } else {
+            0x3a5040
+        },
+    );
+    scene.text_centered(Layout::song_viz_play(), "PLAY", 0xffffff, 2);
+    scene.fill_rect(Layout::song_viz_stop(), 0x3c3836);
+    scene.text_centered(Layout::song_viz_stop(), "STOP", 0xffffff, 2);
+    scene.fill_rect(Layout::song_viz_close(), 0x9d0006);
+    scene.text_centered(Layout::song_viz_close(), "CLOSE", 0xffffff, 2);
+
+    let notes = model.song_viz_notes();
+    let length = model.song_viz_length().max(1);
+    let playhead = model.song_playhead_tick();
+    draw_song_overview(scene, notes, length, playhead, model.song_loop);
+    draw_song_fall(
+        scene,
+        notes,
+        length,
+        playhead,
+        model.song_playing,
+        model.song_loop,
+    );
+}
+
+fn draw_song_overview(
+    scene: &mut Scene,
+    notes: &[song_viz::VizNote],
+    length: u32,
+    playhead: u32,
+    looping: bool,
+) {
+    let bar = Layout::song_viz_overview();
+    scene.fill_rect(bar, 0x12141f);
+    if notes.is_empty() {
+        return;
+    }
+    let pitched: Vec<&song_viz::VizNote> = song_viz::pitched_notes(notes).collect();
+    let drums: Vec<&song_viz::VizNote> = notes.iter().filter(|n| n.is_drum()).collect();
+    let w = bar.w.max(1) as f32;
+    let split = if drums.is_empty() {
+        bar.h as f32
+    } else {
+        (bar.h as f32 * 0.62).max(8.0)
+    };
+    if !pitched.is_empty() {
+        let (lo, hi) = song_viz::pitched_range(notes);
+        let span = (hi - lo).max(1) as f32;
+        for note in pitched {
+            let x0 = bar.x as f32 + (note.start as f32 / length as f32) * w;
+            let x1 = bar.x as f32 + (note.end.min(length) as f32 / length as f32) * w;
+            let y = bar.y as f32
+                + (1.0 - (note.note.saturating_sub(lo) as f32 + 0.5) / span) * (split - 1.0);
+            scene.fill(x0, y, (x1 - x0).max(1.0), 1.5, song_viz::note_color(note, false));
+        }
+    }
+    if !drums.is_empty() {
+        let pitches = song_viz::drum_pitches(notes);
+        let n = pitches.len().max(1) as f32;
+        let band_y = bar.y as f32 + split;
+        let band_h = (bar.h as f32 - split).max(3.0);
+        for note in drums {
+            let Some(idx) = pitches.iter().position(|&p| p == note.note) else {
+                continue;
+            };
+            let x0 = bar.x as f32 + (note.start as f32 / length as f32) * w;
+            let x1 = bar.x as f32 + (note.end.min(length) as f32 / length as f32) * w;
+            let y = band_y + (idx as f32 + 0.2) / n * band_h;
+            scene.fill(x0, y, (x1 - x0).max(1.0), 1.5, 0xd79921);
+        }
+    }
+    draw_song_overview_window(scene, bar, playhead, length, looping);
+}
+
+fn draw_song_overview_window(
+    scene: &mut Scene,
+    bar: crate::layout::Rect,
+    playhead: u32,
+    length: u32,
+    looping: bool,
+) {
+    const FRAME: u32 = 0xfbf1c7;
+    for (start, end) in song_viz::overview_window(playhead, length, looping) {
+        if end <= start {
+            continue;
+        }
+        let (x0, x1) = song_viz::overview_span_x(start, end, length, bar);
+        let y = bar.y as f32;
+        let h = bar.h as f32;
+        let w = (x1 - x0).max(3.0);
+        scene.fill(x0, y, w, 2.0, FRAME);
+        scene.fill(x0, y + h - 2.0, w, 2.0, FRAME);
+        scene.fill(x0, y, 2.0, h, FRAME);
+        scene.fill(x1 - 2.0, y, 2.0, h, FRAME);
+    }
+}
+
+fn draw_song_fall(
+    scene: &mut Scene,
+    notes: &[song_viz::VizNote],
+    length: u32,
+    playhead: u32,
+    playing: bool,
+    looping: bool,
+) {
+    let drums = song_viz::drum_pitches(notes);
+    let n_drums = drums.len();
+    let fall = Layout::song_viz_fall(n_drums);
+    let piano = Layout::song_viz_piano(n_drums);
+    let drum_lane = Layout::song_viz_drums(n_drums);
+    let drum_pads = Layout::song_viz_drum_pads(n_drums);
+    let (lo, hi) = song_viz::pitched_range(notes);
+    let hit_y = piano.y as f32;
+    let ppt = song_viz::fall_pixels_per_tick(fall);
+    let ahead = song_viz::fall_ahead_ticks();
+    let win_hi = playhead.saturating_add(ahead);
+
+    scene.fill_rect(fall, 0x0c0e18);
+    if n_drums > 0 {
+        scene.fill_rect(drum_lane, 0x101218);
+    }
+    if notes.is_empty() {
+        scene.text_centered(fall, "no notes in this file", 0x7c6f64, 2);
+        return;
+    }
+
+    // Piano: white keys first, then black.
+    for n in lo..=hi {
+        if song_viz::key_is_black(n) {
+            continue;
+        }
+        let key = song_viz::white_key_rect(n, lo, hi, piano);
+        let sounding = notes.iter().find(|note| {
+            playing && !note.is_drum() && note.note == n && note.sounding_at(playhead)
+        });
+        scene.fill_rect(
+            key,
+            sounding
+                .map(|note| song_viz::note_color(note, true))
+                .unwrap_or(0xe8e0d0),
+        );
+        scene.fill(
+            key.x as f32,
+            (key.y + key.h - 2) as f32,
+            key.w as f32,
+            2.0,
+            0xc0b8a8,
+        );
+        // Lane guide into the fall field.
+        scene.fill(
+            key.x as f32 + key.w as f32 - 1.0,
+            fall.y as f32,
+            1.0,
+            fall.h as f32,
+            0x161820,
+        );
+    }
+    for n in lo..=hi {
+        let Some(key) = song_viz::black_key_rect(n, lo, hi, piano) else {
+            continue;
+        };
+        let sounding = notes.iter().find(|note| {
+            playing && !note.is_drum() && note.note == n && note.sounding_at(playhead)
+        });
+        scene.fill_rect(
+            key,
+            sounding
+                .map(|note| song_viz::note_color(note, true))
+                .unwrap_or(0x1d2021),
+        );
+    }
+
+    for (i, pitch) in drums.iter().enumerate() {
+        let col = song_viz::drum_column(i, n_drums, drum_lane);
+        let pad = song_viz::drum_column(i, n_drums, drum_pads);
+        let lit = playing
+            && notes
+                .iter()
+                .any(|n| n.is_drum() && n.note == *pitch && n.sounding_at(playhead));
+        scene.fill(
+            col.x as f32 + col.w as f32 - 1.0,
+            col.y as f32,
+            1.0,
+            col.h as f32,
+            0x1a1c24,
+        );
+        scene.fill_rect(pad, if lit { 0xfe8019 } else { 0x282838 });
+        scene.text_centered(pad, song_viz::drum_label(*pitch), 0xfbf1c7, 2);
+    }
+
+    let draw_note = |scene: &mut Scene, note: &song_viz::VizNote, start: i64, end: i64| {
+        if end <= playhead as i64 || start >= win_hi as i64 {
+            if !(playing && note.sounding_at(playhead) && start <= playhead as i64) {
+                return;
+            }
+        }
+        let y_attack = song_viz::tick_y(start, playhead as i64, hit_y, ppt);
+        let y_release = song_viz::tick_y(end, playhead as i64, hit_y, ppt);
+        let top = y_release.min(y_attack).max(fall.y as f32);
+        let bot = y_release.max(y_attack).min(hit_y);
+        let nh = bot - top;
+        if nh < 1.5 {
+            return;
+        }
+        let color = song_viz::note_color(note, false);
+        if note.is_drum() {
+            let Some(idx) = drums.iter().position(|&p| p == note.note) else {
+                return;
+            };
+            let col = song_viz::drum_column(idx, n_drums, drum_lane);
+            let x = col.x as f32 + 2.0;
+            let nw = (col.w as f32 - 4.0).max(4.0);
+            scene.fill(x, top, nw, nh, color);
+            return;
+        }
+        if note.note < lo || note.note > hi {
+            return;
+        }
+        let (x, nw) = if song_viz::key_is_black(note.note) {
+            let Some(key) = song_viz::black_key_rect(note.note, lo, hi, piano) else {
+                return;
+            };
+            (key.x as f32, key.w as f32)
+        } else {
+            let key = song_viz::white_key_rect(note.note, lo, hi, piano);
+            (key.x as f32 + 1.0, (key.w as f32 - 2.0).max(3.0))
+        };
+        scene.fill(x, top, nw, nh, color);
+    };
+
+    for note in notes {
+        draw_note(scene, note, note.start as i64, note.end as i64);
+        if looping && playing {
+            draw_note(
+                scene,
+                note,
+                note.start as i64 + length as i64,
+                note.end as i64 + length as i64,
+            );
+        }
+    }
+
+    if !playing {
+        scene.text(fall.x + 12, fall.y + 12, "press PLAY", 0x7c6f64);
+    }
+}
+
+/// Horizontal DAW roll — kept for SEQ / clip editing. Songs playback uses falling notes.
+pub fn draw_piano_overview(
+    scene: &mut Scene,
+    notes: &[song_viz::VizNote],
+    length: u32,
+    playhead: u32,
+    bar: Rect,
+) {
+    scene.fill_rect(bar, 0x12141f);
+    if notes.is_empty() {
+        return;
+    }
+    let (lo, hi) = piano_roll::pitch_range(notes);
+    let span = (hi - lo).max(1) as f32;
+    let w = bar.w.max(1) as f32;
+    let h = bar.h.max(1) as f32;
+    let length = length.max(1);
+    for note in notes {
+        let x0 = bar.x as f32 + (note.start as f32 / length as f32) * w;
+        let x1 = bar.x as f32 + (note.end.min(length) as f32 / length as f32) * w;
+        let y = bar.y as f32 + (1.0 - (note.note.saturating_sub(lo) as f32 + 0.5) / span) * h;
+        scene.fill(x0, y, (x1 - x0).max(1.5), 2.0, song_viz::note_color(note, false));
+    }
+    let px = bar.x as f32 + (playhead.min(length) as f32 / length as f32) * w;
+    scene.fill(px, bar.y as f32, 2.0, h, 0xfbf1c7);
+}
+
+/// Horizontal DAW roll — time on X, pitch on Y, keyboard gutter on the left.
+pub fn draw_piano_roll(
+    scene: &mut Scene,
+    notes: &[song_viz::VizNote],
+    length: u32,
+    playhead: u32,
+    playing: bool,
+    looping: bool,
+    roll: Rect,
+) {
+    let keys = piano_roll::key_gutter(roll);
+    scene.fill_rect(roll, 0x0c0e18);
+    if notes.is_empty() {
+        scene.text_centered(roll, "empty clip", 0x7c6f64, 2);
+        return;
+    }
+    let (lo, hi) = piano_roll::pitch_range(notes);
+    let rows = (hi - lo + 1).max(1) as f32;
+    let row_h = roll.h as f32 / rows;
+    let (behind, ahead) = piano_roll::window_ticks();
+    let win_lo = playhead.saturating_sub(behind);
+    let win_hi = playhead.saturating_add(ahead);
+    let ph_x = piano_roll::playhead_x(roll);
+
+    for n in lo..=hi {
+        let row = (hi - n) as f32;
+        let y = roll.y as f32 + row * row_h;
+        if n % 12 == 0 {
+            scene.fill(roll.x as f32, y, roll.w as f32, 1.0, 0x1d2233);
+        }
+        let key_color = if song_viz::key_is_black(n) {
+            0x1a1c28
+        } else {
+            0x2a2d3c
+        };
+        scene.fill(keys.x as f32, y, keys.w as f32, row_h.max(1.0), key_color);
+    }
+
+    let draw_note = |scene: &mut Scene, note: &song_viz::VizNote, start: i64, end: i64| {
+        if end <= win_lo as i64 || start >= win_hi as i64 {
+            return;
+        }
+        if note.note < lo || note.note > hi {
+            return;
+        }
+        let x0 = piano_roll::tick_x(start, playhead as i64, roll).max(keys.x as f32 + keys.w as f32);
+        let x1 = piano_roll::tick_x(end, playhead as i64, roll).min((roll.x + roll.w) as f32);
+        if x1 < keys.x as f32 + keys.w as f32 || x0 > (roll.x + roll.w) as f32 {
+            return;
+        }
+        let nw = (x1 - x0).max(2.0);
+        let row = (hi - note.note) as f32;
+        let y = roll.y as f32 + row * row_h + 1.0;
+        let nh = (row_h - 2.0).max(2.0);
+        let active = playing && note.sounding_at(playhead);
+        let color = song_viz::note_color(note, active);
+        if active {
+            scene.fill(x0 - 1.0, y - 1.0, nw + 2.0, nh + 2.0, 0xffffff);
+        }
+        scene.fill(x0, y, nw, nh, color);
+    };
+
+    for note in notes {
+        draw_note(scene, note, note.start as i64, note.end as i64);
+        if looping && playing {
+            draw_note(
+                scene,
+                note,
+                note.start as i64 + length as i64,
+                note.end as i64 + length as i64,
+            );
+            draw_note(
+                scene,
+                note,
+                note.start as i64 - length as i64,
+                note.end as i64 - length as i64,
+            );
+        }
+    }
+
+    scene.fill(ph_x - 3.0, roll.y as f32, 7.0, roll.h as f32, 0x1d3344);
+    scene.fill(ph_x, roll.y as f32, 2.0, roll.h as f32, 0x8ec07c);
 }
 
 fn midi_connected_names(connected: &str) -> Vec<&str> {
@@ -2964,6 +3307,16 @@ fn draw_settings(scene: &mut Scene, model: &NativeModel) {
         0xffffff,
         2,
     );
+    scene.fill_rect(
+        layout.settings_power_warn,
+        if model.power_warn { 0xd79921 } else { 0x504945 },
+    );
+    scene.text_centered(
+        layout.settings_power_warn,
+        if model.power_warn { "PWR ON" } else { "PWR" },
+        if model.power_warn { 0x1d2021 } else { 0xffffff },
+        2,
+    );
     let wifi_busy = model.host_busy() == Some(crate::host::HostTask::Wifi);
     scene.fill_rect(
         layout.settings_wifi,
@@ -3015,7 +3368,6 @@ fn draw_settings(scene: &mut Scene, model: &NativeModel) {
 
 fn draw_fx(scene: &mut Scene, model: &NativeModel) {
     let layout = model.layout;
-    scene.text_scaled(layout.content.x + 12, layout.content.y + 8, "FX", 0xfbf1c7, 2);
     scene.fill_rect(
         layout.settings_fx_target,
         match model.fx_target {
@@ -3027,13 +3379,23 @@ fn draw_fx(scene: &mut Scene, model: &NativeModel) {
     scene.text_centered(
         layout.settings_fx_target,
         match model.fx_target {
-            crate::model::FxEditTarget::Bus => "TARGET: BUS (global)",
+            crate::model::FxEditTarget::Bus => "TARGET: BUS",
             crate::model::FxEditTarget::Voice => "TARGET: VOICE",
             crate::model::FxEditTarget::DrumGroup => "TARGET: DRUMS",
         },
         0xffffff,
         2,
     );
+    scene.text(
+        layout.settings_fx_target.x + layout.settings_fx_target.w + 12,
+        layout.settings_fx_target.y + 14,
+        "slide amount · tap on",
+        0x928374,
+    );
+    let clear = layout.punch_clear();
+    let punch_live = model.punch_active();
+    scene.fill_rect(clear, if punch_live { 0xcc241d } else { 0x3c3836 });
+    scene.text_centered(clear, "CLEAR", 0xffffff, 2);
     const LABELS: [&str; Layout::FX_SLIDER_COUNT] =
         ["DRIVE", "DELAY", "REVERB", "FLANGE", "LEVEL", "DRUMS"];
     let inserts = match model.fx_target {
@@ -3049,7 +3411,7 @@ fn draw_fx(scene: &mut Scene, model: &NativeModel) {
     for index in 0..Layout::FX_SLIDER_COUNT {
         let track = layout.settings_fx_slider(index);
         scene.fill_rect(track, 0x20202c);
-        scene.text(track.x + 4, track.y - 18, LABELS[index], 0xc0c0d0);
+        scene.text(track.x + 2, track.y - 16, LABELS[index], 0xc0c0d0);
         let value = if index == Layout::FX_KEYS_LEVEL {
             model.synth_params[2]
         } else if index == Layout::FX_DRUMS_LEVEL {
@@ -3059,9 +3421,9 @@ fn draw_fx(scene: &mut Scene, model: &NativeModel) {
         };
         let fill_h = (track.h as f32 * value) as i32;
         let fill = Rect {
-            x: track.x + 4,
+            x: track.x + 3,
             y: track.y + track.h - fill_h,
-            w: track.w - 8,
+            w: track.w - 6,
             h: fill_h,
         };
         let fill_color = if index == Layout::FX_KEYS_LEVEL {
@@ -3072,6 +3434,43 @@ fn draw_fx(scene: &mut Scene, model: &NativeModel) {
             insert_color
         };
         scene.fill_rect(fill, fill_color);
+    }
+    const PUNCH_COLOR: [u32; Layout::PUNCH_PAD_COUNT] = [
+        0xfb4934, 0xfe8019, 0xd79921, 0xb8bb26, 0x8ec07c, 0x458588, 0xb16286, 0xcc241d,
+    ];
+    for index in 0..Layout::PUNCH_PAD_COUNT {
+        let cell = layout.punch_pad_cell(index);
+        let amount = model.punch_amount[index];
+        let armed = model.punch_armed[index];
+        scene.fill_rect(cell, if armed { PUNCH_COLOR[index] } else { 0x1a1a22 });
+        scene.fill_rect(
+            Rect {
+                x: cell.x + 3,
+                y: cell.y + 3,
+                w: cell.w - 6,
+                h: cell.h - 6,
+            },
+            0x1d2021,
+        );
+        let fill_h = ((cell.h - 10) as f32 * amount) as i32;
+        scene.fill_rect(
+            Rect {
+                x: cell.x + 6,
+                y: cell.y + cell.h - fill_h - 5,
+                w: cell.w - 12,
+                h: fill_h,
+            },
+            if armed { PUNCH_COLOR[index] } else { 0x3c3836 },
+        );
+        scene.text(
+            cell.x + 8,
+            cell.y + 8,
+            jambox_core::PUNCH_LABELS[index],
+            if armed { 0xfbf1c7 } else { 0xa89984 },
+        );
+        if armed {
+            scene.text(cell.x + cell.w - 28, cell.y + 8, "ON", 0xfabd2f);
+        }
     }
 }
 
@@ -3450,6 +3849,7 @@ mod tests {
     #[test]
     fn undervolt_draws_low_pwr_badge() {
         let mut model = NativeModel::new();
+        model.power_warn = true;
         model.throttle = crate::throttle::ThrottleState::parse("throttled=0x50005").unwrap();
         let scene = build(&model);
         let bolts = scene
@@ -3483,6 +3883,20 @@ mod tests {
     }
 
     #[test]
+    fn power_warn_off_hides_low_pwr_badge() {
+        let mut model = NativeModel::new();
+        assert!(!model.power_warn);
+        model.throttle = crate::throttle::ThrottleState::parse("throttled=0x50005").unwrap();
+        let scene = build(&model);
+        let bolts = scene
+            .color
+            .iter()
+            .filter(|q| q.color == 0xfabd2f && q.w <= 12.0 && q.h <= 6.0)
+            .count();
+        assert_eq!(bolts, 0, "LOW PWR badge should stay hidden until SET→PWR");
+    }
+
+    #[test]
     fn chrome_rec_stays_armed_red_while_backbone_plays() {
         let mut model = NativeModel::new();
         model.seq.seed_playing_backbone(
@@ -3512,5 +3926,90 @@ mod tests {
                 && (q.y - rec.y as f32).abs() < 3.0
         });
         assert!(!idle_gray, "chrome REC must not look disabled after backbone");
+    }
+
+    #[test]
+    fn song_viz_draws_the_midi_notes() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Songs);
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("pidi-song-viz-draw-{stamp}"));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("roll.mid");
+        let events = vec![
+            jambox_protocol::WireClipEvent::midi(0, true, 0, 60, 110),
+            jambox_protocol::WireClipEvent::midi(480, false, 0, 60, 0),
+        ];
+        assert!(crate::songs::write_smf_type0(&path, &events, 960, 120.0));
+        model.song_files = vec![path];
+        model.song_selected = 0;
+        let mut out = Outbox::new();
+        let play = model.layout.song_play;
+        model.finger_down(1, play.x + 8, play.y + 8, &mut out);
+        model.finger_up(1, &mut out);
+        model.song_viz_open = true;
+        let scene = build(&model);
+        assert_eq!(scene.clear, 0x07080f);
+        assert!(
+            scene.color.len() > 20,
+            "falling-notes stage should emit many quads, got {}",
+            scene.color.len()
+        );
+        let no_hit_line = !scene
+            .color
+            .iter()
+            .any(|q| q.color == 0x8ec07c && q.h <= 4.0 && q.w > 200.0);
+        assert!(no_hit_line, "song viz should not draw a playhead line");
+        let lit_key = scene.color.iter().any(|q| {
+            q.color != 0xe8e0d0
+                && q.color != 0x1d2021
+                && q.h > 20.0
+                && q.y >= crate::layout::Layout::song_viz_keyboard().y as f32
+        });
+        assert!(lit_key, "playing notes should light the matching keys");
+        let overview = crate::layout::Layout::song_viz_overview();
+        let window = scene.color.iter().any(|q| {
+            q.color == 0xfbf1c7
+                && (q.y - overview.y as f32).abs() < 1.0
+                && q.h <= 3.0
+                && q.w > 4.0
+        });
+        assert!(window, "overview should frame the visible falling-notes span");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn piano_roll_still_draws_for_seq_editing() {
+        let notes = crate::song_viz::pair_notes(
+            &[
+                jambox_protocol::WireClipEvent::midi(0, true, 0, 60, 110),
+                jambox_protocol::WireClipEvent::midi(480, false, 0, 60, 0),
+            ],
+            960,
+        );
+        let mut scene = Scene {
+            clear: 0x111111,
+            font_style: FontStyle::Retro,
+            color: Vec::new(),
+            glyphs: Vec::new(),
+        };
+        draw_piano_roll(
+            &mut scene,
+            &notes,
+            960,
+            0,
+            true,
+            false,
+            Layout::piano_roll_viewport(),
+        );
+        let playhead = scene
+            .color
+            .iter()
+            .any(|q| q.color == 0x8ec07c && q.w <= 3.0 && q.h > 200.0);
+        assert!(playhead, "horizontal roll should keep a tall playhead");
+        assert!(scene.color.len() > 8);
     }
 }

@@ -28,6 +28,8 @@ pub mod scroll;
 pub mod screensaver;
 pub mod seq;
 pub mod session;
+pub mod piano_roll;
+pub mod song_viz;
 pub mod songs;
 pub mod throttle;
 pub mod voice_bake;

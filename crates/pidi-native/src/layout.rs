@@ -164,8 +164,8 @@ pub enum Hit {
     SongRow(usize),
     SongPlay,
     SongStop,
-    SongPrev,
-    SongNext,
+    SongViz,
+    SongVizClose,
     SongLoop,
     SongDelete,
     SongBpmUp,
@@ -177,6 +177,8 @@ pub enum Hit {
     SettingsAudio,
     FxTarget,
     FxSlider(usize),
+    PunchPad(usize),
+    PunchClear,
     MixBus(usize),
     MixPad(usize),
     SettingsWifi,
@@ -186,6 +188,7 @@ pub enum Hit {
     SettingsLog,
     SettingsMap,
     SettingsProbe,
+    SettingsPowerWarn,
     UpdateClose,
     UpdateCheck,
     UpdateApply,
@@ -324,6 +327,7 @@ pub struct Layout {
     pub settings_log: Rect,
     pub settings_map: Rect,
     pub settings_probe: Rect,
+    pub settings_power_warn: Rect,
     pub seq_rec: Rect,
     pub seq_play: Rect,
     pub seq_keep: Rect,
@@ -349,8 +353,7 @@ pub struct Layout {
     pub song_list: Rect,
     pub song_play: Rect,
     pub song_stop: Rect,
-    pub song_prev: Rect,
-    pub song_next: Rect,
+    pub song_viz: Rect,
     pub song_loop: Rect,
     pub song_delete: Rect,
     pub song_bpm_up: Rect,
@@ -1010,69 +1013,63 @@ impl Layout {
             },
             song_list: Rect {
                 x: 24,
-                y: HUD_H + 24,
+                y: HUD_H + 8,
                 w: 520,
-                h: content_h - 148,
+                h: content_h - 16,
             },
             song_play: Rect {
                 x: 560,
-                y: HUD_H + 24,
+                y: HUD_H + 8,
                 w: 216,
-                h: 56,
+                h: 54,
             },
             song_stop: Rect {
                 x: 560,
-                y: HUD_H + 88,
+                y: HUD_H + 70,
                 w: 216,
-                h: 56,
+                h: 54,
             },
             song_loop: Rect {
                 x: 560,
-                y: HUD_H + 152,
+                y: HUD_H + 132,
                 w: 100,
-                h: 48,
+                h: 46,
             },
             song_delete: Rect {
                 x: 668,
-                y: HUD_H + 152,
+                y: HUD_H + 132,
                 w: 108,
-                h: 48,
+                h: 46,
             },
             song_bpm_down: Rect {
                 x: 560,
-                y: HUD_H + 208,
+                y: HUD_H + 186,
                 w: 100,
-                h: 48,
+                h: 46,
             },
             song_bpm_up: Rect {
                 x: 668,
-                y: HUD_H + 208,
+                y: HUD_H + 186,
                 w: 108,
-                h: 48,
+                h: 46,
             },
-            song_prev: Rect {
+            song_viz: Rect {
                 x: 560,
-                y: HUD_H + 268,
-                w: 100,
-                h: 56,
-            },
-            song_next: Rect {
-                x: 668,
-                y: HUD_H + 268,
-                w: 108,
-                h: 56,
+                y: HUD_H + 240,
+                w: 216,
+                h: 58,
             },
             song_save_seq: Rect {
                 x: 560,
-                y: HUD_H + 326,
+                y: HUD_H + 306,
                 w: 216,
-                h: 44,
+                h: 42,
             },
             song_out: Rect {
                 x: 560,
-                y: HUD_H + 376,
+                y: HUD_H + 356,
                 w: 216,
-                h: 44,
+                h: 42,
             },
             settings_panic: Rect {
                 x: 24,
@@ -1093,17 +1090,18 @@ impl Layout {
                 h: 72,
             },
             // FX mode owns these rects (not Settings).
+            // Target + insert sliders sit left; punch pads take the right half.
             settings_fx_target: Rect {
-                x: 24,
-                y: HUD_H + 24,
-                w: 752,
-                h: 64,
+                x: 16,
+                y: HUD_H + 10,
+                w: 268,
+                h: 44,
             },
             settings_fx: Rect {
-                x: 24,
-                y: HUD_H + 108,
-                w: 752,
-                h: 280,
+                x: 16,
+                y: HUD_H + 60,
+                w: 268,
+                h: 340,
             },
             settings_wifi: Rect {
                 x: 280,
@@ -1144,7 +1142,13 @@ impl Layout {
             settings_probe: Rect {
                 x: 280,
                 y: HUD_H + 308,
-                w: 240,
+                w: 116,
+                h: 72,
+            },
+            settings_power_warn: Rect {
+                x: 404,
+                y: HUD_H + 308,
+                w: 116,
                 h: 72,
             },
             log_clear: Rect {
@@ -2093,6 +2097,7 @@ impl Layout {
     pub const FX_SLIDER_COUNT: usize = 6;
     pub const FX_KEYS_LEVEL: usize = 4;
     pub const FX_DRUMS_LEVEL: usize = 5;
+    pub const PUNCH_PAD_COUNT: usize = 8;
 
     /// MIX page: LIVE / KIT / SEQ DRM / SEQ KEY / SEQ KSS, then 16 pad faders.
     pub const MIX_BUS_COUNT: usize = 5;
@@ -2846,12 +2851,144 @@ impl Layout {
         crate::scroll::ListScroll {
             row_h: self.song_row_step(),
             item_count,
-            visible_rows: 5,
+            visible_rows: self.song_visible_rows(),
         }
     }
 
     pub fn song_row_step(&self) -> i32 {
         56
+    }
+
+    pub fn song_visible_rows(&self) -> usize {
+        let inner = (self.song_list.h - 8).max(self.song_row_step());
+        (inner / self.song_row_step()).max(1) as usize
+    }
+
+    pub fn song_viz_close() -> Rect {
+        Rect {
+            x: SCREEN_W - 108,
+            y: 8,
+            w: 96,
+            h: 40,
+        }
+    }
+
+    pub fn song_viz_play() -> Rect {
+        Rect {
+            x: SCREEN_W - 300,
+            y: 8,
+            w: 88,
+            h: 40,
+        }
+    }
+
+    pub fn song_viz_stop() -> Rect {
+        Rect {
+            x: SCREEN_W - 204,
+            y: 8,
+            w: 88,
+            h: 40,
+        }
+    }
+
+    pub fn song_viz_title() -> Rect {
+        Rect {
+            x: 16,
+            y: 8,
+            w: SCREEN_W - 328,
+            h: 40,
+        }
+    }
+
+    pub fn song_viz_overview() -> Rect {
+        Rect {
+            x: 8,
+            y: 54,
+            w: SCREEN_W - 16,
+            h: 20,
+        }
+    }
+
+    pub fn song_viz_keys_h() -> i32 {
+        58
+    }
+
+    pub fn song_viz_keyboard() -> Rect {
+        Rect {
+            x: 8,
+            y: SCREEN_H - 8 - Self::song_viz_keys_h(),
+            w: SCREEN_W - 16,
+            h: Self::song_viz_keys_h(),
+        }
+    }
+
+    /// Horizontal DAW roll viewport (SEQ / clip editing). Not the falling-notes stage.
+    pub fn piano_roll_viewport() -> Rect {
+        Rect {
+            x: 8,
+            y: 82,
+            w: SCREEN_W - 16,
+            h: SCREEN_H - 90,
+        }
+    }
+
+    pub fn song_viz_fall(drum_cols: usize) -> Rect {
+        let keys = Self::song_viz_keyboard();
+        let drums = Self::song_viz_drums(drum_cols);
+        let x = if drums.w > 0 { drums.x + drums.w + 4 } else { 8 };
+        Rect {
+            x,
+            y: 78,
+            w: keys.x + keys.w - x,
+            h: keys.y - 4 - 78,
+        }
+    }
+
+    pub fn song_viz_piano(drum_cols: usize) -> Rect {
+        let keys = Self::song_viz_keyboard();
+        let drums = Self::song_viz_drum_pads(drum_cols);
+        if drums.w <= 0 {
+            return keys;
+        }
+        Rect {
+            x: drums.x + drums.w + 4,
+            y: keys.y,
+            w: keys.x + keys.w - (drums.x + drums.w + 4),
+            h: keys.h,
+        }
+    }
+
+    pub fn song_viz_drums(drum_cols: usize) -> Rect {
+        if drum_cols == 0 {
+            return Rect {
+                x: 8,
+                y: 78,
+                w: 0,
+                h: 0,
+            };
+        }
+        let keys = Self::song_viz_keyboard();
+        let w = (8 + drum_cols as i32 * 22).min(200);
+        Rect {
+            x: 8,
+            y: 78,
+            w,
+            h: keys.y - 4 - 78,
+        }
+    }
+
+    pub fn song_viz_drum_pads(drum_cols: usize) -> Rect {
+        let lane = Self::song_viz_drums(drum_cols);
+        if lane.w <= 0 {
+            return lane;
+        }
+        let keys = Self::song_viz_keyboard();
+        Rect {
+            x: lane.x,
+            y: keys.y,
+            w: lane.w,
+            h: keys.h,
+        }
     }
 
     pub fn log_list_scroll(&self, item_count: usize) -> crate::scroll::ListScroll {
@@ -2929,11 +3066,8 @@ impl Layout {
         if self.song_bpm_down.contains(px, py) {
             return Hit::SongBpmDown;
         }
-        if self.song_prev.contains(px, py) {
-            return Hit::SongPrev;
-        }
-        if self.song_next.contains(px, py) {
-            return Hit::SongNext;
+        if self.song_viz.contains(px, py) {
+            return Hit::SongViz;
         }
         if self.song_save_seq.contains(px, py) {
             return Hit::SongSaveSeq;
@@ -2941,10 +3075,23 @@ impl Layout {
         if self.song_out.contains(px, py) {
             return Hit::SongOut;
         }
-        for index in 0..5 {
+        for index in 0..self.song_visible_rows() {
             if self.song_row(index).contains(px, py) {
                 return Hit::SongRow(index);
             }
+        }
+        Hit::None
+    }
+
+    pub fn hit_song_viz(px: i32, py: i32) -> Hit {
+        if Self::song_viz_close().contains(px, py) {
+            return Hit::SongVizClose;
+        }
+        if Self::song_viz_play().contains(px, py) {
+            return Hit::SongPlay;
+        }
+        if Self::song_viz_stop().contains(px, py) {
+            return Hit::SongStop;
         }
         Hit::None
     }
@@ -3155,14 +3302,44 @@ impl Layout {
     }
 
     pub fn settings_fx_slider(&self, index: usize) -> Rect {
-        // Inserts (drive / delay / reverb / flange) plus KEYS / DRUMS mix levels.
-        let n = Self::FX_SLIDER_COUNT as i32;
-        let w = self.settings_fx.w / n;
+        // Two rows of three so punch pads can own the right half of FX.
+        let i = (index % Self::FX_SLIDER_COUNT) as i32;
+        let col = i % 3;
+        let row = i / 3;
+        let w = self.settings_fx.w / 3;
+        let h = (self.settings_fx.h - 16) / 2;
         Rect {
-            x: self.settings_fx.x + (index as i32) * w + 8,
-            y: self.settings_fx.y + 28,
-            w: w - 16,
-            h: self.settings_fx.h - 36,
+            x: self.settings_fx.x + col * w + 6,
+            y: self.settings_fx.y + 22 + row * h,
+            w: w - 12,
+            h: h - 26,
+        }
+    }
+
+    pub fn punch_clear(&self) -> Rect {
+        Rect {
+            x: 588,
+            y: HUD_H + 10,
+            w: 196,
+            h: 44,
+        }
+    }
+
+    pub fn punch_pad_cell(&self, index: usize) -> Rect {
+        let i = (index % Self::PUNCH_PAD_COUNT) as i32;
+        let col = i % 4;
+        let row = i / 4;
+        let left = 300;
+        let top = HUD_H + 60;
+        let area_w = SCREEN_W - 16 - left;
+        let area_h = 340;
+        let cw = area_w / 4;
+        let rh = area_h / 2;
+        Rect {
+            x: left + col * cw + 4,
+            y: top + row * rh + 4,
+            w: cw - 8,
+            h: rh - 8,
         }
     }
 
@@ -3185,6 +3362,9 @@ impl Layout {
         if self.settings_probe.contains(px, py) {
             return Hit::SettingsProbe;
         }
+        if self.settings_power_warn.contains(px, py) {
+            return Hit::SettingsPowerWarn;
+        }
         if self.settings_wifi.contains(px, py) {
             return Hit::SettingsWifi;
         }
@@ -3204,9 +3384,17 @@ impl Layout {
         if self.settings_fx_target.contains(px, py) {
             return Hit::FxTarget;
         }
+        if self.punch_clear().contains(px, py) {
+            return Hit::PunchClear;
+        }
         for index in 0..Self::FX_SLIDER_COUNT {
             if self.settings_fx_slider(index).contains(px, py) {
                 return Hit::FxSlider(index);
+            }
+        }
+        for index in 0..Self::PUNCH_PAD_COUNT {
+            if self.punch_pad_cell(index).contains(px, py) {
+                return Hit::PunchPad(index);
             }
         }
         Hit::None
@@ -3348,6 +3536,11 @@ pub enum Surface {
     FxSlider {
         index: usize,
     },
+    PunchPad {
+        index: usize,
+        start_py: i32,
+        dragged: bool,
+    },
     MixBus {
         index: usize,
     },
@@ -3455,6 +3648,23 @@ mod tests {
         assert!(
             bottom(layout.song_out) <= SCREEN_H - 4,
             "song OUT should leave a bottom margin"
+        );
+        assert!(
+            bottom(layout.song_list) <= SCREEN_H - 4,
+            "song list should leave a bottom margin"
+        );
+        assert!(
+            layout.song_list.h + 24 >= layout.content.h,
+            "song list should use the full content height, h={}",
+            layout.song_list.h
+        );
+        assert!(
+            layout.song_visible_rows() >= 6,
+            "full-height list should show more than the old 5 rows"
+        );
+        assert!(
+            layout.song_viz.w > 0 && layout.song_viz.h > 0,
+            "VIZ button should occupy the old UP/DOWN slot"
         );
     }
 
@@ -3855,13 +4065,32 @@ mod tests {
         assert!(first.x >= layout.settings_fx.x);
         assert!(last.x + last.w <= layout.settings_fx.x + layout.settings_fx.w);
         assert!(
-            last.x > first.x,
-            "KEYS/DRUMS columns should sit to the right of DRIVE"
+            last.y > first.y,
+            "DRUMS should sit on the second slider row"
         );
         match layout.hit(UiMode::Fx, last.x + 4, last.y + last.h / 2) {
             Hit::FxSlider(i) if i == Layout::FX_DRUMS_LEVEL => {}
             other => panic!("expected drums level slider, got {other:?}"),
         }
+        let rpt = layout.punch_pad_cell(0);
+        let crush = layout.punch_pad_cell(7);
+        assert_on_screen("punch rpt", rpt);
+        assert_on_screen("punch crush", crush);
+        assert!(rpt.x > last.x + last.w, "punch pads sit right of inserts");
+        assert_eq!(
+            layout.hit(UiMode::Fx, rpt.x + 8, rpt.y + 8),
+            Hit::PunchPad(0)
+        );
+        assert_eq!(
+            layout.hit(UiMode::Fx, crush.x + 8, crush.y + 8),
+            Hit::PunchPad(7)
+        );
+        let clear = layout.punch_clear();
+        assert_on_screen("punch clear", clear);
+        assert_eq!(
+            layout.hit(UiMode::Fx, clear.x + 8, clear.y + 8),
+            Hit::PunchClear
+        );
     }
 
     #[test]

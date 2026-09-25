@@ -274,6 +274,9 @@ pub struct SessionState {
     /// Lightweight probe log of engine/audio health. Missing in old sessions → off.
     #[serde(default)]
     pub probe: bool,
+    /// Show the LOW PWR / THROTTLE status badge. Missing in old sessions → off.
+    #[serde(default)]
+    pub power_warn: bool,
     /// Keep the USB Wi-Fi dongle powered for SSH after leaving WIFI/UPDATE.
     #[serde(default)]
     pub wifi_usb_hold: bool,
@@ -382,6 +385,7 @@ impl Default for SessionState {
             channel_map: [0; 16],
             clip_quantize: ClipQuantize::Bar,
             probe: false,
+            power_warn: false,
             wifi_usb_hold: false,
         }
     }
@@ -450,6 +454,7 @@ mod tests {
         assert_eq!(s.kaoss_fx_target, KaossFxTarget::Voice);
         assert_eq!(s.clip_quantize, ClipQuantize::Bar);
         assert!(!s.probe);
+        assert!(!s.power_warn);
         assert!(!s.wifi_usb_hold);
         assert!((s.fx_flanger_rate - 0.35).abs() < 1e-6);
     }
@@ -470,6 +475,16 @@ mod tests {
         let json = serde_json::to_string(&s).unwrap();
         let back: SessionState = serde_json::from_str(&json).unwrap();
         assert!(back.probe);
+    }
+
+    #[test]
+    fn session_roundtrip_includes_power_warn() {
+        let mut s = SessionState::default();
+        s.power_warn = true;
+        let json = serde_json::to_string(&s).unwrap();
+        let back: SessionState = serde_json::from_str(&json).unwrap();
+        assert!(back.power_warn);
+        assert!(!SessionState::default().power_warn);
     }
 
     #[test]

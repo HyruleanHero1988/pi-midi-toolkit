@@ -258,6 +258,13 @@ impl Outbox {
         });
     }
 
+    pub fn punch_fx(&mut self, slot: u8, amount: f32) {
+        self.reliable.push_back(Request::PunchFx {
+            slot,
+            amount: amount.clamp(0.0, 1.0),
+        });
+    }
+
     pub fn kaoss_scale(&mut self, scale_index: u8, key: u8, root_midi: u8, octaves: u8) {
         self.reliable.push_back(Request::KaossScale {
             scale_index,

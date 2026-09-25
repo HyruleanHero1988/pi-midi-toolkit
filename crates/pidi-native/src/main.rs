@@ -133,7 +133,7 @@ fn main() {
         }
         client.flush();
         for notice in client.midi_inbox.drain(..) {
-            model.on_midi_notice(&notice);
+            model.on_midi_notice(&notice, &mut client.outbox);
         }
         model.note_engine_link(client.connected);
         model.status = client.last_status;

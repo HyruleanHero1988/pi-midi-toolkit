@@ -16,6 +16,7 @@ use crate::screensaver;
 use crate::scroll::{self, ScrollKind, TOUCH_SCROLL_THRESH_PX};
 use crate::seq::{SeqAction, SeqModel, SEQ_CLIP_SLOT, SEQ_DRUM_MIX_SLOT, SEQ_KAOSS_MIX_SLOT};
 use crate::session::{self, ClipQuantize, OutMode, SessionState};
+use crate::song_viz::{self, VizNote};
 use crate::songs::{self, SONG_CLIP_SLOT};
 use crate::voice_bake;
 use crate::waves;
@@ -278,12 +279,20 @@ pub struct NativeModel {
     pub song_scroll: usize,
     pub song_playing: bool,
     pub song_loop: bool,
+    pub song_viz_open: bool,
+    song_viz_notes: Vec<VizNote>,
+    song_viz_length: u32,
+    song_viz_name: String,
+    song_origin: Option<Instant>,
+    song_elapsed_ticks: f64,
     pub fx_bus: [f32; 4],
     pub fx_voice: [f32; 4],
     /// Voice flanger LFO rate (0..1). Independent of SYNTH FLANGE mix.
     pub fx_flanger_rate: f32,
     pub fx_drum: [f32; 4],
     pub fx_target: FxEditTarget,
+    pub punch_amount: [f32; Layout::PUNCH_PAD_COUNT],
+    pub punch_armed: [bool; Layout::PUNCH_PAD_COUNT],
     /// Kit bus trim (FX DRUMS / MIX KIT). Independent of melody `synth_params[2]` (LEVEL).
     pub drum_level: f32,
     /// SEQ / songs key trim (MIX KEY). Phrase pads use `phrases[i].gain`.
@@ -399,6 +408,8 @@ pub struct NativeModel {
     logged_undervolt: bool,
     /// SET→PROBE: append engine health to `probe.log` every couple of seconds.
     pub probe: bool,
+    /// SET→PWR: draw the LOW PWR / THROTTLE status badge. Off by default.
+    pub power_warn: bool,
     pub probe_reconnects: u64,
     last_probe_write: Instant,
     last_logged_xruns: u64,
@@ -503,11 +514,19 @@ impl NativeModel {
             song_scroll: 0,
             song_playing: false,
             song_loop: false,
+            song_viz_open: false,
+            song_viz_notes: Vec::new(),
+            song_viz_length: 0,
+            song_viz_name: String::new(),
+            song_origin: None,
+            song_elapsed_ticks: 0.0,
             fx_bus: [0.0, 0.0, 0.0, 0.0],
             fx_voice: [0.0, 0.0, 0.0, 0.0],
             fx_flanger_rate: 0.35,
             fx_drum: [0.0, 0.0, 0.0, 0.0],
             fx_target: FxEditTarget::Bus,
+            punch_amount: [0.55; Layout::PUNCH_PAD_COUNT],
+            punch_armed: [false; Layout::PUNCH_PAD_COUNT],
             drum_level: 1.0,
             seq_level: 1.0,
             seq_drum_level: 1.0,
@@ -598,6 +617,7 @@ impl NativeModel {
             last_throttle_poll: Instant::now(),
             logged_undervolt: false,
             probe: false,
+            power_warn: false,
             probe_reconnects: 0,
             last_probe_write: Instant::now(),
             last_logged_xruns: 0,
@@ -713,6 +733,9 @@ impl NativeModel {
         self.chords_overlay = None;
         self.chords_arm = false;
         self.map_out_edit = None;
+        if mode != UiMode::Songs {
+            self.song_viz_open = false;
+        }
         if mode == UiMode::Drums {
             self.kit_wave_dirty = true;
         }
@@ -732,6 +755,8 @@ impl NativeModel {
             outbox.synth("fm_enable", 0.0);
             if self.mode == UiMode::Drums {
                 outbox.knob_map("drums");
+            } else if self.mode == UiMode::Fx {
+                outbox.knob_map("punch");
             } else {
                 outbox.knob_map("keys");
             }
@@ -864,6 +889,9 @@ impl NativeModel {
         }
         if self.map_out_edit.is_some() {
             return Some("map_out");
+        }
+        if self.song_viz_open {
+            return Some("song_viz");
         }
         None
     }
@@ -1026,6 +1054,7 @@ impl NativeModel {
                 self.map_out_edit = None;
                 self.status_line = "MAP".into();
             }
+            Some("song_viz") => self.close_song_viz(),
             _ => {
                 if let Some(prev) = self.nav_stack.pop() {
                     self.nav_back_navigating = true;
@@ -1187,6 +1216,7 @@ impl NativeModel {
             }
             self.tick_kaoss_full_exit();
         }
+        self.tick_song_playhead(dt);
         self.tick_kaoss_gate(outbox);
         self.tick_chords_combo_grace(dt, outbox);
         self.capture_held_repeats_at(Instant::now());
@@ -1963,6 +1993,7 @@ impl NativeModel {
         self.midi_out_filter = s.midi_out.clone();
         self.channel_map_bits = s.channel_map;
         self.probe = s.probe;
+        self.power_warn = s.power_warn;
         self.wifi_usb_hold = s.wifi_usb_hold;
         outbox.midi_select(
             Some(self.midi_in_filter.clone()),
@@ -2076,6 +2107,7 @@ impl NativeModel {
             midi_out: self.midi_out_filter.clone(),
             channel_map: self.channel_map_bits,
             probe: self.probe,
+            power_warn: self.power_warn,
             wifi_usb_hold: self.wifi_usb_hold,
         }
     }
@@ -2094,10 +2126,13 @@ impl NativeModel {
         }
     }
 
-    pub fn on_midi_notice(&mut self, notice: &MidiNotice) {
+    pub fn on_midi_notice(&mut self, notice: &MidiNotice, outbox: &mut Outbox) {
         let kind = notice.kind.to_ascii_lowercase();
         let note = notice.note.unwrap_or(0);
         let vel = notice.velocity.unwrap_or(0) as u8;
+        if self.apply_punch_midi(notice, outbox) {
+            return;
+        }
         if kind == "note_on" || kind == "noteon" {
             if vel > 0 {
                 if self.mode != UiMode::Arp {
@@ -2257,7 +2292,7 @@ impl NativeModel {
 
     pub fn panic_ui_state(&mut self, outbox: &mut Outbox) {
         self.phrase_playing = [false; 16];
-        self.song_playing = false;
+        self.stop_song_clock();
         self.kaoss_hold = false;
         self.kaoss_touching = false;
         self.kaoss_gate_on = false;
@@ -2265,6 +2300,7 @@ impl NativeModel {
         self.kaoss_gate_gesture = None;
         let action = self.seq.stop_all();
         self.apply_seq_action(action, outbox);
+        self.clear_punch(outbox);
     }
 
     pub fn finger_down(&mut self, id: i32, px: i32, py: i32, outbox: &mut Outbox) {
@@ -2413,6 +2449,8 @@ impl NativeModel {
             }
         } else if self.mode == UiMode::Home && self.layout.content.contains(px, py) {
             Hit::ScrollArea(ScrollKind::Home)
+        } else if self.mode == UiMode::Songs && self.song_viz_open {
+            Layout::hit_song_viz(px, py)
         } else if self.mode == UiMode::Songs && self.layout.song_list.contains(px, py) {
             Hit::ScrollArea(ScrollKind::SongList)
         } else if self.mode == UiMode::Log {
@@ -3386,40 +3424,16 @@ impl NativeModel {
                     gate_on: false,
                 };
                 outbox.clip_stop(SONG_CLIP_SLOT, "off");
-                self.song_playing = false;
+                self.stop_song_clock();
                 self.status_line = "song stop".into();
             }
-            Hit::SongPrev => {
-                self.fingers[slot] = Finger {
-                    active: true,
-                    id,
-                    gesture,
-                    x: 0.0,
-                    y: 0.0,
-                    px,
-                    py,
-                    surface: Surface::UiTap,
-                    gate_on: false,
-                };
-                if self.song_scroll > 0 {
-                    self.song_scroll -= 1;
-                }
+            Hit::SongViz => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.toggle_song_viz();
             }
-            Hit::SongNext => {
-                self.fingers[slot] = Finger {
-                    active: true,
-                    id,
-                    gesture,
-                    x: 0.0,
-                    y: 0.0,
-                    px,
-                    py,
-                    surface: Surface::UiTap,
-                    gate_on: false,
-                };
-                if self.song_scroll + 5 < self.song_files.len() {
-                    self.song_scroll += 1;
-                }
+            Hit::SongVizClose => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.close_song_viz();
             }
             Hit::SongLoop => {
                 self.tap_ui(slot, id, gesture, px, py);
@@ -3522,6 +3536,27 @@ impl NativeModel {
                     gate_on: false,
                 };
                 self.apply_fx_slider(index, py, outbox);
+            }
+            Hit::PunchPad(index) => {
+                self.fingers[slot] = Finger {
+                    active: true,
+                    id,
+                    gesture,
+                    x: 0.0,
+                    y: 0.0,
+                    px,
+                    py,
+                    surface: Surface::PunchPad {
+                        index,
+                        start_py: py,
+                        dragged: false,
+                    },
+                    gate_on: false,
+                };
+            }
+            Hit::PunchClear => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.clear_punch(outbox);
             }
             Hit::MixBus(index) => {
                 self.fingers[slot] = Finger {
@@ -3646,6 +3681,18 @@ impl NativeModel {
                 } else {
                     self.status_line = "PROBE OFF".into();
                     self.push_log("probe off");
+                }
+                self.mark_dirty();
+            }
+            Hit::SettingsPowerWarn => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.power_warn = !self.power_warn;
+                if self.power_warn {
+                    self.status_line = "LOW PWR badge on".into();
+                    self.push_log("power warn on");
+                } else {
+                    self.status_line = "LOW PWR badge off".into();
+                    self.push_log("power warn off");
                 }
                 self.mark_dirty();
             }
@@ -3943,6 +3990,22 @@ impl NativeModel {
             Surface::FxSlider { index } => {
                 self.apply_fx_slider(index, py, outbox);
             }
+            Surface::PunchPad {
+                index,
+                start_py,
+                dragged,
+            } => {
+                if !dragged && (py - start_py).abs() >= TOUCH_SCROLL_THRESH_PX {
+                    self.fingers[slot].surface = Surface::PunchPad {
+                        index,
+                        start_py,
+                        dragged: true,
+                    };
+                }
+                if dragged || (py - start_py).abs() >= TOUCH_SCROLL_THRESH_PX {
+                    self.set_punch_amount(index, py, outbox);
+                }
+            }
             Surface::MixBus { index } => {
                 self.apply_mix_bus(index, py, outbox);
             }
@@ -4086,6 +4149,18 @@ impl NativeModel {
                     self.apply_scroll_drag(kind, start_py, finger.py, scroll_at_start);
                 } else {
                     self.resolve_scroll_tap(kind, finger.px, finger.py, outbox);
+                }
+            }
+            Surface::PunchPad {
+                index,
+                start_py,
+                dragged,
+            } => {
+                let moved = dragged || (finger.py - start_py).abs() >= TOUCH_SCROLL_THRESH_PX;
+                if moved {
+                    self.set_punch_amount(index, finger.py, outbox);
+                } else {
+                    self.toggle_punch_arm(index, outbox);
                 }
             }
             Surface::Phrase { .. }
@@ -4996,6 +5071,94 @@ impl NativeModel {
             }
         }
         self.mark_dirty();
+    }
+
+    pub fn punch_active(&self) -> bool {
+        self.punch_armed.iter().any(|on| *on)
+    }
+
+    fn apply_punch_midi(&mut self, notice: &MidiNotice, outbox: &mut Outbox) -> bool {
+        if self.mode != UiMode::Fx {
+            return false;
+        }
+        let kind = notice.kind.to_ascii_lowercase();
+        if kind == "control_change" || kind == "cc" {
+            let Some(index) = jambox_core::punch_index_for_knob_cc(notice.control.unwrap_or(255))
+            else {
+                return false;
+            };
+            let unit = (notice.value.unwrap_or(0) as f32 / 127.0).clamp(0.0, 1.0);
+            self.set_punch_amount_unit(index, unit, outbox);
+            return true;
+        }
+        if kind == "note_on" || kind == "noteon" {
+            if notice.velocity.unwrap_or(0) == 0 {
+                return jambox_core::punch_index_for_pad_note(notice.note.unwrap_or(255)).is_some();
+            }
+            if let Some(index) = jambox_core::punch_index_for_pad_note(notice.note.unwrap_or(255)) {
+                self.toggle_punch_arm(index, outbox);
+                return true;
+            }
+        }
+        if kind == "note_off" || kind == "noteoff" {
+            return jambox_core::punch_index_for_pad_note(notice.note.unwrap_or(255)).is_some();
+        }
+        false
+    }
+
+    fn set_punch_amount(&mut self, index: usize, py: i32, outbox: &mut Outbox) {
+        if index >= Layout::PUNCH_PAD_COUNT {
+            return;
+        }
+        let cell = self.layout.punch_pad_cell(index);
+        let y = 1.0 - ((py - cell.y) as f32 / cell.h.max(1) as f32);
+        self.set_punch_amount_unit(index, y.clamp(0.08, 1.0), outbox);
+    }
+
+    fn set_punch_amount_unit(&mut self, index: usize, amount: f32, outbox: &mut Outbox) {
+        if index >= Layout::PUNCH_PAD_COUNT {
+            return;
+        }
+        let amount = amount.clamp(0.0, 1.0);
+        self.punch_amount[index] = amount;
+        if self.punch_armed[index] {
+            outbox.punch_fx(index as u8, amount);
+        }
+        self.status_line = format!(
+            "punch {} {:.0}%{}",
+            jambox_core::PUNCH_LABELS[index],
+            amount * 100.0,
+            if self.punch_armed[index] { " on" } else { "" }
+        );
+    }
+
+    fn toggle_punch_arm(&mut self, index: usize, outbox: &mut Outbox) {
+        if index >= Layout::PUNCH_PAD_COUNT {
+            return;
+        }
+        self.punch_armed[index] = !self.punch_armed[index];
+        let amount = if self.punch_armed[index] {
+            self.punch_amount[index]
+        } else {
+            0.0
+        };
+        outbox.punch_fx(index as u8, amount);
+        self.status_line = format!(
+            "punch {} {} {:.0}%",
+            jambox_core::PUNCH_LABELS[index],
+            if self.punch_armed[index] { "on" } else { "off" },
+            self.punch_amount[index] * 100.0
+        );
+    }
+
+    fn clear_punch(&mut self, outbox: &mut Outbox) {
+        for i in 0..Layout::PUNCH_PAD_COUNT {
+            if self.punch_armed[i] {
+                outbox.punch_fx(i as u8, 0.0);
+            }
+            self.punch_armed[i] = false;
+        }
+        self.status_line = "punch off".into();
     }
 
     fn mix_slider_value(track: Rect, py: i32) -> f32 {
@@ -6276,7 +6439,7 @@ impl NativeModel {
                 }
             }
             ScrollKind::SongList => {
-                for row in 0..5 {
+                for row in 0..self.layout.song_visible_rows() {
                     let cell = self.layout.song_row(row);
                     if cell.contains(px, py) {
                         let idx = self.song_scroll + row;
@@ -7051,6 +7214,9 @@ impl NativeModel {
         self.song_selected = idx;
         let path = self.song_files[idx].clone();
         self.apply_song_file_tempo(&path, outbox);
+        if let Some((events, length_ticks, _)) = songs::load_smf_as_clip(&path) {
+            self.arm_song_viz(&path, &events, length_ticks);
+        }
         self.status_line = path
             .file_name()
             .and_then(|n| n.to_str())
@@ -7077,6 +7243,7 @@ impl NativeModel {
             self.status_line = "could not parse SMF".into();
             return;
         };
+        self.arm_song_viz(&path, &events, length_ticks);
         outbox.tempo(bpm);
         let mode = if self.song_loop { "loop" } else { "oneshot" };
         // Imported SMF has no baked take tone. Follow the live brightness knob
@@ -7089,10 +7256,142 @@ impl NativeModel {
         self.song_playing = true;
         self.bpm = bpm.clamp(40.0, 240.0);
         self.seq.bpm = self.bpm;
+        self.start_song_clock();
         self.status_line = format!(
             "play {}",
             path.file_name().and_then(|n| n.to_str()).unwrap_or("song")
         );
+    }
+
+    fn arm_song_viz(&mut self, path: &std::path::Path, events: &[WireClipEvent], length_ticks: u32) {
+        self.song_viz_notes = song_viz::pair_notes(events, length_ticks);
+        self.song_viz_length = length_ticks.max(1);
+        self.song_viz_name = path
+            .file_stem()
+            .and_then(|n| n.to_str())
+            .unwrap_or("song")
+            .replace('-', " ")
+            .replace('_', " ");
+    }
+
+    fn load_selected_song_viz(&mut self) -> bool {
+        let Some(path) = self.song_files.get(self.song_selected).cloned() else {
+            return false;
+        };
+        let Some((events, length_ticks, _)) = songs::load_smf_as_clip(&path) else {
+            return false;
+        };
+        self.arm_song_viz(&path, &events, length_ticks);
+        true
+    }
+
+    fn toggle_song_viz(&mut self) {
+        if self.song_viz_open {
+            self.close_song_viz();
+            return;
+        }
+        if self.song_viz_notes.is_empty() && !self.load_selected_song_viz() {
+            self.status_line = if self.song_files.is_empty() {
+                "no songs in songs/".into()
+            } else {
+                "could not parse SMF".into()
+            };
+            return;
+        }
+        self.song_viz_open = true;
+        self.status_line = "song visualizer".into();
+        self.mark_dirty();
+    }
+
+    fn close_song_viz(&mut self) {
+        self.song_viz_open = false;
+        self.status_line = if self.song_playing {
+            "song playing".into()
+        } else {
+            "SONGS".into()
+        };
+        self.mark_dirty();
+    }
+
+    fn start_song_clock(&mut self) {
+        self.song_elapsed_ticks = 0.0;
+        self.song_origin = Some(Instant::now() + self.song_launch_delay());
+    }
+
+    fn stop_song_clock(&mut self) {
+        self.song_playing = false;
+        self.song_origin = None;
+        self.song_elapsed_ticks = 0.0;
+    }
+
+    /// Headphones on the lab Pi open at 44.1 kHz (not 48 k).
+    fn audio_sample_rate(&self) -> f64 {
+        44_100.0
+    }
+
+    /// Estimate how long the engine will wait for the clip quantize grid.
+    fn song_launch_delay(&self) -> Duration {
+        match self.clip_quantize {
+            ClipQuantize::Off => Duration::ZERO,
+            q => {
+                let sr = self.audio_sample_rate();
+                let bpm = self.bpm.max(20.0) as f64;
+                let beat = 60.0 / bpm * sr;
+                let grid = match q {
+                    ClipQuantize::Beat => beat,
+                    ClipQuantize::Bar => beat * 4.0,
+                    ClipQuantize::Off => return Duration::ZERO,
+                };
+                if grid <= 1.0 {
+                    return Duration::ZERO;
+                }
+                let pos = self.status.position as f64;
+                let next = (pos / grid).ceil() * grid;
+                let wait = ((next - pos) / sr).clamp(0.0, 8.0);
+                Duration::from_secs_f64(wait)
+            }
+        }
+    }
+
+    fn tick_song_playhead(&mut self, dt: f32) {
+        let _ = dt;
+        if !self.song_playing {
+            return;
+        }
+        let Some(origin) = self.song_origin else {
+            return;
+        };
+        if Instant::now() < origin {
+            self.song_elapsed_ticks = 0.0;
+            return;
+        }
+        let ticks_per_sec = (self.bpm.max(20.0) as f64) / 60.0 * (phrases::PPQ as f64);
+        self.song_elapsed_ticks = origin.elapsed().as_secs_f64() * ticks_per_sec;
+        let length = self.song_viz_length.max(1) as f64;
+        if self.song_loop {
+            self.song_elapsed_ticks %= length;
+        } else if self.song_elapsed_ticks >= length {
+            self.stop_song_clock();
+        }
+        if self.song_viz_open && !self.screensaver.active {
+            let _ = self.screensaver.poke();
+        }
+    }
+
+    pub fn song_viz_notes(&self) -> &[VizNote] {
+        &self.song_viz_notes
+    }
+
+    pub fn song_viz_length(&self) -> u32 {
+        self.song_viz_length
+    }
+
+    pub fn song_viz_name(&self) -> &str {
+        &self.song_viz_name
+    }
+
+    pub fn song_playhead_tick(&self) -> u32 {
+        self.song_elapsed_ticks.max(0.0) as u32
     }
 
     fn paint_cells(&mut self) {
@@ -9614,6 +9913,195 @@ mod tests {
     }
 
     #[test]
+    fn punch_tap_arms_without_changing_stored_amount() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Fx);
+        let stored = model.punch_amount[0];
+        let mut out = Outbox::new();
+        let pad = model.layout.punch_pad_cell(0);
+        model.finger_down(1, pad.x + 8, pad.y + 8, &mut out);
+        assert!(
+            out.take().iter().all(|r| !matches!(r, Request::PunchFx { .. })),
+            "down must not punch until armed"
+        );
+        model.finger_up(1, &mut out);
+        let up = out.take();
+        assert!(
+            up.iter().any(|r| matches!(
+                r,
+                Request::PunchFx { slot: 0, amount } if (*amount - stored).abs() < 1e-5
+            )),
+            "tap should arm at the stored value, got {up:?}"
+        );
+        assert!(model.punch_armed[0]);
+        assert!((model.punch_amount[0] - stored).abs() < 1e-5);
+        model.finger_down(2, pad.x + 8, pad.y + 8, &mut out);
+        model.finger_up(2, &mut out);
+        let off = out.take();
+        assert!(
+            off.iter()
+                .any(|r| matches!(r, Request::PunchFx { slot: 0, amount } if *amount == 0.0)),
+            "second tap should disarm, got {off:?}"
+        );
+        assert!(!model.punch_armed[0]);
+        assert!((model.punch_amount[0] - stored).abs() < 1e-5);
+    }
+
+    #[test]
+    fn punch_slide_sets_amount_while_disarmed() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Fx);
+        let mut out = Outbox::new();
+        let pad = model.layout.punch_pad_cell(1);
+        let start_y = pad.y + pad.h / 2;
+        model.finger_down(1, pad.x + 8, start_y, &mut out);
+        model.finger_move(1, pad.x + 8, pad.y + 6, &mut out);
+        let moved = out.take();
+        assert!(
+            moved.iter().all(|r| !matches!(r, Request::PunchFx { .. })),
+            "disarmed slide must not punch, got {moved:?}"
+        );
+        assert!(!model.punch_armed[1]);
+        assert!(
+            model.punch_amount[1] > 0.85,
+            "slide to the top should raise the stored amount"
+        );
+    }
+
+    #[test]
+    fn punch_clear_disarms_and_keeps_amounts() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Fx);
+        let stored = model.punch_amount[3];
+        let mut out = Outbox::new();
+        let pad = model.layout.punch_pad_cell(3);
+        model.finger_down(1, pad.x + 8, pad.y + 8, &mut out);
+        model.finger_up(1, &mut out);
+        let _ = out.take();
+        assert!(model.punch_armed[3]);
+        let clear = model.layout.punch_clear();
+        model.finger_down(2, clear.x + 8, clear.y + 8, &mut out);
+        model.finger_up(2, &mut out);
+        let batch = out.take();
+        assert!(
+            batch
+                .iter()
+                .any(|r| matches!(r, Request::PunchFx { slot: 3, amount } if *amount == 0.0)),
+            "CLEAR should disarm HPF, got {batch:?}"
+        );
+        assert!(!model.punch_active());
+        assert!((model.punch_amount[3] - stored).abs() < 1e-5);
+    }
+
+    fn punch_midi(
+        kind: &str,
+        note: Option<u8>,
+        velocity: Option<u16>,
+        control: Option<u8>,
+        value: Option<u16>,
+    ) -> MidiNotice {
+        MidiNotice {
+            kind: kind.into(),
+            channel: 9,
+            note,
+            velocity,
+            control,
+            value,
+        }
+    }
+
+    #[test]
+    fn entering_fx_sends_punch_knob_map() {
+        let mut model = NativeModel::new();
+        let mut out = Outbox::new();
+        model.switch_mode(UiMode::Fx, &mut out);
+        let batch = out.take();
+        assert!(
+            batch
+                .iter()
+                .any(|r| matches!(r, Request::KnobMap { mode, .. } if mode == "punch")),
+            "FX page should steal MPK knobs/pads for punch, got {batch:?}"
+        );
+    }
+
+    #[test]
+    fn mpk_knob_sets_punch_amount_while_disarmed() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Fx);
+        let mut out = Outbox::new();
+        model.on_midi_notice(
+            &punch_midi("control_change", None, None, Some(70), Some(127)),
+            &mut out,
+        );
+        assert!(!model.punch_armed[0]);
+        assert!((model.punch_amount[0] - 1.0).abs() < 1e-5);
+        assert!(
+            out.take()
+                .iter()
+                .all(|r| !matches!(r, Request::PunchFx { .. })),
+            "disarmed knob must only store the amount"
+        );
+    }
+
+    #[test]
+    fn mpk_pad_toggles_punch_arm() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Fx);
+        let stored = model.punch_amount[0];
+        let mut out = Outbox::new();
+        model.on_midi_notice(
+            &punch_midi("note_on", Some(40), Some(100), None, None),
+            &mut out,
+        );
+        let on = out.take();
+        assert!(model.punch_armed[0]);
+        assert!(
+            on.iter().any(|r| matches!(
+                r,
+                Request::PunchFx { slot: 0, amount } if (*amount - stored).abs() < 1e-5
+            )),
+            "Bank A pad 1 should arm RPT, got {on:?}"
+        );
+        model.on_midi_notice(
+            &punch_midi("note_off", Some(40), Some(0), None, None),
+            &mut out,
+        );
+        assert!(out.take().is_empty());
+        assert!(model.punch_armed[0]);
+        model.on_midi_notice(
+            &punch_midi("note_on", Some(40), Some(90), None, None),
+            &mut out,
+        );
+        assert!(!model.punch_armed[0]);
+        assert!(out
+            .take()
+            .iter()
+            .any(|r| matches!(r, Request::PunchFx { slot: 0, amount } if *amount == 0.0)));
+    }
+
+    #[test]
+    fn mpk_punch_controls_stay_off_keys_page() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Synth);
+        let stored = model.punch_amount[0];
+        let mut out = Outbox::new();
+        model.on_midi_notice(
+            &punch_midi("control_change", None, None, Some(70), Some(127)),
+            &mut out,
+        );
+        model.on_midi_notice(
+            &punch_midi("note_on", Some(40), Some(100), None, None),
+            &mut out,
+        );
+        assert!(!model.punch_armed[0]);
+        assert!((model.punch_amount[0] - stored).abs() < 1e-5);
+        assert!(out
+            .take()
+            .iter()
+            .all(|r| !matches!(r, Request::PunchFx { .. })));
+    }
+
+    #[test]
     fn mix_live_sends_keys_level() {
         let mut model = NativeModel::new();
         model.set_mode(UiMode::Mix);
@@ -10044,6 +10532,25 @@ mod tests {
     }
 
     #[test]
+    fn settings_power_warn_toggles_and_defaults_off() {
+        let mut model = NativeModel::new();
+        assert!(!model.power_warn);
+        assert!(!model.capture_session().power_warn);
+        model.set_mode(UiMode::Settings);
+        let mut out = Outbox::new();
+        let btn = model.layout.settings_power_warn;
+        model.finger_down(1, btn.x + 4, btn.y + 4, &mut out);
+        model.finger_up(1, &mut out);
+        assert!(model.power_warn);
+        assert!(model.capture_session().power_warn);
+        assert!(model.status_line.contains("on"));
+        model.finger_down(2, btn.x + 4, btn.y + 4, &mut out);
+        model.finger_up(2, &mut out);
+        assert!(!model.power_warn);
+        assert!(model.status_line.contains("off"));
+    }
+
+    #[test]
     fn song_play_uses_session_tone_not_wide_open() {
         let stamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -10135,6 +10642,69 @@ mod tests {
             model.song_scroll > 0,
             "lift with vertical delta should scroll the list"
         );
+    }
+
+    #[test]
+    fn song_viz_opens_from_button_and_closes() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("pidi-song-viz-{stamp}"));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("viz-demo.mid");
+        let events = vec![
+            jambox_protocol::WireClipEvent::midi(0, true, 0, 60, 100),
+            jambox_protocol::WireClipEvent::midi(240, true, 0, 64, 90),
+            jambox_protocol::WireClipEvent::midi(480, false, 0, 60, 0),
+            jambox_protocol::WireClipEvent::midi(720, false, 0, 64, 0),
+        ];
+        assert!(crate::songs::write_smf_type0(&path, &events, 960, 120.0));
+        let mut model = NativeModel::new();
+        let mut out = Outbox::new();
+        model.set_mode(UiMode::Songs);
+        model.song_files = vec![path];
+        model.song_selected = 0;
+        model.clip_quantize = ClipQuantize::Off;
+        let viz = model.layout.song_viz;
+        model.finger_down(1, viz.x + 8, viz.y + 8, &mut out);
+        model.finger_up(1, &mut out);
+        assert!(model.song_viz_open, "VIZ should open the piano-roll overlay");
+        assert_eq!(model.song_viz_notes().len(), 2);
+        assert!(model.can_nav_back());
+        model.nav_back(&mut out);
+        assert!(!model.song_viz_open, "BACK should close the visualizer");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn song_playhead_advances_while_playing() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("pidi-song-clock-{stamp}"));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("clock.mid");
+        let events = vec![
+            jambox_protocol::WireClipEvent::midi(0, true, 0, 60, 100),
+            jambox_protocol::WireClipEvent::midi(1920, false, 0, 60, 0),
+        ];
+        assert!(crate::songs::write_smf_type0(&path, &events, 3840, 120.0));
+        let mut model = NativeModel::new();
+        model.clip_quantize = ClipQuantize::Off;
+        model.song_files = vec![path];
+        model.song_selected = 0;
+        let mut out = Outbox::new();
+        model.play_selected_song(&mut out);
+        assert!(model.song_playing);
+        std::thread::sleep(Duration::from_millis(40));
+        model.tick(0.0, &mut out);
+        assert!(
+            model.song_playhead_tick() > 0,
+            "playhead should follow wall-clock time while playing"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

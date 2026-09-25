@@ -127,6 +127,28 @@ fn main() {
         dump(&model, &out, "05-songs");
     }
     {
+        let demo = PathBuf::from("/tmp/pidi-docs-songs/viz-demo.mid");
+        let events = vec![
+            jambox_protocol::WireClipEvent::midi(0, true, 0, 48, 90),
+            jambox_protocol::WireClipEvent::midi(0, true, 0, 60, 110),
+            jambox_protocol::WireClipEvent::midi(0, true, 0, 67, 100),
+            jambox_protocol::WireClipEvent::midi(480, false, 0, 60, 0),
+            jambox_protocol::WireClipEvent::midi(720, true, 0, 64, 105),
+            jambox_protocol::WireClipEvent::midi(960, false, 0, 48, 0),
+            jambox_protocol::WireClipEvent::midi(960, false, 0, 67, 0),
+            jambox_protocol::WireClipEvent::midi(1440, false, 0, 64, 0),
+            jambox_protocol::WireClipEvent::midi(960, true, 9, 36, 120),
+            jambox_protocol::WireClipEvent::midi(1080, false, 9, 36, 0),
+        ];
+        let _ = pidi_native::songs::write_smf_type0(&demo, &events, 1920, 120.0);
+        let (mut model, mut ob) = fresh();
+        model.set_mode(UiMode::Songs);
+        let viz = model.layout.song_viz;
+        tap(&mut model, 1, viz, &mut ob);
+        tick_n(&mut model, &mut ob, 2);
+        dump(&model, &out, "05-songs-viz");
+    }
+    {
         let (mut model, mut ob) = fresh();
         model.set_mode(UiMode::Presets);
         tick_n(&mut model, &mut ob, 2);
@@ -341,6 +363,9 @@ fn main() {
         model.fx_bus = [0.22, 0.38, 0.28, 0.18];
         model.synth_params[2] = 0.72;
         model.drum_level = 0.48;
+        model.punch_amount[0] = 0.72;
+        model.punch_armed[0] = true;
+        model.punch_amount[7] = 0.45;
         tick_n(&mut model, &mut ob, 2);
         dump(&model, &out, "25-fx");
     }
