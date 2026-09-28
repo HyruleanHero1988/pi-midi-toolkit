@@ -391,6 +391,18 @@ pub fn handle_line(
             midi_io.set_channel_map(bits);
             Response::Ok
         }
+        Ok(Decoded::FullVel { on }) => {
+            map.set_full_vel(on);
+            Response::Ok
+        }
+        Ok(Decoded::DrumRepeat { slots, latch }) => {
+            for owner in map.set_drum_repeat(slots, latch) {
+                if owner != 0 {
+                    let _ = send_or_drop(control, cache, Command::StopRepeat { owner });
+                }
+            }
+            Response::Ok
+        }
     }
 }
 

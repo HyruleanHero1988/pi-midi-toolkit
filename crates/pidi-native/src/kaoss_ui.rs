@@ -13,10 +13,48 @@ pub enum KaossPicker {
 pub struct KaossProgram {
     pub id: &'static str,
     pub label: &'static str,
+    /// `true` = finger starts a scale note. `false` = sculpts an already-playing sound.
     pub note: bool,
     pub y_param: &'static str,
     pub x_param: Option<&'static str>,
     pub curated: bool,
+}
+
+impl KaossProgram {
+    /// Short family tag for chrome / picker.
+    pub fn family_tag(self) -> &'static str {
+        if self.note {
+            "NOTE"
+        } else {
+            "FX"
+        }
+    }
+
+    /// Idle tile fill in the PROG picker (selected uses a brighter cousin).
+    pub fn picker_color(self) -> u32 {
+        if self.note {
+            0x458588 // teal — plays a tone
+        } else {
+            0xd65d0e // orange — sculpts an existing tone
+        }
+    }
+
+    pub fn picker_selected_color(self) -> u32 {
+        if self.note {
+            0x689d6a
+        } else {
+            0xfe8019
+        }
+    }
+
+    /// PROG toolbar button fill.
+    pub fn chrome_color(self) -> u32 {
+        if self.note {
+            0x458588
+        } else {
+            0xd65d0e
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -28,6 +66,8 @@ pub struct GatePattern {
 }
 
 /// Full program table — curated first, then the rest (SHOW ALL).
+/// Indices 0..=20 are stable (sessions persist `kaoss_program` as an index);
+/// FX twins append after that.
 pub const KAOSS_PROGRAMS: &[KaossProgram] = &[
     KaossProgram {
         id: "lead",
@@ -77,7 +117,7 @@ pub const KAOSS_PROGRAMS: &[KaossProgram] = &[
         x_param: Some("drive"),
         curated: true,
     },
-    // X = scale pitch (plays); Y = flange amount. Rate wobble is SHOW ALL.
+    // X = scale pitch (plays); Y = flange amount.
     KaossProgram {
         id: "flange",
         label: "FLANGE",
@@ -193,13 +233,62 @@ pub const KAOSS_PROGRAMS: &[KaossProgram] = &[
         x_param: None,
         curated: true,
     },
-    // Legacy rate-on-X pad; kept for SHOW ALL, not the curated flange.
+    // FX twin of FLANGE — rate + mix, no pad note.
     KaossProgram {
         id: "flange_rate",
         label: "FL RATE",
         note: false,
         y_param: "flanger_mix",
         x_param: Some("flanger_rate"),
+        curated: true,
+    },
+    // FX twins appended so existing session program indices stay stable.
+    KaossProgram {
+        id: "vib_fx",
+        label: "VIB FX",
+        note: false,
+        y_param: "vib",
+        x_param: None,
+        curated: true,
+    },
+    KaossProgram {
+        id: "bend_fx",
+        label: "BEND FX",
+        note: false,
+        y_param: "pitch_bend",
+        x_param: None,
+        curated: true,
+    },
+    KaossProgram {
+        id: "wah_fx",
+        label: "WAH FX",
+        note: false,
+        y_param: "tone_lfo",
+        x_param: None,
+        curated: true,
+    },
+    KaossProgram {
+        id: "level_fx",
+        label: "LVL FX",
+        note: false,
+        y_param: "level",
+        x_param: None,
+        curated: false,
+    },
+    KaossProgram {
+        id: "decay_fx",
+        label: "DEC FX",
+        note: false,
+        y_param: "release",
+        x_param: None,
+        curated: false,
+    },
+    KaossProgram {
+        id: "attack_fx",
+        label: "ATK FX",
+        note: false,
+        y_param: "attack",
+        x_param: None,
         curated: false,
     },
 ];
@@ -491,6 +580,15 @@ mod tests {
             p.id == "wah" && p.curated && p.note && p.y_param == "tone_lfo"
         }));
         assert!(KAOSS_PROGRAMS.iter().any(|p| {
+            p.id == "wah_fx" && p.curated && !p.note && p.y_param == "tone_lfo"
+        }));
+        assert!(KAOSS_PROGRAMS.iter().any(|p| {
+            p.id == "vib_fx" && p.curated && !p.note && p.y_param == "vib"
+        }));
+        assert!(KAOSS_PROGRAMS.iter().any(|p| {
+            p.id == "bend_fx" && p.curated && !p.note && p.y_param == "pitch_bend"
+        }));
+        assert!(KAOSS_PROGRAMS.iter().any(|p| {
             p.id == "dub"
                 && p.label == "DUB"
                 && !p.note
@@ -503,8 +601,26 @@ mod tests {
         assert_eq!(flange.y_param, "flanger_mix");
         assert_eq!(flange.x_param, None);
         let rate = KAOSS_PROGRAMS.iter().find(|p| p.id == "flange_rate").unwrap();
-        assert!(!rate.curated && !rate.note);
+        assert!(rate.curated && !rate.note);
         assert_eq!(rate.x_param, Some("flanger_rate"));
+    }
+
+    #[test]
+    fn every_note_y_effect_has_an_fx_path() {
+        // Any Y effect a NOTE program can scrub must also be reachable from an
+        // FX program (same y_param or matching x_param) so an arp can get it
+        // without stacking another pad tone.
+        for note_prog in KAOSS_PROGRAMS.iter().filter(|p| p.note) {
+            let effect = note_prog.y_param;
+            let covered = KAOSS_PROGRAMS.iter().any(|p| {
+                !p.note && (p.y_param == effect || p.x_param == Some(effect))
+            });
+            assert!(
+                covered,
+                "NOTE program '{}' y_param '{}' has no FX alternate",
+                note_prog.id, effect
+            );
+        }
     }
 
     #[test]
@@ -526,5 +642,16 @@ mod tests {
         let just_out = apply_zero_deadzone(ZERO_REST_DEADZONE + 0.02, ZERO_REST_DEADZONE);
         assert!(just_out > 0.0 && just_out < 0.15, "smooth ramp, got {just_out}");
         assert!((apply_zero_deadzone(1.0, ZERO_REST_DEADZONE) - 1.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn note_and_fx_families_are_tagged() {
+        let lead = KAOSS_PROGRAMS.iter().find(|p| p.id == "lead").unwrap();
+        assert_eq!(lead.family_tag(), "NOTE");
+        assert_eq!(lead.picker_color(), 0x458588);
+        let echo = KAOSS_PROGRAMS.iter().find(|p| p.id == "echo").unwrap();
+        assert_eq!(echo.family_tag(), "FX");
+        assert_eq!(echo.picker_color(), 0xd65d0e);
+        assert_ne!(lead.chrome_color(), echo.chrome_color());
     }
 }

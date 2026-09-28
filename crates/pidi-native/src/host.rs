@@ -304,8 +304,21 @@ fn load_selected_channel_map() -> [u16; 16] {
     [0; 16]
 }
 
+#[allow(dead_code)]
+fn load_selected_full_velocity() -> bool {
+    let path = crate::paths::midi_ports_path();
+    if let Ok(text) = std::fs::read_to_string(&path) {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+            if let Some(on) = v.get("full_velocity").and_then(|x| x.as_bool()) {
+                return on;
+            }
+        }
+    }
+    true
+}
+
 /// Write the live THRU preset (`presets/active.json`) so `--watch` picks up remaps.
-pub fn write_live_thru_preset(input: &str, output: &str, bits: [u16; 16]) {
+pub fn write_live_thru_preset(input: &str, output: &str, bits: [u16; 16], full_vel: bool) {
     let input = if input.trim().is_empty() {
         "USB".to_string()
     } else {
@@ -326,7 +339,11 @@ pub fn write_live_thru_preset(input: &str, output: &str, bits: [u16; 16]) {
         ports: midi_core::PortsConfig { input, output },
         channel_map,
         cc_map: Vec::new(),
-        velocity: midi_core::VelocityConfig::PassThrough,
+        velocity: if full_vel {
+            midi_core::VelocityConfig::AlwaysFull
+        } else {
+            midi_core::VelocityConfig::PassThrough
+        },
     };
     let path = crate::paths::data_root().join("thru-preset.json");
     if let Some(parent) = path.parent() {
@@ -377,7 +394,7 @@ pub fn map_thru_on() -> (String, Vec<String>) {
         };
         let (input, output) = load_selected_midi_ports();
         let bits = load_selected_channel_map();
-        write_live_thru_preset(&input, &output, bits);
+        write_live_thru_preset(&input, &output, bits, load_selected_full_velocity());
         let preset = thru_preset_path();
         if !preset.is_file() {
             return (

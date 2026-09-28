@@ -27,6 +27,20 @@ pub const PUNCH_KNOB_CCS: [u8; PUNCH_PAD_COUNT] = [70, 71, 72, 73, 74, 75, 76, 7
 /// MPK factory Bank A pads, row-swapped to match the FX grid.
 pub const PUNCH_PAD_NOTES: [u8; PUNCH_PAD_COUNT] = [40, 41, 42, 43, 36, 37, 38, 39];
 
+/// RPT / SLICE beat lengths as amount rises: 1/4, 1/8, 1/16, 1/32.
+pub const PUNCH_GRID_BEATS: [f32; 4] = [1.0, 0.5, 0.25, 0.125];
+/// Slider marks at the 1/8, 1/16, and 1/32 boundaries (1/4 is the bottom band).
+pub const PUNCH_GRID_TICKS: [f32; 3] = [0.25, 0.50, 0.75];
+pub const PUNCH_GRID_LABELS: [&str; 4] = ["1/4", "1/8", "1/16", "1/32"];
+
+pub fn punch_slot_has_grid(index: usize) -> bool {
+    index == PUNCH_RPT as usize || index == PUNCH_SLICE as usize
+}
+
+pub fn punch_grid_index(amount: f32) -> usize {
+    (amount.clamp(0.0, 1.0) * 3.999).floor() as usize
+}
+
 pub fn punch_index_for_knob_cc(controller: u8) -> Option<usize> {
     PUNCH_KNOB_CCS.iter().position(|cc| *cc == controller)
 }
@@ -248,9 +262,7 @@ fn read_ring(ring: &[f32], pos: f32) -> f32 {
 
 /// 1/4 → 1/8 → 1/16 → 1/32 of a beat as amount rises.
 fn rpt_loop_samples(amount: f32, bpm: f32, sr: f32) -> usize {
-    let steps = [1.0f32, 0.5, 0.25, 0.125];
-    let idx = (amount.clamp(0.0, 1.0) * 3.999).floor() as usize;
-    let beats = steps[idx.min(3)];
+    let beats = PUNCH_GRID_BEATS[punch_grid_index(amount).min(3)];
     let sec = beats * 60.0 / bpm.max(20.0);
     (sec * sr).round() as usize
 }
@@ -313,9 +325,7 @@ fn apply_crush(buf: &mut [f32], amount: f32, hold: &mut f32, left: &mut u32) {
 }
 
 fn apply_slice(buf: &mut [f32], amount: f32, bpm: f32, sr: f32, phase: &mut f32) {
-    let steps = [1.0f32, 0.5, 0.25, 0.125];
-    let idx = (amount.clamp(0.0, 1.0) * 3.999).floor() as usize;
-    let beats = steps[idx.min(3)];
+    let beats = PUNCH_GRID_BEATS[punch_grid_index(amount).min(3)];
     let period = (beats * 60.0 / bpm.max(20.0) * sr).max(8.0);
     let inc = 1.0 / period;
     for s in buf.iter_mut() {
@@ -349,6 +359,21 @@ mod tests {
         assert_eq!(punch_index_for_pad_note(39), Some(PUNCH_CRUSH as usize));
         assert!(punch_index_for_knob_cc(1).is_none());
         assert!(punch_index_for_pad_note(60).is_none());
+    }
+
+    #[test]
+    fn grid_index_matches_quarter_steps() {
+        assert_eq!(punch_grid_index(0.0), 0);
+        assert_eq!(punch_grid_index(0.24), 0);
+        assert_eq!(punch_grid_index(0.26), 1);
+        assert_eq!(punch_grid_index(0.51), 2);
+        assert_eq!(punch_grid_index(0.76), 3);
+        assert_eq!(punch_grid_index(1.0), 3);
+        assert!(punch_slot_has_grid(PUNCH_RPT as usize));
+        assert!(punch_slot_has_grid(PUNCH_SLICE as usize));
+        assert!(!punch_slot_has_grid(PUNCH_TAPE as usize));
+        assert_eq!(PUNCH_GRID_LABELS[punch_grid_index(0.1)], "1/4");
+        assert_eq!(PUNCH_GRID_LABELS[punch_grid_index(0.4)], "1/8");
     }
 
     #[test]

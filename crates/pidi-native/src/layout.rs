@@ -93,6 +93,7 @@ pub enum Hit {
     KitAllDrums,
     KitWave,
     KitNoteRepeat,
+    KitRepeatLock,
     KitPlay,
     KitSlider(usize),
     MapThruOn,
@@ -189,6 +190,7 @@ pub enum Hit {
     SettingsMap,
     SettingsProbe,
     SettingsPowerWarn,
+    SettingsFullVel,
     UpdateClose,
     UpdateCheck,
     UpdateApply,
@@ -287,6 +289,7 @@ pub struct Layout {
     pub kit_all: Rect,
     pub kit_wave: Rect,
     pub kit_note_repeat: Rect,
+    pub kit_repeat_lock: Rect,
     pub synth_wave_a: Rect,
     pub synth_wave_b: Rect,
     pub synth_swap: Rect,
@@ -328,6 +331,7 @@ pub struct Layout {
     pub settings_map: Rect,
     pub settings_probe: Rect,
     pub settings_power_warn: Rect,
+    pub settings_full_vel: Rect,
     pub seq_rec: Rect,
     pub seq_play: Rect,
     pub seq_keep: Rect,
@@ -744,12 +748,18 @@ impl Layout {
                 x: 24,
                 y: HUD_H + 56,
                 w: 752,
-                h: 300,
+                h: 250,
             },
             kit_note_repeat: Rect {
                 x: 24,
                 y: HUD_H + content_h - 48,
-                w: 320,
+                w: 240,
+                h: 44,
+            },
+            kit_repeat_lock: Rect {
+                x: 272,
+                y: HUD_H + content_h - 48,
+                w: 72,
                 h: 44,
             },
             kit_wave: Rect {
@@ -1088,6 +1098,12 @@ impl Layout {
                 y: HUD_H + 24,
                 w: 240,
                 h: 72,
+            },
+            settings_full_vel: Rect {
+                x: 24,
+                y: HUD_H + 116,
+                w: 752,
+                h: 80,
             },
             // FX mode owns these rects (not Settings).
             // Target + insert sliders sit left; punch pads take the right half.
@@ -2678,6 +2694,9 @@ impl Layout {
         if self.kit_note_repeat.contains(px, py) {
             return Hit::KitNoteRepeat;
         }
+        if self.kit_repeat_lock.contains(px, py) {
+            return Hit::KitRepeatLock;
+        }
         if self.kit_wave.contains(px, py) {
             return Hit::KitWave;
         }
@@ -2702,7 +2721,19 @@ impl Layout {
         Hit::None
     }
 
+    pub fn kit_repeat_lock_row(&self) -> Rect {
+        Rect {
+            x: 24,
+            y: self.content.y + self.content.h - 56,
+            w: 752,
+            h: 48,
+        }
+    }
+
     pub fn hit_kit_repeat(&self, px: i32, py: i32) -> Hit {
+        if self.kit_repeat_lock_row().contains(px, py) {
+            return Hit::KitRepeatLock;
+        }
         for index in 0..6 {
             if self.kit_repeat_choice_cell(index).contains(px, py) {
                 return Hit::Division(index);
@@ -3353,6 +3384,9 @@ impl Layout {
         if self.settings_audio.contains(px, py) {
             return Hit::SettingsAudio;
         }
+        if self.settings_full_vel.contains(px, py) {
+            return Hit::SettingsFullVel;
+        }
         if self.settings_log.contains(px, py) {
             return Hit::SettingsLog;
         }
@@ -3674,6 +3708,7 @@ mod tests {
         assert_on_screen("kit wave", layout.kit_wave);
         assert_on_screen("kit all", layout.kit_all);
         assert_on_screen("kit note repeat", layout.kit_note_repeat);
+        assert_on_screen("kit repeat lock", layout.kit_repeat_lock);
         assert_on_screen("kit play", layout.kit_edit_play());
         assert!(
             gap_below(layout.kit_grid, layout.kit_note_repeat) >= 4,
@@ -3765,6 +3800,11 @@ mod tests {
         assert_eq!(
             layout.hit(UiMode::Drums, btn.x + 4, btn.y + 4),
             Hit::KitNoteRepeat
+        );
+        let lock = layout.kit_repeat_lock;
+        assert_eq!(
+            layout.hit(UiMode::Drums, lock.x + 4, lock.y + 4),
+            Hit::KitRepeatLock
         );
         let none = layout.kit_repeat_choice_cell(0);
         assert_eq!(

@@ -37,6 +37,8 @@ pub const LED_ROWS: usize = 7;
 #[allow(dead_code)]
 pub const KICK_NOTE: u8 = 36;
 pub const DRUM_CHANNEL: u8 = 9;
+/// Repeat-lane owners for locked on-screen pads (`0x2000 | note`).
+const LOCK_REPEAT_OWNER: u32 = 0x2000;
 pub const MAX_FINGERS: usize = 5;
 /// Hold still on the bottom edge this long to leave FULL PAD (Tk uses ~700ms).
 pub const KAOSS_PLAY_EXIT_MS: u64 = 500;
@@ -79,6 +81,17 @@ impl RepeatDivisionChoice {
 
     pub fn is_on(self) -> bool {
         !matches!(self, Self::Off)
+    }
+
+    pub fn as_slot(self) -> u8 {
+        match self {
+            Self::Off => 0,
+            Self::Quarter => 1,
+            Self::Eighth => 2,
+            Self::EighthTriplet => 3,
+            Self::Sixteenth => 4,
+            Self::Triple => 5,
+        }
     }
 
     pub fn as_wire(self) -> RepeatDivision {
@@ -410,6 +423,14 @@ pub struct NativeModel {
     pub probe: bool,
     /// SET→PWR: draw the LOW PWR / THROTTLE status badge. Off by default.
     pub power_warn: bool,
+    /// SET→FULL VEL: rewrite keyboard note-ons to 127. On by default (Tk).
+    pub full_vel: bool,
+    /// DRUMS→LOCK: note-repeat keeps running after the pad is released.
+    pub drum_repeat_lock: bool,
+    repeat_held: [u8; DRUM_MODEL_COUNT],
+    repeat_latched: [bool; DRUM_MODEL_COUNT],
+    repeat_capture_due: [Option<Instant>; DRUM_MODEL_COUNT],
+    repeat_capture_note: [u8; DRUM_MODEL_COUNT],
     pub probe_reconnects: u64,
     last_probe_write: Instant,
     last_logged_xruns: u64,
@@ -525,7 +546,7 @@ impl NativeModel {
             fx_flanger_rate: 0.35,
             fx_drum: [0.0, 0.0, 0.0, 0.0],
             fx_target: FxEditTarget::Bus,
-            punch_amount: [0.55; Layout::PUNCH_PAD_COUNT],
+            punch_amount: [0.0; Layout::PUNCH_PAD_COUNT],
             punch_armed: [false; Layout::PUNCH_PAD_COUNT],
             drum_level: 1.0,
             seq_level: 1.0,
@@ -618,6 +639,12 @@ impl NativeModel {
             logged_undervolt: false,
             probe: false,
             power_warn: false,
+            full_vel: true,
+            drum_repeat_lock: false,
+            repeat_held: [0; DRUM_MODEL_COUNT],
+            repeat_latched: [false; DRUM_MODEL_COUNT],
+            repeat_capture_due: [None; DRUM_MODEL_COUNT],
+            repeat_capture_note: [0; DRUM_MODEL_COUNT],
             probe_reconnects: 0,
             last_probe_write: Instant::now(),
             last_logged_xruns: 0,
@@ -1275,12 +1302,17 @@ impl NativeModel {
     }
 
     /// Track engine socket drops so probe.log can attribute reconnect storms.
-    pub fn note_engine_link(&mut self, connected: bool) {
+    /// On a reconnect edge, re-push live map flags the new engine process lost.
+    pub fn note_engine_link(&mut self, connected: bool, outbox: &mut Outbox) {
         if self.connected && !connected {
             self.probe_reconnects = self.probe_reconnects.saturating_add(1);
             if self.probe {
                 self.push_log(format!("probe engine link down ({})", self.probe_reconnects));
             }
+        } else if !self.connected && connected {
+            outbox.full_vel(self.full_vel);
+            outbox.channel_map(self.channel_map_bits);
+            self.sync_drum_repeat_map(outbox);
         }
         self.connected = connected;
     }
@@ -1995,6 +2027,8 @@ impl NativeModel {
         self.probe = s.probe;
         self.power_warn = s.power_warn;
         self.wifi_usb_hold = s.wifi_usb_hold;
+        self.full_vel = s.full_velocity;
+        self.drum_repeat_lock = s.drum_repeat_lock;
         outbox.midi_select(
             Some(self.midi_in_filter.clone()),
             Some(self.midi_out_filter.clone()),
@@ -2006,7 +2040,10 @@ impl NativeModel {
             &self.midi_in_filter,
             &self.midi_out_filter,
             self.channel_map_bits,
+            self.full_vel,
         );
+        outbox.full_vel(self.full_vel);
+        self.sync_drum_repeat_map(outbox);
         outbox.emit_mode("clips", self.pads_out.wire());
         outbox.emit_mode("kaoss", self.kaoss_out.wire());
         outbox.tempo(self.bpm);
@@ -2109,6 +2146,8 @@ impl NativeModel {
             probe: self.probe,
             power_warn: self.power_warn,
             wifi_usb_hold: self.wifi_usb_hold,
+            full_velocity: self.full_vel,
+            drum_repeat_lock: self.drum_repeat_lock,
         }
     }
 
@@ -2129,12 +2168,19 @@ impl NativeModel {
     pub fn on_midi_notice(&mut self, notice: &MidiNotice, outbox: &mut Outbox) {
         let kind = notice.kind.to_ascii_lowercase();
         let note = notice.note.unwrap_or(0);
-        let vel = notice.velocity.unwrap_or(0) as u8;
+        let vel = self.maybe_full_vel(notice.channel, notice.velocity.unwrap_or(0) as u8);
         if self.apply_punch_midi(notice, outbox) {
             return;
         }
         if kind == "note_on" || kind == "noteon" {
             if vel > 0 {
+                if notice.channel == DRUM_CHANNEL
+                    && self.handle_hardware_drum_repeat(note, true, outbox)
+                {
+                    self.last_midi_activity =
+                        format!("IN  ch{} n{} v{}", notice.channel + 1, note, vel);
+                    return;
+                }
                 if self.mode != UiMode::Arp {
                     self.seq.push_note(true, notice.channel, note, vel);
                     self.push_pad_rec(true, notice.channel, note, vel);
@@ -2143,11 +2189,17 @@ impl NativeModel {
                     format!("IN  ch{} n{} v{}", notice.channel + 1, note, vel);
                 self.push_log(format!("midi on ch{} n{} v{}", notice.channel, note, vel));
             } else if self.mode != UiMode::Arp {
+                if notice.channel == DRUM_CHANNEL {
+                    self.handle_hardware_drum_repeat(note, false, outbox);
+                }
                 self.seq.push_note(false, notice.channel, note, 0);
                 self.push_pad_rec(false, notice.channel, note, 0);
                 self.push_log(format!("midi off ch{} n{}", notice.channel, note));
             }
         } else if kind == "note_off" || kind == "noteoff" {
+            if notice.channel == DRUM_CHANNEL {
+                self.handle_hardware_drum_repeat(note, false, outbox);
+            }
             if self.mode != UiMode::Arp {
                 self.seq.push_note(false, notice.channel, note, 0);
                 self.push_pad_rec(false, notice.channel, note, 0);
@@ -2192,6 +2244,7 @@ impl NativeModel {
             "input": self.midi_in_filter,
             "output": self.midi_out_filter,
             "channel_map": self.channel_map_bits,
+            "full_velocity": self.full_vel,
         });
         let _ = std::fs::write(path, body.to_string() + "\n");
     }
@@ -2279,7 +2332,38 @@ impl NativeModel {
             &self.midi_in_filter,
             &self.midi_out_filter,
             self.channel_map_bits,
+            self.full_vel,
         );
+    }
+
+    fn maybe_full_vel(&self, _channel: u8, velocity: u8) -> u8 {
+        if self.full_vel && velocity > 0 {
+            127
+        } else {
+            velocity
+        }
+    }
+
+    fn toggle_full_vel(&mut self, outbox: &mut Outbox) {
+        self.full_vel = !self.full_vel;
+        outbox.full_vel(self.full_vel);
+        self.write_midi_ports_file();
+        crate::host::write_live_thru_preset(
+            &self.midi_in_filter,
+            &self.midi_out_filter,
+            self.channel_map_bits,
+            self.full_vel,
+        );
+        self.status_line = if self.full_vel {
+            "FULL VEL ON — all MPK notes at 127".into()
+        } else {
+            "FULL VEL OFF — MPK velocity".into()
+        };
+        self.push_log(format!(
+            "Full velocity → {}",
+            if self.full_vel { "ON" } else { "OFF" }
+        ));
+        self.mark_dirty();
     }
 
     fn test_midi_out(&mut self, outbox: &mut Outbox) {
@@ -2301,6 +2385,7 @@ impl NativeModel {
         let action = self.seq.stop_all();
         self.apply_seq_action(action, outbox);
         self.clear_punch(outbox);
+        self.clear_drum_repeats(outbox);
     }
 
     pub fn finger_down(&mut self, id: i32, px: i32, py: i32, outbox: &mut Outbox) {
@@ -2552,7 +2637,6 @@ impl NativeModel {
                 self.begin_kaoss_touch(gesture, x, y, outbox);
             }
             Hit::Drum { index, note } => {
-                let repeat = self.drum_repeat_for_note(note);
                 if self.mode == UiMode::Drums {
                     self.kit_selected = index;
                     self.kit_all_drums = false;
@@ -2560,6 +2644,7 @@ impl NativeModel {
                         self.kit_wave_dirty = true;
                     }
                 }
+                let repeating = self.begin_screen_drum(note, gesture, outbox);
                 self.fingers[slot] = Finger {
                     active: true,
                     id,
@@ -2570,32 +2655,21 @@ impl NativeModel {
                     py,
                     surface: Surface::Drum {
                         note,
-                        repeat: repeat.is_on(),
+                        repeat: repeating,
                     },
                     gate_on: false,
                 };
-                if repeat.is_on() {
-                    outbox.repeat(
-                        gesture,
-                        RepeatPhase::Down,
-                        note,
-                        DRUM_CHANNEL,
-                        110,
-                        repeat.as_wire(),
-                    );
-                } else {
-                    outbox.note_on(DRUM_CHANNEL, note, 110);
-                }
-                self.seq.push_note(true, DRUM_CHANNEL, note, 110);
-                self.push_pad_rec(true, DRUM_CHANNEL, note, 110);
-                self.arm_repeat_capture(slot, Instant::now());
+            }
+            Hit::KitRepeatLock => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.toggle_drum_repeat_lock(outbox);
             }
             Hit::KitNoteRepeat => {
                 self.tap_ui(slot, id, gesture, px, py);
                 self.open_kit_repeat();
             }
             Hit::Division(index) => {
-                self.apply_drum_repeat(RepeatDivisionChoice::from_index(index));
+                self.apply_drum_repeat(RepeatDivisionChoice::from_index(index), outbox);
                 self.fingers[slot] = Finger {
                     active: true,
                     id,
@@ -3501,6 +3575,10 @@ impl NativeModel {
                 self.status_line = "all notes off".into();
                 self.push_log("all notes off");
             }
+            Hit::SettingsFullVel => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.toggle_full_vel(outbox);
+            }
             Hit::SettingsAudio => {
                 self.fingers[slot] = Finger {
                     active: true,
@@ -4097,20 +4175,7 @@ impl NativeModel {
                 self.end_kaoss_touch(finger.gesture, finger.x, finger.y, finger.gate_on, outbox);
             }
             Surface::Drum { note, repeat } => {
-                if repeat {
-                    outbox.repeat(
-                        finger.gesture,
-                        RepeatPhase::Up,
-                        note,
-                        DRUM_CHANNEL,
-                        110,
-                        self.drum_repeat_for_note(note).as_wire(),
-                    );
-                } else {
-                    outbox.note_off(DRUM_CHANNEL, note);
-                }
-                self.seq.push_note(false, DRUM_CHANNEL, note, 0);
-                self.push_pad_rec(false, DRUM_CHANNEL, note, 0);
+                self.release_screen_drum(note, finger.gesture, repeat, outbox);
                 self.repeat_due[slot] = None;
             }
             Surface::SynthKey { note } => {
@@ -4806,16 +4871,31 @@ impl NativeModel {
         }
     }
 
-    fn arm_repeat_capture(&mut self, slot: usize, now: Instant) {
-        self.repeat_due[slot] = None;
+    fn lock_repeat_owner(note: u8) -> u32 {
+        LOCK_REPEAT_OWNER | u32::from(note)
+    }
+
+    fn drum_repeat_slots(&self) -> [u8; 16] {
+        let mut slots = [0u8; 16];
+        for (i, choice) in self.drum_repeat.iter().enumerate() {
+            slots[i] = choice.as_slot();
+        }
+        slots
+    }
+
+    fn sync_drum_repeat_map(&mut self, outbox: &mut Outbox) {
+        outbox.drum_repeat_map(self.drum_repeat_slots(), self.drum_repeat_lock);
+    }
+
+    fn repeat_voice_active(&self, index: usize) -> bool {
+        self.repeat_held[index] > 0 || self.repeat_latched[index]
+    }
+
+    fn arm_repeat_voice(&mut self, note: u8, now: Instant) {
+        let index = drum_model_for_note(note).index();
+        self.repeat_capture_note[index] = note;
+        self.repeat_capture_due[index] = None;
         let Some(origin) = self.recording_origin() else {
-            return;
-        };
-        let Surface::Drum {
-            note,
-            repeat: true,
-        } = self.fingers[slot].surface
-        else {
             return;
         };
         let Some(interval) = self.drum_repeat_for_note(note).interval_secs(self.record_bpm()) else {
@@ -4826,7 +4906,162 @@ impl NativeModel {
         }
         let t = now.saturating_duration_since(origin).as_secs_f64();
         let next = (t / interval).floor() * interval + interval;
-        self.repeat_due[slot] = Some(origin + Duration::from_secs_f64(next.max(0.0)));
+        self.repeat_capture_due[index] = Some(origin + Duration::from_secs_f64(next.max(0.0)));
+    }
+
+    fn hold_repeat_voice(&mut self, note: u8, now: Instant) {
+        let index = drum_model_for_note(note).index();
+        self.repeat_held[index] = self.repeat_held[index].saturating_add(1);
+        if self.repeat_held[index] == 1 && !self.repeat_latched[index] {
+            self.arm_repeat_voice(note, now);
+        }
+    }
+
+    fn release_repeat_voice(&mut self, index: usize) {
+        self.repeat_held[index] = self.repeat_held[index].saturating_sub(1);
+        if !self.repeat_voice_active(index) {
+            self.repeat_capture_due[index] = None;
+        }
+    }
+
+    fn stop_repeat_voice(&mut self, index: usize, outbox: &mut Outbox) {
+        let note = self.repeat_capture_note[index];
+        if note > 0 || self.repeat_latched[index] {
+            outbox.repeat(
+                Self::lock_repeat_owner(note),
+                RepeatPhase::Up,
+                note,
+                DRUM_CHANNEL,
+                110,
+                self.drum_repeat_for_note(note).as_wire(),
+            );
+        }
+        self.repeat_latched[index] = false;
+        self.repeat_held[index] = 0;
+        self.repeat_capture_due[index] = None;
+    }
+
+    fn clear_drum_repeats(&mut self, outbox: &mut Outbox) {
+        for index in 0..DRUM_MODEL_COUNT {
+            if self.repeat_voice_active(index) {
+                self.stop_repeat_voice(index, outbox);
+            }
+        }
+        self.repeat_held = [0; DRUM_MODEL_COUNT];
+        self.repeat_latched = [false; DRUM_MODEL_COUNT];
+        self.repeat_capture_due = [None; DRUM_MODEL_COUNT];
+    }
+
+    fn toggle_drum_repeat_lock(&mut self, outbox: &mut Outbox) {
+        self.drum_repeat_lock = !self.drum_repeat_lock;
+        if !self.drum_repeat_lock {
+            for index in 0..DRUM_MODEL_COUNT {
+                if self.repeat_latched[index] && self.repeat_held[index] == 0 {
+                    self.stop_repeat_voice(index, outbox);
+                } else {
+                    self.repeat_latched[index] = false;
+                }
+            }
+        }
+        self.sync_drum_repeat_map(outbox);
+        self.status_line = if self.drum_repeat_lock {
+            "REPEAT LOCK — tap a pad to latch the grid".into()
+        } else {
+            "REPEAT HOLD — keep the pad down".into()
+        };
+        self.push_log(self.status_line.clone());
+        self.mark_dirty();
+    }
+
+    /// Start or toggle an on-screen drum. Returns whether lift should stop a hold-repeat.
+    fn begin_screen_drum(&mut self, note: u8, gesture: u32, outbox: &mut Outbox) -> bool {
+        let repeat = self.drum_repeat_for_note(note);
+        let index = drum_model_for_note(note).index();
+        if !repeat.is_on() {
+            outbox.note_on(DRUM_CHANNEL, note, 110);
+            self.seq.push_note(true, DRUM_CHANNEL, note, 110);
+            self.push_pad_rec(true, DRUM_CHANNEL, note, 110);
+            return false;
+        }
+        if self.drum_repeat_lock && self.repeat_latched[index] {
+            self.stop_repeat_voice(index, outbox);
+            self.status_line = format!("{} repeat off", drum_model_for_note(note).name());
+            return false;
+        }
+        let owner = if self.drum_repeat_lock {
+            Self::lock_repeat_owner(note)
+        } else {
+            gesture
+        };
+        outbox.repeat(
+            owner,
+            RepeatPhase::Down,
+            note,
+            DRUM_CHANNEL,
+            110,
+            repeat.as_wire(),
+        );
+        self.seq.push_note(true, DRUM_CHANNEL, note, 110);
+        self.push_pad_rec(true, DRUM_CHANNEL, note, 110);
+        self.hold_repeat_voice(note, Instant::now());
+        if self.drum_repeat_lock {
+            self.repeat_latched[index] = true;
+        }
+        true
+    }
+
+    fn release_screen_drum(&mut self, note: u8, gesture: u32, repeating: bool, outbox: &mut Outbox) {
+        let index = drum_model_for_note(note).index();
+        if repeating && !(self.drum_repeat_lock && self.repeat_latched[index]) {
+            outbox.repeat(
+                gesture,
+                RepeatPhase::Up,
+                note,
+                DRUM_CHANNEL,
+                110,
+                self.drum_repeat_for_note(note).as_wire(),
+            );
+        } else if !repeating {
+            outbox.note_off(DRUM_CHANNEL, note);
+        }
+        if repeating {
+            self.release_repeat_voice(index);
+        }
+        self.seq.push_note(false, DRUM_CHANNEL, note, 0);
+        self.push_pad_rec(false, DRUM_CHANNEL, note, 0);
+    }
+
+    fn handle_hardware_drum_repeat(&mut self, note: u8, on: bool, _outbox: &mut Outbox) -> bool {
+        if !self.drum_repeat_for_note(note).is_on() {
+            return false;
+        }
+        let index = drum_model_for_note(note).index();
+        if on {
+            if self.drum_repeat_lock && self.repeat_latched[index] {
+                self.repeat_latched[index] = false;
+                self.repeat_held[index] = 0;
+                self.repeat_capture_due[index] = None;
+                self.push_log(format!("midi lock off n{note}"));
+                return true;
+            }
+            if self.drum_repeat_lock {
+                self.repeat_latched[index] = true;
+                self.arm_repeat_voice(note, Instant::now());
+            } else {
+                self.hold_repeat_voice(note, Instant::now());
+            }
+            if self.mode != UiMode::Arp {
+                self.seq.push_note(true, DRUM_CHANNEL, note, 110);
+                self.push_pad_rec(true, DRUM_CHANNEL, note, 110);
+            }
+            self.push_log(format!("midi repeat on n{note}"));
+            true
+        } else if !self.drum_repeat_lock {
+            self.release_repeat_voice(index);
+            false
+        } else {
+            false
+        }
     }
 
     fn record_repeat_hit(&mut self, note: u8, at: Instant) {
@@ -4855,33 +5090,30 @@ impl NativeModel {
         };
         let bpm = self.record_bpm();
         let mut hits = Vec::new();
-        for slot in 0..MAX_FINGERS {
-            if !self.fingers[slot].active {
-                self.repeat_due[slot] = None;
+        for index in 0..DRUM_MODEL_COUNT {
+            if !self.repeat_voice_active(index) {
+                self.repeat_capture_due[index] = None;
                 continue;
             }
-            let Surface::Drum { note, repeat } = self.fingers[slot].surface else {
-                self.repeat_due[slot] = None;
-                continue;
-            };
-            if !repeat {
-                self.repeat_due[slot] = None;
+            let note = self.repeat_capture_note[index];
+            if note == 0 {
                 continue;
             }
             let Some(interval) = self.drum_repeat_for_note(note).interval_secs(bpm) else {
-                self.repeat_due[slot] = None;
+                self.repeat_capture_due[index] = None;
                 continue;
             };
             if interval <= 0.0 {
-                self.repeat_due[slot] = None;
+                self.repeat_capture_due[index] = None;
                 continue;
             }
-            if self.repeat_due[slot].is_none() {
+            if self.repeat_capture_due[index].is_none() {
                 let t = now.saturating_duration_since(grid_origin).as_secs_f64();
                 let next = (t / interval).floor() * interval + interval;
-                self.repeat_due[slot] = Some(grid_origin + Duration::from_secs_f64(next.max(0.0)));
+                self.repeat_capture_due[index] =
+                    Some(grid_origin + Duration::from_secs_f64(next.max(0.0)));
             }
-            let mut due = match self.repeat_due[slot] {
+            let mut due = match self.repeat_capture_due[index] {
                 Some(due) => due,
                 None => continue,
             };
@@ -4891,7 +5123,7 @@ impl NativeModel {
                 due += Duration::from_secs_f64(interval);
                 n += 1;
             }
-            self.repeat_due[slot] = Some(due);
+            self.repeat_capture_due[index] = Some(due);
         }
         for (note, due) in hits {
             self.record_repeat_hit(note, due);
@@ -4943,7 +5175,7 @@ impl NativeModel {
         self.mark_dirty();
     }
 
-    fn apply_drum_repeat(&mut self, choice: RepeatDivisionChoice) {
+    fn apply_drum_repeat(&mut self, choice: RepeatDivisionChoice, outbox: &mut Outbox) {
         if self.kit_all_drums {
             self.drum_repeat = [choice; DRUM_MODEL_COUNT];
             self.status_line = format!("ALL DRUMS note repeat {}", choice.label());
@@ -4957,6 +5189,19 @@ impl NativeModel {
             );
         }
         self.kit_repeat_open = false;
+        self.sync_drum_repeat_map(outbox);
+        if !choice.is_on() {
+            let models = if self.kit_all_drums {
+                (0..DRUM_MODEL_COUNT).collect::<Vec<_>>()
+            } else {
+                vec![self.selected_drum_model().index()]
+            };
+            for index in models {
+                if self.repeat_voice_active(index) {
+                    self.stop_repeat_voice(index, outbox);
+                }
+            }
+        }
         self.mark_dirty();
     }
 
@@ -5112,7 +5357,7 @@ impl NativeModel {
         }
         let cell = self.layout.punch_pad_cell(index);
         let y = 1.0 - ((py - cell.y) as f32 / cell.h.max(1) as f32);
-        self.set_punch_amount_unit(index, y.clamp(0.08, 1.0), outbox);
+        self.set_punch_amount_unit(index, y.clamp(0.0, 1.0), outbox);
     }
 
     fn set_punch_amount_unit(&mut self, index: usize, amount: f32, outbox: &mut Outbox) {
@@ -6115,6 +6360,8 @@ impl NativeModel {
             } else if prog.y_param == "tone_lfo" {
                 outbox.synth("tone_lfo_rate", y.clamp(0.0, 1.0));
                 outbox.synth("tone_lfo_amount", 1.0);
+            } else if prog.y_param == "pitch_bend" {
+                self.apply_kaoss_pitch_bend(y, outbox);
             } else {
                 self.apply_named_param(prog.y_param, y, outbox);
             }
@@ -7924,6 +8171,64 @@ mod tests {
     }
 
     #[test]
+    fn kaoss_wah_fx_sculpts_without_starting_a_note() {
+        let mut model = model_on_kaoss();
+        model.kaoss_program = kaoss_ui::KAOSS_PROGRAMS
+            .iter()
+            .position(|p| p.id == "wah_fx")
+            .expect("wah_fx program");
+        assert!(!kaoss_ui::program(model.kaoss_program).note);
+        let mut out = Outbox::new();
+        let cell = model.layout.kaoss_cell(6, 6);
+        model.finger_down(1, cell.x + 4, cell.y + 4, &mut out);
+        let batch = out.take();
+        assert!(
+            batch.iter().any(|r| matches!(
+                r,
+                Request::Synth { param, value, .. }
+                    if param == "tone_lfo_rate" && *value > 0.5
+            )),
+            "WAH FX should arm the tone LFO: {batch:?}"
+        );
+        assert!(
+            !batch.iter().any(|r| matches!(r, Request::Touch { .. })),
+            "WAH FX must not start a local pad note: {batch:?}"
+        );
+        assert!(
+            !batch.iter().any(|r| matches!(
+                r,
+                Request::MidiEmit { kind, .. } if kind == "note_on"
+            )),
+            "WAH FX must not emit USB note_on: {batch:?}"
+        );
+    }
+
+    #[test]
+    fn kaoss_bend_fx_bends_without_starting_a_note() {
+        let mut model = model_on_kaoss();
+        model.kaoss_program = kaoss_ui::KAOSS_PROGRAMS
+            .iter()
+            .position(|p| p.id == "bend_fx")
+            .expect("bend_fx program");
+        let mut out = Outbox::new();
+        let k = model.layout.kaoss;
+        model.finger_down(1, k.x + k.w / 2, k.y + 4, &mut out); // top → +bend
+        let batch = out.take();
+        assert!(
+            batch.iter().any(|r| matches!(
+                r,
+                Request::Synth { param, value, .. }
+                    if param == "pitch_bend" && *value > 1.0
+            )),
+            "BEND FX should emit pitch_bend: {batch:?}"
+        );
+        assert!(
+            !batch.iter().any(|r| matches!(r, Request::Touch { .. })),
+            "BEND FX must not start a local pad note: {batch:?}"
+        );
+    }
+
+    #[test]
     fn gate_multi_touch_survives_first_finger_up() {
         let mut model = model_on_kaoss();
         model.kaoss_gate = 1; // GATE 1/8
@@ -8887,6 +9192,103 @@ mod tests {
             .iter()
             .all(|d| *d == RepeatDivisionChoice::Sixteenth));
         assert_eq!(model.note_repeat_button_label(), "NOTE REPEAT: 1/16");
+    }
+
+    #[test]
+    fn repeat_lock_survives_pad_release() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Drums);
+        model.drum_repeat[jambox_core::DrumModel::Kick.index()] = RepeatDivisionChoice::Eighth;
+        let mut out = Outbox::new();
+        let lock = model.layout.kit_repeat_lock;
+        model.finger_down(1, lock.x + 4, lock.y + 4, &mut out);
+        model.finger_up(1, &mut out);
+        assert!(model.drum_repeat_lock);
+        assert!(out
+            .take()
+            .iter()
+            .any(|r| matches!(r, Request::DrumRepeat { latch: true, .. })));
+        let kick = model.layout.kit_pad_cell(4);
+        model.finger_down(2, kick.x + 4, kick.y + 4, &mut out);
+        model.finger_up(2, &mut out);
+        let batch = out.take();
+        assert!(batch.iter().any(|r| matches!(
+            r,
+            Request::Repeat {
+                phase: RepeatPhase::Down,
+                note: 36,
+                ..
+            }
+        )));
+        assert!(!batch.iter().any(|r| matches!(
+            r,
+            Request::Repeat {
+                phase: RepeatPhase::Up,
+                ..
+            }
+        )));
+        assert!(model.repeat_latched[jambox_core::DrumModel::Kick.index()]);
+        model.finger_down(3, kick.x + 4, kick.y + 4, &mut out);
+        model.finger_up(3, &mut out);
+        assert!(out.take().iter().any(|r| matches!(
+            r,
+            Request::Repeat {
+                phase: RepeatPhase::Up,
+                note: 36,
+                ..
+            }
+        )));
+        assert!(!model.repeat_latched[jambox_core::DrumModel::Kick.index()]);
+    }
+
+    #[test]
+    fn hardware_pad_hold_records_repeat_hits() {
+        let mut model = NativeModel::new();
+        model.bpm = 120.0;
+        model.seq.bpm = 120.0;
+        model.drum_repeat[jambox_core::DrumModel::Kick.index()] = RepeatDivisionChoice::Eighth;
+        assert!(matches!(
+            model.seq.toggle_record(),
+            crate::seq::SeqAction::Stop
+        ));
+        let origin = model.seq.rec_origin().expect("take clock");
+        let mut out = Outbox::new();
+        model.on_midi_notice(
+            &MidiNotice {
+                kind: "note_on".into(),
+                channel: 9,
+                note: Some(36),
+                velocity: Some(80),
+                control: None,
+                value: None,
+            },
+            &mut out,
+        );
+        model.capture_held_repeats_at(origin + Duration::from_millis(260));
+        model.capture_held_repeats_at(origin + Duration::from_millis(510));
+        let ons = model.seq.recorded_on_notes();
+        assert!(
+            ons.iter().filter(|n| **n == 36).count() >= 3,
+            "held MPK kick should keep landing on the 1/8 grid, got {ons:?}"
+        );
+        model.on_midi_notice(
+            &MidiNotice {
+                kind: "note_off".into(),
+                channel: 9,
+                note: Some(36),
+                velocity: Some(0),
+                control: None,
+                value: None,
+            },
+            &mut out,
+        );
+        model.capture_held_repeats_at(origin + Duration::from_millis(800));
+        let after = model.seq.recorded_on_notes();
+        assert_eq!(
+            after.iter().filter(|n| **n == 36).count(),
+            ons.iter().filter(|n| **n == 36).count(),
+            "release should stop hardware hold-repeat"
+        );
     }
 
     #[test]
@@ -10025,6 +10427,15 @@ mod tests {
     }
 
     #[test]
+    fn punch_amounts_start_at_zero() {
+        let model = NativeModel::new();
+        assert!(
+            model.punch_amount.iter().all(|a| *a == 0.0),
+            "fresh punch pads must match parked MPK knobs"
+        );
+    }
+
+    #[test]
     fn mpk_knob_sets_punch_amount_while_disarmed() {
         let mut model = NativeModel::new();
         model.set_mode(UiMode::Fx);
@@ -10524,8 +10935,8 @@ mod tests {
         model.finger_up(2, &mut out);
         assert!(!model.probe);
         assert!(model.status_line.contains("PROBE OFF"));
-        model.note_engine_link(true);
-        model.note_engine_link(false);
+        model.note_engine_link(true, &mut out);
+        model.note_engine_link(false, &mut out);
         assert_eq!(model.probe_reconnects, 1);
         std::env::remove_var("PIDI_PROBE_LOG");
         let _ = std::fs::remove_dir_all(&dir);
@@ -10548,6 +10959,85 @@ mod tests {
         model.finger_up(2, &mut out);
         assert!(!model.power_warn);
         assert!(model.status_line.contains("off"));
+    }
+
+    #[test]
+    fn settings_full_vel_toggles_and_defaults_on() {
+        let mut model = NativeModel::new();
+        assert!(model.full_vel);
+        assert!(model.capture_session().full_velocity);
+        model.set_mode(UiMode::Settings);
+        let mut out = Outbox::new();
+        let btn = model.layout.settings_full_vel;
+        model.finger_down(1, btn.x + 4, btn.y + 4, &mut out);
+        model.finger_up(1, &mut out);
+        assert!(!model.full_vel);
+        assert!(!model.capture_session().full_velocity);
+        assert!(
+            out.take()
+                .iter()
+                .any(|r| matches!(r, Request::FullVel { on: false })),
+            "turning FULL VEL off should tell the engine"
+        );
+        model.finger_down(2, btn.x + 4, btn.y + 4, &mut out);
+        model.finger_up(2, &mut out);
+        assert!(model.full_vel);
+        assert!(model.status_line.contains("ON"));
+    }
+
+    #[test]
+    fn full_vel_rewrites_every_note_on_including_drums() {
+        let mut model = NativeModel::new();
+        let mut out = Outbox::new();
+        model.on_midi_notice(
+            &MidiNotice {
+                kind: "note_on".into(),
+                channel: 0,
+                note: Some(60),
+                velocity: Some(40),
+                control: None,
+                value: None,
+            },
+            &mut out,
+        );
+        assert!(
+            model.last_midi_activity.contains("v127"),
+            "keys should rewrite to 127, got {}",
+            model.last_midi_activity
+        );
+        model.on_midi_notice(
+            &MidiNotice {
+                kind: "note_on".into(),
+                channel: 9,
+                note: Some(36),
+                velocity: Some(40),
+                control: None,
+                value: None,
+            },
+            &mut out,
+        );
+        assert!(
+            model.last_midi_activity.contains("v127"),
+            "drum pads also rewrite to 127, got {}",
+            model.last_midi_activity
+        );
+        model.full_vel = false;
+        model.on_midi_notice(
+            &MidiNotice {
+                kind: "note_on".into(),
+                channel: 0,
+                note: Some(64),
+                velocity: Some(40),
+                control: None,
+                value: None,
+            },
+            &mut out,
+        );
+        assert!(
+            model.last_midi_activity.contains("v40"),
+            "off should pass keyboard velocity, got {}",
+            model.last_midi_activity
+        );
     }
 
     #[test]

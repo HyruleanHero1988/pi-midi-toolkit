@@ -343,10 +343,10 @@
 
     <section class="screen" id="kaoss-programs">
       <h2>KAOSS programs</h2>
-      <p class="lede">PROG is two families. Note programs play the scale on X. FX programs do not start a note — they sculpt the synth voice (not the drum kit).</p>
+      <p class="lede">PROG is two families. <strong>NOTE</strong> (teal) programs play the scale on X. <strong>FX</strong> (orange) programs do not start a note — they sculpt the synth voice (not the drum kit). The PROG button and each picker tile are color-coded and tagged NOTE / FX.</p>
       <figure>
         <img src="screens/20-kaoss-programs.png" alt="KAOSS program picker" width="800" height="480" />
-        <figcaption>20 — PROG picker (SHOW ALL). Curated set is LEAD / MORPH / VIB / FILTER / ECHO / DRIVE / FLANGE / BEND / WAH.</figcaption>
+        <figcaption>20 — PROG picker (SHOW ALL). Curated set is LEAD / MORPH / VIB / FILTER / ECHO / DRIVE / FLANGE / BEND / WAH / FL RATE / VIB FX / BEND FX / WAH FX.</figcaption>
       </figure>
       <h3>Note programs — X = scale pitch</h3>
       <table>
@@ -363,10 +363,12 @@
         <tr><th>FILTER</th><td>X = TONE, Y = MORPH (momentary unless HOLD).</td></tr>
         <tr><th>ECHO</th><td>X = delay time, Y = delay mix. Lands on the SET pad-FX target (voice / drums / both).</td></tr>
         <tr><th>DRIVE</th><td>X = drive, Y = reverb. Same pad-FX target as ECHO.</td></tr>
-        <tr><th>FL RATE</th><td>SHOW ALL. X = flanger rate, Y = flanger mix. Latch a note first if you still want the old wobble pad.</td></tr>
+        <tr><th>WAH FX / VIB FX / BEND FX</th><td>Same Y maps as the NOTE twins, but no pad tone — use over a GATE arp, HOLD drone, or SEQ. Curated.</td></tr>
+        <tr><th>FL RATE</th><td>X = flanger rate, Y = flanger mix. Curated FX twin of FLANGE.</td></tr>
+        <tr><th>LVL FX / DEC FX / ATK FX</th><td>SHOW ALL FX twins of LEVEL / DECAY / ATTACK.</td></tr>
         <tr><th>SPACE / RESO / WASH / CRUSH / DUB / SWELL</th><td>SHOW ALL extras — delay/reverb/drive pairs. Lift restores unless HOLD is on.</td></tr>
       </table>
-      <p class="note"><strong>FILTER / ECHO do not play notes.</strong> If you open them on an empty pad you hear silence. Latch a sound first, then sculpt. Pad FX follows SET → VOICE / DRUMS / BOTH. For <em>different</em> reverb on keys vs kit, use FX MODE sliders (TARGET: VOICE vs TARGET: DRUMS) — those inserts are independent.</p>
+      <p class="note"><strong>Every NOTE effect has an FX path.</strong> FILTER / ECHO / WAH FX and the other orange tiles do not play notes. If you open them on an empty pad you hear silence. Latch a sound first (or run a GATE arp / HOLD), then sculpt. Pad FX follows SET → VOICE / DRUMS / BOTH. For <em>different</em> reverb on keys vs kit, use FX MODE sliders (TARGET: VOICE vs TARGET: DRUMS) — those inserts are independent.</p>
     </section>
 
     <section class="screen" id="kaoss-scales">
@@ -518,14 +520,14 @@
 
       <h3 id="punch">Punch-in pads</h3>
       <p class="lede">Punch-in sits after keys + drums + clips + the bus insert, and before the output limiter. Songs, SEQ, live keys, and the kit all hear it. Armed pads stay on when you leave FX.</p>
-      <p>Each pad stores an amount and an on/off. Slide vertically to set the amount whether the pad is armed or not — top of the pad is full. Tap to arm or disarm at that stored value. CLEAR and panic only turn pads off; they do not reset the sliders. Fresh pads start at 55%.</p>
+      <p>Each pad stores an amount and an on/off. Slide vertically to set the amount whether the pad is armed or not — top of the pad is full. Tap to arm or disarm at that stored value. CLEAR and panic only turn pads off; they do not reset the sliders. Fresh pads start at 0% so they match parked MPK knobs.</p>
       <table>
-        <tr><th>RPT</th><td>Beat repeat. Catches a slice of the master and loops it. Amount picks the grid from the current engine BPM: 1/4, then 1/8, 1/16, 1/32 as you raise it. Changing amount while armed retimes the loop.</td></tr>
+        <tr><th>RPT</th><td>Beat repeat. Catches a slice of the master and loops it. Amount picks the grid from the current engine BPM: 1/4, then 1/8, 1/16, 1/32 as you raise it. Tick marks on the pad sit at those steps. Changing amount while armed retimes the loop.</td></tr>
         <tr><th>TAPE</th><td>Tape-style drag. The motor slews toward a slower playback rate; higher amount drags more (down to about 0.28×). It never parks or goes silent. While TAPE is on, RPT and DROP are silent.</td></tr>
         <tr><th>LPF</th><td>Master low-pass. Higher amount cuts more highs.</td></tr>
         <tr><th>HPF</th><td>Master high-pass. Higher amount cuts more lows / bass.</td></tr>
         <tr><th>SEND</th><td>Opens the current bus insert — delay, reverb, and flange — toward full wet. Amount is how far those mixes open. The stored insert sliders come back when SEND is off.</td></tr>
-        <tr><th>SLICE</th><td>Hard amplitude gate (about 45% open) on the whole mix. Same 1/4 → 1/32 BPM grid as RPT. Chops rather than loops.</td></tr>
+        <tr><th>SLICE</th><td>Hard amplitude gate (about 45% open) on the whole mix. Same 1/4 → 1/32 BPM grid as RPT, with the same tick marks on the pad. Chops rather than loops.</td></tr>
         <tr><th>DROP</th><td>Varispeed pitch-down of the master. Full amount is about an octave and a half down. Only runs when TAPE and RPT are off.</td></tr>
         <tr><th>CRUSH</th><td>Bit depth and sample-rate reduction. Higher amount is dirtier.</td></tr>
         <tr><th>CLEAR</th><td>Turns every punch pad off. Stored amounts stay put.</td></tr>
@@ -535,7 +537,7 @@
       <p>TAPE, RPT, and DROP share one buffer, so only one of those three speaks at a time: <strong>TAPE</strong> wins, then <strong>RPT</strong>, then <strong>DROP</strong>. LPF, HPF, CRUSH, and SLICE run after that and stack — for example TAPE + LPF + CRUSH, or RPT + SLICE. SEND is not a buffer effect; it boosts the bus insert while that insert is processing, then punch-in hears the wetter mix.</p>
 
       <h3>MPK mini</h3>
-      <p>On the FX page only, factory MPC (<code>Prog Select → Pad 1</code>) maps knobs 1–8 and Bank A pads onto punch-in. Knobs write amounts (the mix stays dry if that pad is off). Pads toggle on/off at the stored amount. Keys still play. Leave FX to get the synth / drum knob map back.</p>
+      <p>On the FX page only, factory MPC (<code>Prog Select → Pad 1</code>) maps knobs 1–8 and Bank A pads onto punch-in. Knobs write amounts directly (0–127). Pads start at zero so a parked knob is not fighting a stored value. The mix stays dry if that pad is off. Pads toggle on/off at the stored amount. Keys still play. Leave FX to get the synth / drum knob map back.</p>
       <table>
         <tr><th>Knob 1 / Bank A top-left</th><td>RPT (CC 70, note 40)</td></tr>
         <tr><th>Knob 2 / top 2</th><td>TAPE (CC 71, note 41)</td></tr>
@@ -575,7 +577,7 @@
       <table>
         <tr><th>PANIC / NOTES OFF</th><td>Silence everything, or all-notes-off.</td></tr>
         <tr><th>AUDIO</th><td>All-notes-off then reopen the sound device (headphone jack swap).</td></tr>
-        <tr><th>FULL VEL</th><td>Force keyboard note-ons to velocity 127 so the MPK mini’s uneven hits stay loud. Drum pads keep their own velocity. On by default; saved in the session. Also applies to MAP THRU.</td></tr>
+        <tr><th>FULL VEL</th><td>Force every incoming MPK note-on (keys and drum pads) to velocity 127 so uneven hits stay loud. On by default; saved in the session. Also applies to MAP THRU.</td></tr>
         <tr><th>LOG / MAP</th><td>Engine log, MIDI thru.</td></tr>
         <tr><th>FX: BUS / VOICE / DRUMS</th><td>Which insert the four sliders edit.</td></tr>
         <tr><th>DRIVE DELAY REVERB FLANGE</th><td>Vertical mix sliders. Flanger is also a KAOSS program (X = pitch, Y = mix).</td></tr>
@@ -663,7 +665,7 @@
         <tr><th>Knob 6</th><td>Vibrato rate</td></tr>
         <tr><th>Knob 8</th><td>Synth bus level</td></tr>
       </table>
-      <p class="note">On the FX page those eight knobs become punch amounts (RPT → CRUSH) and Bank A pads toggle the matching punch pads — see <a href="#punch">Punch-in pads</a>. FX page LEVEL / DRUMS sliders stay the keys vs kit mix. Pitch bend and the mod wheel still affect the voice. Joystick Y is CC1 = vibrato.</p>
+      <p class="note">On the FX page those eight knobs write punch amounts (RPT → CRUSH). Pads start at zero to match the knobs at rest. Bank A pads toggle the matching punch pads — see <a href="#punch">Punch-in pads</a>. FX page LEVEL / DRUMS sliders stay the keys vs kit mix. Pitch bend and the mod wheel still affect the voice. Joystick Y is CC1 = vibrato.</p>
     </section>
   </main>
 

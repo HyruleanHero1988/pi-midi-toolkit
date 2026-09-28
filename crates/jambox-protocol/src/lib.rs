@@ -224,6 +224,18 @@ pub enum Request {
     ChannelMap {
         bits: [u16; 16],
     },
+    /// Force incoming keyboard note-ons to velocity 127 (MPK workaround).
+    /// Applies to every channel, including drum pads.
+    FullVel {
+        on: bool,
+    },
+    /// Per kit-voice note-repeat map for hardware pads. `slots[i]`: 0 = off,
+    /// 1 = 1/4, 2 = 1/8, 3 = 1/8T, 4 = 1/16, 5 = triple. `latch` keeps the
+    /// grid running after the pad is released.
+    DrumRepeat {
+        slots: [u8; 16],
+        latch: bool,
+    },
     /// Enable and configure the key-relative arpeggiator.
     SetArp {
         enabled: bool,

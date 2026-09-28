@@ -17,8 +17,12 @@ use tracing::{info, warn};
 
 use crate::bus::{MidiInSide, MidiOutSide};
 use jambox_core::{
-    punch_index_for_knob_cc, punch_index_for_pad_note, Command, FxParam, FxTarget, SynthParam,
+    drum_model_for_note, punch_index_for_knob_cc, punch_index_for_pad_note, Command, FxParam,
+    FxTarget, RepeatDivision, SynthParam, DRUM_CHANNEL, DRUM_MODEL_COUNT,
 };
+
+/// Repeat-lane owners for hardware pads (`0x1000 | note`).
+const HW_REPEAT_OWNER: u32 = 0x1000;
 
 /// How often the output thread checks the ring.
 const OUT_POLL: Duration = Duration::from_micros(500);
@@ -57,11 +61,32 @@ pub enum MidiError {
 }
 
 /// Live knob-bank state. UI buttons write this; MIDI ingest reads it.
-#[derive(Default)]
 pub struct MidiMap {
     mode: AtomicU8,
     fx_kind: AtomicU8,
     fx_index: AtomicU16,
+    /// Incoming NoteOns → 127 (MPK velocity workaround). Default on.
+    full_vel: AtomicBool,
+    /// Per kit-voice note-repeat slot (0 = off). Hardware pads read this.
+    repeat_div: [AtomicU8; DRUM_MODEL_COUNT],
+    repeat_latch: AtomicBool,
+    hw_latched: [AtomicBool; DRUM_MODEL_COUNT],
+    hw_note: [AtomicU8; DRUM_MODEL_COUNT],
+}
+
+impl Default for MidiMap {
+    fn default() -> Self {
+        Self {
+            mode: AtomicU8::new(0),
+            fx_kind: AtomicU8::new(0),
+            fx_index: AtomicU16::new(0),
+            full_vel: AtomicBool::new(true),
+            repeat_div: std::array::from_fn(|_| AtomicU8::new(0)),
+            repeat_latch: AtomicBool::new(false),
+            hw_latched: std::array::from_fn(|_| AtomicBool::new(false)),
+            hw_note: std::array::from_fn(|_| AtomicU8::new(0)),
+        }
+    }
 }
 
 impl MidiMap {
@@ -85,6 +110,94 @@ impl MidiMap {
 
     pub fn set_punch(&self) {
         self.mode.store(MODE_PUNCH, Ordering::Relaxed);
+    }
+
+    pub fn set_full_vel(&self, on: bool) {
+        self.full_vel.store(on, Ordering::Relaxed);
+    }
+
+    pub fn full_vel(&self) -> bool {
+        self.full_vel.load(Ordering::Relaxed)
+    }
+
+    /// Rewrite keyboard note-ons to 127 when FULL VEL is on. Drums / note-offs stay.
+    pub fn set_drum_repeat(&self, slots: [u8; 16], latch: bool) -> [u32; DRUM_MODEL_COUNT] {
+        let was_latch = self.repeat_latch.swap(latch, Ordering::Relaxed);
+        let mut stops = [0u32; DRUM_MODEL_COUNT];
+        for i in 0..DRUM_MODEL_COUNT {
+            let slot = slots.get(i).copied().unwrap_or(0);
+            self.repeat_div[i].store(slot, Ordering::Relaxed);
+            let drop = slot == 0 || (was_latch && !latch);
+            if drop && self.hw_latched[i].swap(false, Ordering::Relaxed) {
+                let note = self.hw_note[i].load(Ordering::Relaxed);
+                stops[i] = HW_REPEAT_OWNER | u32::from(note);
+            }
+        }
+        stops
+    }
+
+    fn hw_repeat_owner(note: u8) -> u32 {
+        HW_REPEAT_OWNER | u32::from(note)
+    }
+
+    fn interpret_drum_repeat(&self, note: u8, velocity: u8, on: bool) -> Option<Command> {
+        let division = self.repeat_division_for_note(note)?;
+        let model = drum_model_for_note(note).index();
+        let latch = self.repeat_latch.load(Ordering::Relaxed);
+        if on {
+            if latch && self.hw_latched[model].swap(false, Ordering::Relaxed) {
+                let prev = self.hw_note[model].load(Ordering::Relaxed);
+                return Some(Command::StopRepeat {
+                    owner: Self::hw_repeat_owner(prev),
+                });
+            }
+            self.hw_note[model].store(note, Ordering::Relaxed);
+            self.hw_latched[model].store(latch, Ordering::Relaxed);
+            Some(Command::StartRepeat {
+                owner: Self::hw_repeat_owner(note),
+                channel: DRUM_CHANNEL,
+                note,
+                velocity: velocity.max(1),
+                division,
+            })
+        } else if latch {
+            None
+        } else {
+            self.hw_latched[model].store(false, Ordering::Relaxed);
+            Some(Command::StopRepeat {
+                owner: Self::hw_repeat_owner(note),
+            })
+        }
+    }
+
+    fn repeat_division_for_note(&self, note: u8) -> Option<RepeatDivision> {
+        let slot = self.repeat_div[drum_model_for_note(note).index()].load(Ordering::Relaxed);
+        match slot {
+            1 => Some(RepeatDivision::Quarter),
+            2 => Some(RepeatDivision::Eighth),
+            3 => Some(RepeatDivision::EighthTriplet),
+            4 => Some(RepeatDivision::Sixteenth),
+            5 => Some(RepeatDivision::QuarterTriplet),
+            _ => None,
+        }
+    }
+
+    pub fn apply_velocity(&self, event: MidiEvent) -> MidiEvent {
+        if !self.full_vel() {
+            return event;
+        }
+        match event {
+            MidiEvent::NoteOn {
+                channel,
+                note,
+                velocity,
+            } if velocity > 0 => MidiEvent::NoteOn {
+                channel,
+                note,
+                velocity: 127,
+            },
+            other => other,
+        }
     }
 
     pub fn apply_knob_map(&self, mode: &str, fx_kind: Option<&str>, fx_index: u16) {
@@ -127,6 +240,11 @@ impl MidiMap {
                 {
                     return None;
                 }
+                if channel == DRUM_CHANNEL {
+                    if let Some(command) = self.interpret_drum_repeat(note, velocity, true) {
+                        return Some(command);
+                    }
+                }
                 Some(Command::NoteOn {
                     channel,
                     note,
@@ -138,6 +256,9 @@ impl MidiMap {
                     && punch_index_for_pad_note(note).is_some()
                 {
                     return None;
+                }
+                if channel == DRUM_CHANNEL && self.repeat_division_for_note(note).is_some() {
+                    return self.interpret_drum_repeat(note, 0, false);
                 }
                 Some(Command::NoteOff { channel, note })
             }
@@ -253,6 +374,7 @@ pub fn ingest(
     map: &MidiMap,
     mut send: impl FnMut(Command) -> bool,
 ) {
+    let event = map.apply_velocity(event);
     let mask = fanout_dest_mask(dest_mask, event.channel());
     for dest in 0..16u8 {
         if mask & (1 << dest) == 0 {
@@ -579,6 +701,131 @@ pub fn spawn_output(io: Arc<MidiIo>, mut side: MidiOutSide, running: Arc<AtomicB
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hardware_pad_hold_starts_and_stops_repeat() {
+        let map = MidiMap::default();
+        let mut slots = [0u8; 16];
+        slots[jambox_core::DrumModel::Kick.index()] = 1;
+        map.set_drum_repeat(slots, false);
+        assert_eq!(
+            map.interpret(MidiEvent::NoteOn {
+                channel: 9,
+                note: 36,
+                velocity: 80,
+            }),
+            Some(Command::StartRepeat {
+                owner: 0x1000 | 36,
+                channel: 9,
+                note: 36,
+                velocity: 80,
+                division: RepeatDivision::Quarter,
+            })
+        );
+        assert_eq!(
+            map.interpret(MidiEvent::NoteOff {
+                channel: 9,
+                note: 36,
+                velocity: 0,
+            }),
+            Some(Command::StopRepeat {
+                owner: 0x1000 | 36
+            })
+        );
+    }
+
+    #[test]
+    fn hardware_pad_lock_keeps_repeat_after_release() {
+        let map = MidiMap::default();
+        let mut slots = [0u8; 16];
+        slots[jambox_core::DrumModel::Kick.index()] = 2;
+        map.set_drum_repeat(slots, true);
+        assert!(matches!(
+            map.interpret(MidiEvent::NoteOn {
+                channel: 9,
+                note: 36,
+                velocity: 100,
+            }),
+            Some(Command::StartRepeat {
+                division: RepeatDivision::Eighth,
+                ..
+            })
+        ));
+        assert_eq!(
+            map.interpret(MidiEvent::NoteOff {
+                channel: 9,
+                note: 36,
+                velocity: 0,
+            }),
+            None
+        );
+        assert_eq!(
+            map.interpret(MidiEvent::NoteOn {
+                channel: 9,
+                note: 36,
+                velocity: 100,
+            }),
+            Some(Command::StopRepeat {
+                owner: 0x1000 | 36
+            })
+        );
+    }
+
+    #[test]
+    fn full_vel_rewrites_every_note_on_including_drums() {
+        let map = MidiMap::default();
+        assert!(map.full_vel());
+        assert_eq!(
+            map.apply_velocity(MidiEvent::NoteOn {
+                channel: 0,
+                note: 60,
+                velocity: 40,
+            }),
+            MidiEvent::NoteOn {
+                channel: 0,
+                note: 60,
+                velocity: 127,
+            }
+        );
+        assert_eq!(
+            map.apply_velocity(MidiEvent::NoteOn {
+                channel: 9,
+                note: 36,
+                velocity: 40,
+            }),
+            MidiEvent::NoteOn {
+                channel: 9,
+                note: 36,
+                velocity: 127,
+            }
+        );
+        assert_eq!(
+            map.apply_velocity(MidiEvent::NoteOn {
+                channel: 0,
+                note: 60,
+                velocity: 0,
+            }),
+            MidiEvent::NoteOn {
+                channel: 0,
+                note: 60,
+                velocity: 0,
+            },
+            "note-on velocity 0 is a note-off; leave it"
+        );
+        map.set_full_vel(false);
+        assert_eq!(
+            map.apply_velocity(MidiEvent::NoteOn {
+                channel: 0,
+                note: 60,
+                velocity: 40,
+            }),
+            MidiEvent::NoteOn {
+                channel: 0,
+                note: 60,
+                velocity: 40,
+            }
+        );
+    }
 
     #[test]
     fn note_on_becomes_a_note_command() {

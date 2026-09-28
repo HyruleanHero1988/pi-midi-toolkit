@@ -179,6 +179,14 @@ pub enum Request {
     ChannelMap {
         bits: [u16; 16],
     },
+    /// Force incoming keyboard note-ons to velocity 127 (MPK workaround).
+    FullVel {
+        on: bool,
+    },
+    DrumRepeat {
+        slots: [u8; 16],
+        latch: bool,
+    },
     SetArp {
         enabled: bool,
         latch: bool,
@@ -490,6 +498,13 @@ pub enum Decoded {
     },
     ChannelMap {
         bits: [u16; 16],
+    },
+    FullVel {
+        on: bool,
+    },
+    DrumRepeat {
+        slots: [u8; 16],
+        latch: bool,
     },
 }
 
@@ -823,6 +838,8 @@ pub fn decode(request: Request) -> Result<Decoded, String> {
         Request::MidiPorts => Decoded::MidiPorts,
         Request::MidiSelect { input, output } => Decoded::MidiSelect { input, output },
         Request::ChannelMap { bits } => Decoded::ChannelMap { bits },
+        Request::FullVel { on } => Decoded::FullVel { on },
+        Request::DrumRepeat { slots, latch } => Decoded::DrumRepeat { slots, latch },
         Request::SetArp {
             enabled,
             latch,
@@ -1088,6 +1105,24 @@ mod tests {
     fn audio_reopen_decodes() {
         let d = decode_line(r#"{"cmd":"audio_reopen"}"#);
         assert!(matches!(d, Decoded::AudioReopen));
+    }
+
+    #[test]
+    fn full_vel_decodes() {
+        let d = decode_line(r#"{"cmd":"full_vel","on":false}"#);
+        assert!(matches!(d, Decoded::FullVel { on: false }));
+    }
+
+    #[test]
+    fn drum_repeat_decodes() {
+        let d = decode_line(r#"{"cmd":"drum_repeat","slots":[1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"latch":true}"#);
+        match d {
+            Decoded::DrumRepeat { slots, latch } => {
+                assert_eq!(slots[0], 1);
+                assert!(latch);
+            }
+            _ => panic!("wrong decode"),
+        }
     }
 
     #[test]

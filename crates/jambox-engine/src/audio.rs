@@ -365,8 +365,9 @@ fn now_ms() -> u64 {
         .min(u128::from(u64::MAX)) as u64
 }
 
-/// Best-effort analog unmute. Jack-detect / HDMI steal often leaves Headphone
-/// muted after a cable pull; this is off the audio thread.
+/// Best-effort analog unmute + safe playback level. Jack-detect / HDMI steal
+/// often leaves Headphone muted after a cable pull; bcm2835 PCM also likes to
+/// sit at +4 dB which turns soft-limited peaks into cyclic PWM static.
 fn restore_mixer() {
     #[cfg(target_os = "linux")]
     {
@@ -385,6 +386,22 @@ fn restore_mixer() {
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .status();
+        }
+        // 0 dB is well below the bcm2835 PCM ceiling (+4 dB at 100%).
+        for ctrl in ["PCM", "Headphone", "Headphones"] {
+            for level in ["0dB", "85%"] {
+                let ok = Command::new("amixer")
+                    .args(["-q", "sset", ctrl, level])
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status()
+                    .map(|s| s.success())
+                    .unwrap_or(false);
+                if ok {
+                    break;
+                }
+            }
         }
     }
 }
@@ -405,8 +422,10 @@ fn open_stream(
     state.prepare_for_device(sample_rate, channels);
 
     // cpal Fixed sizes often probe OK on bcm2835 Headphones then immediately
-    // XRUN/POLLERR at runtime. Only try Fixed when the operator asks
-    // (--buffer-frames N with N>0); otherwise keep ALSA default periods.
+    // XRUN/POLLERR at small periods (512). ALSA Default here is ~2200 frames
+    // (~50 ms), and under load peak render approaches that → cyclic static.
+    // Prefer a large fixed period (~93 ms) so the Pi 2 has headroom; fall back
+    // to Default if Fixed is rejected.
     let mut chosen = "alsa-default".to_string();
     let mut config = StreamConfig {
         channels,
@@ -414,9 +433,24 @@ fn open_stream(
         buffer_size: BufferSize::Default,
     };
 
-    if preferred_frames > 0 {
-        let mut candidates = vec![preferred_frames];
-        for size in [PREFERRED_BLOCK, 1024, 256] {
+    let prefer = if preferred_frames > 0 {
+        preferred_frames
+    } else if device
+        .name()
+        .map(|n| {
+            let l = n.to_ascii_lowercase();
+            l.contains("headphone") || l.contains("bcm2835") || l.contains("analog")
+        })
+        .unwrap_or(false)
+    {
+        4096
+    } else {
+        0
+    };
+
+    if prefer > 0 {
+        let mut candidates = vec![prefer];
+        for size in [4096, 3072, 2048, PREFERRED_BLOCK, 1024, 256] {
             if !candidates.contains(&size) {
                 candidates.push(size);
             }

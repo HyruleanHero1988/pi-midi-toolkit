@@ -799,7 +799,9 @@ fn draw_kaoss(scene: &mut Scene, model: &NativeModel) {
         scene.text(
             layout.kaoss.x + 8,
             layout.kaoss.y + 4,
-            if matches!(kind, kaoss_ui::KaossPicker::Octave) {
+            if matches!(kind, kaoss_ui::KaossPicker::Program) {
+                "teal NOTE = plays · orange FX = sculpts"
+            } else if matches!(kind, kaoss_ui::KaossPicker::Octave) {
                 "start C + width · tap outside to close"
             } else {
                 "drag to scroll"
@@ -819,11 +821,33 @@ fn draw_kaoss(scene: &mut Scene, model: &NativeModel) {
             } else {
                 index == selected
             };
-            scene.button(cell, if on { 0x458588 } else { 0x2a2a38 });
+            let fill = if matches!(kind, kaoss_ui::KaossPicker::Program) {
+                let prog = kaoss_ui::program_at(model.kaoss_show_all, index);
+                if on {
+                    prog.picker_selected_color()
+                } else {
+                    prog.picker_color()
+                }
+            } else if on {
+                0x458588
+            } else {
+                0x2a2a38
+            };
+            scene.button(cell, fill);
             let label = kaoss_ui::picker_label(kind, index, model.kaoss_show_all);
             scene.text_centered(cell, &label, 0xffffff, 2);
+            if matches!(kind, kaoss_ui::KaossPicker::Program) {
+                let prog = kaoss_ui::program_at(model.kaoss_show_all, index);
+                scene.text(
+                    cell.x + 4,
+                    cell.y + 4,
+                    prog.family_tag(),
+                    if on { 0xfbf1c7 } else { 0xebdbb2 },
+                );
+            }
         }
     } else {
+        let prog = kaoss_ui::program(model.kaoss_program);
         scene.fill_rect(layout.kaoss, 0x08040a);
         if model.kaoss_viz_style.is_glow() {
             draw_kaoss_glow(scene, layout.kaoss, model);
@@ -846,6 +870,17 @@ fn draw_kaoss(scene: &mut Scene, model: &NativeModel) {
         }
         draw_kaoss_axes(scene, layout.kaoss, model);
         draw_kaoss_note_readout(scene, layout.kaoss, model);
+        // Corner family cue on the play surface (picker already tags every tile).
+        scene.text(
+            layout.kaoss.x + 8,
+            layout.kaoss.y + 8,
+            if prog.note {
+                "NOTE · pad plays"
+            } else {
+                "FX · latch a note first"
+            },
+            if prog.note { 0x8ec07c } else { 0xfe8019 },
+        );
     }
 
     let prog = kaoss_ui::program(model.kaoss_program);
@@ -859,8 +894,15 @@ fn draw_kaoss(scene: &mut Scene, model: &NativeModel) {
     let gate = kaoss_ui::gate(model.kaoss_gate).label;
 
     if layout.kaoss_prog.w > 0 {
-        scene.button(layout.kaoss_prog, 0xb16286);
+        scene.button(layout.kaoss_prog, prog.chrome_color());
         scene.text_centered(layout.kaoss_prog, prog.label, 0xffffff, 2);
+        // Tiny family chip so LEAD vs ECHO is obvious without opening PROG.
+        scene.text(
+            layout.kaoss_prog.x + 4,
+            layout.kaoss_prog.y + 2,
+            prog.family_tag(),
+            0xfbf1c7,
+        );
         scene.button(layout.kaoss_scale, 0x458588);
         scene.text_centered(layout.kaoss_scale, scale.label, 0xffffff, 2);
         scene.button(layout.kaoss_key, 0x3c3836);
@@ -2349,6 +2391,16 @@ fn draw_drums(scene: &mut Scene, model: &NativeModel) {
         0xfbf1c7,
         2,
     );
+    scene.fill_rect(
+        layout.kit_repeat_lock,
+        if model.drum_repeat_lock { 0xd79921 } else { 0x3c3836 },
+    );
+    scene.text_centered(
+        layout.kit_repeat_lock,
+        if model.drum_repeat_lock { "LOCK" } else { "HOLD" },
+        if model.drum_repeat_lock { 0x1d2021 } else { 0xfbf1c7 },
+        2,
+    );
 
     scene.fill_rect(layout.kit_wave, 0x689d6a);
     scene.text_centered(layout.kit_wave, "WAVE", 0xfbf1c7, 2);
@@ -2449,17 +2501,19 @@ fn draw_kit_repeat(scene: &mut Scene, model: &NativeModel) {
         scene.text_centered(cell, choice.label(), 0xffffff, 2);
     }
 
-    scene.text(
-        24,
-        layout.content.y + layout.content.h - 36,
-        "OFF is one-shot · hold a pad to repeat",
-        0xa89984,
+    scene.fill_rect(
+        layout.kit_repeat_lock_row(),
+        if model.drum_repeat_lock { 0xd79921 } else { 0x3c3836 },
     );
-    scene.text(
-        24,
-        layout.content.y + layout.content.h - 16,
-        "BACK returns to pads",
-        0xa89984,
+    scene.text_centered(
+        layout.kit_repeat_lock_row(),
+        if model.drum_repeat_lock {
+            "LOCK ON — tap a pad to start/stop on the grid"
+        } else {
+            "HOLD — keep a pad down to repeat · LOCK latches it"
+        },
+        if model.drum_repeat_lock { 0x1d2021 } else { 0xfbf1c7 },
+        2,
     );
 }
 
@@ -3293,6 +3347,20 @@ fn draw_settings(scene: &mut Scene, model: &NativeModel) {
     scene.text_centered(layout.settings_all_off, "NOTES OFF", 0xffffff, 2);
     scene.fill_rect(layout.settings_audio, 0x458588);
     scene.text_centered(layout.settings_audio, "AUDIO", 0xffffff, 2);
+    scene.fill_rect(
+        layout.settings_full_vel,
+        if model.full_vel { 0x689d6a } else { 0x3c3836 },
+    );
+    scene.text_centered(
+        layout.settings_full_vel,
+        if model.full_vel {
+            "FULL VEL: ON"
+        } else {
+            "FULL VEL: OFF"
+        },
+        0xffffff,
+        2,
+    );
     scene.fill_rect(layout.settings_log, 0x504945);
     scene.text_centered(layout.settings_log, "LOG", 0xffffff, 2);
     scene.fill_rect(layout.settings_map, 0x83a598);
@@ -3462,6 +3530,32 @@ fn draw_fx(scene: &mut Scene, model: &NativeModel) {
             },
             if armed { PUNCH_COLOR[index] } else { 0x3c3836 },
         );
+        if jambox_core::punch_slot_has_grid(index) {
+            let inner_h = (cell.h - 10) as f32;
+            let inner_top = (cell.y + 5) as f32;
+            let line_color = if armed { 0xfbf1c7 } else { 0x7c6f64 };
+            let label_color = if armed { 0xfbf1c7 } else { 0xa89984 };
+            for tick in jambox_core::PUNCH_GRID_TICKS {
+                let y = (inner_top + inner_h * (1.0 - tick)).round() as i32;
+                scene.fill_rect(
+                    Rect {
+                        x: cell.x + 6,
+                        y,
+                        w: cell.w - 12,
+                        h: 2,
+                    },
+                    line_color,
+                );
+            }
+            const BAND_MIDS: [f32; 4] = [0.125, 0.375, 0.625, 0.875];
+            for (label, mid) in jambox_core::PUNCH_GRID_LABELS
+                .iter()
+                .zip(BAND_MIDS.iter())
+            {
+                let y = (inner_top + inner_h * (1.0 - mid) - 4.0).round() as i32;
+                scene.text_scaled(cell.x + cell.w - 36, y, label, label_color, 1);
+            }
+        }
         scene.text(
             cell.x + 8,
             cell.y + 8,
@@ -3618,6 +3712,47 @@ mod tests {
     use crate::model::NativeModel;
 
     #[test]
+    fn punch_rpt_and_slice_draw_grid_ticks() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Fx);
+        let scene = build(&model);
+        let ticks_in = |cell: Rect| {
+            scene
+                .color
+                .iter()
+                .filter(|q| {
+                    q.color == 0x7c6f64
+                        && q.h <= 2.5
+                        && q.w > 20.0
+                        && q.x >= cell.x as f32 - 0.5
+                        && q.x + q.w <= (cell.x + cell.w) as f32 + 1.0
+                        && q.y > cell.y as f32
+                        && q.y < (cell.y + cell.h) as f32
+                })
+                .count()
+        };
+        assert!(
+            ticks_in(model.layout.punch_pad_cell(0)) >= 3,
+            "RPT should mark 1/8 1/16 1/32"
+        );
+        assert!(
+            ticks_in(model.layout.punch_pad_cell(5)) >= 3,
+            "SLICE should mark the same grid"
+        );
+        assert_eq!(
+            ticks_in(model.layout.punch_pad_cell(1)),
+            0,
+            "continuous pads should not get grid ticks"
+        );
+        let labels = scene
+            .glyphs
+            .iter()
+            .filter(|g| g.color == 0xa89984)
+            .count();
+        assert!(labels >= 8, "RPT and SLICE should label 1/4 1/8 1/16 1/32");
+    }
+
+    #[test]
     fn cells_are_one_batched_field() {
         let mut model = NativeModel::new();
         model.set_mode(UiMode::Kaoss);
@@ -3692,6 +3827,19 @@ mod tests {
             field_cells > 20,
             "GLOW should paint a soft light-field, got {field_cells}"
         );
+    }
+
+    #[test]
+    fn program_picker_colors_note_and_fx_families() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Kaoss);
+        model.kaoss_picker = Some(kaoss_ui::KaossPicker::Program);
+        model.kaoss_show_all = true;
+        let scene = build(&model);
+        let note_tile = scene.color.iter().any(|q| q.color == 0x458588 && q.w > 40.0);
+        let fx_tile = scene.color.iter().any(|q| q.color == 0xd65d0e && q.w > 40.0);
+        assert!(note_tile, "NOTE programs should paint teal tiles");
+        assert!(fx_tile, "FX programs should paint orange tiles");
     }
 
     #[test]

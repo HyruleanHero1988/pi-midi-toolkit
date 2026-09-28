@@ -38,8 +38,9 @@ pub const MAX_MIDI_OUT: usize = 128;
 /// 2048 of those left a silent tail every callback — choppy audio on the Pi.
 pub const MAX_RENDER_BLOCK: usize = 8192;
 const MAX_BLOCK: usize = MAX_RENDER_BLOCK;
-/// Makeup gain before the soft limiter — Pi line/headphone out is timid.
-const OUTPUT_MAKEUP: f32 = 1.65;
+/// Makeup gain before the soft limiter — Pi line/headphone out is timid,
+/// but 1.65 + ALSA PCM at +4 dB was slamming the PWM jack into grit.
+const OUTPUT_MAKEUP: f32 = 1.25;
 /// Extra kit bus gain, matching Python `DRUM_BUS_GAIN`.
 const DRUM_BUS_GAIN: f32 = 1.55;
 

@@ -280,6 +280,12 @@ pub struct SessionState {
     /// Keep the USB Wi-Fi dongle powered for SSH after leaving WIFI/UPDATE.
     #[serde(default)]
     pub wifi_usb_hold: bool,
+    /// Force keyboard note-ons to velocity 127. Missing in old sessions → on.
+    #[serde(default = "default_full_velocity")]
+    pub full_velocity: bool,
+    /// Note-repeat latch: tap instead of hold. Missing in old sessions → hold.
+    #[serde(default)]
+    pub drum_repeat_lock: bool,
 }
 
 fn default_drum_level() -> f32 {
@@ -324,6 +330,10 @@ fn default_vibrato_rate() -> f32 {
 
 fn default_fx_flanger_rate() -> f32 {
     0.35
+}
+
+fn default_full_velocity() -> bool {
+    true
 }
 
 impl Default for SessionState {
@@ -387,6 +397,8 @@ impl Default for SessionState {
             probe: false,
             power_warn: false,
             wifi_usb_hold: false,
+            full_velocity: default_full_velocity(),
+            drum_repeat_lock: false,
         }
     }
 }
@@ -456,6 +468,7 @@ mod tests {
         assert!(!s.probe);
         assert!(!s.power_warn);
         assert!(!s.wifi_usb_hold);
+        assert!(s.full_velocity);
         assert!((s.fx_flanger_rate - 0.35).abs() < 1e-6);
     }
 
@@ -523,6 +536,16 @@ mod tests {
         let json = serde_json::to_string(&s).unwrap();
         let back: SessionState = serde_json::from_str(&json).unwrap();
         assert_eq!(back.channel_map[0], 1 << 5);
+    }
+
+    #[test]
+    fn session_roundtrip_includes_full_velocity() {
+        let mut s = SessionState::default();
+        assert!(s.full_velocity);
+        s.full_velocity = false;
+        let json = serde_json::to_string(&s).unwrap();
+        let back: SessionState = serde_json::from_str(&json).unwrap();
+        assert!(!back.full_velocity);
     }
 
     #[test]
