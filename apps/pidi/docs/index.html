@@ -522,6 +522,8 @@
       <h3 id="punch">Punch-in pads</h3>
       <p class="lede">Punch-in sits after keys + drums + clips + the bus insert, and before the output limiter. Songs, SEQ, live keys, and the kit all hear it. Armed pads stay on when you leave FX.</p>
       <p>Each pad stores an amount and an on/off. Slide vertically to set the amount whether the pad is armed or not — top of the pad is full. Tap to arm or disarm at that stored value. CLEAR and panic only turn pads off; they do not reset the sliders. Fresh pads start at 0% so they match parked MPK knobs.</p>
+      <p><strong>LOCK</strong> grabs the last ~4 seconds of the master bus (keys + drums + mic) into a freeze loop and ignores live input until you tap LOCK again or CLEAR. While locked, the punch pads (TAPE drag, RPT / SLICE skip, LPF, CRUSH, …) process the frozen loop — grab a chorus, lock it, then drag and chop.</p>
+      <p><strong>PRIO</strong> cycles who wins among the three buffer pads when several are armed: <code>T&gt;R&gt;D</code> (default bounce — TAPE owns the ring, release it and RPT takes over), <code>R&gt;T&gt;D</code> (stutter interrupts drag), <code>D&gt;T&gt;R</code> (DROP first), and <code>R×T</code> (repeat-on-tape — RPT loop advanced at the TAPE motor rate). Persists in the session.</p>
       <table>
         <tr><th>RPT</th><td>Beat repeat. Catches a slice of the master and loops it. Amount picks the grid from the current engine BPM: 1/4, then 1/8, 1/16, 1/32 as you raise it. Tick marks on the pad sit at those steps. Changing amount while armed retimes the loop.</td></tr>
         <tr><th>TAPE</th><td>Tape-style drag. The motor slews toward a slower playback rate; higher amount drags more (down to about 0.28×). It never parks or goes silent. While TAPE is on, RPT and DROP are silent.</td></tr>
@@ -535,7 +537,7 @@
       </table>
 
       <h3>Layering</h3>
-      <p>TAPE, RPT, and DROP share one buffer, so only one of those three speaks at a time: <strong>TAPE</strong> wins, then <strong>RPT</strong>, then <strong>DROP</strong>. LPF, HPF, CRUSH, and SLICE run after that and stack — for example TAPE + LPF + CRUSH, or RPT + SLICE. SEND is not a buffer effect; it boosts the bus insert while that insert is processing, then punch-in hears the wetter mix.</p>
+      <p>TAPE, RPT, and DROP share one buffer. Which one speaks when several are armed is set by <strong>PRIO</strong> (default <code>T&gt;R&gt;D</code>: TAPE wins, then RPT, then DROP). LPF, HPF, CRUSH, and SLICE run after that and stack — for example TAPE + LPF + CRUSH, or RPT + SLICE. SEND is not a buffer effect; it boosts the bus insert while that insert is processing, then punch-in hears the wetter mix.</p>
 
       <h3>MPK mini</h3>
       <p>On the FX page only, factory MPC (<code>Prog Select → Pad 1</code>) maps knobs 1–8 and Bank A pads onto punch-in. Knobs write amounts directly (0–127). Pads start at zero so a parked knob is not fighting a stored value. The mix stays dry if that pad is off. Pads toggle on/off at the stored amount. Keys still play. Leave FX to get the synth / drum knob map back.</p>
