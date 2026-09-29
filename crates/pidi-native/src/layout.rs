@@ -180,6 +180,9 @@ pub enum Hit {
     FxSlider(usize),
     PunchPad(usize),
     PunchClear,
+    PunchLock,
+    PunchPrio,
+    PunchRptMode,
     MixBus(usize),
     MixPad(usize),
     SettingsWifi,
@@ -3351,9 +3354,36 @@ impl Layout {
 
     pub fn punch_clear(&self) -> Rect {
         Rect {
-            x: 588,
+            x: 620,
             y: HUD_H + 10,
-            w: 196,
+            w: 100,
+            h: 44,
+        }
+    }
+
+    pub fn punch_lock(&self) -> Rect {
+        Rect {
+            x: 292,
+            y: HUD_H + 10,
+            w: 72,
+            h: 44,
+        }
+    }
+
+    pub fn punch_prio(&self) -> Rect {
+        Rect {
+            x: 372,
+            y: HUD_H + 10,
+            w: 100,
+            h: 44,
+        }
+    }
+
+    pub fn punch_rpt_mode(&self) -> Rect {
+        Rect {
+            x: 480,
+            y: HUD_H + 10,
+            w: 128,
             h: 44,
         }
     }
@@ -3419,6 +3449,15 @@ impl Layout {
     fn hit_fx(&self, px: i32, py: i32) -> Hit {
         if self.settings_fx_target.contains(px, py) {
             return Hit::FxTarget;
+        }
+        if self.punch_prio().contains(px, py) {
+            return Hit::PunchPrio;
+        }
+        if self.punch_rpt_mode().contains(px, py) {
+            return Hit::PunchRptMode;
+        }
+        if self.punch_lock().contains(px, py) {
+            return Hit::PunchLock;
         }
         if self.punch_clear().contains(px, py) {
             return Hit::PunchClear;
@@ -3577,6 +3616,10 @@ pub enum Surface {
         index: usize,
         start_py: i32,
         dragged: bool,
+    },
+    /// Hold-to-grab freeze button. `releasing` = this press is unlocking a loop.
+    PunchLock {
+        releasing: bool,
     },
     MixBus {
         index: usize,
@@ -4138,6 +4181,18 @@ mod tests {
         assert_eq!(
             layout.hit(UiMode::Fx, clear.x + 8, clear.y + 8),
             Hit::PunchClear
+        );
+        let lock = layout.punch_lock();
+        assert_on_screen("punch lock", lock);
+        assert_eq!(
+            layout.hit(UiMode::Fx, lock.x + 8, lock.y + 8),
+            Hit::PunchLock
+        );
+        let prio = layout.punch_prio();
+        assert_on_screen("punch prio", prio);
+        assert_eq!(
+            layout.hit(UiMode::Fx, prio.x + 8, prio.y + 8),
+            Hit::PunchPrio
         );
     }
 

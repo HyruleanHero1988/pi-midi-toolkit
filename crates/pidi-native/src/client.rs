@@ -265,6 +265,22 @@ impl Outbox {
         });
     }
 
+    pub fn punch_lock(&mut self, locked: bool) {
+        self.reliable.push_back(Request::PunchLock { locked });
+    }
+
+    pub fn punch_grab(&mut self, active: bool) {
+        self.reliable.push_back(Request::PunchGrab { active });
+    }
+
+    pub fn punch_buffer_prio(&mut self, mode: u8) {
+        self.reliable.push_back(Request::PunchBufferPrio { mode });
+    }
+
+    pub fn punch_rpt_mode(&mut self, mode: u8) {
+        self.reliable.push_back(Request::PunchRptMode { mode });
+    }
+
     pub fn kaoss_scale(&mut self, scale_index: u8, key: u8, root_midi: u8, octaves: u8) {
         self.reliable.push_back(Request::KaossScale {
             scale_index,

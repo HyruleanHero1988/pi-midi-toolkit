@@ -3461,7 +3461,37 @@ fn draw_fx(scene: &mut Scene, model: &NativeModel) {
         0x928374,
     );
     let clear = layout.punch_clear();
+    let lock = layout.punch_lock();
+    let prio = layout.punch_prio();
+    let rpt_mode = layout.punch_rpt_mode();
     let punch_live = model.punch_active();
+    scene.fill_rect(prio, 0x3c3836);
+    scene.text_centered(
+        prio,
+        &format!("PRIO {}", model.punch_buffer_prio.label()),
+        0xffffff,
+        2,
+    );
+    scene.fill_rect(
+        rpt_mode,
+        if model.punch_rpt_mode == jambox_core::PunchRptMode::Hold {
+            0x689d6a
+        } else {
+            0x3c3836
+        },
+    );
+    scene.text_centered(rpt_mode, model.punch_rpt_mode.label(), 0xffffff, 2);
+    scene.fill_rect(
+        lock,
+        if model.punch_grabbing {
+            0xfe8019
+        } else if model.punch_locked {
+            0xb16286
+        } else {
+            0x3c3836
+        },
+    );
+    scene.text_centered(lock, "GRAB", 0xffffff, 2);
     scene.fill_rect(clear, if punch_live { 0xcc241d } else { 0x3c3836 });
     scene.text_centered(clear, "CLEAR", 0xffffff, 2);
     const LABELS: [&str; Layout::FX_SLIDER_COUNT] =

@@ -207,6 +207,12 @@ pub struct SessionState {
     /// KAOSS pad FX destination: voice insert, kit-group insert, or both.
     #[serde(default)]
     pub kaoss_fx_target: KaossFxTarget,
+    /// Buffer FX precedence for TAPE / RPT / DROP. Missing → T>R>D.
+    #[serde(default)]
+    pub punch_buffer_prio: u8,
+    /// RPT refresh vs hold. Missing → refresh (morphs into new audio).
+    #[serde(default)]
+    pub punch_rpt_mode: u8,
     #[serde(default)]
     pub kaoss_show_all: bool,
     #[serde(default)]
@@ -369,6 +375,8 @@ impl Default for SessionState {
             fx_flanger_rate: default_fx_flanger_rate(),
             fx_bus_flanger: 0.0,
             kaoss_fx_target: KaossFxTarget::Voice,
+            punch_buffer_prio: 0,
+            punch_rpt_mode: 0,
             kaoss_show_all: false,
             kaoss_channel: 0,
             vibrato_always: 0.0,
