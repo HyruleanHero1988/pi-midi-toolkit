@@ -43,9 +43,9 @@ pub use command::{
 };
 pub use punch::{
     boost_send_mix, punch_grid_index, punch_index_for_knob_cc, punch_index_for_pad_note,
-    punch_slot_has_grid, PunchRack, PUNCH_CRUSH, PUNCH_DROP, PUNCH_GRID_BEATS, PUNCH_GRID_LABELS,
-    PUNCH_GRID_TICKS, PUNCH_HPF, PUNCH_KNOB_CCS, PUNCH_LABELS, PUNCH_LPF, PUNCH_PAD_COUNT,
-    PUNCH_PAD_NOTES, PUNCH_RPT, PUNCH_SEND, PUNCH_SLICE, PUNCH_TAPE,
+    punch_slot_has_grid, PunchBufferPrio, PunchRack, PunchRptMode, PUNCH_CRUSH, PUNCH_DROP,
+    PUNCH_GRID_BEATS, PUNCH_GRID_LABELS, PUNCH_GRID_TICKS, PUNCH_HPF, PUNCH_KNOB_CCS, PUNCH_LABELS,
+    PUNCH_LPF, PUNCH_PAD_COUNT, PUNCH_PAD_NOTES, PUNCH_RPT, PUNCH_SEND, PUNCH_SLICE, PUNCH_TAPE,
 };
 pub use drums::{
     drum_model_for_note, preview_drum, DrumKit, DrumMacros, DrumModel, DRUM_MODEL_COUNT,

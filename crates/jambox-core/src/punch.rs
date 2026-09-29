@@ -1,8 +1,9 @@
 //! EP-style punch-in FX on the master bus.
 //!
-//! Eight pads, layered. Buffer effects (repeat / tape / drop) share one ring
-//! and take priority in that order. Filters, crush, and slice run after.
-//! SEND is a wet-boost of the existing bus insert (handled by the engine).
+//! Eight pads, layered. Buffer effects (repeat / tape / drop) share one ring;
+//! who wins when several are armed is set by [`PunchBufferPrio`]. Filters,
+//! crush, and slice run after. SEND is a wet-boost of the bus insert that
+//! runs after this rack (so it still works on a GRAB freeze).
 //!
 //! Amounts are 0..1. The UI maps pad Y (and latch) onto them; this unit only
 //! hears the current amount per slot. `process` never allocates.
@@ -17,7 +18,8 @@ pub const PUNCH_SLICE: u8 = 5;
 pub const PUNCH_DROP: u8 = 6;
 pub const PUNCH_CRUSH: u8 = 7;
 
-const RING_SEC: f32 = 2.0;
+/// Continuous history kept for punch pads + LOCK grabs (vaporwave chorus length).
+const RING_SEC: f32 = 4.0;
 const ENGAGE: f32 = 0.04;
 
 pub const PUNCH_LABELS: [&str; PUNCH_PAD_COUNT] =
@@ -32,6 +34,160 @@ pub const PUNCH_GRID_BEATS: [f32; 4] = [1.0, 0.5, 0.25, 0.125];
 /// Slider marks at the 1/8, 1/16, and 1/32 boundaries (1/4 is the bottom band).
 pub const PUNCH_GRID_TICKS: [f32; 3] = [0.25, 0.50, 0.75];
 pub const PUNCH_GRID_LABELS: [&str; 4] = ["1/4", "1/8", "1/16", "1/32"];
+
+/// Who wins when several buffer pads are armed. Cycles on the FX page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[repr(u8)]
+pub enum PunchBufferPrio {
+    /// Classic bounce: TAPE owns the ring; release it and RPT/DROP take over.
+    #[default]
+    TapeRptDrop = 0,
+    /// Stutter wins over drag — RPT can interrupt TAPE.
+    RptTapeDrop = 1,
+    /// DROP wins over TAPE / RPT.
+    DropTapeRpt = 2,
+    /// RPT loop played at TAPE rate when both are armed (repeat-on-tape).
+    RptOnTape = 3,
+}
+
+impl PunchBufferPrio {
+    pub const ALL: [PunchBufferPrio; 4] = [
+        Self::TapeRptDrop,
+        Self::RptTapeDrop,
+        Self::DropTapeRpt,
+        Self::RptOnTape,
+    ];
+
+    pub fn from_u8(v: u8) -> Self {
+        match v {
+            1 => Self::RptTapeDrop,
+            2 => Self::DropTapeRpt,
+            3 => Self::RptOnTape,
+            _ => Self::TapeRptDrop,
+        }
+    }
+
+    pub fn as_u8(self) -> u8 {
+        self as u8
+    }
+
+    /// Short FX-page label.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::TapeRptDrop => "T>R>D",
+            Self::RptTapeDrop => "R>T>D",
+            Self::DropTapeRpt => "D>T>R",
+            Self::RptOnTape => "R×T",
+        }
+    }
+
+    pub fn next(self) -> Self {
+        Self::from_u8((self.as_u8() + 1) % Self::ALL.len() as u8)
+    }
+}
+
+/// Whether RPT keeps eating new live audio or freezes the grab.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[repr(u8)]
+pub enum PunchRptMode {
+    /// Ring keeps writing — after ~RING_SEC the loop morphs into new audio.
+    #[default]
+    Refresh = 0,
+    /// Capture on engage and loop that slice until RPT is released.
+    Hold = 1,
+}
+
+impl PunchRptMode {
+    pub const ALL: [PunchRptMode; 2] = [Self::Refresh, Self::Hold];
+
+    pub fn from_u8(v: u8) -> Self {
+        match v {
+            1 => Self::Hold,
+            _ => Self::Refresh,
+        }
+    }
+
+    pub fn as_u8(self) -> u8 {
+        self as u8
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Refresh => "RPT↻",
+            Self::Hold => "RPTH",
+        }
+    }
+
+    pub fn next(self) -> Self {
+        Self::from_u8((self.as_u8() + 1) % Self::ALL.len() as u8)
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BufferVoice {
+    Live,
+    Tape,
+    Rpt,
+    Drop,
+    /// RPT content advanced at the tape motor rate.
+    RptAtTape,
+}
+
+fn pick_buffer_voice(
+    prio: PunchBufferPrio,
+    tape: bool,
+    rpt: bool,
+    drop: bool,
+) -> BufferVoice {
+    match prio {
+        PunchBufferPrio::TapeRptDrop => {
+            if tape {
+                BufferVoice::Tape
+            } else if rpt {
+                BufferVoice::Rpt
+            } else if drop {
+                BufferVoice::Drop
+            } else {
+                BufferVoice::Live
+            }
+        }
+        PunchBufferPrio::RptTapeDrop => {
+            if rpt {
+                BufferVoice::Rpt
+            } else if tape {
+                BufferVoice::Tape
+            } else if drop {
+                BufferVoice::Drop
+            } else {
+                BufferVoice::Live
+            }
+        }
+        PunchBufferPrio::DropTapeRpt => {
+            if drop {
+                BufferVoice::Drop
+            } else if tape {
+                BufferVoice::Tape
+            } else if rpt {
+                BufferVoice::Rpt
+            } else {
+                BufferVoice::Live
+            }
+        }
+        PunchBufferPrio::RptOnTape => {
+            if tape && rpt {
+                BufferVoice::RptAtTape
+            } else if tape {
+                BufferVoice::Tape
+            } else if rpt {
+                BufferVoice::Rpt
+            } else if drop {
+                BufferVoice::Drop
+            } else {
+                BufferVoice::Live
+            }
+        }
+    }
+}
 
 pub fn punch_slot_has_grid(index: usize) -> bool {
     index == PUNCH_RPT as usize || index == PUNCH_SLICE as usize
@@ -53,8 +209,22 @@ pub fn punch_index_for_pad_note(note: u8) -> Option<usize> {
 pub struct PunchRack {
     sample_rate: f32,
     amount: [f32; PUNCH_PAD_COUNT],
+    buffer_prio: PunchBufferPrio,
+    rpt_mode: PunchRptMode,
     ring: Vec<f32>,
     write: usize,
+    /// How many samples of valid history are in `ring` (caps at ring len).
+    filled: usize,
+    /// Locked freeze loop: ignores live bus until released.
+    locked: bool,
+    /// Hold-to-grab: append live master into `lock_buf` until released.
+    grabbing: bool,
+    lock_buf: Vec<f32>,
+    lock_len: usize,
+    lock_read: f32,
+    /// Frozen RPT slice when [`PunchRptMode::Hold`] is engaged.
+    rpt_hold_buf: Vec<f32>,
+    rpt_hold_len: usize,
     rpt_on: bool,
     rpt_start: usize,
     rpt_len: usize,
@@ -76,11 +246,22 @@ impl PunchRack {
     pub fn new(sample_rate: f32) -> Self {
         let sample_rate = sample_rate.max(8000.0);
         let n = (sample_rate * RING_SEC) as usize + 64;
+        let n = n.max(64);
         Self {
             sample_rate,
             amount: [0.0; PUNCH_PAD_COUNT],
-            ring: vec![0.0; n.max(64)],
+            buffer_prio: PunchBufferPrio::TapeRptDrop,
+            rpt_mode: PunchRptMode::Refresh,
+            ring: vec![0.0; n],
             write: 0,
+            filled: 0,
+            locked: false,
+            grabbing: false,
+            lock_buf: vec![0.0; n],
+            lock_len: 0,
+            lock_read: 0.0,
+            rpt_hold_buf: vec![0.0; n],
+            rpt_hold_len: 0,
             rpt_on: false,
             rpt_start: 0,
             rpt_len: 1,
@@ -97,6 +278,118 @@ impl PunchRack {
             crush_hold: 0.0,
             crush_left: 0,
         }
+    }
+
+    pub fn buffer_prio(&self) -> PunchBufferPrio {
+        self.buffer_prio
+    }
+
+    pub fn set_buffer_prio(&mut self, prio: PunchBufferPrio) {
+        self.buffer_prio = prio;
+    }
+
+    pub fn rpt_mode(&self) -> PunchRptMode {
+        self.rpt_mode
+    }
+
+    pub fn set_rpt_mode(&mut self, mode: PunchRptMode) {
+        self.rpt_mode = mode;
+        if mode == PunchRptMode::Refresh {
+            self.rpt_hold_len = 0;
+        }
+    }
+
+    fn capture_rpt_hold(&mut self) {
+        let len = self.rpt_len.max(32);
+        let len = if self.locked && self.lock_len > 0 {
+            len.min(self.lock_len)
+        } else {
+            len.min(self.ring.len().saturating_sub(1).max(32))
+        };
+        if self.locked && self.lock_len > 0 {
+            for i in 0..len {
+                let src = (self.rpt_start + i) % self.lock_len;
+                self.rpt_hold_buf[i] = self.lock_buf[src];
+            }
+        } else {
+            let nring = self.ring.len();
+            for i in 0..len {
+                let src = (self.rpt_start + i) % nring;
+                self.rpt_hold_buf[i] = self.ring[src];
+            }
+        }
+        self.rpt_hold_len = len;
+        self.rpt_len = len;
+        self.rpt_read = self.rpt_read % len as f32;
+    }
+
+    pub fn locked(&self) -> bool {
+        self.locked
+    }
+
+    pub fn grabbing(&self) -> bool {
+        self.grabbing
+    }
+
+    /// Hold-to-grab: `true` starts recording live master into the freeze
+    /// buffer; `false` commits that buffer as a loop (or discards if too short).
+    pub fn set_grabbing(&mut self, active: bool) {
+        if active {
+            self.grabbing = true;
+            self.locked = false;
+            self.lock_len = 0;
+            self.lock_read = 0.0;
+            self.rpt_on = false;
+            self.tape_on = false;
+            self.tape_rate = 1.0;
+            self.drop_read = 0.0;
+        } else {
+            self.grabbing = false;
+            if self.lock_len >= 32 {
+                self.locked = true;
+                self.lock_read = 0.0;
+                self.rpt_on = false;
+                self.tape_on = false;
+                self.tape_rate = 1.0;
+                self.drop_read = 0.0;
+            } else {
+                self.lock_len = 0;
+                self.lock_read = 0.0;
+            }
+        }
+    }
+
+    /// Unlock / clear the freeze loop. `locked=true` is legacy: grab the
+    /// recent rolling history (tap-style). Prefer [`Self::set_grabbing`] for
+    /// hold-to-capture.
+    pub fn set_locked(&mut self, locked: bool) {
+        self.grabbing = false;
+        if locked {
+            self.capture_lock();
+        } else {
+            self.locked = false;
+            self.lock_len = 0;
+            self.lock_read = 0.0;
+            self.rpt_on = false;
+            self.tape_on = false;
+        }
+    }
+
+    fn capture_lock(&mut self) {
+        let nring = self.ring.len();
+        let len = self.filled.max(32).min(nring);
+        // Chronological: oldest captured → newest, ending at write.
+        for i in 0..len {
+            let src = (self.write + nring - len + i) % nring;
+            self.lock_buf[i] = self.ring[src];
+        }
+        self.lock_len = len;
+        self.lock_read = 0.0;
+        self.locked = true;
+        self.rpt_on = false;
+        self.tape_on = false;
+        self.tape_rate = 1.0;
+        self.drop_read = 0.0;
     }
 
     pub fn amount(&self, slot: u8) -> f32 {
@@ -118,13 +411,21 @@ impl PunchRack {
         self.tape_rate = 1.0;
         self.slice_phase = 0.0;
         self.crush_left = 0;
+        self.locked = false;
+        self.grabbing = false;
+        self.lock_len = 0;
+        self.lock_read = 0.0;
+        self.rpt_hold_len = 0;
     }
 
     /// Drop the ring so a panic cannot leak a frozen loop.
     pub fn reset(&mut self) {
         self.clear();
         self.ring.iter_mut().for_each(|s| *s = 0.0);
+        self.lock_buf.iter_mut().for_each(|s| *s = 0.0);
+        self.rpt_hold_buf.iter_mut().for_each(|s| *s = 0.0);
         self.write = 0;
+        self.filled = 0;
         self.rpt_read = 0.0;
         self.tape_read = 0.0;
         self.drop_read = 0.0;
@@ -136,7 +437,11 @@ impl PunchRack {
     }
 
     pub fn is_idle(&self) -> bool {
-        self.amount.iter().all(|a| *a <= ENGAGE) && !self.tape_on && !self.rpt_on
+        self.amount.iter().all(|a| *a <= ENGAGE)
+            && !self.tape_on
+            && !self.rpt_on
+            && !self.locked
+            && !self.grabbing
     }
 
     /// Process in place. `bpm` drives repeat / slice grid. Allocation-free.
@@ -149,75 +454,190 @@ impl PunchRack {
         let rpt = self.amount[PUNCH_RPT as usize];
         let tape = self.amount[PUNCH_TAPE as usize];
         let drop = self.amount[PUNCH_DROP as usize];
+        let tape_want = tape > ENGAGE;
+        let rpt_want = rpt > ENGAGE;
+        let drop_want = drop > ENGAGE;
+        let voice = pick_buffer_voice(self.buffer_prio, tape_want, rpt_want, drop_want);
 
-        if tape > ENGAGE && !self.tape_on {
+        let tape_active =
+            matches!(voice, BufferVoice::Tape | BufferVoice::RptAtTape);
+        let rpt_active =
+            matches!(voice, BufferVoice::Rpt | BufferVoice::RptAtTape);
+
+        if tape_active && !self.tape_on {
             self.tape_on = true;
             self.tape_rate = 1.0;
-            self.tape_read = self.write as f32;
-        } else if tape <= ENGAGE {
+            if self.locked {
+                self.tape_read = self.lock_read;
+            } else {
+                self.tape_read = self.write as f32;
+            }
+        } else if !tape_active {
             self.tape_on = false;
             self.tape_rate = 1.0;
         }
 
-        let want_rpt = rpt > ENGAGE && !self.tape_on;
-        if want_rpt && !self.rpt_on {
-            self.rpt_len = rpt_loop_samples(rpt, bpm, sr).clamp(32, nring - 1);
-            self.rpt_start = (self.write + nring - self.rpt_len) % nring;
+        if rpt_active && !self.rpt_on {
+            let max_len = if self.locked {
+                self.lock_len.max(32)
+            } else {
+                nring.saturating_sub(1).max(32)
+            };
+            self.rpt_len = rpt_loop_samples(rpt, bpm, sr).clamp(32, max_len);
+            if self.locked && self.lock_len > 0 {
+                self.rpt_start = (self.lock_read as usize) % self.lock_len;
+            } else {
+                self.rpt_start = (self.write + nring - self.rpt_len) % nring;
+            }
             self.rpt_read = 0.0;
             self.rpt_on = true;
-        } else if want_rpt {
-            let len = rpt_loop_samples(rpt, bpm, sr).clamp(32, nring - 1);
-            if len != self.rpt_len {
-                self.rpt_len = len;
-                self.rpt_read %= self.rpt_len as f32;
+            if self.rpt_mode == PunchRptMode::Hold {
+                self.capture_rpt_hold();
+            } else {
+                self.rpt_hold_len = 0;
+            }
+        } else if rpt_active {
+            if self.rpt_mode == PunchRptMode::Hold && self.rpt_hold_len >= 32 {
+                // Stay on the frozen grab; amount only retimes within it.
+                let len = rpt_loop_samples(rpt, bpm, sr).clamp(32, self.rpt_hold_len);
+                if len != self.rpt_len {
+                    self.rpt_len = len;
+                    self.rpt_read %= self.rpt_len as f32;
+                }
+            } else {
+                let max_len = if self.locked {
+                    self.lock_len.max(32)
+                } else {
+                    nring.saturating_sub(1).max(32)
+                };
+                let len = rpt_loop_samples(rpt, bpm, sr).clamp(32, max_len);
+                if len != self.rpt_len {
+                    self.rpt_len = len;
+                    self.rpt_read %= self.rpt_len as f32;
+                }
             }
         } else {
             self.rpt_on = false;
+            self.rpt_hold_len = 0;
         }
 
-        if drop > ENGAGE && !self.tape_on && !self.rpt_on {
-            // Keep the read head a short grain behind the write head.
-            if self.drop_read == 0.0 {
-                self.drop_read = self.write as f32;
-            }
+        if matches!(voice, BufferVoice::Drop) && self.drop_read == 0.0 {
+            self.drop_read = if self.locked {
+                self.lock_read
+            } else {
+                self.write as f32
+            };
+        }
+        if !matches!(voice, BufferVoice::Drop) {
+            self.drop_read = 0.0;
         }
 
         let tape_target = tape_target_rate(tape);
-        // Motor slew: heavier Y drags more, but the deck never parks.
         let tape_slew = 1.0 - (-1.0 / (0.14 * sr).max(1.0)).exp();
-        let drop_rate = if drop > ENGAGE {
+        let drop_rate = if drop_want {
             2f32.powf(-drop * 1.7)
         } else {
             1.0
         };
 
+        let locked = self.locked && self.lock_len >= 32;
+        let lock_n = self.lock_len;
+
         for s in buf.iter_mut() {
             self.ring[self.write] = *s;
             let live = *s;
             self.write = (self.write + 1) % nring;
-
-            let wet = if self.tape_on {
-                self.tape_rate += (tape_target - self.tape_rate) * tape_slew;
-                let sample = read_ring(&self.ring, self.tape_read);
-                self.tape_read = (self.tape_read + self.tape_rate).rem_euclid(nring as f32);
-                sample
-            } else if self.rpt_on {
-                let sample = read_ring(
-                    &self.ring,
-                    self.rpt_start as f32 + self.rpt_read,
-                );
-                self.rpt_read += 1.0;
-                if self.rpt_read >= self.rpt_len as f32 {
-                    self.rpt_read -= self.rpt_len as f32;
+            if self.filled < nring {
+                self.filled += 1;
+            }
+            // Hold-to-grab: only audio while the button is down enters the loop.
+            if self.grabbing {
+                let cap = self.lock_buf.len();
+                if self.lock_len < cap {
+                    self.lock_buf[self.lock_len] = live;
+                    self.lock_len += 1;
                 }
-                sample
-            } else if drop > ENGAGE {
-                let sample = read_ring(&self.ring, self.drop_read);
-                self.drop_read = (self.drop_read + drop_rate).rem_euclid(nring as f32);
-                sample
-            } else {
-                self.drop_read = 0.0;
-                live
+            }
+
+            let wet = match voice {
+                BufferVoice::Live if locked => {
+                    let sample = read_ring_n(&self.lock_buf, lock_n, self.lock_read);
+                    self.lock_read = (self.lock_read + 1.0).rem_euclid(lock_n as f32);
+                    sample
+                }
+                BufferVoice::Live => live,
+                BufferVoice::Tape => {
+                    self.tape_rate += (tape_target - self.tape_rate) * tape_slew;
+                    let (sample, next) = if locked {
+                        let sample = read_ring_n(&self.lock_buf, lock_n, self.tape_read);
+                        let next =
+                            (self.tape_read + self.tape_rate).rem_euclid(lock_n as f32);
+                        self.lock_read = next;
+                        (sample, next)
+                    } else {
+                        let sample = read_ring(&self.ring, self.tape_read);
+                        let next =
+                            (self.tape_read + self.tape_rate).rem_euclid(nring as f32);
+                        (sample, next)
+                    };
+                    self.tape_read = next;
+                    sample
+                }
+                BufferVoice::Rpt => {
+                    let use_hold = self.rpt_hold_len >= 32;
+                    let sample = if use_hold {
+                        read_ring_n(&self.rpt_hold_buf, self.rpt_hold_len, self.rpt_read)
+                    } else if locked {
+                        read_ring_n(
+                            &self.lock_buf,
+                            lock_n,
+                            self.rpt_start as f32 + self.rpt_read,
+                        )
+                    } else {
+                        read_ring(&self.ring, self.rpt_start as f32 + self.rpt_read)
+                    };
+                    self.rpt_read += 1.0;
+                    if self.rpt_read >= self.rpt_len as f32 {
+                        self.rpt_read -= self.rpt_len as f32;
+                    }
+                    sample
+                }
+                BufferVoice::RptAtTape => {
+                    self.tape_rate += (tape_target - self.tape_rate) * tape_slew;
+                    let use_hold = self.rpt_hold_len >= 32;
+                    let sample = if use_hold {
+                        read_ring_n(&self.rpt_hold_buf, self.rpt_hold_len, self.rpt_read)
+                    } else if locked {
+                        read_ring_n(
+                            &self.lock_buf,
+                            lock_n,
+                            self.rpt_start as f32 + self.rpt_read,
+                        )
+                    } else {
+                        read_ring(&self.ring, self.rpt_start as f32 + self.rpt_read)
+                    };
+                    self.rpt_read += self.tape_rate;
+                    while self.rpt_read >= self.rpt_len as f32 {
+                        self.rpt_read -= self.rpt_len as f32;
+                    }
+                    sample
+                }
+                BufferVoice::Drop => {
+                    let (sample, next) = if locked {
+                        let sample = read_ring_n(&self.lock_buf, lock_n, self.drop_read);
+                        let next =
+                            (self.drop_read + drop_rate).rem_euclid(lock_n as f32);
+                        self.lock_read = next;
+                        (sample, next)
+                    } else {
+                        let sample = read_ring(&self.ring, self.drop_read);
+                        let next =
+                            (self.drop_read + drop_rate).rem_euclid(nring as f32);
+                        (sample, next)
+                    };
+                    self.drop_read = next;
+                    sample
+                }
             };
             *s = wet;
         }
@@ -252,11 +672,16 @@ fn slot_index(slot: u8) -> usize {
 }
 
 fn read_ring(ring: &[f32], pos: f32) -> f32 {
-    let n = ring.len() as f32;
+    read_ring_n(ring, ring.len(), pos)
+}
+
+fn read_ring_n(ring: &[f32], len: usize, pos: f32) -> f32 {
+    let len = len.max(1).min(ring.len());
+    let n = len as f32;
     let p = pos.rem_euclid(n);
-    let i0 = p.floor() as usize;
-    let i1 = (i0 + 1) % ring.len();
-    let frac = p - i0 as f32;
+    let i0 = p.floor() as usize % len;
+    let i1 = (i0 + 1) % len;
+    let frac = p - p.floor();
     ring[i0] * (1.0 - frac) + ring[i1] * frac
 }
 
@@ -477,5 +902,104 @@ mod tests {
         let mut quiet = [0.2f32; 64];
         p.process(&mut quiet, 120.0);
         assert!(quiet.iter().all(|v| (*v - 0.2).abs() < 1e-6));
+    }
+
+    #[test]
+    fn hold_grab_captures_only_while_held() {
+        let mut p = PunchRack::new(48_000.0);
+        // Live silence before grab must not enter the freeze.
+        let mut pre = vec![0.0f32; 512];
+        p.process(&mut pre, 120.0);
+        p.set_grabbing(true);
+        assert!(p.grabbing());
+        assert!(!p.locked());
+        let mut held = vec![0.8f32; 1024];
+        p.process(&mut held, 120.0);
+        // Audio after release must not append — only the hold window loops.
+        p.set_grabbing(false);
+        assert!(p.locked());
+        assert!(!p.grabbing());
+        let mut out = vec![0.0f32; 2048];
+        p.process(&mut out, 120.0);
+        let peak = out.iter().fold(0.0f32, |a, b| a.max(b.abs()));
+        assert!(peak > 0.5, "grabbed hold must replay, peak={peak}");
+        p.set_locked(false);
+        let mut live = vec![0.12f32; 256];
+        p.process(&mut live, 120.0);
+        assert!(
+            live.iter().all(|v| (*v - 0.12).abs() < 1e-5),
+            "unlock must return live"
+        );
+    }
+
+    #[test]
+    fn lock_freezes_history_and_ignores_live() {
+        let mut p = PunchRack::new(48_000.0);
+        // Prime ring with a loud tone, then lock.
+        let mut prime = vec![0.7f32; 4096];
+        p.process(&mut prime, 120.0);
+        p.set_locked(true);
+        assert!(p.locked());
+        // Feed silence while locked — output must stay loud from the freeze.
+        let mut out = vec![0.0f32; 2048];
+        p.process(&mut out, 120.0);
+        let peak = out.iter().fold(0.0f32, |a, b| a.max(b.abs()));
+        assert!(peak > 0.5, "locked loop must replay freeze, peak={peak}");
+        p.set_locked(false);
+        assert!(!p.locked());
+        let mut live = vec![0.15f32; 256];
+        p.process(&mut live, 120.0);
+        assert!(
+            live.iter().all(|v| (*v - 0.15).abs() < 1e-5),
+            "unlock must return live"
+        );
+    }
+
+    #[test]
+    fn lock_plus_tape_keeps_moving() {
+        let mut p = PunchRack::new(48_000.0);
+        let mut prime = vec![0.4f32; 8192];
+        p.process(&mut prime, 120.0);
+        p.set_locked(true);
+        p.set_amount(PUNCH_TAPE, 1.0);
+        let mut out = vec![0.0f32; 48_000];
+        p.process(&mut out, 120.0);
+        let peak = out.iter().fold(0.0f32, |a, b| a.max(b.abs()));
+        assert!(peak > 0.2, "tape over lock must stay audible, peak={peak}");
+    }
+
+    #[test]
+    fn rpt_first_lets_repeat_beat_tape() {
+        let mut p = PunchRack::new(48_000.0);
+        p.set_buffer_prio(PunchBufferPrio::RptTapeDrop);
+        // Short 1/32 grid so the primed hit sits inside the loop window.
+        let loop_n = rpt_loop_samples(0.9, 120.0, 48_000.0);
+        let mut prime = vec![0.0f32; loop_n];
+        prime[0] = 1.0;
+        p.process(&mut prime, 120.0);
+        p.set_amount(PUNCH_TAPE, 1.0);
+        p.set_amount(PUNCH_RPT, 0.9);
+        let mut out = vec![0.0f32; loop_n * 2];
+        p.process(&mut out, 120.0);
+        let peak = out.iter().fold(0.0f32, |a, b| a.max(b.abs()));
+        assert!(
+            peak > 0.4,
+            "RPT-first must stutter even with TAPE armed, peak={peak}"
+        );
+    }
+
+    #[test]
+    fn rpt_on_tape_mode_label_cycles() {
+        let mut m = PunchBufferPrio::TapeRptDrop;
+        assert_eq!(m.label(), "T>R>D");
+        m = m.next();
+        assert_eq!(m, PunchBufferPrio::RptTapeDrop);
+        m = m.next();
+        assert_eq!(m, PunchBufferPrio::DropTapeRpt);
+        m = m.next();
+        assert_eq!(m, PunchBufferPrio::RptOnTape);
+        assert_eq!(m.label(), "R×T");
+        m = m.next();
+        assert_eq!(m, PunchBufferPrio::TapeRptDrop);
     }
 }

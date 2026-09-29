@@ -151,6 +151,22 @@ pub enum Command {
         slot: u8,
         amount: f32,
     },
+    /// Freeze the recent master into a loop (vaporwave LOCK). `true` = grab & hold.
+    SetPunchLock {
+        locked: bool,
+    },
+    /// Hold-to-grab: record live master while `active`, commit loop on release.
+    SetPunchGrab {
+        active: bool,
+    },
+    /// Buffer FX precedence (TAPE / RPT / DROP). See [`crate::PunchBufferPrio`].
+    SetPunchBufferPrio {
+        mode: u8,
+    },
+    /// RPT refresh vs hold. See [`crate::PunchRptMode`].
+    SetPunchRptMode {
+        mode: u8,
+    },
     SetMorphPair {
         a: u16,
         b: u16,

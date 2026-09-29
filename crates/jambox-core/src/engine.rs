@@ -239,7 +239,7 @@ pub struct JamboxEngine {
     key_bus: Vec<f32>,
     drum_bus: Vec<f32>,
     group_buf: Vec<f32>,
-    /// Live capture mixed onto the master before bus FX / punch-in.
+    /// Live capture mixed onto the master before punch-in / bus FX.
     input_bus: Vec<f32>,
     seq_scratch: Vec<SeqEvent>,
     repeat_scratch: [RepeatEvent; MAX_REPEAT_EVENTS_PER_BLOCK],
@@ -507,7 +507,11 @@ impl JamboxEngine {
         self.bus_fx = FxUnit::new(sr);
         self.bus_fx.set_params(bus);
         let punch_amounts: [f32; PUNCH_PAD_COUNT] = std::array::from_fn(|i| self.punch.amount(i as u8));
+        let punch_prio = self.punch.buffer_prio();
+        let punch_rpt_mode = self.punch.rpt_mode();
         self.punch = PunchRack::new(sr);
+        self.punch.set_buffer_prio(punch_prio);
+        self.punch.set_rpt_mode(punch_rpt_mode);
         for (i, amount) in punch_amounts.iter().enumerate() {
             self.punch.set_amount(i as u8, *amount);
         }
@@ -916,6 +920,10 @@ impl JamboxEngine {
             }
             out[i] = sample;
         }
+        // Punch first (freeze / RPT / TAPE / filters), then the bus insert so
+        // delay / reverb / flange and SEND wet the loop instead of being
+        // overwritten when GRAB is locked.
+        punch.process(out, transport.bpm() as f32);
         let send = punch.send_amount();
         let saved_bus = if send > 0.001 {
             let mut boosted = bus_fx.params();
@@ -934,8 +942,6 @@ impl JamboxEngine {
         if let Some(saved) = saved_bus {
             bus_fx.set_params(saved);
         }
-        // Always write the punch ring so a repeat/tape hit has history.
-        punch.process(out, transport.bpm() as f32);
 
         for s in out.iter_mut() {
             *s = (*s * OUTPUT_MAKEUP).tanh() * 0.97;
@@ -1066,6 +1072,15 @@ impl JamboxEngine {
                 value,
             } => self.set_fx(target, param, value),
             Command::SetPunchFx { slot, amount } => self.punch.set_amount(slot, amount),
+            Command::SetPunchLock { locked } => self.punch.set_locked(locked),
+            Command::SetPunchGrab { active } => self.punch.set_grabbing(active),
+            Command::SetPunchBufferPrio { mode } => {
+                self.punch
+                    .set_buffer_prio(crate::PunchBufferPrio::from_u8(mode))
+            }
+            Command::SetPunchRptMode { mode } => {
+                self.punch.set_rpt_mode(crate::PunchRptMode::from_u8(mode))
+            }
             Command::SetMorphPair { a, b } => {
                 self.bank.set_morph_pair(a as usize, b as usize);
             }
@@ -2166,6 +2181,74 @@ mod tests {
             .sum();
         assert!(diff > 1.0, "crush should grit the master, diff={diff}");
         assert!(peak(&wet_buf) > 0.01);
+    }
+
+    #[test]
+    fn bus_send_and_delay_wet_a_locked_grab() {
+        let mut dry = engine();
+        let mut wet = engine();
+        let on = [ScheduledCommand::now(Command::NoteOn {
+            channel: 0,
+            note: 69,
+            velocity: 120,
+        })];
+        let mut buf = vec![0.0f32; 4096];
+        let mut midi = MidiOutSink::new();
+        dry.render(&mut buf, &on, &mut midi);
+        wet.render(&mut buf, &on, &mut midi);
+        apply_now(&mut dry, Command::SetPunchLock { locked: true });
+        apply_now(&mut wet, Command::SetPunchLock { locked: true });
+        apply_now(
+            &mut dry,
+            Command::NoteOff {
+                channel: 0,
+                note: 69,
+            },
+        );
+        apply_now(
+            &mut wet,
+            Command::NoteOff {
+                channel: 0,
+                note: 69,
+            },
+        );
+        apply_now(
+            &mut wet,
+            Command::SetFx {
+                target: FxTarget::Bus,
+                param: FxParam::DelayMix,
+                value: 0.95,
+            },
+        );
+        apply_now(
+            &mut wet,
+            Command::SetFx {
+                target: FxTarget::Bus,
+                param: FxParam::DelayFb,
+                value: 0.7,
+            },
+        );
+        apply_now(
+            &mut wet,
+            Command::SetPunchFx {
+                slot: crate::PUNCH_SEND,
+                amount: 1.0,
+            },
+        );
+        let mut dry_buf = vec![0.0f32; 8192];
+        let mut wet_buf = vec![0.0f32; 8192];
+        dry.render(&mut dry_buf, &[], &mut midi);
+        wet.render(&mut wet_buf, &[], &mut midi);
+        assert!(peak(&dry_buf) > 0.05, "locked freeze must keep playing");
+        let diff: f32 = dry_buf
+            .iter()
+            .zip(wet_buf.iter())
+            .map(|(a, b)| (a - b).abs())
+            .sum();
+        assert!(
+            diff > 5.0,
+            "bus delay/SEND must wet the freeze after punch, diff={diff}"
+        );
     }
 
     #[test]

@@ -48,6 +48,18 @@ pub enum Request {
         slot: u8,
         amount: f32,
     },
+    PunchLock {
+        locked: bool,
+    },
+    PunchGrab {
+        active: bool,
+    },
+    PunchBufferPrio {
+        mode: u8,
+    },
+    PunchRptMode {
+        mode: u8,
+    },
     MorphPair {
         a: u16,
         b: u16,
@@ -707,6 +719,12 @@ pub fn decode(request: Request) -> Result<Decoded, String> {
             })
         }
         Request::PunchFx { slot, amount } => Decoded::Command(Command::SetPunchFx { slot, amount }),
+        Request::PunchLock { locked } => Decoded::Command(Command::SetPunchLock { locked }),
+        Request::PunchGrab { active } => Decoded::Command(Command::SetPunchGrab { active }),
+        Request::PunchBufferPrio { mode } => {
+            Decoded::Command(Command::SetPunchBufferPrio { mode })
+        }
+        Request::PunchRptMode { mode } => Decoded::Command(Command::SetPunchRptMode { mode }),
         Request::MorphPair { a, b } => Decoded::Command(Command::SetMorphPair { a, b }),
         Request::Tempo { bpm } => Decoded::Command(Command::SetTempo { bpm }),
         Request::BeatsPerBar { beats } => Decoded::Command(Command::SetBeatsPerBar { beats }),
@@ -920,6 +938,24 @@ mod tests {
                 assert_eq!(slot, 1);
                 assert!((amount - 0.8).abs() < 1e-6);
             }
+            _ => panic!("wrong decode"),
+        }
+    }
+
+    #[test]
+    fn punch_lock_decodes() {
+        let d = decode_line(r#"{"cmd":"punch_lock","locked":true}"#);
+        match d {
+            Decoded::Command(Command::SetPunchLock { locked }) => assert!(locked),
+            _ => panic!("wrong decode"),
+        }
+    }
+
+    #[test]
+    fn punch_grab_decodes() {
+        let d = decode_line(r#"{"cmd":"punch_grab","active":true}"#);
+        match d {
+            Decoded::Command(Command::SetPunchGrab { active }) => assert!(active),
             _ => panic!("wrong decode"),
         }
     }

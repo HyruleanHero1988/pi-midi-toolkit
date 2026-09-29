@@ -84,6 +84,19 @@ pub enum Request {
         slot: u8,
         amount: f32,
     },
+    /// Freeze recent master into a loop until released.
+    PunchLock {
+        locked: bool,
+    },
+    PunchGrab {
+        active: bool,
+    },
+    PunchBufferPrio {
+        mode: u8,
+    },
+    PunchRptMode {
+        mode: u8,
+    },
     MorphPair {
         a: u16,
         b: u16,
