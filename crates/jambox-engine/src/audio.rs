@@ -373,6 +373,10 @@ fn watch_stream(running: &AtomicBool, health: &AudioHealth) {
         if health.reopen_gen() != start_gen {
             break;
         }
+        if health.error.load(Ordering::Relaxed) {
+            warn!("audio: output error — reopening stream");
+            break;
+        }
         std::thread::sleep(WATCH_POLL);
     }
 }
