@@ -922,7 +922,7 @@ mod tests {
             &mut session,
         );
         assert!(matches!(response, Response::Ok));
-        assert!(health.take_reopen());
+        assert_ne!(health.reopen_gen(), 0);
     }
 
     #[test]

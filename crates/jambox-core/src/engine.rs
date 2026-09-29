@@ -239,6 +239,8 @@ pub struct JamboxEngine {
     key_bus: Vec<f32>,
     drum_bus: Vec<f32>,
     group_buf: Vec<f32>,
+    /// Live capture mixed onto the master before bus FX / punch-in.
+    input_bus: Vec<f32>,
     seq_scratch: Vec<SeqEvent>,
     repeat_scratch: [RepeatEvent; MAX_REPEAT_EVENTS_PER_BLOCK],
     arp_scratch: [ArpEvent; MAX_ARP_EVENTS_PER_BLOCK],
@@ -247,6 +249,8 @@ pub struct JamboxEngine {
     tone: f32,
     level: f32,
     drum_level: f32,
+    /// Mic / line gain. Starts at 0 so a hot USB mic cannot feedback until armed.
+    input_level: f32,
     clip_gain: [f32; MAX_CLIPS],
     attack_sec: f32,
     release_sec: f32,
@@ -328,6 +332,7 @@ impl JamboxEngine {
             key_bus: vec![0.0; MAX_BLOCK],
             drum_bus: vec![0.0; MAX_BLOCK],
             group_buf: vec![0.0; MAX_BLOCK],
+            input_bus: vec![0.0; MAX_BLOCK],
             seq_scratch: vec![
                 SeqEvent {
                     frame: 0,
@@ -359,6 +364,7 @@ impl JamboxEngine {
             tone: 1.0,
             level: 1.0,
             drum_level: 1.0,
+            input_level: 0.0,
             clip_gain: [1.0; MAX_CLIPS],
             attack_sec: 0.012,
             release_sec: 0.030,
@@ -735,9 +741,11 @@ impl JamboxEngine {
             key_bus,
             drum_bus,
             group_buf,
+            input_bus,
             tone,
             level,
             drum_level,
+            input_level,
             clip_gain,
             attack_sec,
             release_sec,
@@ -900,8 +908,13 @@ impl JamboxEngine {
         }
 
         // Keys `level` / kit `drum_level` / clip gains are applied at the voice.
+        let input_gain = *input_level;
         for i in 0..n {
-            out[i] = key_bus[i] + drum_bus[i];
+            let mut sample = key_bus[i] + drum_bus[i];
+            if input_gain > 1e-4 {
+                sample += input_bus[i] * input_gain;
+            }
+            out[i] = sample;
         }
         let send = punch.send_amount();
         let saved_bus = if send > 0.001 {
@@ -1437,6 +1450,21 @@ impl JamboxEngine {
     /// processed in this block wins because `KaossMapper::follow` is idle then.
     ///
     /// Brightness / morph / vibrato come from UI `synth` commands for the active
+    /// Copy a mono capture block for the next [`Self::render`]. Silence when empty.
+    pub fn set_input_block(&mut self, mono: &[f32]) {
+        let n = mono.len().min(MAX_BLOCK);
+        if n > 0 {
+            self.input_bus[..n].copy_from_slice(&mono[..n]);
+        }
+        if n < MAX_BLOCK {
+            self.input_bus[n..].fill(0.0);
+        }
+    }
+
+    pub fn input_level(&self) -> f32 {
+        self.input_level
+    }
+
     /// Kaoss program — this path only retunes pitch from X.
     pub fn sync_touches(&mut self, touches: &[LatestTouch]) {
         for touch in touches {
@@ -1491,6 +1519,7 @@ impl JamboxEngine {
                 self.drums.set_macros(macros);
             }
             SynthParam::DrumLevel => self.drum_level = unit,
+            SynthParam::InputLevel => self.input_level = unit,
             SynthParam::FmEnable => {
                 let enable = value > 0.5;
                 if enable != self.fm_enabled {
@@ -1765,6 +1794,45 @@ mod tests {
             &mut midi,
         );
         assert_eq!(peak(&out), 0.0, "drum_level 0 must silence the kit");
+    }
+
+    #[test]
+    fn live_input_mixes_onto_master_before_punch() {
+        let mut e = engine();
+        let mut out = vec![0.0f32; 128];
+        let mut midi = MidiOutSink::new();
+        e.set_input_block(&[0.4f32; 128]);
+        e.render(&mut out, &[], &mut midi);
+        assert!(
+            peak(&out) < 1e-4,
+            "input_level defaults to 0 so a mic cannot feedback"
+        );
+        e.render(
+            &mut out,
+            &[ScheduledCommand::now(Command::SetSynth {
+                param: SynthParam::InputLevel,
+                value: 1.0,
+            })],
+            &mut midi,
+        );
+        e.set_input_block(&[0.4f32; 128]);
+        e.render(&mut out, &[], &mut midi);
+        assert!(
+            peak(&out) > 0.2,
+            "armed input_level must put capture on the master, peak={}",
+            peak(&out)
+        );
+        e.render(
+            &mut out,
+            &[ScheduledCommand::now(Command::SetPunchFx {
+                slot: crate::PUNCH_CRUSH,
+                amount: 1.0,
+            })],
+            &mut midi,
+        );
+        e.set_input_block(&[0.4f32; 128]);
+        e.render(&mut out, &[], &mut midi);
+        assert!(peak(&out) > 0.05);
     }
 
     #[test]

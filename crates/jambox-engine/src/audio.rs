@@ -20,6 +20,7 @@ use jambox_core::{
 use tracing::{info, warn};
 
 use crate::bus::{AudioSide, StatusPacket};
+use crate::capture::CaptureRing;
 
 /// Conservative first explicit period; architecture primary target is 512.
 pub const PREFERRED_BLOCK: u32 = 512;
@@ -46,9 +47,9 @@ pub enum AudioError {
 /// Shared reopen / liveness flags between IPC, the device callback, and the supervisor.
 pub struct AudioHealth {
     last_callback_ms: AtomicU64,
-    error: AtomicBool,
-    /// Edge-triggered IPC / operator request to drop and reopen the stream.
-    reopen: AtomicBool,
+    pub(crate) error: AtomicBool,
+    /// Bumped by SET → AUDIO so both output and capture supervisors reopen.
+    reopen_gen: AtomicU64,
 }
 
 impl AudioHealth {
@@ -56,16 +57,16 @@ impl AudioHealth {
         Self {
             last_callback_ms: AtomicU64::new(0),
             error: AtomicBool::new(false),
-            reopen: AtomicBool::new(false),
+            reopen_gen: AtomicU64::new(0),
         }
     }
 
     pub fn request_reopen(&self) {
-        self.reopen.store(true, Ordering::Relaxed);
+        self.reopen_gen.fetch_add(1, Ordering::Relaxed);
     }
 
-    pub(crate) fn take_reopen(&self) -> bool {
-        self.reopen.swap(false, Ordering::Relaxed)
+    pub(crate) fn reopen_gen(&self) -> u64 {
+        self.reopen_gen.load(Ordering::Relaxed)
     }
 }
 
@@ -83,6 +84,9 @@ struct RenderState {
     scheduled: Vec<ScheduledCommand>,
     midi_out: MidiOutSink,
     mono: Vec<f32>,
+    /// Mic / line samples for this output block (drained from [`CaptureRing`]).
+    input: Vec<f32>,
+    capture: Arc<CaptureRing>,
     touch_scratch: [LatestTouch; MAX_TOUCH_VOICES + 3],
     peak_micros: u32,
     xruns: u64,
@@ -106,7 +110,13 @@ impl StatePtr {
 }
 
 impl RenderState {
-    fn new(audio: AudioSide, bank: WaveBank, sample_rate: u32, channels: u16) -> Self {
+    fn new(
+        audio: AudioSide,
+        bank: WaveBank,
+        sample_rate: u32,
+        channels: u16,
+        capture: Arc<CaptureRing>,
+    ) -> Self {
         let mut engine = JamboxEngine::with_bank(sample_rate as f64, bank);
         engine.sync_fx_slots();
         Self {
@@ -115,6 +125,8 @@ impl RenderState {
             scheduled: Vec::with_capacity(MAX_BLOCK_COMMANDS),
             midi_out: MidiOutSink::new(),
             mono: vec![0.0; SCRATCH_FRAMES],
+            input: vec![0.0; SCRATCH_FRAMES],
+            capture,
             touch_scratch: [LatestTouch {
                 owner: 0,
                 x: 0.0,
@@ -245,11 +257,22 @@ pub fn spawn_output(
     bank: WaveBank,
     preferred_frames: u32,
     health: Arc<AudioHealth>,
+    capture: Arc<CaptureRing>,
     running: Arc<AtomicBool>,
 ) {
     let _ = std::thread::Builder::new()
         .name("jambox-audio-out".into())
-        .spawn(move || supervisor(filter, audio, bank, preferred_frames, health, running));
+        .spawn(move || {
+            supervisor(
+                filter,
+                audio,
+                bank,
+                preferred_frames,
+                health,
+                capture,
+                running,
+            )
+        });
 }
 
 fn supervisor(
@@ -258,6 +281,7 @@ fn supervisor(
     bank: WaveBank,
     preferred_frames: u32,
     health: Arc<AudioHealth>,
+    capture: Arc<CaptureRing>,
     running: Arc<AtomicBool>,
 ) {
     let mut pending_audio = Some(audio);
@@ -310,6 +334,7 @@ fn supervisor(
                     pending_bank.take().expect("wave bank"),
                     sample_rate,
                     channels,
+                    Arc::clone(&capture),
                 )));
                 state.as_mut().expect("state just inserted")
             }
@@ -343,9 +368,9 @@ fn supervisor(
 fn watch_stream(running: &AtomicBool, health: &AudioHealth) {
     health.error.store(false, Ordering::Relaxed);
     health.last_callback_ms.store(0, Ordering::Relaxed);
-    let _ = health.take_reopen();
+    let start_gen = health.reopen_gen();
     while running.load(Ordering::Relaxed) {
-        if health.take_reopen() {
+        if health.reopen_gen() != start_gen {
             break;
         }
         std::thread::sleep(WATCH_POLL);
@@ -610,6 +635,11 @@ fn callback_body<S: Copy>(
     let n_touch = state.audio.latest.snapshot(&mut state.touch_scratch);
     state.engine.sync_touches(&state.touch_scratch[..n_touch]);
 
+    // Drain mic / line into the engine before render so punch-in hears it.
+    let input = &mut state.input[..frames];
+    state.capture.pull_resampled(input, sample_rate);
+    state.engine.set_input_block(input);
+
     let mut offset = 0usize;
     while offset < frames {
         let n = (frames - offset).min(MAX_RENDER_BLOCK);
@@ -747,11 +777,12 @@ mod tests {
     }
 
     #[test]
-    fn reopen_request_is_edge_triggered() {
+    fn reopen_request_bumps_generation() {
         let health = AudioHealth::new();
-        assert!(!health.take_reopen());
+        let before = health.reopen_gen();
         health.request_reopen();
-        assert!(health.take_reopen());
-        assert!(!health.take_reopen());
+        assert_ne!(health.reopen_gen(), before);
+        health.request_reopen();
+        assert_eq!(health.reopen_gen(), before + 2);
     }
 }
