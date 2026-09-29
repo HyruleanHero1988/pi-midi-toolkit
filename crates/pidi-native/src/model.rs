@@ -308,6 +308,8 @@ pub struct NativeModel {
     pub punch_armed: [bool; Layout::PUNCH_PAD_COUNT],
     /// Kit bus trim (FX DRUMS / MIX KIT). Independent of melody `synth_params[2]` (LEVEL).
     pub drum_level: f32,
+    /// USB mic / line trim (FX MIC / MIX MIC). Default 0 = muted.
+    pub input_level: f32,
     /// SEQ / songs key trim (MIX KEY). Phrase pads use `phrases[i].gain`.
     pub seq_level: f32,
     pub seq_drum_level: f32,
@@ -549,6 +551,7 @@ impl NativeModel {
             punch_amount: [0.0; Layout::PUNCH_PAD_COUNT],
             punch_armed: [false; Layout::PUNCH_PAD_COUNT],
             drum_level: 1.0,
+            input_level: 0.0,
             seq_level: 1.0,
             seq_drum_level: 1.0,
             seq_kaoss_level: 1.0,
@@ -1949,6 +1952,7 @@ impl NativeModel {
         self.seq.cue_beep = s.seq_cue_beep;
         self.synth_params = [s.morph, s.tone, s.level, s.attack, s.release];
         self.drum_level = s.drum_level.clamp(0.0, 1.0);
+        self.input_level = s.input_level.clamp(0.0, 1.0);
         self.seq_level = s.seq_level.clamp(0.0, 2.0);
         self.seq_drum_level = s.seq_drum_level.clamp(0.0, 2.0);
         self.seq_kaoss_level = s.seq_kaoss_level.clamp(0.0, 2.0);
@@ -2052,6 +2056,7 @@ impl NativeModel {
         outbox.synth("tone", self.synth_params[1]);
         outbox.synth("level", self.synth_params[2]);
         outbox.synth("drum_level", self.drum_level);
+        outbox.synth("input_level", self.input_level);
         outbox.clip_gain(SEQ_CLIP_SLOT, self.seq_level);
         outbox.clip_gain(SEQ_DRUM_MIX_SLOT, self.seq_drum_level);
         outbox.clip_gain(SEQ_KAOSS_MIX_SLOT, self.seq_kaoss_level);
@@ -2094,6 +2099,7 @@ impl NativeModel {
             tone: self.synth_params[1],
             level: self.synth_params[2],
             drum_level: self.drum_level,
+            input_level: self.input_level,
             seq_level: self.seq_level,
             seq_drum_level: self.seq_drum_level,
             seq_kaoss_level: self.seq_kaoss_level,
@@ -5297,6 +5303,13 @@ impl NativeModel {
             self.mark_dirty();
             return;
         }
+        if index == Layout::FX_MIC_LEVEL {
+            self.input_level = value;
+            outbox.synth("input_level", value);
+            self.status_line = format!("mic {:.2}", value);
+            self.mark_dirty();
+            return;
+        }
         let name = Self::FX_PARAM_NAMES[index];
         match self.fx_target {
             FxEditTarget::Bus => {
@@ -5442,6 +5455,11 @@ impl NativeModel {
                 self.seq_kaoss_level = gain;
                 outbox.clip_gain(SEQ_KAOSS_MIX_SLOT, gain);
                 self.status_line = format!("SEQ KSS {:.2}", gain);
+            }
+            Layout::MIX_MIC => {
+                self.input_level = t;
+                outbox.synth("input_level", t);
+                self.status_line = format!("MIC {:.2}", t);
             }
             _ => return,
         }
@@ -6960,6 +6978,7 @@ impl NativeModel {
     fn factory_reset_synth(&mut self, outbox: &mut Outbox) {
         self.synth_params = [0.5, 0.5, 0.8, 0.05, 0.3];
         self.drum_level = 1.0;
+        self.input_level = 0.0;
         self.vibrato_always = 0.0;
         self.vibrato_depth = 0.5;
         self.vibrato_rate = 5.0;
@@ -6970,6 +6989,7 @@ impl NativeModel {
         outbox.synth("tone", self.synth_params[1]);
         outbox.synth("level", self.synth_params[2]);
         outbox.synth("drum_level", self.drum_level);
+        outbox.synth("input_level", self.input_level);
         outbox.synth("attack", self.synth_params[3]);
         outbox.synth("release", self.synth_params[4]);
         self.push_vibrato_params(outbox);
@@ -10315,6 +10335,26 @@ mod tests {
     }
 
     #[test]
+    fn fx_mic_sends_input_level() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Fx);
+        assert!((model.input_level - 0.0).abs() < 1e-5);
+        let mut out = Outbox::new();
+        let track = model.layout.settings_fx_slider(Layout::FX_MIC_LEVEL);
+        model.finger_down(1, track.x + 8, track.y + 4, &mut out);
+        let batch = out.take();
+        assert!(
+            batch.iter().any(|r| matches!(
+                r,
+                Request::Synth { param, value, .. }
+                    if param == "input_level" && *value > 0.9
+            )),
+            "expected FX MIC input_level, got {batch:?}"
+        );
+        assert!(model.input_level > 0.9);
+    }
+
+    #[test]
     fn punch_tap_arms_without_changing_stored_amount() {
         let mut model = NativeModel::new();
         model.set_mode(UiMode::Fx);
@@ -10548,6 +10588,25 @@ mod tests {
             "expected KIT drum_level, got {batch:?}"
         );
         assert!(model.drum_level < 0.1);
+    }
+
+    #[test]
+    fn mix_mic_sends_input_level() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Mix);
+        let mut out = Outbox::new();
+        let track = model.layout.mix_bus_slider(Layout::MIX_MIC);
+        model.finger_down(1, track.x + 8, track.y + 4, &mut out);
+        let batch = out.take();
+        assert!(
+            batch.iter().any(|r| matches!(
+                r,
+                Request::Synth { param, value, .. }
+                    if param == "input_level" && *value > 0.9
+            )),
+            "expected MIX MIC input_level, got {batch:?}"
+        );
+        assert!(model.input_level > 0.9);
     }
 
     #[test]

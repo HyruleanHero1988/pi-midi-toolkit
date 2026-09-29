@@ -504,7 +504,7 @@
 
     <section class="screen" id="fx">
       <h2>FX</h2>
-      <p class="lede">Left side is the insert rack (BUS / VOICE / DRUMS). Right side is eight EP-style punch-in pads on the master bus. LEVEL and DRUMS stay the keys vs kit trims.</p>
+      <p class="lede">Left side is the insert rack (BUS / VOICE / DRUMS). Right side is eight EP-style punch-in pads on the master bus. LEVEL, DRUMS, and MIC are the keys / kit / capture trims.</p>
       <figure>
         <img src="screens/25-fx.png" alt="FX screen with insert sliders and punch-in pads" width="800" height="480" />
         <figcaption>25 — FX (inserts left, punch pads right)</figcaption>
@@ -516,6 +516,7 @@
         <tr><th>DRIVE DELAY REVERB FLANGE</th><td>Insert mix. Voice flange mirrors SYNTH FLANGE; bus flange is independent global wet.</td></tr>
         <tr><th>LEVEL</th><td>Melody / keys bus. Same fader as SYNTH LEVEL. Does not duck the kit.</td></tr>
         <tr><th>DRUMS</th><td>Shared kit bus trim. Balance drums against melodies here without opening DRUM MODE.</td></tr>
+        <tr><th>MIC</th><td>USB mic / line capture onto the master bus (before punch-in). Starts at 0 so a headset cannot feedback until you open it. Same fader as MIX MIC.</td></tr>
       </table>
 
       <h3 id="punch">Punch-in pads</h3>
@@ -553,15 +554,16 @@
 
     <section class="screen" id="mix">
       <h2>MIX</h2>
-      <p class="lede">First mixer slice: live keys, live kit, the running sequence, and each phrase pad. Clip faders do not rewrite MIDI velocity.</p>
+      <p class="lede">Live keys, live kit, SEQ family buses, USB mic, and each phrase pad. Clip faders do not rewrite MIDI velocity.</p>
       <figure>
-        <img src="screens/26-mix.png" alt="MIX screen with LIVE KIT SEQ buses and 16 pad faders" width="800" height="480" />
-        <figcaption>26 — MIX (LIVE / KIT / SEQ + pads)</figcaption>
+        <img src="screens/26-mix.png" alt="MIX screen with LIVE KIT SEQ MIC buses and 16 pad faders" width="800" height="480" />
+        <figcaption>26 — MIX (LIVE / KIT / SEQ / MIC + pads)</figcaption>
       </figure>
       <table>
         <tr><th>LIVE</th><td>Live keys (KAOSS, SYNTH, CHORDS). Same trim as FX LEVEL / SYNTH LEVEL.</td></tr>
         <tr><th>KIT</th><td>Live drums. Same trim as FX DRUMS.</td></tr>
-        <tr><th>SEQ</th><td>The sequence / song clip (engine slot 16). Independent of pad B8.</td></tr>
+        <tr><th>DRM / KEY / KSS</th><td>SEQ / song family trims (drums, keys, Kaoss) on engine slots 16–18.</td></tr>
+        <tr><th>MIC</th><td>USB mic / line capture onto the master bus. Starts muted. Same fader as FX MIC.</td></tr>
         <tr><th>A1–B8</th><td>Per-pad clip gain (0.1–2.0). Empty pads are inert. V− / V+ on PADS EDIT writes the same gain.</td></tr>
       </table>
     </section>

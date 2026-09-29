@@ -2108,20 +2108,22 @@ impl Layout {
     }
 
     /// One-octave piano keyboard inside `synth_keys`.
-    /// FX page: four insert sliders + KEYS / DRUMS mix levels.
+    /// FX page: four insert sliders + KEYS / DRUMS / MIC mix levels.
     pub const FX_INSERT_COUNT: usize = 4;
-    pub const FX_SLIDER_COUNT: usize = 6;
+    pub const FX_SLIDER_COUNT: usize = 7;
     pub const FX_KEYS_LEVEL: usize = 4;
     pub const FX_DRUMS_LEVEL: usize = 5;
+    pub const FX_MIC_LEVEL: usize = 6;
     pub const PUNCH_PAD_COUNT: usize = 8;
 
-    /// MIX page: LIVE / KIT / SEQ DRM / SEQ KEY / SEQ KSS, then 16 pad faders.
-    pub const MIX_BUS_COUNT: usize = 5;
+    /// MIX page: LIVE / KIT / SEQ DRM / SEQ KEY / SEQ KSS / MIC, then 16 pad faders.
+    pub const MIX_BUS_COUNT: usize = 6;
     pub const MIX_LIVE: usize = 0;
     pub const MIX_KIT: usize = 1;
     pub const MIX_SEQ_DRUM: usize = 2;
     pub const MIX_SEQ_KEY: usize = 3;
     pub const MIX_SEQ_KAOSS: usize = 4;
+    pub const MIX_MIC: usize = 5;
     /// Back-compat alias for the SEQ keys fader.
     pub const MIX_SEQ: usize = Self::MIX_SEQ_KEY;
 
@@ -3333,12 +3335,12 @@ impl Layout {
     }
 
     pub fn settings_fx_slider(&self, index: usize) -> Rect {
-        // Two rows of three so punch pads can own the right half of FX.
+        // Three rows of three so MIC can sit under LEVEL / DRUMS.
         let i = (index % Self::FX_SLIDER_COUNT) as i32;
         let col = i % 3;
         let row = i / 3;
         let w = self.settings_fx.w / 3;
-        let h = (self.settings_fx.h - 16) / 2;
+        let h = (self.settings_fx.h - 16) / 3;
         Rect {
             x: self.settings_fx.x + col * w + 6,
             y: self.settings_fx.y + 22 + row * h,
@@ -3450,7 +3452,8 @@ impl Layout {
         let i = (index % 16) as i32;
         let col = i % 4;
         let row = i / 4;
-        let left = self.content.x + 288;
+        // Six bus faders (~54px each) sit left of the pad grid.
+        let left = self.content.x + 340;
         let top = self.content.y + 44;
         let area_w = self.content.x + self.content.w - 12 - left;
         let area_h = self.content.h - 60;
@@ -4106,9 +4109,14 @@ mod tests {
         assert!(last.x + last.w <= layout.settings_fx.x + layout.settings_fx.w);
         assert!(
             last.y > first.y,
-            "DRUMS should sit on the second slider row"
+            "MIC / DRUMS should sit below the first insert row"
         );
         match layout.hit(UiMode::Fx, last.x + 4, last.y + last.h / 2) {
+            Hit::FxSlider(i) if i == Layout::FX_MIC_LEVEL => {}
+            other => panic!("expected mic level slider, got {other:?}"),
+        }
+        let drums = layout.settings_fx_slider(Layout::FX_DRUMS_LEVEL);
+        match layout.hit(UiMode::Fx, drums.x + 4, drums.y + drums.h / 2) {
             Hit::FxSlider(i) if i == Layout::FX_DRUMS_LEVEL => {}
             other => panic!("expected drums level slider, got {other:?}"),
         }
@@ -4156,10 +4164,10 @@ mod tests {
             layout.hit(UiMode::Mix, b8.x + 4, b8.y + b8.h / 2),
             Hit::MixPad(15)
         );
-        let last_bus = layout.mix_bus_slider(Layout::MIX_SEQ_KAOSS);
+        let last_bus = layout.mix_bus_slider(Layout::MIX_MIC);
         assert!(
             a1.x >= last_bus.x + last_bus.w,
-            "pad grid should sit to the right of the SEQ buses"
+            "pad grid must sit right of the MIC bus fader"
         );
     }
 }

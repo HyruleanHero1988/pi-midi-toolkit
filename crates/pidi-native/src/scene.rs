@@ -3465,7 +3465,7 @@ fn draw_fx(scene: &mut Scene, model: &NativeModel) {
     scene.fill_rect(clear, if punch_live { 0xcc241d } else { 0x3c3836 });
     scene.text_centered(clear, "CLEAR", 0xffffff, 2);
     const LABELS: [&str; Layout::FX_SLIDER_COUNT] =
-        ["DRIVE", "DELAY", "REVERB", "FLANGE", "LEVEL", "DRUMS"];
+        ["DRIVE", "DELAY", "REVERB", "FLANGE", "LEVEL", "DRUMS", "MIC"];
     let inserts = match model.fx_target {
         crate::model::FxEditTarget::Bus => &model.fx_bus,
         crate::model::FxEditTarget::Voice => &model.fx_voice,
@@ -3484,6 +3484,8 @@ fn draw_fx(scene: &mut Scene, model: &NativeModel) {
             model.synth_params[2]
         } else if index == Layout::FX_DRUMS_LEVEL {
             model.drum_level
+        } else if index == Layout::FX_MIC_LEVEL {
+            model.input_level
         } else {
             inserts[index]
         };
@@ -3498,6 +3500,8 @@ fn draw_fx(scene: &mut Scene, model: &NativeModel) {
             0x689d6a
         } else if index == Layout::FX_DRUMS_LEVEL {
             0xd79921
+        } else if index == Layout::FX_MIC_LEVEL {
+            0x458588
         } else {
             insert_color
         };
@@ -3571,12 +3575,13 @@ fn draw_fx(scene: &mut Scene, model: &NativeModel) {
 fn draw_mix(scene: &mut Scene, model: &NativeModel) {
     let layout = model.layout;
     scene.text_scaled(layout.content.x + 12, layout.content.y + 8, "MIX", 0xfbf1c7, 2);
-    const BUS: [(&str, u32); 5] = [
+    const BUS: [(&str, u32); 6] = [
         ("LIVE", 0x689d6a),
         ("KIT", 0xd79921),
         ("DRM", 0xfb4934),
         ("KEY", 0xb16286),
         ("KSS", 0x8ec07c),
+        ("MIC", 0x458588),
     ];
     let bus_values = [
         model.synth_params[2],
@@ -3584,6 +3589,7 @@ fn draw_mix(scene: &mut Scene, model: &NativeModel) {
         (model.seq_drum_level / 2.0).clamp(0.0, 1.0),
         (model.seq_level / 2.0).clamp(0.0, 1.0),
         (model.seq_kaoss_level / 2.0).clamp(0.0, 1.0),
+        model.input_level,
     ];
     for index in 0..Layout::MIX_BUS_COUNT {
         let track = layout.mix_bus_slider(index);
@@ -3598,7 +3604,7 @@ fn draw_mix(scene: &mut Scene, model: &NativeModel) {
         };
         scene.fill_rect(fill, BUS[index].1);
     }
-    scene.text_scaled(layout.content.x + 240, layout.content.y + 8, "PADS", 0xfbf1c7, 2);
+    scene.text_scaled(layout.content.x + 340, layout.content.y + 8, "PADS", 0xfbf1c7, 2);
     for index in 0..16 {
         let cell = layout.mix_pad_cell(index);
         let pad = &model.phrases[index];
