@@ -258,11 +258,36 @@ impl Outbox {
         });
     }
 
-    pub fn punch_fx(&mut self, slot: u8, amount: f32) {
+    pub fn punch_fx(&mut self, source: u8, slot: u8, amount: f32) {
         self.reliable.push_back(Request::PunchFx {
+            source,
             slot,
             amount: amount.clamp(0.0, 1.0),
         });
+    }
+
+    pub fn punch_lock(&mut self, source: u8, locked: bool) {
+        self.reliable.push_back(Request::PunchLock { source, locked });
+    }
+
+    pub fn punch_grab(&mut self, source: u8, active: bool) {
+        self.reliable.push_back(Request::PunchGrab { source, active });
+    }
+
+    pub fn punch_buffer_prio(&mut self, mode: u8) {
+        self.reliable.push_back(Request::PunchBufferPrio { mode });
+    }
+
+    pub fn punch_rpt_mode(&mut self, mode: u8) {
+        self.reliable.push_back(Request::PunchRptMode { mode });
+    }
+
+    pub fn punch_grid(&mut self, mode: u8) {
+        self.reliable.push_back(Request::PunchGrid { mode });
+    }
+
+    pub fn punch_pads(&mut self, armed: bool) {
+        self.reliable.push_back(Request::PunchPads { armed });
     }
 
     pub fn kaoss_scale(&mut self, scale_index: u8, key: u8, root_midi: u8, octaves: u8) {

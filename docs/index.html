@@ -504,7 +504,7 @@
 
     <section class="screen" id="fx">
       <h2>FX</h2>
-      <p class="lede">Left side is the insert rack (BUS / VOICE / DRUMS). Right side is eight EP-style punch-in pads on the master bus. LEVEL and DRUMS stay the keys vs kit trims.</p>
+      <p class="lede">Left side is the insert rack (BUS / VOICE / DRUMS). Right side is eight EP-style punch-in pads on the master bus. LEVEL, DRUMS, and MIC are the keys / kit / capture trims.</p>
       <figure>
         <img src="screens/25-fx.png" alt="FX screen with insert sliders and punch-in pads" width="800" height="480" />
         <figcaption>25 — FX (inserts left, punch pads right)</figcaption>
@@ -516,11 +516,14 @@
         <tr><th>DRIVE DELAY REVERB FLANGE</th><td>Insert mix. Voice flange mirrors SYNTH FLANGE; bus flange is independent global wet.</td></tr>
         <tr><th>LEVEL</th><td>Melody / keys bus. Same fader as SYNTH LEVEL. Does not duck the kit.</td></tr>
         <tr><th>DRUMS</th><td>Shared kit bus trim. Balance drums against melodies here without opening DRUM MODE.</td></tr>
+        <tr><th>MIC</th><td>USB mic / line capture onto the master bus (before punch-in). Starts at 0 so a headset cannot feedback until you open it. Same fader as MIX MIC.</td></tr>
       </table>
 
       <h3 id="punch">Punch-in pads</h3>
-      <p class="lede">Punch-in sits after keys + drums + clips + the bus insert, and before the output limiter. Songs, SEQ, live keys, and the kit all hear it. Armed pads stay on when you leave FX.</p>
+      <p class="lede">Punch-in sits after keys + drums + clips + mic, and before the bus insert and output limiter. Songs, SEQ, live keys, and the kit all hear it. Armed pads stay on when you leave FX. Bus delay / reverb / flange (and SEND) wet whatever punch is playing — including a GRAB freeze.</p>
       <p>Each pad stores an amount and an on/off. Slide vertically to set the amount whether the pad is armed or not — top of the pad is full. Tap to arm or disarm at that stored value. CLEAR and panic only turn pads off; they do not reset the sliders. Fresh pads start at 0% so they match parked MPK knobs.</p>
+      <p><strong>GRAB</strong> is hold-to-capture: press and hold to record only the master bus audio while your finger is down (keys + drums + mic). Release to freeze that take into a loop and ignore live input until you tap GRAB again or CLEAR. While locked, the punch pads (TAPE drag, RPT / SLICE skip, LPF, CRUSH, …) process the frozen loop — hold through a phrase, release, then drag and chop.</p>
+      <p><strong>PRIO</strong> cycles who wins among the three buffer pads when several are armed: <code>T&gt;R&gt;D</code> (default bounce — TAPE owns the ring, release it and RPT takes over), <code>R&gt;T&gt;D</code> (stutter interrupts drag), <code>D&gt;T&gt;R</code> (DROP first), and <code>R×T</code> (repeat-on-tape — RPT loop advanced at the TAPE motor rate). Persists in the session.</p>
       <table>
         <tr><th>RPT</th><td>Beat repeat. Catches a slice of the master and loops it. Amount picks the grid from the current engine BPM: 1/4, then 1/8, 1/16, 1/32 as you raise it. Tick marks on the pad sit at those steps. Changing amount while armed retimes the loop.</td></tr>
         <tr><th>TAPE</th><td>Tape-style drag. The motor slews toward a slower playback rate; higher amount drags more (down to about 0.28×). It never parks or goes silent. While TAPE is on, RPT and DROP are silent.</td></tr>
@@ -534,10 +537,10 @@
       </table>
 
       <h3>Layering</h3>
-      <p>TAPE, RPT, and DROP share one buffer, so only one of those three speaks at a time: <strong>TAPE</strong> wins, then <strong>RPT</strong>, then <strong>DROP</strong>. LPF, HPF, CRUSH, and SLICE run after that and stack — for example TAPE + LPF + CRUSH, or RPT + SLICE. SEND is not a buffer effect; it boosts the bus insert while that insert is processing, then punch-in hears the wetter mix.</p>
+      <p>TAPE, RPT, and DROP share one buffer. Which one speaks when several are armed is set by <strong>PRIO</strong> (default <code>T&gt;R&gt;D</code>: TAPE wins, then RPT, then DROP). LPF, HPF, CRUSH, and SLICE run after that and stack — for example TAPE + LPF + CRUSH, or RPT + SLICE. SEND is not a buffer effect; it boosts the bus insert after punch, so delay / reverb / flange still wet a frozen GRAB loop.</p>
 
       <h3>MPK mini</h3>
-      <p>On the FX page only, factory MPC (<code>Prog Select → Pad 1</code>) maps knobs 1–8 and Bank A pads onto punch-in. Knobs write amounts directly (0–127). Pads start at zero so a parked knob is not fighting a stored value. The mix stays dry if that pad is off. Pads toggle on/off at the stored amount. Keys still play. Leave FX to get the synth / drum knob map back.</p>
+      <p>On the FX page only, factory MPC (<code>Prog Select → Pad 1</code>) maps knobs 1–8 and Bank A pads onto punch-in. Pad toggles accept MIDI channel 10 only so keyboard notes never arm a pad; knobs still write amounts on any channel. Knobs write amounts directly (0–127). Pads start at zero so a parked knob is not fighting a stored value. The mix stays dry if that pad is off. Pads toggle on/off at the stored amount. Keys still play on their own channel. Leave FX to get the synth / drum knob map back.</p>
       <table>
         <tr><th>Knob 1 / Bank A top-left</th><td>RPT (CC 70, note 40)</td></tr>
         <tr><th>Knob 2 / top 2</th><td>TAPE (CC 71, note 41)</td></tr>
@@ -553,15 +556,16 @@
 
     <section class="screen" id="mix">
       <h2>MIX</h2>
-      <p class="lede">First mixer slice: live keys, live kit, the running sequence, and each phrase pad. Clip faders do not rewrite MIDI velocity.</p>
+      <p class="lede">Live keys, live kit, SEQ family buses, USB mic, and each phrase pad. Clip faders do not rewrite MIDI velocity.</p>
       <figure>
-        <img src="screens/26-mix.png" alt="MIX screen with LIVE KIT SEQ buses and 16 pad faders" width="800" height="480" />
-        <figcaption>26 — MIX (LIVE / KIT / SEQ + pads)</figcaption>
+        <img src="screens/26-mix.png" alt="MIX screen with LIVE KIT SEQ MIC buses and 16 pad faders" width="800" height="480" />
+        <figcaption>26 — MIX (LIVE / KIT / SEQ / MIC + pads)</figcaption>
       </figure>
       <table>
         <tr><th>LIVE</th><td>Live keys (KAOSS, SYNTH, CHORDS). Same trim as FX LEVEL / SYNTH LEVEL.</td></tr>
         <tr><th>KIT</th><td>Live drums. Same trim as FX DRUMS.</td></tr>
-        <tr><th>SEQ</th><td>The sequence / song clip (engine slot 16). Independent of pad B8.</td></tr>
+        <tr><th>DRM / KEY / KSS</th><td>SEQ / song family trims (drums, keys, Kaoss) on engine slots 16–18.</td></tr>
+        <tr><th>MIC</th><td>USB mic / line capture onto the master bus. Starts muted. Same fader as FX MIC.</td></tr>
         <tr><th>A1–B8</th><td>Per-pad clip gain (0.1–2.0). Empty pads are inert. V− / V+ on PADS EDIT writes the same gain.</td></tr>
       </table>
     </section>

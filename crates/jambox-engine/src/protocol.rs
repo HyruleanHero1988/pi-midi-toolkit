@@ -45,8 +45,32 @@ pub enum Request {
         value: f32,
     },
     PunchFx {
+        #[serde(default)]
+        source: u8,
         slot: u8,
         amount: f32,
+    },
+    PunchLock {
+        #[serde(default)]
+        source: u8,
+        locked: bool,
+    },
+    PunchGrab {
+        #[serde(default)]
+        source: u8,
+        active: bool,
+    },
+    PunchBufferPrio {
+        mode: u8,
+    },
+    PunchRptMode {
+        mode: u8,
+    },
+    PunchGrid {
+        mode: u8,
+    },
+    PunchPads {
+        armed: bool,
     },
     MorphPair {
         a: u16,
@@ -502,6 +526,10 @@ pub enum Decoded {
     FullVel {
         on: bool,
     },
+    /// Bank A pads arm punch FX (true) or play the kit (false).
+    PunchPads {
+        armed: bool,
+    },
     DrumRepeat {
         slots: [u8; 16],
         latch: bool,
@@ -544,6 +572,7 @@ fn parse_synth_param(name: &str) -> Option<SynthParam> {
         "level" => SynthParam::Level,
         "attack" => SynthParam::Attack,
         "release" => SynthParam::Release,
+        "release_drift" => SynthParam::ReleaseDrift,
         "vibrato_depth" => SynthParam::VibratoDepth,
         "vibrato_rate" => SynthParam::VibratoRate,
         "vibrato_mod" => SynthParam::VibratoMod,
@@ -555,7 +584,9 @@ fn parse_synth_param(name: &str) -> Option<SynthParam> {
         "drum_decay" => SynthParam::DrumDecay,
         "drum_noise" => SynthParam::DrumNoise,
         "drum_tone" => SynthParam::DrumTone,
+        "drum_amp" => SynthParam::DrumAmp,
         "drum_level" => SynthParam::DrumLevel,
+        "input_level" => SynthParam::InputLevel,
         "fm_enable" => SynthParam::FmEnable,
         "fm_recipe" => SynthParam::FmRecipe,
         "fm_op" => SynthParam::FmOp,
@@ -679,6 +710,7 @@ pub fn decode(request: Request) -> Result<Decoded, String> {
                         | SynthParam::DrumDecay
                         | SynthParam::DrumNoise
                         | SynthParam::DrumTone
+                        | SynthParam::DrumAmp
                 ) {
                     Decoded::Command(Command::SetDrumMacro {
                         model: index,
@@ -705,7 +737,27 @@ pub fn decode(request: Request) -> Result<Decoded, String> {
                 value,
             })
         }
-        Request::PunchFx { slot, amount } => Decoded::Command(Command::SetPunchFx { slot, amount }),
+        Request::PunchFx {
+            source,
+            slot,
+            amount,
+        } => Decoded::Command(Command::SetPunchFx {
+            source,
+            slot,
+            amount,
+        }),
+        Request::PunchLock { source, locked } => {
+            Decoded::Command(Command::SetPunchLock { source, locked })
+        }
+        Request::PunchGrab { source, active } => {
+            Decoded::Command(Command::SetPunchGrab { source, active })
+        }
+        Request::PunchBufferPrio { mode } => {
+            Decoded::Command(Command::SetPunchBufferPrio { mode })
+        }
+        Request::PunchRptMode { mode } => Decoded::Command(Command::SetPunchRptMode { mode }),
+        Request::PunchGrid { mode } => Decoded::Command(Command::SetPunchGrid { mode }),
+        Request::PunchPads { armed } => Decoded::PunchPads { armed },
         Request::MorphPair { a, b } => Decoded::Command(Command::SetMorphPair { a, b }),
         Request::Tempo { bpm } => Decoded::Command(Command::SetTempo { bpm }),
         Request::BeatsPerBar { beats } => Decoded::Command(Command::SetBeatsPerBar { beats }),
@@ -915,9 +967,38 @@ mod tests {
     fn punch_fx_decodes_to_the_master_bus_command() {
         let d = decode_line(r#"{"cmd":"punch_fx","slot":1,"amount":0.8}"#);
         match d {
-            Decoded::Command(Command::SetPunchFx { slot, amount }) => {
+            Decoded::Command(Command::SetPunchFx {
+                source,
+                slot,
+                amount,
+            }) => {
+                assert_eq!(source, 0);
                 assert_eq!(slot, 1);
                 assert!((amount - 0.8).abs() < 1e-6);
+            }
+            _ => panic!("wrong decode"),
+        }
+    }
+
+    #[test]
+    fn punch_lock_decodes() {
+        let d = decode_line(r#"{"cmd":"punch_lock","locked":true}"#);
+        match d {
+            Decoded::Command(Command::SetPunchLock { source, locked }) => {
+                assert_eq!(source, 0);
+                assert!(locked);
+            }
+            _ => panic!("wrong decode"),
+        }
+    }
+
+    #[test]
+    fn punch_grab_decodes() {
+        let d = decode_line(r#"{"cmd":"punch_grab","active":true}"#);
+        match d {
+            Decoded::Command(Command::SetPunchGrab { source, active }) => {
+                assert_eq!(source, 0);
+                assert!(active);
             }
             _ => panic!("wrong decode"),
         }

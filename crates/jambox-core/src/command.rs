@@ -47,6 +47,9 @@ pub enum SynthParam {
     Level,
     Attack,
     Release,
+    /// 0..1, center 0.5. Each note glides this far in semitones across its release.
+    /// 0 = −12 st, 0.5 = none, 1 = +12 st.
+    ReleaseDrift,
     VibratoDepth,
     VibratoRate,
     /// 0..1 mod-wheel amount. Vibrato depth is scaled by max(this, VibratoAlways).
@@ -62,7 +65,11 @@ pub enum SynthParam {
     DrumDecay,
     DrumNoise,
     DrumTone,
+    /// Per-voice loudness on the drum WAVE screen. 0.5 is the designed level.
+    DrumAmp,
     DrumLevel,
+    /// 0..1 mic / line trim onto the master bus (0 = muted, safe default).
+    InputLevel,
     /// 0 = wavetable melody, 1 = four-operator FM playground.
     FmEnable,
     /// Recipe index as a raw number (not 0..1). See `fm::FM_RECIPES`.
@@ -145,9 +152,33 @@ pub enum Command {
         value: f32,
     },
     /// One EP-style punch-in pad. `slot` is 0..7 (RPT..CRUSH). `amount` 0 = off.
+    /// `source` is keys / drums / mic ([`crate::PunchSource`]).
     SetPunchFx {
+        source: u8,
         slot: u8,
         amount: f32,
+    },
+    /// Freeze the recent bus into a loop. `true` = grab & hold.
+    SetPunchLock {
+        source: u8,
+        locked: bool,
+    },
+    /// Hold-to-grab: record that bus while `active`, commit loop on release.
+    SetPunchGrab {
+        source: u8,
+        active: bool,
+    },
+    /// Buffer FX precedence (TAPE / RPT / DROP). See [`crate::PunchBufferPrio`].
+    SetPunchBufferPrio {
+        mode: u8,
+    },
+    /// RPT refresh vs hold. See [`crate::PunchRptMode`].
+    SetPunchRptMode {
+        mode: u8,
+    },
+    /// RPT / SLICE length: beat grid or a smooth span of the capture.
+    SetPunchGrid {
+        mode: u8,
     },
     SetMorphPair {
         a: u16,

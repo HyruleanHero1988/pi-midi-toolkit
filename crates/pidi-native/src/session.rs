@@ -168,6 +168,9 @@ pub struct SessionState {
     /// Kit bus trim. Missing in old sessions → unity (1.0).
     #[serde(default = "default_drum_level")]
     pub drum_level: f32,
+    /// USB mic / line trim (0..1). Missing in old sessions → muted.
+    #[serde(default)]
+    pub input_level: f32,
     /// SEQ / songs key trim (0..2, unity 1.0). Missing in old sessions → 1.0.
     #[serde(default = "default_seq_level")]
     pub seq_level: f32,
@@ -177,6 +180,9 @@ pub struct SessionState {
     pub seq_kaoss_level: f32,
     pub attack: f32,
     pub release: f32,
+    /// SYNTH DRIFT. 0.5 = no pitch glide on release. Missing → center.
+    #[serde(default = "default_release_drift")]
+    pub release_drift: f32,
     pub morph_a: u16,
     pub morph_b: u16,
     /// On-screen synth keyboard octave relative to C4 (−3..+3).
@@ -204,6 +210,18 @@ pub struct SessionState {
     /// KAOSS pad FX destination: voice insert, kit-group insert, or both.
     #[serde(default)]
     pub kaoss_fx_target: KaossFxTarget,
+    /// Buffer FX precedence for TAPE / RPT / DROP. Missing → T>R>D.
+    #[serde(default)]
+    pub punch_buffer_prio: u8,
+    /// RPT refresh vs hold. Missing → refresh (morphs into new audio).
+    #[serde(default)]
+    pub punch_rpt_mode: u8,
+    /// 0 = beat grid, 1 = smooth capture span.
+    #[serde(default)]
+    pub punch_grid_mode: u8,
+    /// Bank A pads arm punch FX. Missing → on (previous FX-page behavior).
+    #[serde(default = "default_full_velocity")]
+    pub punch_pads_fx: bool,
     #[serde(default)]
     pub kaoss_show_all: bool,
     #[serde(default)]
@@ -320,6 +338,10 @@ fn default_kaoss_viz_style() -> String {
     "cells".into()
 }
 
+fn default_release_drift() -> f32 {
+    0.5
+}
+
 fn default_vibrato_depth() -> f32 {
     0.5
 }
@@ -345,11 +367,13 @@ impl Default for SessionState {
             tone: 0.5,
             level: 0.8,
             drum_level: default_drum_level(),
+            input_level: 0.0,
             seq_level: default_seq_level(),
             seq_drum_level: default_seq_level(),
             seq_kaoss_level: default_seq_level(),
             attack: 0.05,
             release: 0.3,
+            release_drift: default_release_drift(),
             morph_a: 0,
             morph_b: 1,
             synth_octave: 0,
@@ -365,6 +389,10 @@ impl Default for SessionState {
             fx_flanger_rate: default_fx_flanger_rate(),
             fx_bus_flanger: 0.0,
             kaoss_fx_target: KaossFxTarget::Voice,
+            punch_buffer_prio: 0,
+            punch_rpt_mode: 0,
+            punch_grid_mode: 0,
+            punch_pads_fx: true,
             kaoss_show_all: false,
             kaoss_channel: 0,
             vibrato_always: 0.0,

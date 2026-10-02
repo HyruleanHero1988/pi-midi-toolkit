@@ -1940,7 +1940,7 @@ fn draw_synth(scene: &mut Scene, model: &NativeModel) {
     }
 
     const LABELS: [&str; Layout::SYNTH_SLIDER_COUNT] =
-        ["MORPH", "TONE", "LEVEL", "ATK", "REL", "FLANGE", "RATE"];
+        ["MORPH", "TONE", "LEVEL", "ATK", "REL", "DRIFT", "FLANGE", "RATE"];
 
     let a = waves::short_label(model.wave_label(model.morph_a));
     let b = waves::short_label(model.wave_label(model.morph_b));
@@ -2003,22 +2003,46 @@ fn draw_synth(scene: &mut Scene, model: &NativeModel) {
         let value = if index < 5 {
             model.synth_params[index]
         } else if index == 5 {
+            model.release_drift
+        } else if index == 6 {
             model.fx_voice[3]
         } else {
             model.fx_flanger_rate
         };
-        let fill_h = (track.h as f32 * value) as i32;
-        let fill = Rect {
-            x: track.x + 4,
-            y: track.y + track.h - fill_h,
-            w: track.w - 8,
-            h: fill_h.max(2),
+        let fill = if index == 5 {
+            let mid = track.y + track.h / 2;
+            let travel = ((value - 0.5).abs() * track.h as f32) as i32;
+            if value >= 0.5 {
+                Rect {
+                    x: track.x + 4,
+                    y: mid - travel,
+                    w: track.w - 8,
+                    h: travel.max(2),
+                }
+            } else {
+                Rect {
+                    x: track.x + 4,
+                    y: mid,
+                    w: track.w - 8,
+                    h: travel.max(2),
+                }
+            }
+        } else {
+            let fill_h = (track.h as f32 * value) as i32;
+            Rect {
+                x: track.x + 4,
+                y: track.y + track.h - fill_h,
+                w: track.w - 8,
+                h: fill_h.max(2),
+            }
         };
         scene.fill_rect(
             fill,
             if index == 0 {
                 0xb16286
-            } else if index == 5 || index == 6 {
+            } else if index == 5 {
+                0x83a598
+            } else if index == 6 || index == 7 {
                 0xd79921
             } else {
                 0x689d6a
@@ -2306,12 +2330,13 @@ fn draw_drums(scene: &mut Scene, model: &NativeModel) {
         format!("{} {}", phrases::pad_label(sel_cell), model_name)
     };
     let status = format!(
-        "{}  T{:.0} S{:.0} P{:.0} D{:.0}",
+        "{}  T{:.0} S{:.0} P{:.0} D{:.0} L{:.0}",
         target,
         macros[0] * 100.0,
         macros[1] * 100.0,
         macros[2] * 100.0,
         macros[3] * 100.0,
+        macros[4] * 100.0,
     );
     scene.text_centered(
         Rect {
@@ -2442,8 +2467,8 @@ fn draw_kit_edit(scene: &mut Scene, model: &NativeModel) {
 
     draw_scope_wave(scene, layout.kit_edit_scope(), &model.kit_wave);
 
-    const LABELS: [&str; 4] = ["TONE", "SNAP", "PITCH", "DECAY"];
-    for index in 0..4 {
+    const LABELS: [&str; 5] = ["TONE", "SNAP", "PITCH", "DECAY", "LEVEL"];
+    for index in 0..5 {
         let track = layout.kit_edit_slider(index);
         scene.fill_rect(track, 0x20202c);
         scene.text(track.x + 8, track.y - 18, LABELS[index], 0xc0c0d0);
@@ -3447,25 +3472,59 @@ fn draw_fx(scene: &mut Scene, model: &NativeModel) {
     scene.text_centered(
         layout.settings_fx_target,
         match model.fx_target {
-            crate::model::FxEditTarget::Bus => "TARGET: BUS",
-            crate::model::FxEditTarget::Voice => "TARGET: VOICE",
-            crate::model::FxEditTarget::DrumGroup => "TARGET: DRUMS",
+            crate::model::FxEditTarget::Bus => "BUS",
+            crate::model::FxEditTarget::Voice => "VOICE",
+            crate::model::FxEditTarget::DrumGroup => "DRUMS",
         },
         0xffffff,
         2,
     );
-    scene.text(
-        layout.settings_fx_target.x + layout.settings_fx_target.w + 12,
-        layout.settings_fx_target.y + 14,
-        "slide amount · tap on",
-        0x928374,
-    );
     let clear = layout.punch_clear();
+    let lock = layout.punch_lock();
+    let source = layout.punch_source();
+    let pads = layout.punch_pads();
+    let set = layout.punch_set();
     let punch_live = model.punch_active();
+    let buf = jambox_core::PunchSource::from_u8(model.punch_source);
+    scene.fill_rect(
+        lock,
+        if model.punch_grabbing {
+            0xfe8019
+        } else if model.punch_locked {
+            0xb16286
+        } else {
+            0x3c3836
+        },
+    );
+    scene.text_centered(lock, "GRAB", 0xffffff, 2);
+    scene.fill_rect(
+        source,
+        match buf {
+            jambox_core::PunchSource::Keys => 0x689d6a,
+            jambox_core::PunchSource::Drums => 0xd79921,
+            jambox_core::PunchSource::Mic => 0x458588,
+        },
+    );
+    scene.text_centered(source, buf.label(), 0xffffff, 2);
+    scene.fill_rect(
+        pads,
+        if model.punch_pads_fx { 0x689d6a } else { 0x3c3836 },
+    );
+    scene.text_centered(
+        pads,
+        if model.punch_pads_fx { "PAD FX" } else { "DRUMS" },
+        0xffffff,
+        2,
+    );
+    scene.fill_rect(
+        set,
+        if model.fx_settings_open { 0x458588 } else { 0x3c3836 },
+    );
+    scene.text_centered(set, "SET", 0xffffff, 2);
     scene.fill_rect(clear, if punch_live { 0xcc241d } else { 0x3c3836 });
     scene.text_centered(clear, "CLEAR", 0xffffff, 2);
     const LABELS: [&str; Layout::FX_SLIDER_COUNT] =
-        ["DRIVE", "DELAY", "REVERB", "FLANGE", "LEVEL", "DRUMS"];
+        ["DRIVE", "DELAY", "REVERB", "FLANGE", "LEVEL", "DRUMS", "MIC"];
     let inserts = match model.fx_target {
         crate::model::FxEditTarget::Bus => &model.fx_bus,
         crate::model::FxEditTarget::Voice => &model.fx_voice,
@@ -3484,6 +3543,8 @@ fn draw_fx(scene: &mut Scene, model: &NativeModel) {
             model.synth_params[2]
         } else if index == Layout::FX_DRUMS_LEVEL {
             model.drum_level
+        } else if index == Layout::FX_MIC_LEVEL {
+            model.input_level
         } else {
             inserts[index]
         };
@@ -3498,6 +3559,8 @@ fn draw_fx(scene: &mut Scene, model: &NativeModel) {
             0x689d6a
         } else if index == Layout::FX_DRUMS_LEVEL {
             0xd79921
+        } else if index == Layout::FX_MIC_LEVEL {
+            0x458588
         } else {
             insert_color
         };
@@ -3530,18 +3593,20 @@ fn draw_fx(scene: &mut Scene, model: &NativeModel) {
             },
             if armed { PUNCH_COLOR[index] } else { 0x3c3836 },
         );
-        if jambox_core::punch_slot_has_grid(index) {
-            let inner_h = (cell.h - 10) as f32;
-            let inner_top = (cell.y + 5) as f32;
+        if model.punch_grid_mode == jambox_core::PunchGridMode::Beat
+            && jambox_core::punch_slot_has_grid(index)
+        {
+            let inner_h = (cell.h - 28) as f32;
+            let inner_top = (cell.y + 22) as f32;
             let line_color = if armed { 0xfbf1c7 } else { 0x7c6f64 };
             let label_color = if armed { 0xfbf1c7 } else { 0xa89984 };
             for tick in jambox_core::PUNCH_GRID_TICKS {
                 let y = (inner_top + inner_h * (1.0 - tick)).round() as i32;
                 scene.fill_rect(
                     Rect {
-                        x: cell.x + 6,
+                        x: cell.x + 8,
                         y,
-                        w: cell.w - 12,
+                        w: cell.w - 16,
                         h: 2,
                     },
                     line_color,
@@ -3552,31 +3617,81 @@ fn draw_fx(scene: &mut Scene, model: &NativeModel) {
                 .iter()
                 .zip(BAND_MIDS.iter())
             {
-                let y = (inner_top + inner_h * (1.0 - mid) - 4.0).round() as i32;
-                scene.text_scaled(cell.x + cell.w - 36, y, label, label_color, 1);
+                let y = (inner_top + inner_h * (1.0 - mid) - 6.0).round() as i32;
+                scene.text_scaled(cell.x + 10, y, label, label_color, 1);
             }
         }
         scene.text(
             cell.x + 8,
-            cell.y + 8,
+            cell.y + 6,
             jambox_core::PUNCH_LABELS[index],
             if armed { 0xfbf1c7 } else { 0xa89984 },
         );
-        if armed {
-            scene.text(cell.x + cell.w - 28, cell.y + 8, "ON", 0xfabd2f);
-        }
     }
+    if model.fx_settings_open {
+        draw_fx_settings(scene, model);
+    }
+}
+
+fn draw_fx_settings(scene: &mut Scene, model: &NativeModel) {
+    let layout = model.layout;
+    let panel = Rect {
+        x: 16,
+        y: crate::layout::HUD_H + 56,
+        w: 768,
+        h: 340,
+    };
+    scene.fill_rect(panel, 0x1d2021);
+    scene.text_scaled(panel.x + 24, panel.y + 16, "FX SET", 0xfbf1c7, 2);
+    let prio = layout.punch_prio();
+    let rpt = layout.punch_rpt_mode();
+    let grid = layout.punch_grid_mode();
+    let close = layout.punch_settings_close();
+    scene.fill_rect(prio, 0x3c3836);
+    scene.text_centered(
+        prio,
+        &format!("PRIO {}", model.punch_buffer_prio.label()),
+        0xffffff,
+        2,
+    );
+    scene.fill_rect(
+        rpt,
+        if model.punch_rpt_mode == jambox_core::PunchRptMode::Hold {
+            0x689d6a
+        } else {
+            0x3c3836
+        },
+    );
+    scene.text_centered(rpt, model.punch_rpt_mode.label(), 0xffffff, 2);
+    scene.fill_rect(
+        grid,
+        if model.punch_grid_mode == jambox_core::PunchGridMode::Beat {
+            0x458588
+        } else {
+            0x3c3836
+        },
+    );
+    scene.text_centered(grid, model.punch_grid_mode.label(), 0xffffff, 2);
+    scene.fill_rect(close, 0x504945);
+    scene.text_centered(close, "CLOSE", 0xffffff, 2);
+    scene.text(
+        panel.x + 24,
+        panel.y + panel.h - 36,
+        "BEAT locks 1/4–1/32. SMOOTH loops the whole capture at the bottom.",
+        0xa89984,
+    );
 }
 
 fn draw_mix(scene: &mut Scene, model: &NativeModel) {
     let layout = model.layout;
     scene.text_scaled(layout.content.x + 12, layout.content.y + 8, "MIX", 0xfbf1c7, 2);
-    const BUS: [(&str, u32); 5] = [
+    const BUS: [(&str, u32); 6] = [
         ("LIVE", 0x689d6a),
         ("KIT", 0xd79921),
         ("DRM", 0xfb4934),
         ("KEY", 0xb16286),
         ("KSS", 0x8ec07c),
+        ("MIC", 0x458588),
     ];
     let bus_values = [
         model.synth_params[2],
@@ -3584,6 +3699,7 @@ fn draw_mix(scene: &mut Scene, model: &NativeModel) {
         (model.seq_drum_level / 2.0).clamp(0.0, 1.0),
         (model.seq_level / 2.0).clamp(0.0, 1.0),
         (model.seq_kaoss_level / 2.0).clamp(0.0, 1.0),
+        model.input_level,
     ];
     for index in 0..Layout::MIX_BUS_COUNT {
         let track = layout.mix_bus_slider(index);
@@ -3598,7 +3714,7 @@ fn draw_mix(scene: &mut Scene, model: &NativeModel) {
         };
         scene.fill_rect(fill, BUS[index].1);
     }
-    scene.text_scaled(layout.content.x + 240, layout.content.y + 8, "PADS", 0xfbf1c7, 2);
+    scene.text_scaled(layout.content.x + 340, layout.content.y + 8, "PADS", 0xfbf1c7, 2);
     for index in 0..16 {
         let cell = layout.mix_pad_cell(index);
         let pad = &model.phrases[index];
