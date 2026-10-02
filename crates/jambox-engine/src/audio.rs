@@ -3,9 +3,13 @@
 //! The callback body is deliberately boring — every expensive thing (allocating a
 //! clip, sending MIDI bytes, writing a log line) happens on another thread.
 //!
-//! The stream stays up once opened. Periodic mixer rescans and stale-callback
-//! reopens used to tear ALSA down every few seconds (heard as dropouts).
-//! Reopen only on SET → AUDIO (`audio_reopen`) or process shutdown.
+//! The stream stays up once opened. Mixer unmute is re-applied for a few
+//! seconds after open (jack-detect races the first `amixer`). A reopen happens
+//! on a stream error or SET → AUDIO.
+//!
+//! Do not re-list devices while the stream is running. cpal's device listing
+//! opens every ALSA plugin (JACK, Pulse, OSS, dmix). On this Pi that pegs a
+//! core and returns POLLERR on the live headphone PCM.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -47,7 +51,10 @@ pub enum AudioError {
 /// Shared reopen / liveness flags between IPC, the device callback, and the supervisor.
 pub struct AudioHealth {
     last_callback_ms: AtomicU64,
+    /// Output stream asked to reopen. Capture uses [`Self::capture_error`] so a
+    /// mic glitch does not tear down the headphone stream.
     pub(crate) error: AtomicBool,
+    pub(crate) capture_error: AtomicBool,
     /// Bumped by SET → AUDIO so both output and capture supervisors reopen.
     reopen_gen: AtomicU64,
 }
@@ -57,6 +64,7 @@ impl AudioHealth {
         Self {
             last_callback_ms: AtomicU64::new(0),
             error: AtomicBool::new(false),
+            capture_error: AtomicBool::new(false),
             reopen_gen: AtomicU64::new(0),
         }
     }
@@ -353,7 +361,7 @@ fn supervisor(
                 watch_stream(&running, &health);
                 drop(stream);
                 if running.load(Ordering::Relaxed) {
-                    info!("audio: SET → AUDIO reopen");
+                    info!("audio: reopening output");
                 }
             }
             Err(err) => {
@@ -369,6 +377,8 @@ fn watch_stream(running: &AtomicBool, health: &AudioHealth) {
     health.error.store(false, Ordering::Relaxed);
     health.last_callback_ms.store(0, Ordering::Relaxed);
     let start_gen = health.reopen_gen();
+    let started = Instant::now();
+    let mut mixer_kicks = 0u32;
     while running.load(Ordering::Relaxed) {
         if health.reopen_gen() != start_gen {
             break;
@@ -376,6 +386,12 @@ fn watch_stream(running: &AtomicBool, health: &AudioHealth) {
         if health.error.load(Ordering::Relaxed) {
             warn!("audio: output error — reopening stream");
             break;
+        }
+        // Jack-detect often mutes the analog path after the stream is already
+        // open. Re-apply the mixer for the first few seconds only.
+        if mixer_kicks < 8 && started.elapsed() < Duration::from_secs(10) {
+            restore_mixer();
+            mixer_kicks += 1;
         }
         std::thread::sleep(WATCH_POLL);
     }
@@ -401,34 +417,51 @@ fn restore_mixer() {
     #[cfg(target_os = "linux")]
     {
         use std::process::{Command, Stdio};
-        for ctrl in [
-            "Headphone",
-            "Headphones",
-            "PCM",
-            "Master",
-            "Speaker",
-            "Digital",
-        ] {
-            let _ = Command::new("amixer")
-                .args(["-q", "sset", ctrl, "unmute"])
+        let quiet = |cmd: &mut Command| {
+            let _ = cmd
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .status();
-        }
-        // 0 dB is well below the bcm2835 PCM ceiling (+4 dB at 100%).
-        for ctrl in ["PCM", "Headphone", "Headphones"] {
-            for level in ["0dB", "85%"] {
-                let ok = Command::new("amixer")
-                    .args(["-q", "sset", ctrl, level])
-                    .stdin(Stdio::null())
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .status()
-                    .map(|s| s.success())
-                    .unwrap_or(false);
-                if ok {
-                    break;
+        };
+        // Unmute every card. The default card is often HDMI, so a bare
+        // `amixer sset Headphone` never touches the analog jack — which is
+        // why sound stays dead until SET → AUDIO after a cable swap.
+        for card in 0..4 {
+            let card = card.to_string();
+            let info = Command::new("amixer")
+                .args(["-c", &card, "info"])
+                .output();
+            let info = info
+                .ok()
+                .filter(|o| o.status.success())
+                .map(|o| String::from_utf8_lossy(&o.stdout).to_ascii_lowercase())
+                .unwrap_or_default();
+            if info.is_empty() {
+                continue;
+            }
+            if info.contains("bcm2835") || info.contains("headphone") {
+                // Force analog. Auto-route stays on HDMI when the Klipsch aux
+                // load does not trip the Pi jack-detect pin.
+                quiet(
+                    Command::new("amixer")
+                        .args(["-q", "-c", &card, "cset", "numid=3", "1"]),
+                );
+            }
+            for ctrl in ["Headphone", "Headphones", "PCM", "Master", "Speaker"] {
+                quiet(Command::new("amixer").args(["-q", "-c", &card, "sset", ctrl, "unmute"]));
+                for level in ["0dB", "85%"] {
+                    let ok = Command::new("amixer")
+                        .args(["-q", "-c", &card, "sset", ctrl, level])
+                        .stdin(Stdio::null())
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null())
+                        .status()
+                        .map(|s| s.success())
+                        .unwrap_or(false);
+                    if ok {
+                        break;
+                    }
                 }
             }
         }
@@ -541,9 +574,16 @@ fn build_stream(
     let ptr = StatePtr(state as *mut RenderState);
 
     let health_err = Arc::clone(&health);
+    let last_log_ms = AtomicU64::new(0);
     let err_fn = move |err| {
         health_err.error.store(true, Ordering::Relaxed);
-        warn!(%err, "audio stream error");
+        // POLLERR can fire every few microseconds; the supervisor reopens once.
+        let now = now_ms();
+        let prev = last_log_ms.load(Ordering::Relaxed);
+        if now.saturating_sub(prev) >= 2_000 {
+            last_log_ms.store(now, Ordering::Relaxed);
+            warn!(%err, "audio stream error");
+        }
     };
 
     let stream = match format {

@@ -283,6 +283,10 @@ fn input_supervisor(
 ) {
     let mut backoff = BACKOFF_START;
     let mut announced_wait = false;
+    // Held across failed opens. Re-listing inputs opens every ALSA plugin
+    // (JACK, Pulse, OSS) and POLLERRs the live headphone stream.
+    let mut device: Option<Device> = None;
+    let mut last_gen = health.reopen_gen();
     if filter.trim().is_empty() {
         info!("audio: watching for capture (USB mic / line)");
     } else {
@@ -290,23 +294,36 @@ fn input_supervisor(
     }
 
     while running.load(Ordering::Relaxed) {
-        let device = match pick_input(&filter) {
-            Ok(d) => d,
-            Err(_) => {
-                if !announced_wait {
-                    info!("audio: no capture device yet; punch-in stays synth-only until one appears");
-                    announced_wait = true;
+        let gen = health.reopen_gen();
+        if gen != last_gen {
+            device = None;
+            last_gen = gen;
+            backoff = BACKOFF_START;
+        }
+        if device.is_none() {
+            match pick_input(&filter) {
+                Ok(d) => {
+                    announced_wait = false;
+                    device = Some(d);
                 }
-                std::thread::sleep(HOTPLUG_POLL);
-                continue;
+                Err(_) => {
+                    if !announced_wait {
+                        info!("audio: no capture device yet; punch-in stays synth-only until one appears");
+                        announced_wait = true;
+                    }
+                    std::thread::sleep(HOTPLUG_POLL);
+                    continue;
+                }
             }
+        }
+        let Some(device_ref) = device.as_ref() else {
+            continue;
         };
-        announced_wait = false;
 
-        match open_input_stream(&device, Arc::clone(&ring), &health) {
+        match open_input_stream(device_ref, Arc::clone(&ring), &health) {
             Ok(stream) => {
                 info!(
-                    device = %device.name().unwrap_or_default(),
+                    device = %device_ref.name().unwrap_or_default(),
                     sample_rate = stream.sample_rate,
                     channels = stream.channels,
                     "audio: capture running"
@@ -330,14 +347,14 @@ fn input_supervisor(
 }
 
 fn watch_input(running: &AtomicBool, health: &AudioHealth) {
-    health.error.store(false, Ordering::Relaxed);
+    health.capture_error.store(false, Ordering::Relaxed);
     let start_gen = health.reopen_gen();
     while running.load(Ordering::Relaxed) {
         if health.reopen_gen() != start_gen {
             break;
         }
         // POLLERR / USB unplug sets this; reopen instead of spinning warn spam.
-        if health.error.load(Ordering::Relaxed) {
+        if health.capture_error.load(Ordering::Relaxed) {
             warn!("audio: capture error — reopening stream");
             break;
         }
@@ -359,16 +376,12 @@ fn open_input_stream(
     let supported = device
         .default_input_config()
         .map_err(|e| AudioError::Config(e.to_string()))?;
-    // Prefer 44.1 kHz when the mic can do it so we match the headphone
-    // output clock and skip nearest-neighbor rate conversion (sounds choppy).
-    let (sample_rate, channels, format) =
-        prefer_capture_rate(device, &supported, 44_100).unwrap_or_else(|| {
-            (
-                supported.sample_rate().0,
-                supported.channels(),
-                supported.sample_format(),
-            )
-        });
+    // cpal already picks 44.1 kHz when the mic lists it. A second
+    // supported-config probe on this USB device returns EPIPE on the open
+    // that follows, so use the default config as-is.
+    let sample_rate = supported.sample_rate().0;
+    let channels = supported.channels();
+    let format = supported.sample_format();
     ring.set_sample_rate(sample_rate);
     ring.clear();
 
@@ -401,26 +414,6 @@ fn open_input_stream(
     })
 }
 
-fn prefer_capture_rate(
-    device: &Device,
-    default: &cpal::SupportedStreamConfig,
-    want: u32,
-) -> Option<(u32, u16, SampleFormat)> {
-    if default.sample_rate().0 == want {
-        return Some((want, default.channels(), default.sample_format()));
-    }
-    let ranges = device.supported_input_configs().ok()?;
-    for range in ranges {
-        let min = range.min_sample_rate().0;
-        let max = range.max_sample_rate().0;
-        if min <= want && want <= max {
-            let cfg = range.with_sample_rate(cpal::SampleRate(want));
-            return Some((want, cfg.channels(), cfg.sample_format()));
-        }
-    }
-    None
-}
-
 fn build_input_stream(
     device: &Device,
     config: &StreamConfig,
@@ -432,7 +425,7 @@ fn build_input_stream(
     let health_err = Arc::clone(health);
     let last_log_ms = AtomicU64::new(0);
     let err_fn = move |err| {
-        health_err.error.store(true, Ordering::Relaxed);
+        health_err.capture_error.store(true, Ordering::Relaxed);
         // ALSA POLLERR can fire every few microseconds; reopen + rate-limit.
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
