@@ -62,6 +62,8 @@ pub enum SynthParam {
     DrumDecay,
     DrumNoise,
     DrumTone,
+    /// Per-voice loudness on the drum WAVE screen. 0.5 is the designed level.
+    DrumAmp,
     DrumLevel,
     /// 0..1 mic / line trim onto the master bus (0 = muted, safe default).
     InputLevel,

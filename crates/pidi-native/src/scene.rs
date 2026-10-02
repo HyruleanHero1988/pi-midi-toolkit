@@ -2306,12 +2306,13 @@ fn draw_drums(scene: &mut Scene, model: &NativeModel) {
         format!("{} {}", phrases::pad_label(sel_cell), model_name)
     };
     let status = format!(
-        "{}  T{:.0} S{:.0} P{:.0} D{:.0}",
+        "{}  T{:.0} S{:.0} P{:.0} D{:.0} L{:.0}",
         target,
         macros[0] * 100.0,
         macros[1] * 100.0,
         macros[2] * 100.0,
         macros[3] * 100.0,
+        macros[4] * 100.0,
     );
     scene.text_centered(
         Rect {
@@ -2442,8 +2443,8 @@ fn draw_kit_edit(scene: &mut Scene, model: &NativeModel) {
 
     draw_scope_wave(scene, layout.kit_edit_scope(), &model.kit_wave);
 
-    const LABELS: [&str; 4] = ["TONE", "SNAP", "PITCH", "DECAY"];
-    for index in 0..4 {
+    const LABELS: [&str; 5] = ["TONE", "SNAP", "PITCH", "DECAY", "LEVEL"];
+    for index in 0..5 {
         let track = layout.kit_edit_slider(index);
         scene.fill_rect(track, 0x20202c);
         scene.text(track.x + 8, track.y - 18, LABELS[index], 0xc0c0d0);

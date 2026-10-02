@@ -47,8 +47,8 @@ pub const KAOSS_FULL_EXIT_EDGE_PX: i32 = 24;
 const KAOSS_CC_X: u8 = 12;
 const KAOSS_CC_Y: u8 = 13;
 const KAOSS_CC_TOUCH: u8 = 92;
-/// KIT sliders: tone / snap(noise) / pitch / decay.
-const DEFAULT_DRUM_MACROS: [f32; 4] = [0.60, 0.45, 0.50, 0.55];
+/// KIT sliders: tone / snap(noise) / pitch / decay / level.
+const DEFAULT_DRUM_MACROS: [f32; 5] = [0.60, 0.45, 0.50, 0.55, 0.50];
 const KIT_WAVE_POINTS: usize = 160;
 /// How long two chord-button fingers may come up apart and still count as one
 /// combo lift (m7 / M7 / dim / …). Shorter than this and the leftover button
@@ -239,10 +239,10 @@ pub struct NativeModel {
     pub fm_params: [f32; 4],
     pub kaoss_picker_scroll: i32,
     pub log_scroll: usize,
-    /// Kit macros per model: tone, noise/snap, pitch, decay.
-    pub drum_macros: [[f32; 4]; DRUM_MODEL_COUNT],
+    /// Kit macros per model: tone, noise/snap, pitch, decay, level.
+    pub drum_macros: [[f32; 5]; DRUM_MODEL_COUNT],
     /// Snapshot shown while ALL DRUMS is the edit target.
-    pub drum_group_macros: [f32; 4],
+    pub drum_group_macros: [f32; 5],
     /// Selected kit pad (screen index 0..15 into `PHRASE_GRID_CELLS`).
     pub kit_selected: usize,
     pub kit_all_drums: bool,
@@ -4962,9 +4962,9 @@ impl NativeModel {
     }
 
     const FX_PARAM_NAMES: [&'static str; 4] = ["drive", "delay_mix", "reverb_mix", "flanger_mix"];
-    const DRUM_MACRO_NAMES: [&'static str; 4] =
-        ["drum_tone", "drum_noise", "drum_pitch", "drum_decay"];
-    const DRUM_MACRO_LABELS: [&'static str; 4] = ["TONE", "SNAP", "PITCH", "DECAY"];
+    const DRUM_MACRO_NAMES: [&'static str; 5] =
+        ["drum_tone", "drum_noise", "drum_pitch", "drum_decay", "drum_amp"];
+    const DRUM_MACRO_LABELS: [&'static str; 5] = ["TONE", "SNAP", "PITCH", "DECAY", "LEVEL"];
 
     fn selected_kit_note(&self) -> u8 {
         let cell = phrases::PHRASE_GRID_CELLS[self.kit_selected.min(15)];
@@ -4975,11 +4975,11 @@ impl NativeModel {
         drum_model_for_note(self.selected_kit_note())
     }
 
-    fn edit_source_macros(&self) -> [f32; 4] {
+    fn edit_source_macros(&self) -> [f32; 5] {
         self.drum_macros[self.selected_drum_model().index()]
     }
 
-    pub fn edit_drum_macros(&self) -> [f32; 4] {
+    pub fn edit_drum_macros(&self) -> [f32; 5] {
         if self.kit_all_drums {
             self.drum_group_macros
         } else {
@@ -5355,7 +5355,7 @@ impl NativeModel {
     }
 
     fn apply_kit_slider(&mut self, index: usize, py: i32, moving: bool, outbox: &mut Outbox) {
-        if index >= 4 {
+        if index >= Self::DRUM_MACRO_NAMES.len() {
             return;
         }
         let track = self.layout.kit_edit_slider(index);
@@ -5400,6 +5400,7 @@ impl NativeModel {
             noise: m[1],
             pitch: m[2],
             decay: m[3],
+            level: m[4],
         };
         let mut buf = [0.0f32; DRUM_PREVIEW_SAMPLES];
         DrumKit::preview(

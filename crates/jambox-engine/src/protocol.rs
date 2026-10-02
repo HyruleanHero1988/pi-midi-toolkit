@@ -583,6 +583,7 @@ fn parse_synth_param(name: &str) -> Option<SynthParam> {
         "drum_decay" => SynthParam::DrumDecay,
         "drum_noise" => SynthParam::DrumNoise,
         "drum_tone" => SynthParam::DrumTone,
+        "drum_amp" => SynthParam::DrumAmp,
         "drum_level" => SynthParam::DrumLevel,
         "input_level" => SynthParam::InputLevel,
         "fm_enable" => SynthParam::FmEnable,
@@ -708,6 +709,7 @@ pub fn decode(request: Request) -> Result<Decoded, String> {
                         | SynthParam::DrumDecay
                         | SynthParam::DrumNoise
                         | SynthParam::DrumTone
+                        | SynthParam::DrumAmp
                 ) {
                     Decoded::Command(Command::SetDrumMacro {
                         model: index,

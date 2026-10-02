@@ -1567,6 +1567,10 @@ impl JamboxEngine {
                 macros.tone = unit;
                 self.drums.set_macros(macros);
             }
+            SynthParam::DrumAmp => {
+                macros.level = unit;
+                self.drums.set_macros(macros);
+            }
             SynthParam::DrumLevel => self.drum_level = unit,
             SynthParam::InputLevel => self.input_level = unit,
             SynthParam::FmEnable => {
@@ -1609,6 +1613,7 @@ impl JamboxEngine {
             SynthParam::DrumDecay => macros.decay = unit,
             SynthParam::DrumNoise => macros.noise = unit,
             SynthParam::DrumTone => macros.tone = unit,
+            SynthParam::DrumAmp => macros.level = unit,
             _ => return,
         }
         self.drums.set_model_macros(model, macros);

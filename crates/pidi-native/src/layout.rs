@@ -2075,7 +2075,7 @@ impl Layout {
     }
 
     pub fn kit_edit_slider(&self, index: usize) -> Rect {
-        let n = 4i32;
+        let n = 5i32;
         let w = self.kit_macros.w / n;
         Rect {
             x: self.kit_macros.x + (index as i32) * w + 8,
@@ -2719,7 +2719,7 @@ impl Layout {
         if self.kit_edit_play().contains(px, py) {
             return Hit::KitPlay;
         }
-        for index in 0..4 {
+        for index in 0..5 {
             if self.kit_edit_slider(index).contains(px, py) {
                 return Hit::KitSlider(index);
             }
