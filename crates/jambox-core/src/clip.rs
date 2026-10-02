@@ -93,6 +93,9 @@ pub struct ClipVoice {
     pub delay_mix: f32,
     pub reverb_mix: f32,
     pub flanger_mix: f32,
+    /// DRIFT slider (0..1, center 0.5) captured with the take.
+    /// `None` follows the live slider (older pads).
+    pub release_drift: Option<f32>,
 }
 
 impl Default for ClipVoice {
@@ -107,6 +110,7 @@ impl Default for ClipVoice {
             delay_mix: 0.0,
             reverb_mix: 0.0,
             flanger_mix: 0.0,
+            release_drift: None,
         }
     }
 }
@@ -215,6 +219,10 @@ impl ClipSlot {
         self.mode = mode;
     }
 
+    pub fn playback_drift(&self) -> Option<f32> {
+        self.voice.release_drift
+    }
+
     pub fn playback_tone(&self) -> f32 {
         self.voice.tone
     }
@@ -235,6 +243,7 @@ impl ClipSlot {
             delay_mix: voice.delay_mix.clamp(0.0, 1.0),
             reverb_mix: voice.reverb_mix.clamp(0.0, 1.0),
             flanger_mix: voice.flanger_mix.clamp(0.0, 1.0),
+            release_drift: voice.release_drift.map(|v| v.clamp(0.0, 1.0)),
             ..voice
         };
     }

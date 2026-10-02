@@ -468,6 +468,10 @@ pub struct StatusReply {
     pub arp_root: u8,
     #[serde(default)]
     pub arp_step: u8,
+    #[serde(default)]
+    pub arp_len: u8,
+    #[serde(default)]
+    pub arp_steps: [i8; 16],
 }
 
 /// What the control thread decides to do with a request.
@@ -562,6 +566,7 @@ fn clip_voice_from_wire(voice: jambox_protocol::WireClipVoice) -> jambox_core::C
         delay_mix: voice.delay_mix,
         reverb_mix: voice.reverb_mix,
         flanger_mix: voice.flanger_mix,
+        release_drift: voice.release_drift.map(|v| v.clamp(0.0, 1.0)),
     }
 }
 

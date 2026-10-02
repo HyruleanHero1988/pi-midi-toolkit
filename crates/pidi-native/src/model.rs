@@ -988,9 +988,9 @@ impl NativeModel {
         self.push_arp_pattern(outbox);
         outbox.emit_mode("arp", self.arp.out.wire());
         self.status_line = if self.arp.latch {
-            "ARP LATCH · play a root, then retarget".into()
+            "ARP LATCH · hold a chord, let go, then play a key to move it".into()
         } else {
-            "ARP · hold a root, LATCH to keep it".into()
+            "ARP · hold the notes, in order. LATCH keeps them when you let go".into()
         };
     }
 
@@ -1017,6 +1017,39 @@ impl NativeModel {
         );
         outbox.emit_mode("arp", self.arp.out.wire());
         self.session_dirty = true;
+    }
+
+    /// Mirror a chord the engine just captured onto the step boxes.
+    ///
+    /// A status poll that still shows the previous pattern is left alone, so a
+    /// step tweak or a saved chord is not overwritten before the engine has it.
+    pub fn sync_arp_pattern_from_status(&mut self) {
+        let len = self.status.arp_len as usize;
+        if len == 0 || len > jambox_core::MAX_ARP_STEPS {
+            return;
+        }
+        let incoming = &self.status.arp_steps[..len];
+        let same_as_echo = self.arp.echoed
+            && self.arp.echoed_len as usize == len
+            && self.arp.echoed_steps[..len] == *incoming;
+        self.arp.echoed = true;
+        self.arp.echoed_len = len as u8;
+        self.arp.echoed_steps[..len].copy_from_slice(incoming);
+        if !self.status.arp_enabled {
+            return;
+        }
+        if self.arp.len as usize == len && self.arp.steps[..len] == *incoming {
+            return;
+        }
+        if same_as_echo {
+            return;
+        }
+        self.arp.len = len as u8;
+        self.arp.steps[..len].copy_from_slice(incoming);
+        if self.arp.selected >= len {
+            self.arp.selected = len - 1;
+        }
+        self.mark_dirty();
     }
 
     fn push_arp_pattern(&mut self, outbox: &mut Outbox) {
@@ -4728,6 +4761,7 @@ impl NativeModel {
         pad.fx_delay_mix = self.fx_voice[1].clamp(0.0, 1.0);
         pad.fx_reverb_mix = self.fx_voice[2].clamp(0.0, 1.0);
         pad.fx_flanger_mix = self.fx_voice[3].clamp(0.0, 1.0);
+        pad.release_drift = Some(self.release_drift.clamp(0.0, 1.0));
     }
 
     fn apply_live_voice_snapshot_at(&mut self, index: usize) {
@@ -4749,6 +4783,7 @@ impl NativeModel {
         pad.fx_delay_mix = fx[1];
         pad.fx_reverb_mix = fx[2];
         pad.fx_flanger_mix = fx[3];
+        pad.release_drift = Some(self.release_drift.clamp(0.0, 1.0));
     }
 
     fn phrase_clip_voice(pad: &PhrasePad) -> WireClipVoice {
@@ -4761,6 +4796,7 @@ impl NativeModel {
             delay_mix: pad.fx_delay_mix,
             reverb_mix: pad.fx_reverb_mix,
             flanger_mix: pad.fx_flanger_mix,
+            release_drift: pad.release_drift,
         }
     }
 

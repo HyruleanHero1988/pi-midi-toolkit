@@ -36,6 +36,8 @@ struct Voice {
     bend_target_semis: f32,
     /// Seconds since note-off. Drives the release pitch glide.
     release_age: f32,
+    /// Baked release glide for a pad / SEQ take. `None` follows the live slider.
+    release_drift_semis: Option<f32>,
 }
 
 impl Voice {
@@ -58,6 +60,7 @@ impl Voice {
             bend_semis: 0.0,
             bend_target_semis: 0.0,
             release_age: 0.0,
+            release_drift_semis: None,
         }
     }
 }
@@ -125,7 +128,16 @@ impl VoicePool {
 
     /// Start (or retrigger) a live note on `group`'s wavetable.
     pub fn note_on(&mut self, channel: u8, note: u8, velocity: u8, group: usize) {
-        self.start_note(channel, note, velocity, group, MixSource::Live, false, 1.0);
+        self.start_note(
+            channel,
+            note,
+            velocity,
+            group,
+            MixSource::Live,
+            false,
+            1.0,
+            None,
+        );
     }
 
     pub fn note_on_mix(
@@ -137,10 +149,11 @@ impl VoicePool {
         mix: MixSource,
     ) {
         let recorded = matches!(mix, MixSource::Clip(_));
-        self.start_note(channel, note, velocity, group, mix, recorded, 1.0);
+        self.start_note(channel, note, velocity, group, mix, recorded, 1.0, None);
     }
 
     /// Start a clip / SEQ / song note. `tone` is baked brightness (1 = open).
+    /// `drift_semis` is the take's release glide; `None` follows the live slider.
     pub fn note_on_recorded(
         &mut self,
         channel: u8,
@@ -149,8 +162,18 @@ impl VoicePool {
         group: usize,
         tone: f32,
         mix: MixSource,
+        drift_semis: Option<f32>,
     ) {
-        self.start_note(channel, note, velocity, group, mix, true, tone);
+        self.start_note(
+            channel,
+            note,
+            velocity,
+            group,
+            mix,
+            true,
+            tone,
+            drift_semis,
+        );
     }
 
     fn start_note(
@@ -162,6 +185,7 @@ impl VoicePool {
         mix: MixSource,
         recorded: bool,
         tone: f32,
+        drift_semis: Option<f32>,
     ) {
         if velocity == 0 {
             self.release_note(channel, note, recorded);
@@ -185,6 +209,7 @@ impl VoicePool {
             v.bend_semis = 0.0;
             v.bend_target_semis = 0.0;
             v.release_age = 0.0;
+            v.release_drift_semis = drift_semis;
             return;
         }
 
@@ -207,6 +232,7 @@ impl VoicePool {
             bend_semis: 0.0,
             bend_target_semis: 0.0,
             release_age: 0.0,
+            release_drift_semis: drift_semis,
         };
     }
 
@@ -401,6 +427,7 @@ impl VoicePool {
                 v.releasing,
                 v.recorded,
                 v.release_age,
+                v.release_drift_semis,
                 &ctx,
                 n,
             );
@@ -521,6 +548,7 @@ impl VoicePool {
                 v.releasing,
                 v.recorded,
                 v.release_age,
+                v.release_drift_semis,
                 &ctx,
                 n,
             );
@@ -656,6 +684,7 @@ fn phase_inc_span(
     releasing: bool,
     recorded: bool,
     release_age: f32,
+    baked_drift_semis: Option<f32>,
     ctx: &VoiceContext,
     n: usize,
 ) -> (f64, f64, f32) {
@@ -665,13 +694,18 @@ fn phase_inc_span(
     let base = midi_to_hz(note) * TABLE_SIZE as f64 / sr as f64;
     let voice = semis_to_ratio(bend_semis);
     let wheel = ctx.wheel_mul.max(0.05);
+    let drift_semis = if recorded {
+        baked_drift_semis.unwrap_or(ctx.release_drift_semis)
+    } else {
+        ctx.release_drift_semis
+    };
     let drift0 = if releasing {
-        drift_ratio(release_age, ctx.release_sec, ctx.release_drift_semis)
+        drift_ratio(release_age, ctx.release_sec, drift_semis)
     } else {
         1.0
     };
     let drift1 = if releasing {
-        drift_ratio(release_age + dt, ctx.release_sec, ctx.release_drift_semis)
+        drift_ratio(release_age + dt, ctx.release_sec, drift_semis)
     } else {
         1.0
     };
@@ -784,7 +818,7 @@ mod tests {
         let bank = WaveBank::with_builtins();
         let mut pool = VoicePool::new();
         pool.note_on(0, 60, 100, 0);
-        pool.note_on_recorded(0, 60, 100, 0, 1.0, MixSource::clip(0));
+        pool.note_on_recorded(0, 60, 100, 0, 1.0, MixSource::clip(0), None);
         assert_eq!(pool.active_count(), 2);
 
         pool.note_off_recorded(0, 60);
@@ -804,7 +838,7 @@ mod tests {
     fn recorded_voices_render_onto_the_recorded_bus() {
         let bank = WaveBank::with_builtins();
         let mut pool = VoicePool::new();
-        pool.note_on_recorded(0, 69, 127, 0, 1.0, MixSource::clip(0));
+        pool.note_on_recorded(0, 69, 127, 0, 1.0, MixSource::clip(0), None);
         let mut live = vec![0.0f32; 256];
         let mut recorded = vec![0.0f32; 256];
         pool.render_group_split(0, bank.table(0), &mut live, &mut recorded, ctx());
@@ -879,6 +913,34 @@ mod tests {
         assert!(
             z1 > z0 + z0 / 3,
             "pitch should rise across the release, crossings {z0} → {z1}"
+        );
+    }
+
+    #[test]
+    fn recorded_release_uses_baked_drift_not_the_live_slider() {
+        let bank = WaveBank::with_builtins();
+        let mut ctx = ctx();
+        ctx.attack_sec = 0.001;
+        ctx.release_sec = 0.50;
+        ctx.release_drift_semis = 0.0;
+        let mut pool = VoicePool::new();
+        pool.note_on_recorded(0, 57, 127, 0, 1.0, MixSource::clip(0), Some(12.0));
+        let mut live = vec![0.0f32; 1024];
+        let mut recorded = vec![0.0f32; 1024];
+        pool.render_group_split(0, bank.table(0), &mut live, &mut recorded, ctx);
+        pool.note_off_recorded(0, 57);
+        recorded.fill(0.0);
+        pool.render_group_split(0, bank.table(0), &mut live, &mut recorded, ctx);
+        let early = recorded.clone();
+        for _ in 0..18 {
+            recorded.fill(0.0);
+            pool.render_group_split(0, bank.table(0), &mut live, &mut recorded, ctx);
+        }
+        let z0 = zero_crossings(&early).max(1);
+        let z1 = zero_crossings(&recorded);
+        assert!(
+            z1 > z0 + z0 / 3,
+            "a pad should glide on its saved drift while the slider sits at center, crossings {z0} → {z1}"
         );
     }
 }

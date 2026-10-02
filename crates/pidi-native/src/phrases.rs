@@ -30,6 +30,8 @@ pub struct PhrasePad {
     pub fx_delay_mix: f32,
     pub fx_reverb_mix: f32,
     pub fx_flanger_mix: f32,
+    /// DRIFT slider captured with the take. `None` follows the live slider.
+    pub release_drift: Option<f32>,
 }
 
 impl Default for PhrasePad {
@@ -52,6 +54,7 @@ impl Default for PhrasePad {
             fx_delay_mix: 0.0,
             fx_reverb_mix: 0.0,
             fx_flanger_mix: 0.0,
+            release_drift: None,
         }
     }
 }
@@ -88,6 +91,9 @@ pub struct PhraseFile {
     fx_reverb_mix: f32,
     #[serde(default)]
     fx_flanger_mix: f32,
+    /// DRIFT slider captured with the take. Absent follows the live slider.
+    #[serde(default)]
+    release_drift: Option<f32>,
     #[serde(default)]
     events: Vec<FileEvent>,
 }
@@ -186,6 +192,7 @@ pub fn pad_from_file(file: &PhraseFile, bpm: f32) -> PhrasePad {
         fx_delay_mix: file.fx_delay_mix.clamp(0.0, 1.0),
         fx_reverb_mix: file.fx_reverb_mix.clamp(0.0, 1.0),
         fx_flanger_mix: file.fx_flanger_mix.clamp(0.0, 1.0),
+        release_drift: file.release_drift.map(|v| v.clamp(0.0, 1.0)),
     }
 }
 
@@ -231,6 +238,7 @@ pub fn file_from_pad(pad: &PhrasePad, bpm: f32) -> PhraseFile {
         fx_delay_mix: pad.fx_delay_mix.clamp(0.0, 1.0),
         fx_reverb_mix: pad.fx_reverb_mix.clamp(0.0, 1.0),
         fx_flanger_mix: pad.fx_flanger_mix.clamp(0.0, 1.0),
+        release_drift: pad.release_drift.map(|v| v.clamp(0.0, 1.0)),
         events,
     }
 }
@@ -506,6 +514,37 @@ mod tests {
         assert_eq!(loaded.morph_a, 2);
         assert!((loaded.fx_delay_mix - 0.5).abs() < 1e-6);
         assert!((loaded.fx_flanger_mix - 0.2).abs() < 1e-6);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pad_drift_round_trips_and_old_files_follow_live() {
+        let dir = std::env::temp_dir().join(format!("pidi-phrase-drift-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let mut pad = from_wire(
+            vec![WireClipEvent {
+                tick: 0,
+                on: true,
+                channel: 0,
+                note: 60,
+                velocity: 100,
+                ..Default::default()
+            }],
+            1920,
+            120.0,
+            true,
+        );
+        assert!(pad.release_drift.is_none());
+        pad.release_drift = Some(0.8);
+        assert!(save_pad(&dir, 0, &pad, 120.0));
+        let loaded = load_pad(&pad_path(&dir, 0), 120.0).unwrap();
+        assert!((loaded.release_drift.unwrap() - 0.8).abs() < 1e-6);
+        let old: PhraseFile = serde_json::from_str(
+            r#"{"version":4,"length":1.0,"events":[{"t":0.0,"on":true,"channel":0,"note":60,"velocity":100}]}"#,
+        )
+        .unwrap();
+        assert!(pad_from_file(&old, 120.0).release_drift.is_none());
         let _ = fs::remove_dir_all(&dir);
     }
 
