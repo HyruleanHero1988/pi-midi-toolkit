@@ -1940,7 +1940,7 @@ fn draw_synth(scene: &mut Scene, model: &NativeModel) {
     }
 
     const LABELS: [&str; Layout::SYNTH_SLIDER_COUNT] =
-        ["MORPH", "TONE", "LEVEL", "ATK", "REL", "FLANGE", "RATE"];
+        ["MORPH", "TONE", "LEVEL", "ATK", "REL", "DRIFT", "FLANGE", "RATE"];
 
     let a = waves::short_label(model.wave_label(model.morph_a));
     let b = waves::short_label(model.wave_label(model.morph_b));
@@ -2003,22 +2003,46 @@ fn draw_synth(scene: &mut Scene, model: &NativeModel) {
         let value = if index < 5 {
             model.synth_params[index]
         } else if index == 5 {
+            model.release_drift
+        } else if index == 6 {
             model.fx_voice[3]
         } else {
             model.fx_flanger_rate
         };
-        let fill_h = (track.h as f32 * value) as i32;
-        let fill = Rect {
-            x: track.x + 4,
-            y: track.y + track.h - fill_h,
-            w: track.w - 8,
-            h: fill_h.max(2),
+        let fill = if index == 5 {
+            let mid = track.y + track.h / 2;
+            let travel = ((value - 0.5).abs() * track.h as f32) as i32;
+            if value >= 0.5 {
+                Rect {
+                    x: track.x + 4,
+                    y: mid - travel,
+                    w: track.w - 8,
+                    h: travel.max(2),
+                }
+            } else {
+                Rect {
+                    x: track.x + 4,
+                    y: mid,
+                    w: track.w - 8,
+                    h: travel.max(2),
+                }
+            }
+        } else {
+            let fill_h = (track.h as f32 * value) as i32;
+            Rect {
+                x: track.x + 4,
+                y: track.y + track.h - fill_h,
+                w: track.w - 8,
+                h: fill_h.max(2),
+            }
         };
         scene.fill_rect(
             fill,
             if index == 0 {
                 0xb16286
-            } else if index == 5 || index == 6 {
+            } else if index == 5 {
+                0x83a598
+            } else if index == 6 || index == 7 {
                 0xd79921
             } else {
                 0x689d6a

@@ -72,7 +72,7 @@ pub use repeat::{
     RepeatDivision, RepeatEvent, RepeatRack, MAX_REPEAT_EVENTS_PER_BLOCK, MAX_REPEAT_LANES,
 };
 pub use transport::{Quantize, Transport, PPQ};
-pub use voice::{VoicePool, MAX_VOICES};
+pub use voice::{release_drift_semis, VoicePool, MAX_VOICES};
 pub use wavetable::{WaveBank, TABLE_MASK, TABLE_PEAK, TABLE_SIZE};
 
 /// MIDI channel used for drum voices (channel 10, zero-based).

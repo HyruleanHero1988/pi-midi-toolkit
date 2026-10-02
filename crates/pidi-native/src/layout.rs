@@ -1893,7 +1893,7 @@ impl Layout {
         }
     }
 
-    pub const SYNTH_SLIDER_COUNT: usize = 7;
+    pub const SYNTH_SLIDER_COUNT: usize = 8;
 
     fn synth_play_bottom(&self) -> i32 {
         self.synth_keys.y + self.synth_keys.h
@@ -3848,7 +3848,7 @@ mod tests {
         assert!(rate.x + rate.w <= layout.synth_scope.x);
         assert_eq!(
             layout.hit(UiMode::Synth, rate.x + 4, rate.y + rate.h / 2),
-            Hit::SynthSlider(6)
+            Hit::SynthSlider(Layout::SYNTH_SLIDER_COUNT - 1)
         );
     }
 

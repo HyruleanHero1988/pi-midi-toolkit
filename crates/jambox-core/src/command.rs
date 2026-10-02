@@ -47,6 +47,9 @@ pub enum SynthParam {
     Level,
     Attack,
     Release,
+    /// 0..1, center 0.5. Each note glides this far in semitones across its release.
+    /// 0 = −12 st, 0.5 = none, 1 = +12 st.
+    ReleaseDrift,
     VibratoDepth,
     VibratoRate,
     /// 0..1 mod-wheel amount. Vibrato depth is scaled by max(this, VibratoAlways).

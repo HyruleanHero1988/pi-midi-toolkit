@@ -180,6 +180,9 @@ pub struct SessionState {
     pub seq_kaoss_level: f32,
     pub attack: f32,
     pub release: f32,
+    /// SYNTH DRIFT. 0.5 = no pitch glide on release. Missing → center.
+    #[serde(default = "default_release_drift")]
+    pub release_drift: f32,
     pub morph_a: u16,
     pub morph_b: u16,
     /// On-screen synth keyboard octave relative to C4 (−3..+3).
@@ -335,6 +338,10 @@ fn default_kaoss_viz_style() -> String {
     "cells".into()
 }
 
+fn default_release_drift() -> f32 {
+    0.5
+}
+
 fn default_vibrato_depth() -> f32 {
     0.5
 }
@@ -366,6 +373,7 @@ impl Default for SessionState {
             seq_kaoss_level: default_seq_level(),
             attack: 0.05,
             release: 0.3,
+            release_drift: default_release_drift(),
             morph_a: 0,
             morph_b: 1,
             synth_octave: 0,

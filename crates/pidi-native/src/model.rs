@@ -214,6 +214,8 @@ pub struct NativeModel {
     pub seq_to_pad_armed: bool,
     pub status_line: String,
     pub synth_params: [f32; 5],
+    /// Release pitch glide. 0.5 is no drift; above rises, below falls (±12 st).
+    pub release_drift: f32,
     pub vibrato_always: f32,
     /// Vibrato depth in semitones (0..2).
     pub vibrato_depth: f32,
@@ -489,6 +491,7 @@ impl NativeModel {
             seq_to_pad_armed: false,
             status_line: String::new(),
             synth_params: [0.5, 0.5, 0.8, 0.05, 0.3],
+            release_drift: 0.5,
             vibrato_always: 0.0,
             vibrato_depth: 0.5,
             vibrato_rate: 5.0,
@@ -1983,6 +1986,7 @@ impl NativeModel {
         self.seq.bpm = self.bpm;
         self.seq.cue_beep = s.seq_cue_beep;
         self.synth_params = [s.morph, s.tone, s.level, s.attack, s.release];
+        self.release_drift = s.release_drift.clamp(0.0, 1.0);
         self.drum_level = s.drum_level.clamp(0.0, 1.0);
         self.input_level = s.input_level.clamp(0.0, 1.0);
         self.seq_level = s.seq_level.clamp(0.0, 2.0);
@@ -2102,6 +2106,7 @@ impl NativeModel {
         outbox.clip_gain(SEQ_KAOSS_MIX_SLOT, self.seq_kaoss_level);
         outbox.synth("attack", self.synth_params[3]);
         outbox.synth("release", self.synth_params[4]);
+        outbox.synth("release_drift", self.release_drift);
         outbox.synth("vibrato_always", self.vibrato_always);
         outbox.synth("vibrato_depth", self.vibrato_depth / 2.0);
         outbox.synth(
@@ -2145,6 +2150,7 @@ impl NativeModel {
             seq_kaoss_level: self.seq_kaoss_level,
             attack: self.synth_params[3],
             release: self.synth_params[4],
+            release_drift: self.release_drift,
             morph_a: self.morph_a,
             morph_b: self.morph_b,
             synth_octave: self.synth_octave,
@@ -4788,6 +4794,17 @@ impl NativeModel {
             return;
         };
         if index == 5 {
+            if !Self::accept_slider_value(self.release_drift, value, moving) {
+                return;
+            }
+            self.release_drift = value;
+            outbox.synth("release_drift", value);
+            let semis = jambox_core::release_drift_semis(value);
+            self.status_line = format!("release drift {semis:+.1} st");
+            self.mark_dirty();
+            return;
+        }
+        if index == 6 {
             if !Self::accept_slider_value(self.fx_voice[3], value, moving) {
                 return;
             }
@@ -4797,7 +4814,7 @@ impl NativeModel {
             self.mark_dirty();
             return;
         }
-        if index == 6 {
+        if index == 7 {
             if !Self::accept_slider_value(self.fx_flanger_rate, value, moving) {
                 return;
             }
@@ -6100,7 +6117,8 @@ impl NativeModel {
         self.kaoss_touching = remaining > 0;
         if remaining == 0 {
             self.kaoss_usb_pad_up(outbox);
-            // Leave bend at center when the pad is idle (HOLD keeps the latched Y).
+            // Center the wheel for the next note. The engine already copied the
+            // bend onto the voice that is decaying, so this does not snap the tail.
             if !self.kaoss_hold && prog.y_param == "pitch_bend" {
                 self.reset_kaoss_pitch_bend(outbox);
             }
@@ -7194,6 +7212,7 @@ impl NativeModel {
 
     fn factory_reset_synth(&mut self, outbox: &mut Outbox) {
         self.synth_params = [0.5, 0.5, 0.8, 0.05, 0.3];
+        self.release_drift = 0.5;
         self.drum_level = 1.0;
         self.input_level = 0.0;
         self.vibrato_always = 0.0;
@@ -7209,6 +7228,7 @@ impl NativeModel {
         outbox.synth("input_level", self.input_level);
         outbox.synth("attack", self.synth_params[3]);
         outbox.synth("release", self.synth_params[4]);
+        outbox.synth("release_drift", self.release_drift);
         self.push_vibrato_params(outbox);
         self.sync_wave_bank();
         self.status_line = "synth factory defaults".into();
@@ -10435,7 +10455,7 @@ mod tests {
         model.morph_a = 2;
         model.morph_b = 5;
         let mut out = Outbox::new();
-        let track = model.layout.synth_slider(5);
+        let track = model.layout.synth_slider(6);
         model.finger_down(1, track.x + 4, track.y + 8, &mut out);
         let batch = out.take();
         assert!(batch.iter().any(|r| matches!(
@@ -10464,7 +10484,7 @@ mod tests {
         model.morph_a = 2;
         model.morph_b = 5;
         let mut out = Outbox::new();
-        let track = model.layout.synth_slider(6);
+        let track = model.layout.synth_slider(7);
         model.finger_down(1, track.x + 4, track.y + 8, &mut out);
         let batch = out.take();
         assert!(

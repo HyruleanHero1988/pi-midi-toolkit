@@ -572,6 +572,7 @@ fn parse_synth_param(name: &str) -> Option<SynthParam> {
         "level" => SynthParam::Level,
         "attack" => SynthParam::Attack,
         "release" => SynthParam::Release,
+        "release_drift" => SynthParam::ReleaseDrift,
         "vibrato_depth" => SynthParam::VibratoDepth,
         "vibrato_rate" => SynthParam::VibratoRate,
         "vibrato_mod" => SynthParam::VibratoMod,

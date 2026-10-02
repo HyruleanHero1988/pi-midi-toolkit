@@ -264,6 +264,8 @@ pub struct JamboxEngine {
     tone_lfo_phase: f64,
     bend_semis: f32,
     bend_target_semis: f32,
+    /// Signed semitones a note glides across its release. 0 keeps the pitch.
+    release_drift_semis: f32,
     clip_emit: EmitMode,
     kaoss_emit: EmitMode,
     arp_emit: EmitMode,
@@ -378,6 +380,7 @@ impl JamboxEngine {
             tone_lfo_phase: 0.0,
             bend_semis: 0.0,
             bend_target_semis: 0.0,
+            release_drift_semis: 0.0,
             clip_emit: EmitMode::Both,
             kaoss_emit: EmitMode::Local,
             arp_emit: EmitMode::Both,
@@ -775,6 +778,7 @@ impl JamboxEngine {
             tone_lfo_phase,
             bend_semis,
             bend_target_semis,
+            release_drift_semis,
             ..
         } = self;
 
@@ -795,11 +799,14 @@ impl JamboxEngine {
 
         let dt = n as f32 / sr.max(8000.0);
         *bend_semis = crate::kaoss::slew_bend(*bend_semis, *bend_target_semis, dt);
+        let wheel_mul = 2f32.powf(*bend_semis / 12.0);
         let pitch_mul = 2f32.powf((*bend_semis + vib) / 12.0);
         bank.rebuild_morph();
         let ctx = VoiceContext {
             sample_rate: sr,
             pitch_mul,
+            wheel_mul,
+            release_drift_semis: *release_drift_semis,
             bend_slew_dt: dt,
             attack_sec: *attack_sec,
             release_sec: *release_sec,
@@ -1003,8 +1010,7 @@ impl JamboxEngine {
                         self.apply_arp_voice(ch, n, 0, false, relative_frame, midi_out);
                     }
                 } else if channel != DRUM_CHANNEL {
-                    self.voices.note_off(channel, note);
-                    self.fm.note_off(channel, note);
+                    self.release_keyed_note(channel, note);
                 }
             }
             Command::ClipNoteOn {
@@ -1174,7 +1180,7 @@ impl JamboxEngine {
                 } else {
                     let group = self.bank.nearer_index();
                     self.voices.note_on(channel, note, velocity, group);
-                    self.voices.note_off(channel, note);
+                    self.voices.note_off_latched(channel, note, self.bend_semis);
                 }
                 self.repeats.start(
                     owner,
@@ -1202,7 +1208,7 @@ impl JamboxEngine {
                 } else {
                     let group = self.bank.nearer_index();
                     self.voices.note_on(channel, note, velocity, group);
-                    self.voices.note_off(channel, note);
+                    self.voices.note_off_latched(channel, note, self.bend_semis);
                 }
             }
             Command::TouchDown {
@@ -1336,8 +1342,7 @@ impl JamboxEngine {
         midi_out: &mut MidiOutSink,
     ) {
         if self.arp_emit.includes_local() && channel != DRUM_CHANNEL {
-            self.voices.note_off(channel, note);
-            self.fm.note_off(channel, note);
+            self.release_keyed_note(channel, note);
         }
         if self.arp_emit.includes_usb() {
             midi_out.push(
@@ -1351,10 +1356,17 @@ impl JamboxEngine {
         }
     }
 
+    /// Note-off for a live key or Kaoss voice. The current wheel is copied onto
+    /// the voice so a following pitch-bend reset does not yank the decay home.
+    fn release_keyed_note(&mut self, channel: u8, note: u8) {
+        let bend = self.bend_semis;
+        self.voices.note_off_latched(channel, note, bend);
+        self.fm.note_off_latched(channel, note, bend);
+    }
+
     fn sound_on(&mut self, channel: u8, note: u8, velocity: u8, mix: MixSource) {
         if velocity == 0 {
-            self.voices.note_off(channel, note);
-            self.fm.note_off(channel, note);
+            self.release_keyed_note(channel, note);
             return;
         }
         if channel == DRUM_CHANNEL {
@@ -1407,7 +1419,7 @@ impl JamboxEngine {
                         if recorded {
                             self.voices.note_off_recorded(channel, old_note);
                         } else {
-                            self.voices.note_off(channel, old_note);
+                            self.release_keyed_note(channel, old_note);
                         }
                         self.sound_on(channel, new_note, velocity, mix);
                     }
@@ -1425,7 +1437,7 @@ impl JamboxEngine {
                     if recorded {
                         self.voices.note_off_recorded(channel, note);
                     } else {
-                        self.voices.note_off(channel, note);
+                        self.release_keyed_note(channel, note);
                     }
                 }
             }
@@ -1537,6 +1549,9 @@ impl JamboxEngine {
             }
             SynthParam::Release => {
                 self.release_sec = map_exp_time(unit, RELEASE_SEC_MIN, RELEASE_SEC_MAX)
+            }
+            SynthParam::ReleaseDrift => {
+                self.release_drift_semis = crate::voice::release_drift_semis(unit);
             }
             SynthParam::VibratoDepth => self.vib_depth_semis = unit * 2.0,
             SynthParam::VibratoRate => self.vib_rate_hz = 1.0 + unit * 8.0,
@@ -1689,6 +1704,94 @@ mod tests {
         e.render(&mut out, &[], &mut midi);
         assert_eq!(peak(&out), 0.0);
         assert!(midi.is_empty());
+    }
+
+    fn rising_crossings(buf: &[f32]) -> usize {
+        buf.windows(2)
+            .filter(|w| w[0] <= 0.0 && w[1] > 0.0)
+            .count()
+    }
+
+    #[test]
+    fn bend_stays_on_the_note_after_the_wheel_returns() {
+        let mut held = engine();
+        let mut midi = MidiOutSink::new();
+        apply_now(
+            &mut held,
+            Command::SetSynth {
+                param: SynthParam::Release,
+                value: 1.0,
+            },
+        );
+        apply_now(
+            &mut held,
+            Command::SetSynth {
+                param: SynthParam::PitchBend,
+                value: 12.0,
+            },
+        );
+        let mut out = vec![0.0f32; 2048];
+        held.render(
+            &mut out,
+            &[ScheduledCommand::now(Command::NoteOn {
+                channel: 0,
+                note: 69,
+                velocity: 120,
+            })],
+            &mut midi,
+        );
+        let bent = {
+            let mut tail = vec![0.0f32; 2048];
+            held.render(
+                &mut tail,
+                &[
+                    ScheduledCommand::now(Command::NoteOff {
+                        channel: 0,
+                        note: 69,
+                    }),
+                    ScheduledCommand::now(Command::SetSynth {
+                        param: SynthParam::PitchBend,
+                        value: 0.0,
+                    }),
+                ],
+                &mut midi,
+            );
+            rising_crossings(&tail)
+        };
+
+        let mut plain = engine();
+        apply_now(
+            &mut plain,
+            Command::SetSynth {
+                param: SynthParam::Release,
+                value: 1.0,
+            },
+        );
+        let mut out = vec![0.0f32; 2048];
+        plain.render(
+            &mut out,
+            &[ScheduledCommand::now(Command::NoteOn {
+                channel: 0,
+                note: 69,
+                velocity: 120,
+            })],
+            &mut midi,
+        );
+        let mut tail = vec![0.0f32; 2048];
+        plain.render(
+            &mut tail,
+            &[ScheduledCommand::now(Command::NoteOff {
+                channel: 0,
+                note: 69,
+            })],
+            &mut midi,
+        );
+        let open = rising_crossings(&tail).max(1);
+        let ratio = bent as f32 / open as f32;
+        assert!(
+            (ratio - 2.0).abs() < 0.35,
+            "release should keep the +12 bend after the wheel centers, ratio {ratio} ({open} vs {bent})"
+        );
     }
 
     #[test]
