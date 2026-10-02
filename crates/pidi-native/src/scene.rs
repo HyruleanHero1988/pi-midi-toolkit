@@ -3447,40 +3447,20 @@ fn draw_fx(scene: &mut Scene, model: &NativeModel) {
     scene.text_centered(
         layout.settings_fx_target,
         match model.fx_target {
-            crate::model::FxEditTarget::Bus => "TARGET: BUS",
-            crate::model::FxEditTarget::Voice => "TARGET: VOICE",
-            crate::model::FxEditTarget::DrumGroup => "TARGET: DRUMS",
+            crate::model::FxEditTarget::Bus => "BUS",
+            crate::model::FxEditTarget::Voice => "VOICE",
+            crate::model::FxEditTarget::DrumGroup => "DRUMS",
         },
         0xffffff,
         2,
-    );
-    scene.text(
-        layout.settings_fx_target.x + layout.settings_fx_target.w + 12,
-        layout.settings_fx_target.y + 14,
-        "slide amount · tap on",
-        0x928374,
     );
     let clear = layout.punch_clear();
     let lock = layout.punch_lock();
-    let prio = layout.punch_prio();
-    let rpt_mode = layout.punch_rpt_mode();
+    let source = layout.punch_source();
+    let pads = layout.punch_pads();
+    let set = layout.punch_set();
     let punch_live = model.punch_active();
-    scene.fill_rect(prio, 0x3c3836);
-    scene.text_centered(
-        prio,
-        &format!("PRIO {}", model.punch_buffer_prio.label()),
-        0xffffff,
-        2,
-    );
-    scene.fill_rect(
-        rpt_mode,
-        if model.punch_rpt_mode == jambox_core::PunchRptMode::Hold {
-            0x689d6a
-        } else {
-            0x3c3836
-        },
-    );
-    scene.text_centered(rpt_mode, model.punch_rpt_mode.label(), 0xffffff, 2);
+    let buf = jambox_core::PunchSource::from_u8(model.punch_source);
     scene.fill_rect(
         lock,
         if model.punch_grabbing {
@@ -3492,6 +3472,30 @@ fn draw_fx(scene: &mut Scene, model: &NativeModel) {
         },
     );
     scene.text_centered(lock, "GRAB", 0xffffff, 2);
+    scene.fill_rect(
+        source,
+        match buf {
+            jambox_core::PunchSource::Keys => 0x689d6a,
+            jambox_core::PunchSource::Drums => 0xd79921,
+            jambox_core::PunchSource::Mic => 0x458588,
+        },
+    );
+    scene.text_centered(source, buf.label(), 0xffffff, 2);
+    scene.fill_rect(
+        pads,
+        if model.punch_pads_fx { 0x689d6a } else { 0x3c3836 },
+    );
+    scene.text_centered(
+        pads,
+        if model.punch_pads_fx { "PAD FX" } else { "DRUMS" },
+        0xffffff,
+        2,
+    );
+    scene.fill_rect(
+        set,
+        if model.fx_settings_open { 0x458588 } else { 0x3c3836 },
+    );
+    scene.text_centered(set, "SET", 0xffffff, 2);
     scene.fill_rect(clear, if punch_live { 0xcc241d } else { 0x3c3836 });
     scene.text_centered(clear, "CLEAR", 0xffffff, 2);
     const LABELS: [&str; Layout::FX_SLIDER_COUNT] =
@@ -3564,18 +3568,20 @@ fn draw_fx(scene: &mut Scene, model: &NativeModel) {
             },
             if armed { PUNCH_COLOR[index] } else { 0x3c3836 },
         );
-        if jambox_core::punch_slot_has_grid(index) {
-            let inner_h = (cell.h - 10) as f32;
-            let inner_top = (cell.y + 5) as f32;
+        if model.punch_grid_mode == jambox_core::PunchGridMode::Beat
+            && jambox_core::punch_slot_has_grid(index)
+        {
+            let inner_h = (cell.h - 28) as f32;
+            let inner_top = (cell.y + 22) as f32;
             let line_color = if armed { 0xfbf1c7 } else { 0x7c6f64 };
             let label_color = if armed { 0xfbf1c7 } else { 0xa89984 };
             for tick in jambox_core::PUNCH_GRID_TICKS {
                 let y = (inner_top + inner_h * (1.0 - tick)).round() as i32;
                 scene.fill_rect(
                     Rect {
-                        x: cell.x + 6,
+                        x: cell.x + 8,
                         y,
-                        w: cell.w - 12,
+                        w: cell.w - 16,
                         h: 2,
                     },
                     line_color,
@@ -3586,20 +3592,69 @@ fn draw_fx(scene: &mut Scene, model: &NativeModel) {
                 .iter()
                 .zip(BAND_MIDS.iter())
             {
-                let y = (inner_top + inner_h * (1.0 - mid) - 4.0).round() as i32;
-                scene.text_scaled(cell.x + cell.w - 36, y, label, label_color, 1);
+                let y = (inner_top + inner_h * (1.0 - mid) - 6.0).round() as i32;
+                scene.text_scaled(cell.x + 10, y, label, label_color, 1);
             }
         }
         scene.text(
             cell.x + 8,
-            cell.y + 8,
+            cell.y + 6,
             jambox_core::PUNCH_LABELS[index],
             if armed { 0xfbf1c7 } else { 0xa89984 },
         );
-        if armed {
-            scene.text(cell.x + cell.w - 28, cell.y + 8, "ON", 0xfabd2f);
-        }
     }
+    if model.fx_settings_open {
+        draw_fx_settings(scene, model);
+    }
+}
+
+fn draw_fx_settings(scene: &mut Scene, model: &NativeModel) {
+    let layout = model.layout;
+    let panel = Rect {
+        x: 16,
+        y: crate::layout::HUD_H + 56,
+        w: 768,
+        h: 340,
+    };
+    scene.fill_rect(panel, 0x1d2021);
+    scene.text_scaled(panel.x + 24, panel.y + 16, "FX SET", 0xfbf1c7, 2);
+    let prio = layout.punch_prio();
+    let rpt = layout.punch_rpt_mode();
+    let grid = layout.punch_grid_mode();
+    let close = layout.punch_settings_close();
+    scene.fill_rect(prio, 0x3c3836);
+    scene.text_centered(
+        prio,
+        &format!("PRIO {}", model.punch_buffer_prio.label()),
+        0xffffff,
+        2,
+    );
+    scene.fill_rect(
+        rpt,
+        if model.punch_rpt_mode == jambox_core::PunchRptMode::Hold {
+            0x689d6a
+        } else {
+            0x3c3836
+        },
+    );
+    scene.text_centered(rpt, model.punch_rpt_mode.label(), 0xffffff, 2);
+    scene.fill_rect(
+        grid,
+        if model.punch_grid_mode == jambox_core::PunchGridMode::Beat {
+            0x458588
+        } else {
+            0x3c3836
+        },
+    );
+    scene.text_centered(grid, model.punch_grid_mode.label(), 0xffffff, 2);
+    scene.fill_rect(close, 0x504945);
+    scene.text_centered(close, "CLOSE", 0xffffff, 2);
+    scene.text(
+        panel.x + 24,
+        panel.y + panel.h - 36,
+        "BEAT locks 1/4–1/32. SMOOTH loops the whole capture at the bottom.",
+        0xa89984,
+    );
 }
 
 fn draw_mix(scene: &mut Scene, model: &NativeModel) {

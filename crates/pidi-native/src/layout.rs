@@ -181,8 +181,12 @@ pub enum Hit {
     PunchPad(usize),
     PunchClear,
     PunchLock,
+    PunchPads,
+    PunchSource,
+    PunchSet,
     PunchPrio,
     PunchRptMode,
+    PunchGrid,
     MixBus(usize),
     MixPad(usize),
     SettingsWifi,
@@ -3352,39 +3356,70 @@ impl Layout {
         }
     }
 
-    pub fn punch_clear(&self) -> Rect {
+    pub fn punch_tool(&self, index: i32) -> Rect {
+        let w = 92;
+        let gap = 5;
         Rect {
-            x: 620,
-            y: HUD_H + 10,
-            w: 100,
-            h: 44,
+            x: 300 + index * (w + gap),
+            y: HUD_H + 8,
+            w,
+            h: 40,
         }
     }
 
+    pub fn punch_clear(&self) -> Rect {
+        self.punch_tool(4)
+    }
+
     pub fn punch_lock(&self) -> Rect {
-        Rect {
-            x: 292,
-            y: HUD_H + 10,
-            w: 72,
-            h: 44,
-        }
+        self.punch_tool(0)
+    }
+
+    pub fn punch_source(&self) -> Rect {
+        self.punch_tool(1)
+    }
+
+    pub fn punch_pads(&self) -> Rect {
+        self.punch_tool(2)
+    }
+
+    pub fn punch_set(&self) -> Rect {
+        self.punch_tool(3)
     }
 
     pub fn punch_prio(&self) -> Rect {
         Rect {
-            x: 372,
-            y: HUD_H + 10,
-            w: 100,
-            h: 44,
+            x: 40,
+            y: HUD_H + 130,
+            w: 220,
+            h: 72,
         }
     }
 
     pub fn punch_rpt_mode(&self) -> Rect {
         Rect {
-            x: 480,
-            y: HUD_H + 10,
-            w: 128,
-            h: 44,
+            x: 280,
+            y: HUD_H + 130,
+            w: 220,
+            h: 72,
+        }
+    }
+
+    pub fn punch_grid_mode(&self) -> Rect {
+        Rect {
+            x: 520,
+            y: HUD_H + 130,
+            w: 220,
+            h: 72,
+        }
+    }
+
+    pub fn punch_settings_close(&self) -> Rect {
+        Rect {
+            x: 40,
+            y: HUD_H + 230,
+            w: 160,
+            h: 56,
         }
     }
 
@@ -3450,14 +3485,17 @@ impl Layout {
         if self.settings_fx_target.contains(px, py) {
             return Hit::FxTarget;
         }
-        if self.punch_prio().contains(px, py) {
-            return Hit::PunchPrio;
-        }
-        if self.punch_rpt_mode().contains(px, py) {
-            return Hit::PunchRptMode;
-        }
         if self.punch_lock().contains(px, py) {
             return Hit::PunchLock;
+        }
+        if self.punch_source().contains(px, py) {
+            return Hit::PunchSource;
+        }
+        if self.punch_pads().contains(px, py) {
+            return Hit::PunchPads;
+        }
+        if self.punch_set().contains(px, py) {
+            return Hit::PunchSet;
         }
         if self.punch_clear().contains(px, py) {
             return Hit::PunchClear;
@@ -3471,6 +3509,22 @@ impl Layout {
             if self.punch_pad_cell(index).contains(px, py) {
                 return Hit::PunchPad(index);
             }
+        }
+        Hit::None
+    }
+
+    pub fn hit_fx_settings(&self, px: i32, py: i32) -> Hit {
+        if self.punch_prio().contains(px, py) {
+            return Hit::PunchPrio;
+        }
+        if self.punch_rpt_mode().contains(px, py) {
+            return Hit::PunchRptMode;
+        }
+        if self.punch_grid_mode().contains(px, py) {
+            return Hit::PunchGrid;
+        }
+        if self.punch_settings_close().contains(px, py) || self.punch_set().contains(px, py) {
+            return Hit::PunchSet;
         }
         Hit::None
     }
@@ -4191,8 +4245,13 @@ mod tests {
         let prio = layout.punch_prio();
         assert_on_screen("punch prio", prio);
         assert_eq!(
-            layout.hit(UiMode::Fx, prio.x + 8, prio.y + 8),
+            layout.hit_fx_settings(prio.x + 8, prio.y + 8),
             Hit::PunchPrio
+        );
+        let set = layout.punch_set();
+        assert_eq!(
+            layout.hit(UiMode::Fx, set.x + 8, set.y + 8),
+            Hit::PunchSet
         );
     }
 

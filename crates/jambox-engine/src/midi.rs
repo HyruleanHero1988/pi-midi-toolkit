@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use midi_core::{
     fanout_dest_mask, is_virtual_port_name, matching_port_names, pick_port_name, MidiEvent,
@@ -24,8 +24,9 @@ use jambox_core::{
 /// Repeat-lane owners for hardware pads (`0x1000 | note`).
 const HW_REPEAT_OWNER: u32 = 0x1000;
 
-/// How often the output thread checks the ring.
-const OUT_POLL: Duration = Duration::from_micros(500);
+/// How often the output thread checks the ring once a port is open.
+/// A 0.5 ms poll re-listed every ALSA MIDI port each wake and pegged a core.
+const OUT_POLL: Duration = Duration::from_millis(2);
 /// How often we look for a newly plugged controller.
 const HOTPLUG_POLL: Duration = Duration::from_millis(400);
 
@@ -67,6 +68,8 @@ pub struct MidiMap {
     fx_index: AtomicU16,
     /// Incoming NoteOns → 127 (MPK velocity workaround). Default on.
     full_vel: AtomicBool,
+    /// FX page: Bank A pad notes are punch toggles instead of kit hits.
+    pads_to_fx: AtomicBool,
     /// Per kit-voice note-repeat slot (0 = off). Hardware pads read this.
     repeat_div: [AtomicU8; DRUM_MODEL_COUNT],
     repeat_latch: AtomicBool,
@@ -81,6 +84,7 @@ impl Default for MidiMap {
             fx_kind: AtomicU8::new(0),
             fx_index: AtomicU16::new(0),
             full_vel: AtomicBool::new(true),
+            pads_to_fx: AtomicBool::new(true),
             repeat_div: std::array::from_fn(|_| AtomicU8::new(0)),
             repeat_latch: AtomicBool::new(false),
             hw_latched: std::array::from_fn(|_| AtomicBool::new(false)),
@@ -114,6 +118,14 @@ impl MidiMap {
 
     pub fn set_full_vel(&self, on: bool) {
         self.full_vel.store(on, Ordering::Relaxed);
+    }
+
+    pub fn set_pads_to_fx(&self, armed: bool) {
+        self.pads_to_fx.store(armed, Ordering::Relaxed);
+    }
+
+    fn pads_to_fx(&self) -> bool {
+        self.pads_to_fx.load(Ordering::Relaxed)
     }
 
     pub fn full_vel(&self) -> bool {
@@ -236,6 +248,7 @@ impl MidiMap {
                 velocity,
             } => {
                 if self.mode.load(Ordering::Relaxed) == MODE_PUNCH
+                    && self.pads_to_fx()
                     && punch_index_for_pad_note(note).is_some()
                 {
                     return None;
@@ -253,6 +266,7 @@ impl MidiMap {
             }
             MidiEvent::NoteOff { channel, note, .. } => {
                 if self.mode.load(Ordering::Relaxed) == MODE_PUNCH
+                    && self.pads_to_fx()
                     && punch_index_for_pad_note(note).is_some()
                 {
                     return None;
@@ -629,12 +643,15 @@ fn try_open_output(name: &str) -> Result<MidiOutputConnection, MidiError> {
 /// Drain engine-emitted MIDI to a hardware port until `running` clears.
 /// Re-opens when the cable returns or the kiosk changes the OUT filter.
 pub fn spawn_output(io: Arc<MidiIo>, mut side: MidiOutSide, running: Arc<AtomicBool>) {
-    std::thread::spawn(move || {
+    let _ = std::thread::Builder::new()
+        .name("jambox-midi-out".into())
+        .spawn(move || {
         let mut connection: Option<MidiOutputConnection> = None;
         let mut current = String::new();
         let mut announced_wait = false;
         let mut last_filter = String::from("\0");
         let mut buf = [0u8; 3];
+        let mut next_scan = Instant::now();
         while running.load(Ordering::Relaxed) {
             let filter = io.output_filter();
             if filter != last_filter {
@@ -650,33 +667,37 @@ pub fn spawn_output(io: Arc<MidiIo>, mut side: MidiOutSide, running: Arc<AtomicB
                     current.clear();
                     io.set_output_connected(String::new());
                 }
+                next_scan = Instant::now();
             }
-            let wanted = pick_output_name(&filter);
-            let still =
-                wanted.as_ref().map(|n| n == &current).unwrap_or(false) && connection.is_some();
-            if connection.is_some() && !still {
-                info!(port = %current, "midi: output gone; waiting for reconnect");
-                connection = None;
-                current.clear();
-                io.set_output_connected(String::new());
-            }
-            if connection.is_none() {
-                if let Some(name) = wanted {
-                    announced_wait = false;
-                    match try_open_output(&name) {
-                        Ok(conn) => {
-                            info!(port = %name, "midi: output open");
-                            current = name.clone();
-                            io.set_output_connected(name);
-                            connection = Some(conn);
+            if Instant::now() >= next_scan {
+                next_scan = Instant::now() + HOTPLUG_POLL;
+                let wanted = pick_output_name(&filter);
+                let still = wanted.as_ref().map(|n| n == &current).unwrap_or(false)
+                    && connection.is_some();
+                if connection.is_some() && !still {
+                    info!(port = %current, "midi: output gone; waiting for reconnect");
+                    connection = None;
+                    current.clear();
+                    io.set_output_connected(String::new());
+                }
+                if connection.is_none() {
+                    if let Some(name) = wanted {
+                        announced_wait = false;
+                        match try_open_output(&name) {
+                            Ok(conn) => {
+                                info!(port = %name, "midi: output open");
+                                current = name.clone();
+                                io.set_output_connected(name);
+                                connection = Some(conn);
+                            }
+                            Err(err) => {
+                                warn!(%err, port = %name, "midi: output connect failed");
+                            }
                         }
-                        Err(err) => {
-                            warn!(%err, port = %name, "midi: output connect failed");
-                        }
+                    } else if !announced_wait {
+                        announced_wait = true;
+                        info!("midi: no matching output yet; clip MIDI stays local until one appears");
                     }
-                } else if !announced_wait {
-                    announced_wait = true;
-                    info!("midi: no matching output yet; clip MIDI stays local until one appears");
                 }
             }
             let mut idle = true;

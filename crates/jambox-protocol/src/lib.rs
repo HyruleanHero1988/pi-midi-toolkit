@@ -80,15 +80,22 @@ pub enum Request {
         value: f32,
     },
     /// EP-style punch-in pad. `slot` 0..7, `amount` 0 = off.
+    /// `source` 0 keys, 1 drums, 2 mic. Missing → keys.
     PunchFx {
+        #[serde(default)]
+        source: u8,
         slot: u8,
         amount: f32,
     },
-    /// Freeze recent master into a loop until released.
+    /// Freeze recent audio on that bus into a loop until released.
     PunchLock {
+        #[serde(default)]
+        source: u8,
         locked: bool,
     },
     PunchGrab {
+        #[serde(default)]
+        source: u8,
         active: bool,
     },
     PunchBufferPrio {
@@ -96,6 +103,14 @@ pub enum Request {
     },
     PunchRptMode {
         mode: u8,
+    },
+    /// 0 = beat divisions, 1 = smooth span of the capture.
+    PunchGrid {
+        mode: u8,
+    },
+    /// When true, Bank A pad notes arm punch FX instead of playing drums.
+    PunchPads {
+        armed: bool,
     },
     MorphPair {
         a: u16,

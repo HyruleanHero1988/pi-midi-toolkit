@@ -395,6 +395,10 @@ pub fn handle_line(
             map.set_full_vel(on);
             Response::Ok
         }
+        Ok(Decoded::PunchPads { armed }) => {
+            map.set_pads_to_fx(armed);
+            Response::Ok
+        }
         Ok(Decoded::DrumRepeat { slots, latch }) => {
             for owner in map.set_drum_repeat(slots, latch) {
                 if owner != 0 {

@@ -147,16 +147,20 @@ pub enum Command {
         value: f32,
     },
     /// One EP-style punch-in pad. `slot` is 0..7 (RPT..CRUSH). `amount` 0 = off.
+    /// `source` is keys / drums / mic ([`crate::PunchSource`]).
     SetPunchFx {
+        source: u8,
         slot: u8,
         amount: f32,
     },
-    /// Freeze the recent master into a loop (vaporwave LOCK). `true` = grab & hold.
+    /// Freeze the recent bus into a loop. `true` = grab & hold.
     SetPunchLock {
+        source: u8,
         locked: bool,
     },
-    /// Hold-to-grab: record live master while `active`, commit loop on release.
+    /// Hold-to-grab: record that bus while `active`, commit loop on release.
     SetPunchGrab {
+        source: u8,
         active: bool,
     },
     /// Buffer FX precedence (TAPE / RPT / DROP). See [`crate::PunchBufferPrio`].
@@ -165,6 +169,10 @@ pub enum Command {
     },
     /// RPT refresh vs hold. See [`crate::PunchRptMode`].
     SetPunchRptMode {
+        mode: u8,
+    },
+    /// RPT / SLICE length: beat grid or a smooth span of the capture.
+    SetPunchGrid {
         mode: u8,
     },
     SetMorphPair {

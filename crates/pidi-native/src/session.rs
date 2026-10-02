@@ -213,6 +213,12 @@ pub struct SessionState {
     /// RPT refresh vs hold. Missing → refresh (morphs into new audio).
     #[serde(default)]
     pub punch_rpt_mode: u8,
+    /// 0 = beat grid, 1 = smooth capture span.
+    #[serde(default)]
+    pub punch_grid_mode: u8,
+    /// Bank A pads arm punch FX. Missing → on (previous FX-page behavior).
+    #[serde(default = "default_full_velocity")]
+    pub punch_pads_fx: bool,
     #[serde(default)]
     pub kaoss_show_all: bool,
     #[serde(default)]
@@ -377,6 +383,8 @@ impl Default for SessionState {
             kaoss_fx_target: KaossFxTarget::Voice,
             punch_buffer_prio: 0,
             punch_rpt_mode: 0,
+            punch_grid_mode: 0,
+            punch_pads_fx: true,
             kaoss_show_all: false,
             kaoss_channel: 0,
             vibrato_always: 0.0,

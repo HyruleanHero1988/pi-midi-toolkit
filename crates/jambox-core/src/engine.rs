@@ -18,7 +18,7 @@ use crate::drums::{
 };
 use crate::fm::FmSynth;
 use crate::fx::{FxParams, FxUnit};
-use crate::punch::{boost_send_mix, PunchRack, PUNCH_PAD_COUNT};
+use crate::punch::{boost_send_mix, PunchRack, PunchSource, PUNCH_PAD_COUNT};
 use crate::arp::{
     ArpDivision, ArpEvent, ArpOrder, Arpeggiator, MAX_ARP_EVENTS_PER_BLOCK,
 };
@@ -231,7 +231,7 @@ pub struct JamboxEngine {
     drum_fx: Vec<FxUnit>,
     drum_group_fx: FxUnit,
     bus_fx: FxUnit,
-    punch: PunchRack,
+    punch: [PunchRack; PunchSource::COUNT],
     clip_fx: Vec<FxUnit>,
     clip_table: [[f32; TABLE_SIZE]; MAX_CLIPS],
     clip_baked: [bool; MAX_CLIPS],
@@ -325,7 +325,7 @@ impl JamboxEngine {
             drum_fx,
             drum_group_fx: FxUnit::new(sr),
             bus_fx: FxUnit::new(sr),
-            punch: PunchRack::new(sr),
+            punch: std::array::from_fn(|_| PunchRack::new(sr)),
             clip_fx: (0..MAX_CLIPS).map(|_| FxUnit::new(sr)).collect(),
             clip_table: [[0.0; TABLE_SIZE]; MAX_CLIPS],
             clip_baked: [false; MAX_CLIPS],
@@ -506,18 +506,30 @@ impl JamboxEngine {
         let bus = self.bus_fx.params();
         self.bus_fx = FxUnit::new(sr);
         self.bus_fx.set_params(bus);
-        let punch_amounts: [f32; PUNCH_PAD_COUNT] = std::array::from_fn(|i| self.punch.amount(i as u8));
-        let punch_prio = self.punch.buffer_prio();
-        let punch_rpt_mode = self.punch.rpt_mode();
-        self.punch = PunchRack::new(sr);
-        self.punch.set_buffer_prio(punch_prio);
-        self.punch.set_rpt_mode(punch_rpt_mode);
-        for (i, amount) in punch_amounts.iter().enumerate() {
-            self.punch.set_amount(i as u8, *amount);
+        let punch_amounts: [[f32; PUNCH_PAD_COUNT]; PunchSource::COUNT] =
+            std::array::from_fn(|src| std::array::from_fn(|i| self.punch[src].amount(i as u8)));
+        let punch_prio = self.punch[0].buffer_prio();
+        let punch_rpt_mode = self.punch[0].rpt_mode();
+        let punch_grid = self.punch[0].grid_mode();
+        self.punch = std::array::from_fn(|_| PunchRack::new(sr));
+        for rack in &mut self.punch {
+            rack.set_buffer_prio(punch_prio);
+            rack.set_rpt_mode(punch_rpt_mode);
+            rack.set_grid_mode(punch_grid);
+        }
+        for (src, amounts) in punch_amounts.iter().enumerate() {
+            for (i, amount) in amounts.iter().enumerate() {
+                self.punch[src].set_amount(i as u8, *amount);
+            }
         }
         self.voices.silence();
         self.fm.silence();
         self.drums.silence();
+    }
+
+    fn punch_src(&mut self, source: u8) -> &mut PunchRack {
+        let index = (source as usize).min(PunchSource::COUNT - 1);
+        &mut self.punch[index]
     }
 
     pub fn fx_params(&self, target: FxTarget) -> FxParams {
@@ -911,20 +923,25 @@ impl JamboxEngine {
             drum_group_fx.process(&mut drum_bus[..n]);
         }
 
-        // Keys `level` / kit `drum_level` / clip gains are applied at the voice.
+        // Keys, kit, and mic each have their own punch buffer.
+        let bpm = transport.bpm() as f32;
+        punch[PunchSource::Keys as usize].process(&mut key_bus[..n], bpm);
+        punch[PunchSource::Drums as usize].process(&mut drum_bus[..n], bpm);
         let input_gain = *input_level;
         for i in 0..n {
-            let mut sample = key_bus[i] + drum_bus[i];
-            if input_gain > 1e-4 {
-                sample += input_bus[i] * input_gain;
-            }
-            out[i] = sample;
+            group_buf[i] = input_bus[i] * input_gain;
+        }
+        punch[PunchSource::Mic as usize].process(&mut group_buf[..n], bpm);
+        for i in 0..n {
+            out[i] = key_bus[i] + drum_bus[i] + group_buf[i];
         }
         // Punch first (freeze / RPT / TAPE / filters), then the bus insert so
         // delay / reverb / flange and SEND wet the loop instead of being
         // overwritten when GRAB is locked.
-        punch.process(out, transport.bpm() as f32);
-        let send = punch.send_amount();
+        let send = punch
+            .iter()
+            .map(|rack| rack.send_amount())
+            .fold(0.0f32, f32::max);
         let saved_bus = if send > 0.001 {
             let mut boosted = bus_fx.params();
             let saved = boosted;
@@ -1058,7 +1075,9 @@ impl JamboxEngine {
                 }
                 self.drum_group_fx.reset();
                 self.bus_fx.reset();
-                self.punch.reset();
+                for rack in self.punch.iter_mut() {
+                    rack.reset();
+                }
             }
             Command::SetSynth { param, value } => self.set_synth(param, value),
             Command::SetDrumMacro {
@@ -1071,15 +1090,30 @@ impl JamboxEngine {
                 param,
                 value,
             } => self.set_fx(target, param, value),
-            Command::SetPunchFx { slot, amount } => self.punch.set_amount(slot, amount),
-            Command::SetPunchLock { locked } => self.punch.set_locked(locked),
-            Command::SetPunchGrab { active } => self.punch.set_grabbing(active),
+            Command::SetPunchFx {
+                source,
+                slot,
+                amount,
+            } => self.punch_src(source).set_amount(slot, amount),
+            Command::SetPunchLock { source, locked } => self.punch_src(source).set_locked(locked),
+            Command::SetPunchGrab { source, active } => self.punch_src(source).set_grabbing(active),
             Command::SetPunchBufferPrio { mode } => {
-                self.punch
-                    .set_buffer_prio(crate::PunchBufferPrio::from_u8(mode))
+                let mode = crate::PunchBufferPrio::from_u8(mode);
+                for rack in &mut self.punch {
+                    rack.set_buffer_prio(mode);
+                }
             }
             Command::SetPunchRptMode { mode } => {
-                self.punch.set_rpt_mode(crate::PunchRptMode::from_u8(mode))
+                let mode = crate::PunchRptMode::from_u8(mode);
+                for rack in &mut self.punch {
+                    rack.set_rpt_mode(mode);
+                }
+            }
+            Command::SetPunchGrid { mode } => {
+                let mode = crate::PunchGridMode::from_u8(mode);
+                for rack in &mut self.punch {
+                    rack.set_grid_mode(mode);
+                }
             }
             Command::SetMorphPair { a, b } => {
                 self.bank.set_morph_pair(a as usize, b as usize);
@@ -1840,6 +1874,7 @@ mod tests {
         e.render(
             &mut out,
             &[ScheduledCommand::now(Command::SetPunchFx {
+                source: PunchSource::Mic as u8,
                 slot: crate::PUNCH_CRUSH,
                 amount: 1.0,
             })],
@@ -2160,6 +2195,7 @@ mod tests {
         apply_now(
             &mut wet,
             Command::SetPunchFx {
+                source: PunchSource::Keys as u8,
                 slot: crate::PUNCH_CRUSH,
                 amount: 1.0,
             },
@@ -2184,6 +2220,36 @@ mod tests {
     }
 
     #[test]
+    fn drum_crush_does_not_touch_keys() {
+        let mut dry = engine();
+        let mut wet = engine();
+        apply_now(
+            &mut wet,
+            Command::SetPunchFx {
+                source: PunchSource::Drums as u8,
+                slot: crate::PUNCH_CRUSH,
+                amount: 1.0,
+            },
+        );
+        let cmds = [ScheduledCommand::now(Command::NoteOn {
+            channel: 0,
+            note: 69,
+            velocity: 120,
+        })];
+        let mut dry_buf = vec![0.0f32; 1024];
+        let mut wet_buf = vec![0.0f32; 1024];
+        let mut midi = MidiOutSink::new();
+        dry.render(&mut dry_buf, &cmds, &mut midi);
+        wet.render(&mut wet_buf, &cmds, &mut midi);
+        let diff: f32 = dry_buf
+            .iter()
+            .zip(wet_buf.iter())
+            .map(|(a, b)| (a - b).abs())
+            .sum();
+        assert!(diff < 1e-3, "kit punch must leave keys alone, diff={diff}");
+    }
+
+    #[test]
     fn bus_send_and_delay_wet_a_locked_grab() {
         let mut dry = engine();
         let mut wet = engine();
@@ -2196,8 +2262,8 @@ mod tests {
         let mut midi = MidiOutSink::new();
         dry.render(&mut buf, &on, &mut midi);
         wet.render(&mut buf, &on, &mut midi);
-        apply_now(&mut dry, Command::SetPunchLock { locked: true });
-        apply_now(&mut wet, Command::SetPunchLock { locked: true });
+        apply_now(&mut dry, Command::SetPunchLock { source: 0, locked: true });
+        apply_now(&mut wet, Command::SetPunchLock { source: 0, locked: true });
         apply_now(
             &mut dry,
             Command::NoteOff {
@@ -2231,6 +2297,7 @@ mod tests {
         apply_now(
             &mut wet,
             Command::SetPunchFx {
+                source: 0,
                 slot: crate::PUNCH_SEND,
                 amount: 1.0,
             },

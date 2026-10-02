@@ -43,7 +43,7 @@ pub use command::{
 };
 pub use punch::{
     boost_send_mix, punch_grid_index, punch_index_for_knob_cc, punch_index_for_pad_note,
-    punch_slot_has_grid, PunchBufferPrio, PunchRack, PunchRptMode, PUNCH_CRUSH, PUNCH_DROP,
+    punch_slot_has_grid, PunchBufferPrio, PunchGridMode, PunchRack, PunchRptMode, PunchSource, PUNCH_CRUSH, PUNCH_DROP,
     PUNCH_GRID_BEATS, PUNCH_GRID_LABELS, PUNCH_GRID_TICKS, PUNCH_HPF, PUNCH_KNOB_CCS, PUNCH_LABELS,
     PUNCH_LPF, PUNCH_PAD_COUNT, PUNCH_PAD_NOTES, PUNCH_RPT, PUNCH_SEND, PUNCH_SLICE, PUNCH_TAPE,
 };

@@ -310,10 +310,22 @@ pub struct NativeModel {
     pub punch_locked: bool,
     /// Finger currently holding GRAB (recording into the freeze buffer).
     pub punch_grabbing: bool,
+    /// Which bus the pads edit: 0 keys, 1 drums, 2 mic.
+    pub punch_source: u8,
+    punch_bank: [[f32; Layout::PUNCH_PAD_COUNT]; 3],
+    punch_armed_bank: [[bool; Layout::PUNCH_PAD_COUNT]; 3],
+    punch_locked_bank: [bool; 3],
+    punch_grabbing_bank: [bool; 3],
     /// Buffer FX precedence (TAPE/RPT/DROP). See [`jambox_core::PunchBufferPrio`].
     pub punch_buffer_prio: jambox_core::PunchBufferPrio,
     /// RPT refresh (morph) vs hold (freeze grab).
     pub punch_rpt_mode: jambox_core::PunchRptMode,
+    /// Beat divisions vs a smooth span of the captured audio.
+    pub punch_grid_mode: jambox_core::PunchGridMode,
+    /// Bank A pads arm punch FX. Off: those pads play the kit.
+    pub punch_pads_fx: bool,
+    /// FX SET sheet (granularity, prio, repeat mode).
+    pub fx_settings_open: bool,
     /// Kit bus trim (FX DRUMS / MIX KIT). Independent of melody `synth_params[2]` (LEVEL).
     pub drum_level: f32,
     /// USB mic / line trim (FX MIC / MIX MIC). Default 0 = muted.
@@ -560,8 +572,16 @@ impl NativeModel {
             punch_armed: [false; Layout::PUNCH_PAD_COUNT],
             punch_locked: false,
             punch_grabbing: false,
+            punch_source: 0,
+            punch_bank: [[0.0; Layout::PUNCH_PAD_COUNT]; 3],
+            punch_armed_bank: [[false; Layout::PUNCH_PAD_COUNT]; 3],
+            punch_locked_bank: [false; 3],
+            punch_grabbing_bank: [false; 3],
             punch_buffer_prio: jambox_core::PunchBufferPrio::TapeRptDrop,
             punch_rpt_mode: jambox_core::PunchRptMode::Refresh,
+            punch_grid_mode: jambox_core::PunchGridMode::Beat,
+            punch_pads_fx: true,
+            fx_settings_open: false,
             drum_level: 1.0,
             input_level: 0.0,
             seq_level: 1.0,
@@ -1996,6 +2016,8 @@ impl NativeModel {
         self.kaoss_fx_target = s.kaoss_fx_target;
         self.punch_buffer_prio = jambox_core::PunchBufferPrio::from_u8(s.punch_buffer_prio);
         self.punch_rpt_mode = jambox_core::PunchRptMode::from_u8(s.punch_rpt_mode);
+        self.punch_grid_mode = jambox_core::PunchGridMode::from_u8(s.punch_grid_mode);
+        self.punch_pads_fx = s.punch_pads_fx;
         self.kaoss_show_all = s.kaoss_show_all;
         self.kaoss_channel = s.kaoss_channel & 0x0f;
         self.fx_bus = [
@@ -2073,6 +2095,8 @@ impl NativeModel {
         outbox.synth("input_level", self.input_level);
         outbox.punch_buffer_prio(self.punch_buffer_prio.as_u8());
         outbox.punch_rpt_mode(self.punch_rpt_mode.as_u8());
+        outbox.punch_grid(self.punch_grid_mode.as_u8());
+        outbox.punch_pads(self.punch_pads_fx);
         outbox.clip_gain(SEQ_CLIP_SLOT, self.seq_level);
         outbox.clip_gain(SEQ_DRUM_MIX_SLOT, self.seq_drum_level);
         outbox.clip_gain(SEQ_KAOSS_MIX_SLOT, self.seq_kaoss_level);
@@ -2134,6 +2158,8 @@ impl NativeModel {
             kaoss_fx_target: self.kaoss_fx_target,
             punch_buffer_prio: self.punch_buffer_prio.as_u8(),
             punch_rpt_mode: self.punch_rpt_mode.as_u8(),
+            punch_grid_mode: self.punch_grid_mode.as_u8(),
+            punch_pads_fx: self.punch_pads_fx,
             fx_bus: [self.fx_bus[0], self.fx_bus[1], self.fx_bus[2]],
             fx_flanger: self.fx_voice[3],
             fx_flanger_rate: self.fx_flanger_rate,
@@ -2451,6 +2477,18 @@ impl NativeModel {
             } else if self.layout.content.contains(px, py) {
                 self.layout
                     .hit_kaoss_settings(px, py, self.kaoss_settings_scroll)
+            } else {
+                base
+            }
+        } else if self.fx_settings_open {
+            let base = self.layout.hit(self.mode, px, py);
+            if matches!(
+                base,
+                Hit::Nav(_) | Hit::NavBack | Hit::Power | Hit::HomeTile(_) | Hit::PunchSet
+            ) {
+                base
+            } else if self.layout.content.contains(px, py) {
+                self.layout.hit_fx_settings(px, py)
             } else {
                 base
             }
@@ -3660,18 +3698,30 @@ impl NativeModel {
                 self.tap_ui(slot, id, gesture, px, py);
                 self.clear_punch(outbox);
             }
+            Hit::PunchSource => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.cycle_punch_source();
+            }
             Hit::PunchLock => {
                 let releasing = self.punch_locked;
+                let source = self.punch_source;
                 if releasing {
                     self.punch_locked = false;
                     self.punch_grabbing = false;
-                    outbox.punch_lock(false);
-                    self.status_line = "GRAB off — live".into();
+                    outbox.punch_lock(source, false);
+                    self.status_line = format!(
+                        "{} GRAB off — live",
+                        jambox_core::PunchSource::from_u8(source).label()
+                    );
                 } else {
                     self.punch_grabbing = true;
-                    outbox.punch_grab(true);
-                    self.status_line = "GRAB — hold to capture".into();
+                    outbox.punch_grab(source, true);
+                    self.status_line = format!(
+                        "{} GRAB — hold to capture",
+                        jambox_core::PunchSource::from_u8(source).label()
+                    );
                 }
+                self.sync_punch_bank();
                 self.fingers[slot] = Finger {
                     active: true,
                     id,
@@ -3691,6 +3741,26 @@ impl NativeModel {
             Hit::PunchRptMode => {
                 self.tap_ui(slot, id, gesture, px, py);
                 self.cycle_punch_rpt_mode(outbox);
+            }
+            Hit::PunchGrid => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.cycle_punch_grid(outbox);
+            }
+            Hit::PunchPads => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.punch_pads_fx = !self.punch_pads_fx;
+                outbox.punch_pads(self.punch_pads_fx);
+                self.status_line = if self.punch_pads_fx {
+                    "pads → FX".into()
+                } else {
+                    "pads → drums".into()
+                };
+                self.mark_dirty();
+            }
+            Hit::PunchSet => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.fx_settings_open = !self.fx_settings_open;
+                self.mark_dirty();
             }
             Hit::MixBus(index) => {
                 self.fingers[slot] = Finger {
@@ -4287,9 +4357,13 @@ impl NativeModel {
             Surface::PunchLock { releasing } => {
                 if !releasing && self.punch_grabbing {
                     self.punch_grabbing = false;
-                    outbox.punch_grab(false);
+                    outbox.punch_grab(self.punch_source, false);
                     self.punch_locked = true;
-                    self.status_line = "GRAB locked — looping hold".into();
+                    self.sync_punch_bank();
+                    self.status_line = format!(
+                        "{} GRAB locked",
+                        jambox_core::PunchSource::from_u8(self.punch_source).label()
+                    );
                 }
             }
             Surface::Phrase { .. }
@@ -5403,9 +5477,10 @@ impl NativeModel {
             self.punch_buffer_prio.label(),
             match self.punch_buffer_prio {
                 jambox_core::PunchBufferPrio::TapeRptDrop => "TAPE wins (bounce)",
-                jambox_core::PunchBufferPrio::RptTapeDrop => "RPT wins",
+                jambox_core::PunchBufferPrio::RptTapeDrop => "RPT wins, keeps the drop pitch",
                 jambox_core::PunchBufferPrio::DropTapeRpt => "DROP wins",
                 jambox_core::PunchBufferPrio::RptOnTape => "repeat on tape",
+                jambox_core::PunchBufferPrio::Engage => "first effect keeps its pitch",
             }
         );
         self.mark_dirty();
@@ -5415,8 +5490,20 @@ impl NativeModel {
         self.punch_rpt_mode = self.punch_rpt_mode.next();
         outbox.punch_rpt_mode(self.punch_rpt_mode.as_u8());
         self.status_line = match self.punch_rpt_mode {
-            jambox_core::PunchRptMode::Refresh => "RPT↻ — loop refreshes with live".into(),
-            jambox_core::PunchRptMode::Hold => "RPTH — RPT freezes the grab".into(),
+            jambox_core::PunchRptMode::Refresh => "RPT↻ — each hit loops what you just heard".into(),
+            jambox_core::PunchRptMode::Hold => "RPTH — keeps that loop until CLEAR".into(),
+        };
+        self.mark_dirty();
+    }
+
+    fn cycle_punch_grid(&mut self, outbox: &mut Outbox) {
+        self.punch_grid_mode = self.punch_grid_mode.next();
+        outbox.punch_grid(self.punch_grid_mode.as_u8());
+        self.status_line = match self.punch_grid_mode {
+            jambox_core::PunchGridMode::Beat => "BEAT — 1/4 1/8 1/16 1/32".into(),
+            jambox_core::PunchGridMode::Smooth => {
+                "SMOOTH — full capture at the bottom, shorter toward the top".into()
+            }
         };
         self.mark_dirty();
     }
@@ -5424,16 +5511,20 @@ impl NativeModel {
     fn clear_punch(&mut self, outbox: &mut Outbox) {
         for i in 0..Layout::PUNCH_PAD_COUNT {
             if self.punch_armed[i] {
-                outbox.punch_fx(i as u8, 0.0);
+                outbox.punch_fx(self.punch_source, i as u8, 0.0);
             }
             self.punch_armed[i] = false;
         }
         if self.punch_locked || self.punch_grabbing {
             self.punch_locked = false;
             self.punch_grabbing = false;
-            outbox.punch_lock(false);
+            outbox.punch_lock(self.punch_source, false);
         }
-        self.status_line = "punch off".into();
+        self.sync_punch_bank();
+        self.status_line = format!(
+            "{} punch off",
+            jambox_core::PunchSource::from_u8(self.punch_source).label()
+        );
     }
 
     fn apply_punch_midi(&mut self, notice: &MidiNotice, outbox: &mut Outbox) -> bool {
@@ -5452,7 +5543,7 @@ impl NativeModel {
             self.set_punch_amount_unit(index, unit, outbox);
             return true;
         }
-        if notice.channel != DRUM_CHANNEL {
+        if notice.channel != DRUM_CHANNEL || !self.punch_pads_fx {
             return false;
         }
         if kind == "note_on" || kind == "noteon" {
@@ -5485,11 +5576,13 @@ impl NativeModel {
         }
         let amount = amount.clamp(0.0, 1.0);
         self.punch_amount[index] = amount;
+        self.sync_punch_bank();
         if self.punch_armed[index] {
-            outbox.punch_fx(index as u8, amount);
+            outbox.punch_fx(self.punch_source, index as u8, amount);
         }
         self.status_line = format!(
-            "punch {} {:.0}%{}",
+            "{} {} {:.0}%{}",
+            jambox_core::PunchSource::from_u8(self.punch_source).label(),
             jambox_core::PUNCH_LABELS[index],
             amount * 100.0,
             if self.punch_armed[index] { " on" } else { "" }
@@ -5506,13 +5599,40 @@ impl NativeModel {
         } else {
             0.0
         };
-        outbox.punch_fx(index as u8, amount);
+        self.sync_punch_bank();
+        outbox.punch_fx(self.punch_source, index as u8, amount);
         self.status_line = format!(
-            "punch {} {} {:.0}%",
+            "{} {} {} {:.0}%",
+            jambox_core::PunchSource::from_u8(self.punch_source).label(),
             jambox_core::PUNCH_LABELS[index],
             if self.punch_armed[index] { "on" } else { "off" },
             self.punch_amount[index] * 100.0
         );
+    }
+
+    fn cycle_punch_source(&mut self) {
+        self.sync_punch_bank();
+        self.punch_source = jambox_core::PunchSource::from_u8(self.punch_source)
+            .next()
+            .as_u8();
+        let s = self.punch_source as usize;
+        self.punch_amount = self.punch_bank[s];
+        self.punch_armed = self.punch_armed_bank[s];
+        self.punch_locked = self.punch_locked_bank[s];
+        self.punch_grabbing = self.punch_grabbing_bank[s];
+        self.status_line = format!(
+            "punch buffer {}",
+            jambox_core::PunchSource::from_u8(self.punch_source).label()
+        );
+        self.mark_dirty();
+    }
+
+    fn sync_punch_bank(&mut self) {
+        let s = (self.punch_source as usize).min(2);
+        self.punch_bank[s] = self.punch_amount;
+        self.punch_armed_bank[s] = self.punch_armed;
+        self.punch_locked_bank[s] = self.punch_locked;
+        self.punch_grabbing_bank[s] = self.punch_grabbing;
     }
 
     fn mix_slider_value(track: Rect, py: i32) -> f32 {
@@ -10467,7 +10587,7 @@ mod tests {
         assert!(
             up.iter().any(|r| matches!(
                 r,
-                Request::PunchFx { slot: 0, amount } if (*amount - stored).abs() < 1e-5
+                Request::PunchFx { slot: 0, amount, .. } if (*amount - stored).abs() < 1e-5
             )),
             "tap should arm at the stored value, got {up:?}"
         );
@@ -10478,7 +10598,7 @@ mod tests {
         let off = out.take();
         assert!(
             off.iter()
-                .any(|r| matches!(r, Request::PunchFx { slot: 0, amount } if *amount == 0.0)),
+                .any(|r| matches!(r, Request::PunchFx { slot: 0, amount, .. } if *amount == 0.0)),
             "second tap should disarm, got {off:?}"
         );
         assert!(!model.punch_armed[0]);
@@ -10524,7 +10644,7 @@ mod tests {
         assert!(
             batch
                 .iter()
-                .any(|r| matches!(r, Request::PunchFx { slot: 3, amount } if *amount == 0.0)),
+                .any(|r| matches!(r, Request::PunchFx { slot: 3, amount, .. } if *amount == 0.0)),
             "CLEAR should disarm HPF, got {batch:?}"
         );
         assert!(!model.punch_active());
@@ -10583,7 +10703,7 @@ mod tests {
         assert!(
             out.take()
                 .iter()
-                .any(|r| matches!(r, Request::PunchGrab { active: true })),
+                .any(|r| matches!(r, Request::PunchGrab { active: true, .. })),
             "press must start punch_grab"
         );
         model.finger_up(1, &mut out);
@@ -10592,7 +10712,7 @@ mod tests {
         assert!(
             out.take()
                 .iter()
-                .any(|r| matches!(r, Request::PunchGrab { active: false })),
+                .any(|r| matches!(r, Request::PunchGrab { active: false, .. })),
             "release must commit punch_grab"
         );
         // Tap while locked unlocks.
@@ -10601,7 +10721,7 @@ mod tests {
         assert!(
             out.take()
                 .iter()
-                .any(|r| matches!(r, Request::PunchLock { locked: false })),
+                .any(|r| matches!(r, Request::PunchLock { locked: false, .. })),
             "tap GRAB while locked must unlock"
         );
         model.finger_up(2, &mut out);
@@ -10619,7 +10739,7 @@ mod tests {
         assert!(
             out.take()
                 .iter()
-                .any(|r| matches!(r, Request::PunchLock { locked: false })),
+                .any(|r| matches!(r, Request::PunchLock { locked: false, .. })),
             "CLEAR must unlock"
         );
     }
@@ -10634,16 +10754,17 @@ mod tests {
         );
         let mut out = Outbox::new();
         let prio = model.layout.punch_prio();
+        model.fx_settings_open = true;
         model.finger_down(1, prio.x + 8, prio.y + 8, &mut out);
         model.finger_up(1, &mut out);
         assert_eq!(
             model.punch_buffer_prio,
-            jambox_core::PunchBufferPrio::RptTapeDrop
+            jambox_core::PunchBufferPrio::Engage
         );
         assert!(
             out.take().iter().any(|r| matches!(
                 r,
-                Request::PunchBufferPrio { mode: 1 }
+                Request::PunchBufferPrio { mode: 4 }
             )),
             "PRIO must send punch_buffer_prio"
         );
@@ -10683,7 +10804,7 @@ mod tests {
         assert!(
             on.iter().any(|r| matches!(
                 r,
-                Request::PunchFx { slot: 0, amount } if (*amount - stored).abs() < 1e-5
+                Request::PunchFx { slot: 0, amount, .. } if (*amount - stored).abs() < 1e-5
             )),
             "Bank A pad 1 should arm RPT, got {on:?}"
         );
@@ -10701,7 +10822,7 @@ mod tests {
         assert!(out
             .take()
             .iter()
-            .any(|r| matches!(r, Request::PunchFx { slot: 0, amount } if *amount == 0.0)));
+            .any(|r| matches!(r, Request::PunchFx { slot: 0, amount, .. } if *amount == 0.0)));
     }
 
     #[test]
