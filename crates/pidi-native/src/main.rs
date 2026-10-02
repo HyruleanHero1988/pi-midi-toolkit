@@ -137,6 +137,7 @@ fn main() {
         }
         model.note_engine_link(client.connected, &mut client.outbox);
         model.status = client.last_status;
+        model.sync_arp_pattern_from_status();
         model.apply_midi_ports(&client.last_midi_ports);
         model.tick(dt, &mut client.outbox);
         model.maybe_autosave();

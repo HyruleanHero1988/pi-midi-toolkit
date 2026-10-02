@@ -103,6 +103,8 @@ impl StatusCache {
             arp_latched: s.arp_latched,
             arp_root: s.arp_root,
             arp_step: s.arp_step,
+            arp_len: s.arp_len,
+            arp_steps: s.arp_steps,
         }
     }
 }

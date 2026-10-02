@@ -1710,7 +1710,7 @@ fn draw_arp(scene: &mut Scene, model: &NativeModel) {
     use jambox_core::ArpOrder;
 
     let layout = model.layout;
-    let latched = model.status.arp_latched || (model.arp.latch && model.status.arp_enabled);
+    let latched = model.status.arp_latched;
     let banner = layout.arp_banner();
     scene.fill_rect(banner, if latched { 0x689d6a } else { 0x3c3836 });
     let root = kaoss_ui::midi_note_label(if model.status.arp_root == 0 {
@@ -1719,9 +1719,9 @@ fn draw_arp(scene: &mut Scene, model: &NativeModel) {
         model.status.arp_root
     });
     let banner_text = if latched {
-        format!("LATCHED  {root}  NEXT KEY")
+        format!("LATCHED  {root}  PLAY TO MOVE")
     } else {
-        format!("PLAY A ROOT  {root}")
+        format!("HOLD A CHORD  {root}")
     };
     scene.text_centered(banner, &banner_text, 0xfbf1c7, 2);
 

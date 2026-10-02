@@ -383,6 +383,9 @@ pub struct WireClipVoice {
     pub reverb_mix: f32,
     #[serde(default)]
     pub flanger_mix: f32,
+    /// DRIFT slider captured with the take. Absent follows the live slider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_drift: Option<f32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -455,6 +458,12 @@ pub struct StatusReply {
     pub arp_root: u8,
     #[serde(default)]
     pub arp_step: u8,
+    /// Authored interval count. 0 means the engine has not reported a pattern yet.
+    #[serde(default)]
+    pub arp_len: u8,
+    /// Intervals from the root, press order. Only the first `arp_len` entries count.
+    #[serde(default)]
+    pub arp_steps: [i8; 16],
 }
 
 #[cfg(test)]
