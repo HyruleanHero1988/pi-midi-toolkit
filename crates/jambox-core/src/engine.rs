@@ -2601,6 +2601,54 @@ mod tests {
     }
 
     #[test]
+    fn mod_wheel_wobbles_wavetable_and_fm() {
+        fn wobble(fm: bool) -> f32 {
+            let mut dry = engine();
+            let mut wet = engine();
+            for e in [&mut dry, &mut wet] {
+                if fm {
+                    apply_now(
+                        e,
+                        Command::SetSynth {
+                            param: SynthParam::FmEnable,
+                            value: 1.0,
+                        },
+                    );
+                }
+                apply_now(
+                    e,
+                    Command::NoteOn {
+                        channel: 0,
+                        note: 69,
+                        velocity: 120,
+                    },
+                );
+            }
+            apply_now(
+                &mut wet,
+                Command::SetSynth {
+                    param: SynthParam::VibratoMod,
+                    value: 1.0,
+                },
+            );
+            let mut dry_buf = vec![0.0f32; 8192];
+            let mut wet_buf = vec![0.0f32; 8192];
+            let mut midi = MidiOutSink::new();
+            dry.render(&mut dry_buf, &[], &mut midi);
+            wet.render(&mut wet_buf, &[], &mut midi);
+            dry_buf
+                .iter()
+                .zip(wet_buf.iter())
+                .map(|(a, b)| (a - b).abs())
+                .sum()
+        }
+        let wave = wobble(false);
+        let fm = wobble(true);
+        assert!(wave > 1.0, "mod wheel should wobble a wavetable note, diff={wave}");
+        assert!(fm > 1.0, "mod wheel should wobble an FM note, diff={fm}");
+    }
+
+    #[test]
     fn tone_lfo_hz_is_slow_at_the_bottom_and_fast_at_the_top() {
         assert!((tone_lfo_hz_from_unit(0.0) - TONE_LFO_HZ_MIN).abs() < 1e-5);
         assert!((tone_lfo_hz_from_unit(1.0) - TONE_LFO_HZ_MAX).abs() < 1e-5);

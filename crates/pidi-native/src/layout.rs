@@ -133,6 +133,17 @@ pub enum Hit {
     KaossBpmDown,
     KaossBpmUp5,
     KaossBpmDown5,
+    KaossBpmUp10,
+    KaossBpmDown10,
+    /// Footer tempo control. Opens the exclusive BPM sheet.
+    KaossBpm,
+    /// Current tempo on the BPM sheet. Opens the numpad.
+    KaossBpmValue,
+    KaossBpmDone,
+    KaossBpmDigit(u8),
+    KaossBpmBackspace,
+    KaossBpmOk,
+    KaossBpmCancel,
     KaossShowAll,
     KaossChannel,
     KaossSettings,
@@ -337,10 +348,8 @@ pub struct Layout {
     pub kaoss_fx_hold: Rect,
     pub kaoss_gate: Rect,
     pub kaoss_full: Rect,
-    pub kaoss_bpm_up: Rect,
-    pub kaoss_bpm_down: Rect,
-    pub kaoss_bpm_up5: Rect,
-    pub kaoss_bpm_down5: Rect,
+    /// Single footer control that opens the tempo sheet.
+    pub kaoss_bpm: Rect,
     pub kaoss_show_all: Rect,
     pub kaoss_channel: Rect,
     pub kaoss_wipe_fx: Rect,
@@ -529,84 +538,67 @@ impl Layout {
                 w: 0,
                 h: 0,
             },
-            // Two-row footer chrome (Tk parity), full width under pad+drums.
+            // Two-row footer. HOLD NOTE / HOLD FX need scale-2 text
+            // (9 and 7 glyphs × 12px) so those buttons are wider than PROG/KEY.
             kaoss_prog: Rect {
                 x: 8,
                 y: HUD_H + content_h - 100,
-                w: 152,
+                w: 124,
                 h: 44,
             },
             kaoss_scale: Rect {
-                x: 168,
+                x: 136,
                 y: HUD_H + content_h - 100,
-                w: 152,
+                w: 160,
                 h: 44,
             },
             kaoss_key: Rect {
-                x: 328,
+                x: 300,
                 y: HUD_H + content_h - 100,
-                w: 152,
+                w: 92,
                 h: 44,
             },
             kaoss_oct_down: Rect {
-                x: 488,
+                x: 396,
                 y: HUD_H + content_h - 100,
-                w: 40,
+                w: 44,
                 h: 44,
             },
             kaoss_oct: Rect {
-                x: 532,
+                x: 442,
                 y: HUD_H + content_h - 100,
                 w: 68,
                 h: 44,
             },
             kaoss_oct_up: Rect {
-                x: 604,
+                x: 512,
                 y: HUD_H + content_h - 100,
-                w: 40,
+                w: 44,
                 h: 44,
             },
             kaoss_hold: Rect {
-                x: 648,
+                x: 560,
                 y: HUD_H + content_h - 100,
-                w: 70,
+                w: 124,
                 h: 44,
             },
             kaoss_fx_hold: Rect {
-                x: 722,
+                x: 688,
                 y: HUD_H + content_h - 100,
-                w: 70,
+                w: 104,
                 h: 44,
             },
             kaoss_gate: Rect {
                 x: 8,
-                y: HUD_H + content_h - 48,
-                w: 144,
-                h: 40,
+                y: HUD_H + content_h - 52,
+                w: 168,
+                h: 44,
             },
-            kaoss_bpm_down5: Rect {
-                x: 160,
-                y: HUD_H + content_h - 48,
-                w: 70,
-                h: 40,
-            },
-            kaoss_bpm_down: Rect {
-                x: 234,
-                y: HUD_H + content_h - 48,
-                w: 70,
-                h: 40,
-            },
-            kaoss_bpm_up: Rect {
-                x: 308,
-                y: HUD_H + content_h - 48,
-                w: 70,
-                h: 40,
-            },
-            kaoss_bpm_up5: Rect {
-                x: 382,
-                y: HUD_H + content_h - 48,
-                w: 70,
-                h: 40,
+            kaoss_bpm: Rect {
+                x: 184,
+                y: HUD_H + content_h - 52,
+                w: 168,
+                h: 44,
             },
             kaoss_show_all: Rect {
                 x: 0,
@@ -639,16 +631,16 @@ impl Layout {
                 h: 0,
             },
             kaoss_full: Rect {
-                x: 460,
-                y: HUD_H + content_h - 48,
-                w: 148,
-                h: 40,
+                x: 360,
+                y: HUD_H + content_h - 52,
+                w: 200,
+                h: 44,
             },
             kaoss_settings_btn: Rect {
-                x: 616,
-                y: HUD_H + content_h - 48,
-                w: 176,
-                h: 40,
+                x: 568,
+                y: HUD_H + content_h - 52,
+                w: 224,
+                h: 44,
             },
             phrase_grid: Rect {
                 x: 16,
@@ -1512,25 +1504,7 @@ impl Layout {
                 w: 0,
                 h: 0,
             };
-            self.kaoss_bpm_down = Rect {
-                x: 0,
-                y: 0,
-                w: 0,
-                h: 0,
-            };
-            self.kaoss_bpm_up = Rect {
-                x: 0,
-                y: 0,
-                w: 0,
-                h: 0,
-            };
-            self.kaoss_bpm_down5 = Rect {
-                x: 0,
-                y: 0,
-                w: 0,
-                h: 0,
-            };
-            self.kaoss_bpm_up5 = Rect {
+            self.kaoss_bpm = Rect {
                 x: 0,
                 y: 0,
                 w: 0,
@@ -1939,15 +1913,31 @@ impl Layout {
         r
     }
 
-    pub fn synth_slider(&self, index: usize) -> Rect {
-        let n = Self::SYNTH_SLIDER_COUNT as i32;
-        let w = self.synth_sliders.w / n;
-        let h = self.synth_play_h();
+    /// Two rows of four. Each cell holds a full name and a horizontal bar.
+    fn synth_slider_cell(&self, index: usize) -> Rect {
+        let index = index % Self::SYNTH_SLIDER_COUNT;
+        let cols = 4i32;
+        let col = (index % 4) as i32;
+        let row = (index / 4) as i32;
+        let w = self.synth_sliders.w / cols;
+        let h = self.synth_play_h() / 2;
         Rect {
-            x: self.synth_sliders.x + (index as i32) * w + 6,
-            y: self.synth_sliders.y + 28,
-            w: w - 12,
-            h: h - 36,
+            x: self.synth_sliders.x + col * w,
+            y: self.synth_sliders.y + row * h,
+            w,
+            h,
+        }
+    }
+
+    /// Horizontal track under the label. The name is drawn just above `y`.
+    pub fn synth_slider(&self, index: usize) -> Rect {
+        let cell = self.synth_slider_cell(index);
+        let bar_h = 40.min((cell.h - 24).max(28));
+        Rect {
+            x: cell.x + 4,
+            y: cell.y + 20,
+            w: cell.w - 12,
+            h: bar_h,
         }
     }
 
@@ -2586,6 +2576,123 @@ impl Layout {
         }
     }
 
+    /// ±10 / ±5 / ±1 on the tempo sheet. `step` is 10, 5, or 1.
+    pub fn kaoss_bpm_nudge_btn(&self, negative: bool, step: i32) -> Rect {
+        let row = match step {
+            10 => 0,
+            5 => 1,
+            _ => 2,
+        };
+        let col = if negative { 0 } else { 1 };
+        let value = self.kaoss_bpm_value_btn();
+        let gap = 12;
+        let row_h = 56;
+        let row_gap = 10;
+        let w = (self.content.w - 32 - gap) / 2;
+        let y0 = value.y + value.h + 16;
+        Rect {
+            x: self.content.x + 16 + col * (w + gap),
+            y: y0 + row * (row_h + row_gap),
+            w,
+            h: row_h,
+        }
+    }
+
+    pub fn kaoss_bpm_value_btn(&self) -> Rect {
+        Rect {
+            x: self.content.x + 16,
+            y: self.content.y + 48,
+            w: self.content.w - 32,
+            h: 72,
+        }
+    }
+
+    pub fn kaoss_bpm_done_btn(&self) -> Rect {
+        let last = self.kaoss_bpm_nudge_btn(false, 1);
+        Rect {
+            x: self.content.x + 16,
+            y: last.y + last.h + 16,
+            w: self.content.w - 32,
+            h: 56,
+        }
+    }
+
+    pub fn kaoss_bpm_numpad_display(&self) -> Rect {
+        Rect {
+            x: self.content.x + 16,
+            y: self.content.y + 28,
+            w: self.content.w - 32,
+            h: 56,
+        }
+    }
+
+    /// 0..8 are digits 1–9, 9 is backspace, 10 is 0, 11 is OK, 12 is CANCEL.
+    pub fn kaoss_bpm_numpad_key(&self, index: usize) -> Rect {
+        let c = self.content;
+        let gap = 8;
+        let key_h = 52;
+        let top = self.kaoss_bpm_numpad_display().y + self.kaoss_bpm_numpad_display().h + 12;
+        if index >= 12 {
+            return Rect {
+                x: c.x + 16,
+                y: top + 4 * (key_h + gap),
+                w: c.w - 32,
+                h: key_h,
+            };
+        }
+        let col = (index % 3) as i32;
+        let row = (index / 3) as i32;
+        let key_w = (c.w - 32 - gap * 2) / 3;
+        Rect {
+            x: c.x + 16 + col * (key_w + gap),
+            y: top + row * (key_h + gap),
+            w: key_w,
+            h: key_h,
+        }
+    }
+
+    pub fn hit_kaoss_bpm(&self, px: i32, py: i32, numpad: bool) -> Hit {
+        if numpad {
+            if self.kaoss_bpm_numpad_key(12).contains(px, py) {
+                return Hit::KaossBpmCancel;
+            }
+            if self.kaoss_bpm_numpad_key(9).contains(px, py) {
+                return Hit::KaossBpmBackspace;
+            }
+            if self.kaoss_bpm_numpad_key(11).contains(px, py) {
+                return Hit::KaossBpmOk;
+            }
+            if self.kaoss_bpm_numpad_key(10).contains(px, py) {
+                return Hit::KaossBpmDigit(0);
+            }
+            for index in 0..9 {
+                if self.kaoss_bpm_numpad_key(index).contains(px, py) {
+                    return Hit::KaossBpmDigit((index as u8) + 1);
+                }
+            }
+            return Hit::None;
+        }
+        if self.kaoss_bpm_done_btn().contains(px, py) {
+            return Hit::KaossBpmDone;
+        }
+        if self.kaoss_bpm_value_btn().contains(px, py) {
+            return Hit::KaossBpmValue;
+        }
+        for (negative, step, hit) in [
+            (true, 10, Hit::KaossBpmDown10),
+            (false, 10, Hit::KaossBpmUp10),
+            (true, 5, Hit::KaossBpmDown5),
+            (false, 5, Hit::KaossBpmUp5),
+            (true, 1, Hit::KaossBpmDown),
+            (false, 1, Hit::KaossBpmUp),
+        ] {
+            if self.kaoss_bpm_nudge_btn(negative, step).contains(px, py) {
+                return hit;
+            }
+        }
+        Hit::None
+    }
+
     fn hit_kaoss(&self, px: i32, py: i32) -> Hit {
         if self.kaoss_prog.contains(px, py) {
             return Hit::KaossProg;
@@ -2614,17 +2721,8 @@ impl Layout {
         if self.kaoss_gate.contains(px, py) {
             return Hit::KaossGate;
         }
-        if self.kaoss_bpm_up5.contains(px, py) {
-            return Hit::KaossBpmUp5;
-        }
-        if self.kaoss_bpm_down5.contains(px, py) {
-            return Hit::KaossBpmDown5;
-        }
-        if self.kaoss_bpm_up.contains(px, py) {
-            return Hit::KaossBpmUp;
-        }
-        if self.kaoss_bpm_down.contains(px, py) {
-            return Hit::KaossBpmDown;
+        if self.kaoss_bpm.w > 0 && self.kaoss_bpm.contains(px, py) {
+            return Hit::KaossBpm;
         }
         if self.kaoss_settings_btn.w > 0 && self.kaoss_settings_btn.contains(px, py) {
             return Hit::KaossSettings;
@@ -2757,7 +2855,7 @@ impl Layout {
             return Hit::SynthOctUp;
         }
         for index in 0..Self::SYNTH_SLIDER_COUNT {
-            if self.synth_slider(index).contains(px, py) {
+            if self.synth_slider_cell(index).contains(px, py) {
                 return Hit::SynthSlider(index);
             }
         }
@@ -4035,29 +4133,41 @@ mod tests {
             layout.hit(UiMode::Synth, scope.x + scope.w / 2, scope.y + scope.h / 2),
             Hit::ScopeMode
         );
+        const LABELS: [&str; Layout::SYNTH_SLIDER_COUNT] = [
+            "MORPH", "TONE", "LEVEL", "ATTACK", "RELEASE", "DRIFT", "FLANGE", "RATE",
+        ];
+        for (index, label) in LABELS.iter().enumerate() {
+            let track = layout.synth_slider(index);
+            let label_w = label.len() as i32 * 12;
+            assert!(
+                label_w <= track.w,
+                "{label} is {label_w}px and the bar is {}px",
+                track.w
+            );
+            assert!(track.y >= layout.synth_sliders.y + 16, "{label} covers its name");
+        }
+        assert!(layout.synth_slider(0).y + layout.synth_slider(0).h <= layout.synth_slider(4).y);
     }
 
     #[test]
     fn hidden_keys_expand_synth_and_fm_into_the_piano_strip() {
         let mut layout = Layout::new();
-        let compact_slider = layout.synth_slider(0).h;
         let compact_scope = layout.synth_scope_rect().h;
         let compact_fm = layout.fm_graph().h;
         let key = layout.synth_keyboard_white_rect(0);
         layout.show_on_screen_keys = false;
-        let slider = layout.synth_slider(0);
-        assert!(slider.h > compact_slider);
+        let slider = layout.synth_slider(4);
         assert!(layout.synth_scope_rect().h > compact_scope);
         assert!(layout.fm_graph().h > compact_fm);
         assert!(
             layout
                 .synth_keys
-                .contains(slider.x + 4, slider.y + slider.h - 4),
-            "expanded slider travel should occupy the former piano strip"
+                .contains(slider.x + 4, slider.y + slider.h / 2),
+            "the lower slider row should occupy the former piano strip"
         );
         assert_eq!(layout.synth_keyboard_note_at(key.x + 4, key.y + 8), None);
-        match layout.hit(UiMode::Synth, slider.x + 4, slider.y + slider.h - 4) {
-            Hit::SynthSlider(0) => {}
+        match layout.hit(UiMode::Synth, slider.x + 4, slider.y + slider.h / 2) {
+            Hit::SynthSlider(4) => {}
             other => panic!("former key strip should hit a slider, got {other:?}"),
         }
         let bottom = layout.synth_keys.y + layout.synth_keys.h;

@@ -43,7 +43,7 @@ impl ScopeTap {
             write: AtomicU32::new(0),
             rate: AtomicU32::new(48_000),
             period: AtomicU32::new(0),
-            phase: AtomicU32::new(0),
+            phase: AtomicU32::new(u32::MAX),
             pending: AtomicU32::new(0),
             pending_n: AtomicU32::new(0),
         })
@@ -69,8 +69,13 @@ impl ScopeTap {
     }
 
     /// Newest samples, oldest first. `out` should be [`RING`] long.
+    #[cfg(test)]
     pub fn snapshot(&self, out: &mut [f32]) -> (usize, u32) {
         let write = self.write.load(Ordering::Acquire);
+        self.copy_from(write, out)
+    }
+
+    fn copy_from(&self, write: u32, out: &mut [f32]) -> (usize, u32) {
         let available = (write as usize).min(RING).min(out.len());
         let start = write.wrapping_sub(available as u32);
         for i in 0..available {
@@ -82,14 +87,15 @@ impl ScopeTap {
 
     pub fn frame(&self) -> ScopeReply {
         let mut raw = [0.0f32; RING];
-        let (n, rate) = self.snapshot(&mut raw);
+        let write = self.write.load(Ordering::Acquire);
+        let (n, rate) = self.copy_from(write, &mut raw);
         let mut mem = ScopeMemory {
             period: self.period.load(Ordering::Relaxed),
             phase: self.phase.load(Ordering::Relaxed),
             pending: self.pending.load(Ordering::Relaxed),
             pending_n: self.pending_n.load(Ordering::Relaxed),
         };
-        let reply = build_tracked(&raw[..n], rate, &mut mem);
+        let reply = build_tracked(&raw[..n], rate, write, &mut mem);
         self.period.store(mem.period, Ordering::Relaxed);
         self.phase.store(mem.phase, Ordering::Relaxed);
         self.pending.store(mem.pending, Ordering::Relaxed);
@@ -102,17 +108,27 @@ impl ScopeTap {
 pub fn build(samples: &[f32], sample_rate: u32) -> ScopeReply {
     let mut mem = ScopeMemory {
         period: 0,
-        phase: 0,
+        phase: u32::MAX,
         pending: 0,
         pending_n: 0,
     };
-    build_tracked(samples, sample_rate, &mut mem)
+    build_tracked(samples, sample_rate, samples.len() as u32, &mut mem)
 }
 
 /// Same picture as [`build`], but the period and trigger phase stick across
 /// frames. A ripple that adds one extra edge used to drop the lock and jump
 /// the zoom from two cycles to a long window, which reads as two different waves.
-fn build_tracked(samples: &[f32], sample_rate: u32, mem: &mut ScopeMemory) -> ScopeReply {
+///
+/// `end_index` is the absolute sample count at the end of `samples`. The trigger
+/// is remembered in that count, not as "samples back from the end" — that offset
+/// walks as audio arrives, and a half-cycle step locks the opposite lobe, which
+/// draws the wave upside down.
+fn build_tracked(
+    samples: &[f32],
+    sample_rate: u32,
+    end_index: u32,
+    mem: &mut ScopeMemory,
+) -> ScopeReply {
     let mut reply = ScopeReply {
         rate: sample_rate,
         ..ScopeReply::default()
@@ -132,7 +148,7 @@ fn build_tracked(samples: &[f32], sample_rate: u32, mem: &mut ScopeMemory) -> Sc
         None => (sample_rate as usize / 40).clamp(min_win, max_win),
     };
     let window = window.min(samples.len());
-    let start = trigger_start(samples, mean, window, period, mem);
+    let start = trigger_start(samples, mean, window, period, end_index, mem);
     let mut min = vec![0i16; SCOPE_COLUMNS];
     let mut max = vec![0i16; SCOPE_COLUMNS];
     decimate(&samples[start..start + window], &mut min, &mut max);
@@ -258,6 +274,7 @@ fn trigger_start(
     mean: f32,
     window: usize,
     period: Option<usize>,
+    end_index: u32,
     mem: &mut ScopeMemory,
 ) -> usize {
     let last = samples.len() - window;
@@ -274,21 +291,51 @@ fn trigger_start(
         return last;
     }
     let Some(period) = period.filter(|p| *p >= 8) else {
-        return edges[usable - 1];
+        let edge = edges[usable - 1];
+        mem.phase = edge_abs(end_index, samples.len(), edge);
+        return edge;
     };
-    let want = mem.phase as usize % period;
+    if mem.phase == u32::MAX {
+        let edge = edges[usable - 1];
+        mem.phase = edge_abs(end_index, samples.len(), edge);
+        return edge;
+    }
     let mut best = edges[usable - 1];
     let mut best_dist = usize::MAX;
     for edge in &edges[..usable] {
-        let phase = samples.len().saturating_sub(*edge) % period;
-        let dist = circular_dist(phase, want, period);
+        let delta = edge_abs(end_index, samples.len(), *edge).wrapping_sub(mem.phase);
+        let dist = circular_dist(delta as usize % period, 0, period);
         if dist < best_dist {
             best_dist = dist;
             best = *edge;
         }
     }
-    mem.phase = (samples.len().saturating_sub(best) % period) as u32;
+    // The other lobe sits half a period away. Taking it draws the wave upside down.
+    let limit = (period / 5).max(2);
+    if best_dist > limit {
+        return hold_phase(samples.len(), end_index, mem.phase, period, last);
+    }
+    mem.phase = edge_abs(end_index, samples.len(), best);
     best
+}
+
+fn edge_abs(end_index: u32, len: usize, edge: usize) -> u32 {
+    end_index
+        .wrapping_sub(len as u32)
+        .wrapping_add(edge as u32)
+}
+
+/// Window start whose absolute index is the same phase as the last trigger.
+fn hold_phase(len: usize, end_index: u32, trigger_abs: u32, period: usize, last: usize) -> usize {
+    let start_abs = end_index.wrapping_sub(len as u32);
+    let phase = trigger_abs.wrapping_sub(start_abs) as usize % period;
+    if phase > last {
+        let back = phase - last;
+        let steps = back.div_ceil(period);
+        return phase.saturating_sub(steps * period);
+    }
+    let steps = (last - phase) / period;
+    phase + steps * period
 }
 
 fn circular_dist(a: usize, b: usize, period: usize) -> usize {
@@ -375,11 +422,11 @@ mod tests {
         }
         let mut mem = ScopeMemory {
             period: 0,
-            phase: 0,
+            phase: u32::MAX,
             pending: 0,
             pending_n: 0,
         };
-        let _ = build_tracked(&clean, rate, &mut mem);
+        let _ = build_tracked(&clean, rate, clean.len() as u32, &mut mem);
         let locked = mem.period;
         assert!(
             (locked as f32 - period).abs() < period * 0.08,
@@ -387,7 +434,7 @@ mod tests {
         );
         // One extra zero crossing used to drop the lock and jump the zoom.
         for _ in 0..4 {
-            let _ = build_tracked(&rippled, rate, &mut mem);
+            let _ = build_tracked(&rippled, rate, rippled.len() as u32, &mut mem);
         }
         assert!(
             (mem.period as f32 - period).abs() < period * 0.08,
@@ -401,7 +448,7 @@ mod tests {
         let rate = 48_000u32;
         let mut mem = ScopeMemory {
             period: 0,
-            phase: 0,
+            phase: u32::MAX,
             pending: 0,
             pending_n: 0,
         };
@@ -410,8 +457,8 @@ mod tests {
             let t = i as f32 / rate as f32;
             *sample = (t * 330.0 * std::f32::consts::TAU).sin() * 0.75;
         }
-        let first = build_tracked(&samples[..RING], rate, &mut mem);
-        let second = build_tracked(&samples[200..], rate, &mut mem);
+        let first = build_tracked(&samples[..RING], rate, RING as u32, &mut mem);
+        let second = build_tracked(&samples[200..], rate, (RING + 200) as u32, &mut mem);
         let peak_a = first.max.iter().position(|s| *s == first.max.iter().copied().max().unwrap());
         let peak_b = second
             .max
@@ -419,6 +466,46 @@ mod tests {
             .position(|s| *s == second.max.iter().copied().max().unwrap());
         let shift = peak_a.unwrap().abs_diff(peak_b.unwrap());
         assert!(shift < 8, "picture slid by {shift} columns");
+    }
+
+    #[test]
+    fn a_half_cycle_step_does_not_mirror_the_wave() {
+        let rate = 48_000u32;
+        let freq = 220.0f32;
+        let half = (rate as f32 / freq / 2.0).round() as usize;
+        let mut samples = vec![0.0f32; RING + half];
+        for (i, sample) in samples.iter_mut().enumerate() {
+            let t = i as f32 / rate as f32;
+            *sample = (t * freq * std::f32::consts::TAU).sin() * 0.8;
+        }
+        let mut mem = ScopeMemory {
+            period: 0,
+            phase: u32::MAX,
+            pending: 0,
+            pending_n: 0,
+        };
+        let first = build_tracked(&samples[..RING], rate, RING as u32, &mut mem);
+        let second = build_tracked(
+            &samples[half..half + RING],
+            rate,
+            (RING + half) as u32,
+            &mut mem,
+        );
+        let corr: f32 = first
+            .max
+            .iter()
+            .zip(first.min.iter())
+            .zip(second.max.iter().zip(second.min.iter()))
+            .map(|((a_hi, a_lo), (b_hi, b_lo))| {
+                let a = (*a_hi as f32 + *a_lo as f32) * 0.5;
+                let b = (*b_hi as f32 + *b_lo as f32) * 0.5;
+                a * b
+            })
+            .sum();
+        assert!(
+            corr > 0.0,
+            "half-cycle advance mirrored the trace, corr={corr}"
+        );
     }
 
     #[test]

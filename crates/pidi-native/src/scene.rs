@@ -721,6 +721,12 @@ fn chrome_status(model: &NativeModel) -> String {
     // Short live readout for the status strip — long hints use status_line in content.
     match model.mode {
         UiMode::Kaoss => {
+            if model.kaoss_bpm_open {
+                if !model.status_line.is_empty() {
+                    return model.status_line.chars().take(18).collect();
+                }
+                return "TEMPO".into();
+            }
             if model.kaoss_settings_open {
                 return "SETTINGS".into();
             }
@@ -821,6 +827,15 @@ fn draw_kaoss(scene: &mut Scene, model: &NativeModel) {
 
     if model.kaoss_color_picker_open {
         draw_kaoss_color_picker(scene, model);
+        return;
+    }
+
+    if model.kaoss_bpm_open {
+        if model.kaoss_bpm_numpad {
+            draw_kaoss_bpm_numpad(scene, model);
+        } else {
+            draw_kaoss_bpm_sheet(scene, model);
+        }
         return;
     }
 
@@ -978,7 +993,7 @@ fn draw_kaoss(scene: &mut Scene, model: &NativeModel) {
             layout.kaoss_hold,
             if model.kaoss_hold { 0xd79921 } else { 0x3c3836 },
         );
-        scene.text_centered(layout.kaoss_hold, "HOLD", 0xffffff, 2);
+        scene.text_centered(layout.kaoss_hold, "HOLD NOTE", 0xffffff, 2);
         if layout.kaoss_fx_hold.w > 0 {
             scene.button(
                 layout.kaoss_fx_hold,
@@ -988,21 +1003,22 @@ fn draw_kaoss(scene: &mut Scene, model: &NativeModel) {
                     0x3c3836
                 },
             );
-            scene.text_centered(layout.kaoss_fx_hold, "FX", 0xffffff, 2);
+            scene.text_centered(layout.kaoss_fx_hold, "HOLD FX", 0xffffff, 2);
         }
     }
 
     if layout.kaoss_gate.w > 0 {
         scene.button(layout.kaoss_gate, 0x3c3836);
         scene.text_centered(layout.kaoss_gate, gate, 0xffffff, 2);
-        scene.button(layout.kaoss_bpm_down5, 0x3c3836);
-        scene.text_centered(layout.kaoss_bpm_down5, "-5", 0xffffff, 2);
-        scene.button(layout.kaoss_bpm_down, 0x3c3836);
-        scene.text_centered(layout.kaoss_bpm_down, "-1", 0xffffff, 2);
-        scene.button(layout.kaoss_bpm_up, 0x3c3836);
-        scene.text_centered(layout.kaoss_bpm_up, "+1", 0xffffff, 2);
-        scene.button(layout.kaoss_bpm_up5, 0x3c3836);
-        scene.text_centered(layout.kaoss_bpm_up5, "+5", 0xffffff, 2);
+        if layout.kaoss_bpm.w > 0 {
+            scene.button(layout.kaoss_bpm, 0x3c3836);
+            scene.text_centered(
+                layout.kaoss_bpm,
+                &format!("BPM {:.0}", model.bpm),
+                0xffffff,
+                2,
+            );
+        }
         scene.button(
             layout.kaoss_full,
             if model.kaoss_full { 0x689d6a } else { 0x458588 },
@@ -1025,6 +1041,61 @@ fn draw_kaoss(scene: &mut Scene, model: &NativeModel) {
     if layout.kaoss_full.w > 0 && layout.kaoss_gate.w == 0 {
         // FULL PAD mode — exit control only via bottom-edge hold.
     }
+}
+
+fn draw_kaoss_bpm_sheet(scene: &mut Scene, model: &NativeModel) {
+    let layout = model.layout;
+    let c = layout.content;
+    scene.fill_rect(c, 0x111111);
+    scene.text(c.x + 16, c.y + 12, "TEMPO", 0xfbf1c7);
+    if !model.status_line.is_empty() {
+        scene.text(c.x + 120, c.y + 12, &model.status_line, 0xa89984);
+    }
+    let value = layout.kaoss_bpm_value_btn();
+    scene.button(value, 0x1d2021);
+    scene.text_centered(value, &format!("{:.0}", model.bpm), 0xfbf1c7, 4);
+    for (negative, step, label) in [
+        (true, 10, "-10"),
+        (false, 10, "+10"),
+        (true, 5, "-5"),
+        (false, 5, "+5"),
+        (true, 1, "-1"),
+        (false, 1, "+1"),
+    ] {
+        let btn = layout.kaoss_bpm_nudge_btn(negative, step);
+        scene.button(btn, 0x3c3836);
+        scene.text_centered(btn, label, 0xffffff, 2);
+    }
+    let done = layout.kaoss_bpm_done_btn();
+    scene.button(done, 0x458588);
+    scene.text_centered(done, "DONE", 0xffffff, 2);
+}
+
+fn draw_kaoss_bpm_numpad(scene: &mut Scene, model: &NativeModel) {
+    let layout = model.layout;
+    let c = layout.content;
+    scene.fill_rect(c, 0x111111);
+    scene.text(c.x + 16, c.y + 8, "ENTER BPM", 0xfbf1c7);
+    let display = layout.kaoss_bpm_numpad_display();
+    scene.button(display, 0x1d2021);
+    let shown = if model.kaoss_bpm_digits.is_empty() {
+        "—".to_string()
+    } else {
+        model.kaoss_bpm_digits.clone()
+    };
+    scene.text_centered(display, &shown, 0xfbf1c7, 4);
+    let labels = [
+        "1", "2", "3", "4", "5", "6", "7", "8", "9", "DEL", "0", "OK",
+    ];
+    for (index, label) in labels.iter().enumerate() {
+        let key = layout.kaoss_bpm_numpad_key(index);
+        let fill = if *label == "OK" { 0x458588 } else { 0x3c3836 };
+        scene.button(key, fill);
+        scene.text_centered(key, label, 0xffffff, 2);
+    }
+    let cancel = layout.kaoss_bpm_numpad_key(12);
+    scene.button(cancel, 0x504945);
+    scene.text_centered(cancel, "CANCEL", 0xffffff, 2);
 }
 
 fn draw_kaoss_settings(scene: &mut Scene, model: &NativeModel) {
@@ -2020,8 +2091,9 @@ fn draw_synth(scene: &mut Scene, model: &NativeModel) {
         return;
     }
 
-    const LABELS: [&str; Layout::SYNTH_SLIDER_COUNT] =
-        ["MORPH", "TONE", "LEVEL", "ATK", "REL", "DRIFT", "FLNG", "RATE"];
+    const LABELS: [&str; Layout::SYNTH_SLIDER_COUNT] = [
+        "MORPH", "TONE", "LEVEL", "ATTACK", "RELEASE", "DRIFT", "FLANGE", "RATE",
+    ];
 
     let a = waves::short_label(model.wave_label(model.morph_a));
     let b = waves::short_label(model.wave_label(model.morph_b));
@@ -2079,18 +2151,7 @@ fn draw_synth(scene: &mut Scene, model: &NativeModel) {
     for index in 0..Layout::SYNTH_SLIDER_COUNT {
         let track = layout.synth_slider(index);
         scene.fill_rect(track, 0x20202c);
-        let col_w = layout.synth_sliders.w / Layout::SYNTH_SLIDER_COUNT as i32;
-        scene.text_centered(
-            Rect {
-                x: layout.synth_sliders.x + index as i32 * col_w,
-                y: track.y - 18,
-                w: col_w,
-                h: 16,
-            },
-            LABELS[index],
-            0xc0c0d0,
-            2,
-        );
+        scene.text_scaled(track.x, track.y - 16, LABELS[index], 0xc0c0d0, 2);
         let value = if index < 5 {
             model.synth_params[index]
         } else if index == 5 {
@@ -2101,30 +2162,30 @@ fn draw_synth(scene: &mut Scene, model: &NativeModel) {
             model.fx_flanger_rate
         };
         let fill = if index == 5 {
-            let mid = track.y + track.h / 2;
-            let travel = ((value - 0.5).abs() * track.h as f32) as i32;
+            let mid = track.x + track.w / 2;
+            let travel = ((value - 0.5).abs() * track.w as f32) as i32;
             if value >= 0.5 {
                 Rect {
-                    x: track.x + 4,
-                    y: mid - travel,
-                    w: track.w - 8,
-                    h: travel.max(2),
+                    x: mid,
+                    y: track.y + 4,
+                    w: travel.max(2),
+                    h: track.h - 8,
                 }
             } else {
                 Rect {
-                    x: track.x + 4,
-                    y: mid,
-                    w: track.w - 8,
-                    h: travel.max(2),
+                    x: mid - travel,
+                    y: track.y + 4,
+                    w: travel.max(2),
+                    h: track.h - 8,
                 }
             }
         } else {
-            let fill_h = (track.h as f32 * value) as i32;
+            let fill_w = (track.w as f32 * value) as i32;
             Rect {
-                x: track.x + 4,
-                y: track.y + track.h - fill_h,
-                w: track.w - 8,
-                h: fill_h.max(2),
+                x: track.x,
+                y: track.y + 4,
+                w: fill_w.max(2),
+                h: track.h - 8,
             }
         };
         scene.fill_rect(
