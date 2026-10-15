@@ -1,6 +1,6 @@
 target=armv7-unknown-linux-gnueabihf
-built_utc=2026-10-14T21:37:12Z
+built_utc=2026-10-15T13:23:05Z
 host=Linux x86_64
 host_glibc=2.35
-git_sha=cf7daafbe27eca37ba928b2a88f52361791df53f
+git_sha=43c40540d99155e37a248300f7555a27efe9597b
 crates=pidi-native

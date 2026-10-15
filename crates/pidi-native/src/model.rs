@@ -247,6 +247,15 @@ pub struct NativeModel {
     pub fm_params: [f32; 4],
     /// True while the heard graph is the saved user patch, not a recipe.
     pub fm_user_live: bool,
+    pub fm_user_index: Option<usize>,
+    /// Name shown on the play-screen patch button.
+    pub fm_patch_name: String,
+    pub fm_patches: Vec<session::FmNamedPatch>,
+    pub fm_patches_open: bool,
+    pub fm_patch_scroll: i32,
+    pub fm_name_open: bool,
+    pub fm_name_buf: String,
+    /// Last single save, kept so an older session file still round-trips.
     pub fm_user: Option<session::FmUserPatch>,
     fm_undo: Vec<FmUndo>,
     pub kaoss_picker_scroll: i32,
@@ -495,7 +504,31 @@ pub struct NativeModel {
 struct FmUndo {
     recipe: usize,
     user_live: bool,
+    user_index: Option<usize>,
+    name: String,
     patch: session::FmUserPatch,
+}
+
+fn clean_fm_patch_name(raw: &str) -> String {
+    let mut out = String::new();
+    for ch in raw.chars() {
+        let c = ch.to_ascii_uppercase();
+        if c.is_ascii_alphanumeric() || c == ' ' || c == '-' {
+            if c == ' ' && (out.is_empty() || out.ends_with(' ')) {
+                continue;
+            }
+            out.push(c);
+            if out.len() >= 12 {
+                break;
+            }
+        }
+    }
+    let out = out.trim().to_string();
+    if out.is_empty() {
+        "PATCH".into()
+    } else {
+        out
+    }
 }
 
 /// Pad FX values from just before a touch, restored on lift when HOLD FX is off.
@@ -572,6 +605,13 @@ impl NativeModel {
                 fm_patch.ops[3].env,
             ],
             fm_user_live: false,
+            fm_user_index: None,
+            fm_patch_name: "BELL".into(),
+            fm_patches: Vec::new(),
+            fm_patches_open: false,
+            fm_patch_scroll: 0,
+            fm_name_open: false,
+            fm_name_buf: String::new(),
             fm_user: None,
             fm_undo: Vec::new(),
             kaoss_picker_scroll: 0,
@@ -867,6 +907,9 @@ impl NativeModel {
         self.synth_pick_a = None;
         self.synth_vib_open = false;
         self.synth_pick_scroll = 0;
+        self.fm_patches_open = false;
+        self.fm_name_open = false;
+        self.fm_patch_scroll = 0;
         self.kit_edit_open = false;
         self.kit_repeat_open = false;
         self.fx_settings_open = false;
@@ -919,7 +962,11 @@ impl NativeModel {
             self.enter_arp_mode(outbox);
         }
         if mode == UiMode::Fm {
-            self.status_line = format!("FM · {}", jambox_core::fm_recipe(self.fm_recipe).title);
+            self.status_line = if self.fm_user_live {
+                self.fm_patch_name.clone()
+            } else {
+                jambox_core::fm_recipe(self.fm_recipe).hint.into()
+            };
         }
         if mode == UiMode::Ports {
             outbox.midi_ports();
@@ -1038,6 +1085,12 @@ impl NativeModel {
         }
         if self.song_viz_open {
             return Some("song_viz");
+        }
+        if self.fm_name_open {
+            return Some("fm_name");
+        }
+        if self.fm_patches_open {
+            return Some("fm_patches");
         }
         None
     }
@@ -1242,6 +1295,14 @@ impl NativeModel {
                 self.status_line = "MAP".into();
             }
             Some("song_viz") => self.close_song_viz(),
+            Some("fm_name") => {
+                self.fm_name_open = false;
+                self.status_line = self.fm_patch_name.clone();
+            }
+            Some("fm_patches") => {
+                self.fm_patches_open = false;
+                self.status_line = self.fm_patch_name.clone();
+            }
             _ => {
                 if let Some(prev) = self.nav_stack.pop() {
                     self.nav_back_navigating = true;
@@ -2197,7 +2258,16 @@ impl NativeModel {
         self.wifi_usb_hold = s.wifi_usb_hold;
         self.full_vel = s.full_velocity;
         self.drum_repeat_lock = s.drum_repeat_lock;
-        self.fm_user = s.fm_user;
+        self.fm_patches = s.fm_patches.clone();
+        if self.fm_patches.is_empty() {
+            if let Some(old) = s.fm_user {
+                self.fm_patches.push(session::FmNamedPatch {
+                    name: "USER".into(),
+                    patch: old,
+                });
+            }
+        }
+        self.fm_user = self.fm_patches.last().map(|p| p.patch);
         outbox.midi_select(
             Some(self.midi_in_filter.clone()),
             Some(self.midi_out_filter.clone()),
@@ -2331,6 +2401,7 @@ impl NativeModel {
             full_velocity: self.full_vel,
             drum_repeat_lock: self.drum_repeat_lock,
             fm_user: self.fm_user,
+            fm_patches: self.fm_patches.clone(),
         }
     }
 
@@ -2392,12 +2463,13 @@ impl NativeModel {
             }
             self.push_log(format!("midi off ch{} n{}", notice.channel, note));
         } else if kind == "control_change" || kind == "cc" {
-            self.last_midi_activity = format!(
-                "IN  ch{} cc{} v{}",
-                notice.channel + 1,
-                notice.control.unwrap_or(0),
-                notice.value.unwrap_or(0)
-            );
+            let cc = notice.control.unwrap_or(0);
+            let raw = notice.value.unwrap_or(0);
+            self.last_midi_activity =
+                format!("IN  ch{} cc{} v{}", notice.channel + 1, cc, raw);
+            if self.mode == UiMode::Synth && cc != 1 {
+                self.apply_synth_knob(cc, raw.min(127) as u8, outbox);
+            }
         }
     }
 
@@ -2717,6 +2789,23 @@ impl NativeModel {
                 base
             } else {
                 self.layout.hit_wifi_panel(px, py)
+            }
+        } else if self.mode == UiMode::Fm && (self.fm_patches_open || self.fm_name_open) {
+            let base = self.layout.hit(self.mode, px, py);
+            if matches!(
+                base,
+                Hit::Nav(_) | Hit::NavBack | Hit::Power | Hit::HomeTile(_)
+            ) {
+                base
+            } else if self.fm_name_open {
+                self.layout.hit_fm_name(px, py)
+            } else {
+                self.layout.hit_fm_patches(
+                    px,
+                    py,
+                    jambox_core::FM_RECIPE_COUNT + self.fm_patches.len(),
+                    self.fm_patch_scroll,
+                )
             }
         } else if self.mode == UiMode::Synth
             && (self.synth_pick_a.is_some() || self.synth_vib_open)
@@ -3169,6 +3258,30 @@ impl NativeModel {
                 self.tap_ui(slot, id, gesture, px, py);
                 self.select_fm_recipe(index, outbox);
             }
+            Hit::FmPatches => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.open_fm_patches();
+            }
+            Hit::FmPatchDone => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.fm_patches_open = false;
+                self.status_line = self.fm_patch_name.clone();
+                self.mark_dirty();
+            }
+            Hit::FmNameOk => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.commit_fm_name();
+            }
+            Hit::FmNameCancel => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.fm_name_open = false;
+                self.status_line = self.fm_patch_name.clone();
+                self.mark_dirty();
+            }
+            Hit::FmNameKey(index) => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.type_fm_name(index);
+            }
             Hit::FmOp(index) => {
                 self.fingers[slot] = Finger {
                     active: true,
@@ -3192,11 +3305,11 @@ impl NativeModel {
             }
             Hit::FmSave => {
                 self.tap_ui(slot, id, gesture, px, py);
-                self.save_fm_user();
+                self.open_fm_name();
             }
             Hit::FmUser => {
                 self.tap_ui(slot, id, gesture, px, py);
-                self.load_fm_user(outbox);
+                self.open_fm_patches();
             }
             Hit::FmSlider(index) => {
                 self.fingers[slot] = Finger {
@@ -4954,6 +5067,23 @@ impl NativeModel {
         !moving || (next - prev).abs() <= Self::SLIDER_JUMP
     }
 
+    /// MPK mini K1–K8 (CC 70–77) while the synth page is up.
+    fn apply_synth_knob(&mut self, cc: u8, value: u8, outbox: &mut Outbox) {
+        let index = match cc {
+            70 => 0,
+            71 => 1,
+            72 => 2,
+            73 => 3,
+            74 => 4,
+            75 => 5,
+            76 => 6,
+            77 => 7,
+            _ => return,
+        };
+        let unit = (value as f32 / 127.0).clamp(0.0, 1.0);
+        self.set_synth_slider_unit(index, unit, false, outbox);
+    }
+
     fn apply_synth_slider(
         &mut self,
         index: usize,
@@ -4966,6 +5096,16 @@ impl NativeModel {
         let Some(value) = Self::vertical_slider_t(track, py) else {
             return;
         };
+        self.set_synth_slider_unit(index, value, moving, outbox);
+    }
+
+    fn set_synth_slider_unit(
+        &mut self,
+        index: usize,
+        value: f32,
+        moving: bool,
+        outbox: &mut Outbox,
+    ) {
         if index == 5 {
             if !Self::accept_slider_value(self.release_drift, value, moving) {
                 return;
@@ -5043,6 +5183,8 @@ impl NativeModel {
         let patch = jambox_core::fm_recipe_patch(index);
         self.fm_recipe = index % jambox_core::FM_RECIPE_COUNT;
         self.fm_user_live = false;
+        self.fm_user_index = None;
+        self.fm_patch_name = jambox_core::fm_recipe(self.fm_recipe).label.into();
         self.fm_ops = patch.ops;
         self.fm_matrix = patch.matrix;
         self.fm_selected = 3;
@@ -5076,6 +5218,8 @@ impl NativeModel {
         self.fm_undo.push(FmUndo {
             recipe: self.fm_recipe,
             user_live: self.fm_user_live,
+            user_index: self.fm_user_index,
+            name: self.fm_patch_name.clone(),
             patch: self.fm_snapshot(),
         });
         if self.fm_undo.len() > 24 {
@@ -5110,7 +5254,7 @@ impl NativeModel {
         self.apply_fm_patch(index);
         self.push_fm_params(outbox);
         let rec = jambox_core::fm_recipe(self.fm_recipe);
-        self.status_line = format!("FM · {}", rec.title);
+        self.status_line = rec.hint.into();
         self.mark_dirty();
     }
 
@@ -5129,6 +5273,7 @@ impl NativeModel {
         if self.fm_matrix[from][to] > 0.02 {
             self.fm_matrix[from][to] = 0.0;
             self.fm_user_live = false;
+            self.fm_user_index = None;
             self.push_fm_params(outbox);
             self.status_line = if from == to {
                 format!("erased {} feedback", jambox_core::OP_NAMES[from])
@@ -5145,6 +5290,7 @@ impl NativeModel {
         let amount = amount.clamp(0.25, 0.95);
         self.fm_matrix[from][to] = amount;
         self.fm_user_live = false;
+        self.fm_user_index = None;
         outbox.synth("fm_connect", jambox_core::pack_fm_link(from, to, amount));
         self.status_line = if from == to {
             format!("{} feedback", jambox_core::OP_NAMES[from])
@@ -5161,6 +5307,7 @@ impl NativeModel {
     fn clear_fm_links(&mut self, outbox: &mut Outbox) {
         self.remember_fm();
         self.fm_user_live = false;
+        self.fm_user_index = None;
         self.fm_matrix = [[0.0; jambox_core::FM_OP_COUNT]; jambox_core::FM_OP_COUNT];
         outbox.synth("fm_clear", 1.0);
         self.status_line = "links cleared".into();
@@ -5175,30 +5322,96 @@ impl NativeModel {
         };
         self.fm_recipe = patch.recipe;
         self.fm_user_live = patch.user_live;
+        self.fm_user_index = patch.user_index;
+        self.fm_patch_name = patch.name;
         self.apply_fm_snapshot(patch.patch);
         self.push_fm_params(outbox);
         self.status_line = "undid last FM edit".into();
         self.mark_dirty();
     }
 
-    fn save_fm_user(&mut self) {
-        self.fm_user = Some(self.fm_snapshot());
-        self.fm_user_live = true;
-        self.status_line = "FM sound saved".into();
+    fn open_fm_patches(&mut self) {
+        self.fm_name_open = false;
+        self.fm_patches_open = true;
+        self.fm_patch_scroll = 0;
+        self.status_line = "patches · tap to load".into();
         self.mark_dirty();
     }
 
-    fn load_fm_user(&mut self, outbox: &mut Outbox) {
-        let Some(patch) = self.fm_user else {
-            self.status_line = "no saved FM sound".into();
+    fn open_fm_name(&mut self) {
+        self.fm_patches_open = false;
+        self.fm_name_open = true;
+        self.fm_name_buf = self.fm_patch_name.clone();
+        self.status_line = "name this patch".into();
+        self.mark_dirty();
+    }
+
+    fn type_fm_name(&mut self, index: u8) {
+        let label = crate::layout::fm_name_key_label(index as usize);
+        match label {
+            "DEL" => {
+                self.fm_name_buf.pop();
+            }
+            "SP" => {
+                if !self.fm_name_buf.is_empty()
+                    && !self.fm_name_buf.ends_with(' ')
+                    && self.fm_name_buf.len() < 12
+                {
+                    self.fm_name_buf.push(' ');
+                }
+            }
+            "" => {}
+            other => {
+                if self.fm_name_buf.len() < 12 {
+                    self.fm_name_buf.push_str(other);
+                }
+            }
+        }
+        self.mark_dirty();
+    }
+
+    fn commit_fm_name(&mut self) {
+        let name = clean_fm_patch_name(&self.fm_name_buf);
+        let body = self.fm_snapshot();
+        if let Some(index) = self.fm_patches.iter().position(|p| p.name == name) {
+            self.fm_patches[index].patch = body;
+            self.fm_user_index = Some(index);
+        } else if self.fm_patches.len() >= 32 {
+            self.status_line = "patch list is full".into();
             self.mark_dirty();
+            return;
+        } else {
+            self.fm_patches.push(session::FmNamedPatch {
+                name: name.clone(),
+                patch: body,
+            });
+            self.fm_user_index = Some(self.fm_patches.len() - 1);
+        }
+        self.fm_patch_name = name;
+        self.fm_user_live = true;
+        self.fm_user = Some(body);
+        self.fm_name_open = false;
+        self.status_line = format!("saved {}", self.fm_patch_name);
+        self.mark_dirty();
+    }
+
+    fn load_fm_patch_index(&mut self, index: usize, outbox: &mut Outbox) {
+        if index < jambox_core::FM_RECIPE_COUNT {
+            self.select_fm_recipe(index, outbox);
+            return;
+        }
+        let user = index - jambox_core::FM_RECIPE_COUNT;
+        let Some(named) = self.fm_patches.get(user).cloned() else {
             return;
         };
         self.remember_fm();
-        self.apply_fm_snapshot(patch);
+        self.apply_fm_snapshot(named.patch);
         self.fm_user_live = true;
+        self.fm_user_index = Some(user);
+        self.fm_patch_name = named.name;
+        self.fm_user = Some(named.patch);
         self.push_fm_params(outbox);
-        self.status_line = "loaded saved FM sound".into();
+        self.status_line = self.fm_patch_name.clone();
         self.mark_dirty();
     }
 
@@ -7418,6 +7631,7 @@ impl NativeModel {
             ScrollKind::Home => self.home_scroll,
             ScrollKind::SongList => self.song_scroll as i32,
             ScrollKind::Log => self.log_scroll as i32,
+            ScrollKind::FmPatches => self.fm_patch_scroll,
         }
     }
 
@@ -7450,6 +7664,11 @@ impl NativeModel {
                 let list = self.layout.log_list_scroll(self.log_lines.len());
                 self.log_scroll = list.clamp_scroll(value.max(0) as usize);
             }
+            ScrollKind::FmPatches => {
+                let n = jambox_core::FM_RECIPE_COUNT + self.fm_patches.len();
+                let grid = self.layout.fm_patch_grid(n);
+                self.fm_patch_scroll = grid.clamp_scroll(value);
+            }
         }
         self.mark_dirty();
     }
@@ -7465,7 +7684,8 @@ impl NativeModel {
             ScrollKind::SynthMorphPick
             | ScrollKind::KaossPicker
             | ScrollKind::KaossSettings
-            | ScrollKind::Home => {
+            | ScrollKind::Home
+            | ScrollKind::FmPatches => {
                 let delta = start_py - py;
                 self.set_scroll_offset(kind, scroll_at_start + delta);
             }
@@ -7539,6 +7759,13 @@ impl NativeModel {
                     let mode = crate::layout::HOME_TILES[index].0;
                     self.push_nav_history(mode);
                     self.switch_mode(mode, outbox);
+                }
+            }
+            ScrollKind::FmPatches => {
+                let n = jambox_core::FM_RECIPE_COUNT + self.fm_patches.len();
+                let grid = self.layout.fm_patch_grid(n);
+                if let Some(index) = grid.index_at(px, py, self.fm_patch_scroll) {
+                    self.load_fm_patch_index(index, outbox);
                 }
             }
         }
@@ -9218,7 +9445,7 @@ mod tests {
         model.drum_repeat[jambox_core::DrumModel::Kick.index()] = RepeatDivisionChoice::Quarter;
         let mut out = Outbox::new();
         let kick = model.layout.kit_pad_cell(4);
-        let snare = model.layout.kit_pad_cell(5);
+        let snare = model.layout.kit_pad_cell(13);
         model.finger_down(1, kick.x + 4, kick.y + 4, &mut out);
         model.finger_down(2, snare.x + 4, snare.y + 4, &mut out);
         assert_eq!(model.active_fingers(), 2);
@@ -10228,7 +10455,7 @@ mod tests {
         let mut model = NativeModel::new();
         model.set_mode(UiMode::Drums);
         let mut out = Outbox::new();
-        let snare = model.layout.kit_pad_cell(5);
+        let snare = model.layout.kit_pad_cell(13);
         model.finger_down(1, snare.x + 4, snare.y + 4, &mut out);
         model.finger_up(1, &mut out);
         out.take();
@@ -10331,7 +10558,7 @@ mod tests {
         model.set_mode(UiMode::Drums);
         let mut out = Outbox::new();
         let kick = model.layout.kit_pad_cell(4);
-        let snare = model.layout.kit_pad_cell(5);
+        let snare = model.layout.kit_pad_cell(13);
         model.finger_down(1, kick.x + 4, kick.y + 4, &mut out);
         model.finger_up(1, &mut out);
         out.take();
@@ -12180,6 +12407,68 @@ mod tests {
     }
 
     #[test]
+    fn synth_knobs_move_the_on_screen_sliders() {
+        let mut model = NativeModel::new();
+        let mut out = Outbox::new();
+        model.set_mode(UiMode::Synth);
+        model.on_midi_notice(
+            &MidiNotice {
+                kind: "cc".into(),
+                channel: 0,
+                note: None,
+                velocity: None,
+                control: Some(70),
+                value: Some(127),
+            },
+            &mut out,
+        );
+        assert!((model.synth_params[0] - 1.0).abs() < 0.01);
+        let batch = out.take();
+        assert!(batch.iter().any(|r| matches!(
+            r,
+            Request::Synth { param, value, .. } if param == "morph" && *value > 0.99
+        )));
+        model.on_midi_notice(
+            &MidiNotice {
+                kind: "cc".into(),
+                channel: 0,
+                note: None,
+                velocity: None,
+                control: Some(1),
+                value: Some(100),
+            },
+            &mut out,
+        );
+        assert!((model.synth_params[0] - 1.0).abs() < 0.01, "CC1 is the joystick");
+        model.on_midi_notice(
+            &MidiNotice {
+                kind: "cc".into(),
+                channel: 0,
+                note: None,
+                velocity: None,
+                control: Some(76),
+                value: Some(64),
+            },
+            &mut out,
+        );
+        assert!((model.fx_voice[3] - 64.0 / 127.0).abs() < 0.02);
+        model.set_mode(UiMode::Fm);
+        let before = model.synth_params[1];
+        model.on_midi_notice(
+            &MidiNotice {
+                kind: "cc".into(),
+                channel: 0,
+                note: None,
+                velocity: None,
+                control: Some(71),
+                value: Some(10),
+            },
+            &mut out,
+        );
+        assert!((model.synth_params[1] - before).abs() < 0.001);
+    }
+
+    #[test]
     fn fm_mode_enables_engine_and_plays_a_key() {
         let mut model = NativeModel::new();
         let mut out = Outbox::new();
@@ -12198,10 +12487,20 @@ mod tests {
             Request::KnobMap { mode, .. } if mode == "fm"
         )));
 
-        let rec = model.layout.fm_recipe_cell(1);
-        model.finger_down(2, rec.x + 4, rec.y + 4, &mut out);
+        let open = model.layout.fm_patch_button();
+        model.finger_down(2, open.x + 4, open.y + 4, &mut out);
         model.finger_up(2, &mut out);
+        assert!(model.fm_patches_open);
+        let grid = model.layout.fm_patch_grid(jambox_core::FM_RECIPE_COUNT);
+        let rec = grid.cell_rect(1, 0);
+        model.finger_down(3, rec.x + 4, rec.y + 4, &mut out);
+        model.finger_up(3, &mut out);
         assert_eq!(model.fm_recipe, 1);
+        assert_eq!(model.fm_patch_name, "E.PIANO");
+        let done = model.layout.fm_patch_done();
+        model.finger_down(4, done.x + 4, done.y + 4, &mut out);
+        model.finger_up(4, &mut out);
+        assert!(!model.fm_patches_open);
         let batch = out.take();
         assert!(batch.iter().any(|r| matches!(
             r,
@@ -12275,14 +12574,29 @@ mod tests {
         let save = model.layout.fm_save();
         model.finger_down(3, save.x + 4, save.y + 4, &mut out);
         model.finger_up(3, &mut out);
-        assert!(model.fm_user.is_some());
-        let clear = model.layout.fm_clear();
-        model.finger_down(4, clear.x + 4, clear.y + 4, &mut out);
+        assert!(model.fm_name_open);
+        let key = model.layout.fm_name_key(0);
+        model.finger_down(4, key.x + 4, key.y + 4, &mut out);
         model.finger_up(4, &mut out);
-        assert_eq!(model.fm_matrix[0][1], 0.0);
-        let user = model.layout.fm_user();
-        model.finger_down(5, user.x + 4, user.y + 4, &mut out);
+        let ok = model.layout.fm_name_ok();
+        model.finger_down(5, ok.x + 4, ok.y + 4, &mut out);
         model.finger_up(5, &mut out);
+        assert!(model.fm_user_live);
+        assert_eq!(model.fm_patches.len(), 1);
+        assert!(model.fm_patch_name.starts_with('Q') || model.fm_patch_name.contains('Q'));
+        let clear = model.layout.fm_clear();
+        model.finger_down(6, clear.x + 4, clear.y + 4, &mut out);
+        model.finger_up(6, &mut out);
+        assert_eq!(model.fm_matrix[0][1], 0.0);
+        let open = model.layout.fm_patch_button();
+        model.finger_down(7, open.x + 4, open.y + 4, &mut out);
+        model.finger_up(7, &mut out);
+        let grid = model
+            .layout
+            .fm_patch_grid(jambox_core::FM_RECIPE_COUNT + 1);
+        let user = grid.cell_rect(jambox_core::FM_RECIPE_COUNT, 0);
+        model.finger_down(8, user.x + 4, user.y + 4, &mut out);
+        model.finger_up(8, &mut out);
         assert!(model.fm_user_live);
         assert!((model.fm_matrix[0][1] - 0.7).abs() < 0.05);
     }
@@ -12302,6 +12616,41 @@ mod tests {
             r,
             Request::Synth { param, value, .. } if param == "fm_op" && (*value - 1.0).abs() < 0.1
         )));
+    }
+
+    #[test]
+    fn back_from_fm_patches_stays_on_the_drawing_board() {
+        let mut model = NativeModel::new();
+        let mut out = Outbox::new();
+        model.set_mode(UiMode::Home);
+        let tile = model.layout.home_tile(1, 0);
+        model.finger_down(1, tile.x + 8, tile.y + 8, &mut out);
+        model.finger_up(1, &mut out);
+        assert_eq!(model.mode, UiMode::Fm);
+
+        let open = model.layout.fm_patch_button();
+        model.finger_down(2, open.x + 4, open.y + 4, &mut out);
+        model.finger_up(2, &mut out);
+        assert!(model.fm_patches_open);
+
+        let back = model.layout.nav_back();
+        model.finger_down(3, back.x + 4, back.y + 4, &mut out);
+        model.finger_up(3, &mut out);
+        assert_eq!(model.mode, UiMode::Fm);
+        assert!(!model.fm_patches_open);
+
+        let save = model.layout.fm_save();
+        model.finger_down(4, save.x + 4, save.y + 4, &mut out);
+        model.finger_up(4, &mut out);
+        assert!(model.fm_name_open);
+        model.finger_down(5, back.x + 4, back.y + 4, &mut out);
+        model.finger_up(5, &mut out);
+        assert_eq!(model.mode, UiMode::Fm);
+        assert!(!model.fm_name_open);
+
+        model.finger_down(6, back.x + 4, back.y + 4, &mut out);
+        model.finger_up(6, &mut out);
+        assert_eq!(model.mode, UiMode::Home);
     }
 
     #[test]

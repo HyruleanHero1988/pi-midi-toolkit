@@ -758,9 +758,11 @@ fn chrome_status(model: &NativeModel) -> String {
             }
         }
         UiMode::Presets => format!("SLOT {}", model.preset_selected + 1),
+        UiMode::Fm if model.fm_name_open => "NAME".into(),
+        UiMode::Fm if model.fm_patches_open => "PATCHES".into(),
         UiMode::Fm => format!(
             "{} · {}",
-            jambox_core::fm_recipe(model.fm_recipe).label,
+            model.fm_patch_name,
             jambox_core::OP_NAMES[model.fm_selected]
         ),
         UiMode::Synth if model.synth_vib_open => "VIB".into(),
@@ -2019,7 +2021,7 @@ fn draw_synth(scene: &mut Scene, model: &NativeModel) {
     }
 
     const LABELS: [&str; Layout::SYNTH_SLIDER_COUNT] =
-        ["MORPH", "TONE", "LEVEL", "ATK", "REL", "DRIFT", "FLANGE", "RATE"];
+        ["MORPH", "TONE", "LEVEL", "ATK", "REL", "DRIFT", "FLNG", "RATE"];
 
     let a = waves::short_label(model.wave_label(model.morph_a));
     let b = waves::short_label(model.wave_label(model.morph_b));
@@ -2077,7 +2079,18 @@ fn draw_synth(scene: &mut Scene, model: &NativeModel) {
     for index in 0..Layout::SYNTH_SLIDER_COUNT {
         let track = layout.synth_slider(index);
         scene.fill_rect(track, 0x20202c);
-        scene.text(track.x + 4, track.y - 16, LABELS[index], 0xc0c0d0);
+        let col_w = layout.synth_sliders.w / Layout::SYNTH_SLIDER_COUNT as i32;
+        scene.text_centered(
+            Rect {
+                x: layout.synth_sliders.x + index as i32 * col_w,
+                y: track.y - 18,
+                w: col_w,
+                h: 16,
+            },
+            LABELS[index],
+            0xc0c0d0,
+            2,
+        );
         let value = if index < 5 {
             model.synth_params[index]
         } else if index == 5 {
@@ -2241,49 +2254,97 @@ fn stroke_scope_seg(scene: &mut Scene, x0: f32, y0: f32, x1: f32, y1: f32, color
     }
 }
 
+fn draw_fm_patches(scene: &mut Scene, model: &NativeModel) {
+    let layout = model.layout;
+    scene.fill_rect(layout.content, 0x111111);
+    scene.text(24, HUD_H + 8, "PATCHES", 0xfbf1c7);
+    scene.text(160, HUD_H + 12, "tap to load", 0xa89984);
+    let n = jambox_core::FM_RECIPE_COUNT + model.fm_patches.len();
+    let grid = layout.fm_patch_grid(n);
+    for index in grid.visible_range(model.fm_patch_scroll) {
+        let cell = grid.cell_rect(index, model.fm_patch_scroll);
+        if cell.y + cell.h < grid.viewport.y || cell.y > grid.viewport.y + grid.viewport.h {
+            continue;
+        }
+        let (label, on) = if index < jambox_core::FM_RECIPE_COUNT {
+            (
+                jambox_core::fm_recipe(index).label,
+                !model.fm_user_live && index == model.fm_recipe,
+            )
+        } else {
+            let user = index - jambox_core::FM_RECIPE_COUNT;
+            let name = model
+                .fm_patches
+                .get(user)
+                .map(|p| p.name.as_str())
+                .unwrap_or("");
+            (name, model.fm_user_live && model.fm_user_index == Some(user))
+        };
+        scene.fill_rect(cell, if on { 0x8ec07c } else { 0x3c3836 });
+        scene.text_centered(
+            cell,
+            label,
+            if on { 0x1d2021 } else { 0xfbf1c7 },
+            2,
+        );
+    }
+    scene.fill_rect(layout.fm_patch_done(), 0x458588);
+    scene.text_centered(layout.fm_patch_done(), "DONE", 0xffffff, 2);
+}
+
+fn draw_fm_name(scene: &mut Scene, model: &NativeModel) {
+    let layout = model.layout;
+    scene.fill_rect(layout.content, 0x111111);
+    scene.text(24, HUD_H + 8, "NAME THIS PATCH", 0xfbf1c7);
+    let entry = layout.fm_name_entry();
+    scene.fill_rect(entry, 0x1d2021);
+    let shown = if model.fm_name_buf.is_empty() {
+        "_"
+    } else {
+        model.fm_name_buf.as_str()
+    };
+    scene.text(entry.x + 12, entry.y + 16, shown, 0xfbf1c7);
+    for index in 0..crate::layout::fm_name_key_count() {
+        let key = layout.fm_name_key(index);
+        let label = crate::layout::fm_name_key_label(index);
+        let color = if label == "DEL" { 0x9d0006 } else { 0x3c3836 };
+        scene.fill_rect(key, color);
+        scene.text_centered(key, label, 0xfbf1c7, 2);
+    }
+    scene.fill_rect(layout.fm_name_ok(), 0x689d6a);
+    scene.text_centered(layout.fm_name_ok(), "OK", 0x1d2021, 2);
+    scene.fill_rect(layout.fm_name_cancel(), 0x504945);
+    scene.text_centered(layout.fm_name_cancel(), "CANCEL", 0xfbf1c7, 2);
+}
+
 fn draw_fm(scene: &mut Scene, model: &NativeModel) {
     let layout = model.layout;
-    for index in 0..jambox_core::FM_RECIPE_COUNT {
-        let rec = jambox_core::fm_recipe(index);
-        let cell = layout.fm_recipe_cell(index);
-        let on = !model.fm_user_live && index == model.fm_recipe;
-        scene.fill_rect(cell, if on { 0x8ec07c } else { 0x3c3836 });
-        scene.text_centered(cell, rec.label, if on { 0x1d2021 } else { 0xfbf1c7 }, 1);
+    if model.fm_name_open {
+        draw_fm_name(scene, model);
+        return;
+    }
+    if model.fm_patches_open {
+        draw_fm_patches(scene, model);
+        return;
     }
 
-    let hint = layout.fm_hint();
-    let hint_text = if model.fm_user_live {
-        "saved sound"
-    } else {
-        jambox_core::fm_recipe(model.fm_recipe).hint
-    };
-    scene.text(
-        hint.x,
-        hint.y + 4,
-        &clip_text(hint_text, hint.w, 1),
-        0xa89984,
+    scene.fill_rect(layout.fm_patch_button(), 0x458588);
+    scene.text_centered(
+        layout.fm_patch_button(),
+        &format!("PATCH  {}", model.fm_patch_name),
+        0xffffff,
+        2,
     );
     scene.fill_rect(layout.fm_undo(), 0x504945);
-    scene.text_centered(layout.fm_undo(), "UNDO", 0xfbf1c7, 1);
+    scene.text_centered(layout.fm_undo(), "UNDO", 0xfbf1c7, 2);
     scene.fill_rect(layout.fm_save(), 0x689d6a);
-    scene.text_centered(layout.fm_save(), "SAVE", 0x1d2021, 1);
-    scene.fill_rect(
-        layout.fm_user(),
-        if model.fm_user_live {
-            0xd79921
-        } else if model.fm_user.is_some() {
-            0x458588
-        } else {
-            0x3c3836
-        },
-    );
-    scene.text_centered(layout.fm_user(), "USER", 0xfbf1c7, 1);
+    scene.text_centered(layout.fm_save(), "SAVE", 0x1d2021, 2);
     scene.fill_rect(layout.fm_clear(), 0x9d0006);
-    scene.text_centered(layout.fm_clear(), "CLEAR", 0xfbf1c7, 1);
+    scene.text_centered(layout.fm_clear(), "CLEAR", 0xfbf1c7, 2);
     scene.fill_rect(layout.fm_oct_down(), 0x504945);
-    scene.text_centered(layout.fm_oct_down(), "OCT-", 0xfbf1c7, 1);
+    scene.text_centered(layout.fm_oct_down(), "OCT-", 0xfbf1c7, 2);
     scene.fill_rect(layout.fm_oct_up(), 0x504945);
-    scene.text_centered(layout.fm_oct_up(), "OCT+", 0xfbf1c7, 1);
+    scene.text_centered(layout.fm_oct_up(), "OCT+", 0xfbf1c7, 2);
 
     draw_fm_graph(scene, model);
     draw_fm_scope(scene, model);
@@ -4248,18 +4309,17 @@ mod tests {
         let mut model = NativeModel::new();
         model.set_mode(UiMode::Fm);
         let scene = build(&model);
+        let patch = model.layout.fm_patch_button();
         let chips = scene
             .color
             .iter()
             .filter(|q| {
-                let cell = model.layout.fm_recipe_cell(0);
-                q.w > 40.0 && q.h > 20.0 && q.y >= cell.y as f32 - 2.0 && q.y <= cell.y as f32 + 8.0
+                (q.x - patch.x as f32).abs() < 2.0
+                    && (q.y - patch.y as f32).abs() < 2.0
+                    && q.w > 200.0
             })
             .count();
-        assert!(
-            chips >= jambox_core::FM_RECIPE_COUNT,
-            "expected 8 recipe chips, got {chips}"
-        );
+        assert!(chips >= 1, "expected the patch button");
         let whites = scene
             .color
             .iter()

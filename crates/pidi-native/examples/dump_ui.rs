@@ -19,6 +19,19 @@ fn dump(model: &NativeModel, path: PathBuf) {
     println!("wrote {}", path.display());
 }
 
+fn load_fm_patch(model: &mut NativeModel, outbox: &mut Outbox, index: usize) {
+    let open = model.layout.fm_patch_button();
+    model.finger_down(1, open.x + 8, open.y + 8, outbox);
+    model.finger_up(1, outbox);
+    let grid = model.layout.fm_patch_grid(jambox_core::FM_RECIPE_COUNT);
+    let cell = grid.cell_rect(index, 0);
+    model.finger_down(1, cell.x + 8, cell.y + 8, outbox);
+    model.finger_up(1, outbox);
+    let done = model.layout.fm_patch_done();
+    model.finger_down(1, done.x + 8, done.y + 8, outbox);
+    model.finger_up(1, outbox);
+}
+
 fn main() {
     let out = PathBuf::from("tmp_ui_shots");
     let _ = std::fs::create_dir_all(&out);
@@ -108,9 +121,7 @@ fn main() {
         let mut ob = Outbox::new();
         model.set_mode(UiMode::Fm);
         model.tick(1.0 / 60.0, &mut ob);
-        let growl = model.layout.fm_recipe_cell(7);
-        model.finger_down(1, growl.x + 4, growl.y + 4, &mut ob);
-        model.finger_up(1, &mut ob);
+        load_fm_patch(&mut model, &mut ob, 7);
         model.tick(1.0 / 60.0, &mut ob);
         dump(&model, out.join("fm_growl.ppm"));
 
@@ -119,9 +130,7 @@ fn main() {
             let mut ob2 = Outbox::new();
             rec.set_mode(UiMode::Fm);
             rec.tick(1.0 / 60.0, &mut ob2);
-            let cell = rec.layout.fm_recipe_cell(index);
-            rec.finger_down(1, cell.x + 4, cell.y + 4, &mut ob2);
-            rec.finger_up(1, &mut ob2);
+            load_fm_patch(&mut rec, &mut ob2, index);
             rec.tick(1.0 / 60.0, &mut ob2);
             dump(&rec, out.join(format!("{name}.ppm")));
         }

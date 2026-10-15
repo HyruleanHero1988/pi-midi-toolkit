@@ -308,8 +308,20 @@ pub struct SessionState {
     #[serde(default)]
     pub drum_repeat_lock: bool,
     /// Touch-drawn FM graph the user saved. Missing in old sessions → none.
+    /// Kept so an older file still loads; new saves live in `fm_patches`.
     #[serde(default)]
     pub fm_user: Option<FmUserPatch>,
+    /// Named FM patches. Missing in old sessions → empty (then `fm_user` is imported).
+    #[serde(default)]
+    pub fm_patches: Vec<FmNamedPatch>,
+}
+
+/// A named draw-mode patch. The operator data is the same shape as `FmUserPatch`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FmNamedPatch {
+    pub name: String,
+    #[serde(flatten)]
+    pub patch: FmUserPatch,
 }
 
 /// Saved draw-mode FM graph. Plain arrays so old sessions still load.
@@ -446,6 +458,7 @@ impl Default for SessionState {
             full_velocity: default_full_velocity(),
             drum_repeat_lock: false,
             fm_user: None,
+            fm_patches: Vec::new(),
         }
     }
 }
