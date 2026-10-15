@@ -5,6 +5,7 @@
 
 mod audio;
 mod bus;
+mod capture;
 mod headless;
 mod ipc;
 mod mailbox;
@@ -36,6 +37,9 @@ enum Cmd {
         /// Audio output device name substring (e.g. "headphone").
         #[arg(long, default_value = "")]
         output: String,
+        /// Audio input device name substring (e.g. "usb"). Empty = first non-HDMI capture.
+        #[arg(long, default_value = "")]
+        input: String,
         /// MIDI input name substring. Empty = every class-compliant USB MIDI device.
         #[arg(long, default_value = "")]
         midi_in: String,
@@ -94,6 +98,7 @@ fn main() {
         Cmd::Devices => devices(),
         Cmd::Run {
             output,
+            input,
             midi_in,
             midi_out,
             control,
@@ -105,6 +110,7 @@ fn main() {
             buffer_frames,
         } => run(
             output,
+            input,
             midi_in,
             midi_out,
             control,
@@ -129,6 +135,10 @@ fn devices() {
     for name in audio::list_outputs() {
         println!("  {name}");
     }
+    println!("Audio inputs:");
+    for name in capture::list_inputs() {
+        println!("  {name}");
+    }
     let (ins, outs) = midi::list_ports();
     println!("MIDI inputs:");
     for name in ins {
@@ -143,6 +153,7 @@ fn devices() {
 #[allow(clippy::too_many_arguments)]
 fn run(
     output: String,
+    input: String,
     midi_in: String,
     midi_out: String,
     control: String,
@@ -192,12 +203,20 @@ fn run(
             );
         });
     } else {
+        let capture = Arc::new(capture::CaptureRing::new());
         // Stays on the first successful stream. SET → AUDIO sends audio_reopen.
         audio::spawn_output(
             output,
             audio_side,
             bank,
             buffer_frames,
+            Arc::clone(&audio_health),
+            Arc::clone(&capture),
+            running.clone(),
+        );
+        capture::spawn_input(
+            input,
+            capture,
             Arc::clone(&audio_health),
             running.clone(),
         );

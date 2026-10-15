@@ -47,8 +47,8 @@ pub const KAOSS_FULL_EXIT_EDGE_PX: i32 = 24;
 const KAOSS_CC_X: u8 = 12;
 const KAOSS_CC_Y: u8 = 13;
 const KAOSS_CC_TOUCH: u8 = 92;
-/// KIT sliders: tone / snap(noise) / pitch / decay.
-const DEFAULT_DRUM_MACROS: [f32; 4] = [0.60, 0.45, 0.50, 0.55];
+/// KIT sliders: tone / snap(noise) / pitch / decay / level.
+const DEFAULT_DRUM_MACROS: [f32; 5] = [0.60, 0.45, 0.50, 0.55, 0.50];
 const KIT_WAVE_POINTS: usize = 160;
 /// How long two chord-button fingers may come up apart and still count as one
 /// combo lift (m7 / M7 / dim / …). Shorter than this and the leftover button
@@ -214,6 +214,8 @@ pub struct NativeModel {
     pub seq_to_pad_armed: bool,
     pub status_line: String,
     pub synth_params: [f32; 5],
+    /// Release pitch glide. 0.5 is no drift; above rises, below falls (±12 st).
+    pub release_drift: f32,
     pub vibrato_always: f32,
     /// Vibrato depth in semitones (0..2).
     pub vibrato_depth: f32,
@@ -239,10 +241,10 @@ pub struct NativeModel {
     pub fm_params: [f32; 4],
     pub kaoss_picker_scroll: i32,
     pub log_scroll: usize,
-    /// Kit macros per model: tone, noise/snap, pitch, decay.
-    pub drum_macros: [[f32; 4]; DRUM_MODEL_COUNT],
+    /// Kit macros per model: tone, noise/snap, pitch, decay, level.
+    pub drum_macros: [[f32; 5]; DRUM_MODEL_COUNT],
     /// Snapshot shown while ALL DRUMS is the edit target.
-    pub drum_group_macros: [f32; 4],
+    pub drum_group_macros: [f32; 5],
     /// Selected kit pad (screen index 0..15 into `PHRASE_GRID_CELLS`).
     pub kit_selected: usize,
     pub kit_all_drums: bool,
@@ -306,8 +308,30 @@ pub struct NativeModel {
     pub fx_target: FxEditTarget,
     pub punch_amount: [f32; Layout::PUNCH_PAD_COUNT],
     pub punch_armed: [bool; Layout::PUNCH_PAD_COUNT],
+    /// FX GRAB: freeze loop is playing (committed after a hold).
+    pub punch_locked: bool,
+    /// Finger currently holding GRAB (recording into the freeze buffer).
+    pub punch_grabbing: bool,
+    /// Which bus the pads edit: 0 keys, 1 drums, 2 mic.
+    pub punch_source: u8,
+    punch_bank: [[f32; Layout::PUNCH_PAD_COUNT]; 3],
+    punch_armed_bank: [[bool; Layout::PUNCH_PAD_COUNT]; 3],
+    punch_locked_bank: [bool; 3],
+    punch_grabbing_bank: [bool; 3],
+    /// Buffer FX precedence (TAPE/RPT/DROP). See [`jambox_core::PunchBufferPrio`].
+    pub punch_buffer_prio: jambox_core::PunchBufferPrio,
+    /// RPT refresh (morph) vs hold (freeze grab).
+    pub punch_rpt_mode: jambox_core::PunchRptMode,
+    /// Beat divisions vs a smooth span of the captured audio.
+    pub punch_grid_mode: jambox_core::PunchGridMode,
+    /// Bank A pads arm punch FX. Off: those pads play the kit.
+    pub punch_pads_fx: bool,
+    /// FX SET sheet (granularity, prio, repeat mode).
+    pub fx_settings_open: bool,
     /// Kit bus trim (FX DRUMS / MIX KIT). Independent of melody `synth_params[2]` (LEVEL).
     pub drum_level: f32,
+    /// USB mic / line trim (FX MIC / MIX MIC). Default 0 = muted.
+    pub input_level: f32,
     /// SEQ / songs key trim (MIX KEY). Phrase pads use `phrases[i].gain`.
     pub seq_level: f32,
     pub seq_drum_level: f32,
@@ -467,6 +491,7 @@ impl NativeModel {
             seq_to_pad_armed: false,
             status_line: String::new(),
             synth_params: [0.5, 0.5, 0.8, 0.05, 0.3],
+            release_drift: 0.5,
             vibrato_always: 0.0,
             vibrato_depth: 0.5,
             vibrato_rate: 5.0,
@@ -548,7 +573,20 @@ impl NativeModel {
             fx_target: FxEditTarget::Bus,
             punch_amount: [0.0; Layout::PUNCH_PAD_COUNT],
             punch_armed: [false; Layout::PUNCH_PAD_COUNT],
+            punch_locked: false,
+            punch_grabbing: false,
+            punch_source: 0,
+            punch_bank: [[0.0; Layout::PUNCH_PAD_COUNT]; 3],
+            punch_armed_bank: [[false; Layout::PUNCH_PAD_COUNT]; 3],
+            punch_locked_bank: [false; 3],
+            punch_grabbing_bank: [false; 3],
+            punch_buffer_prio: jambox_core::PunchBufferPrio::TapeRptDrop,
+            punch_rpt_mode: jambox_core::PunchRptMode::Refresh,
+            punch_grid_mode: jambox_core::PunchGridMode::Beat,
+            punch_pads_fx: true,
+            fx_settings_open: false,
             drum_level: 1.0,
+            input_level: 0.0,
             seq_level: 1.0,
             seq_drum_level: 1.0,
             seq_kaoss_level: 1.0,
@@ -1948,7 +1986,9 @@ impl NativeModel {
         self.seq.bpm = self.bpm;
         self.seq.cue_beep = s.seq_cue_beep;
         self.synth_params = [s.morph, s.tone, s.level, s.attack, s.release];
+        self.release_drift = s.release_drift.clamp(0.0, 1.0);
         self.drum_level = s.drum_level.clamp(0.0, 1.0);
+        self.input_level = s.input_level.clamp(0.0, 1.0);
         self.seq_level = s.seq_level.clamp(0.0, 2.0);
         self.seq_drum_level = s.seq_drum_level.clamp(0.0, 2.0);
         self.seq_kaoss_level = s.seq_kaoss_level.clamp(0.0, 2.0);
@@ -1978,6 +2018,10 @@ impl NativeModel {
         };
         self.kaoss_hold = s.kaoss_hold;
         self.kaoss_fx_target = s.kaoss_fx_target;
+        self.punch_buffer_prio = jambox_core::PunchBufferPrio::from_u8(s.punch_buffer_prio);
+        self.punch_rpt_mode = jambox_core::PunchRptMode::from_u8(s.punch_rpt_mode);
+        self.punch_grid_mode = jambox_core::PunchGridMode::from_u8(s.punch_grid_mode);
+        self.punch_pads_fx = s.punch_pads_fx;
         self.kaoss_show_all = s.kaoss_show_all;
         self.kaoss_channel = s.kaoss_channel & 0x0f;
         self.fx_bus = [
@@ -2052,11 +2096,17 @@ impl NativeModel {
         outbox.synth("tone", self.synth_params[1]);
         outbox.synth("level", self.synth_params[2]);
         outbox.synth("drum_level", self.drum_level);
+        outbox.synth("input_level", self.input_level);
+        outbox.punch_buffer_prio(self.punch_buffer_prio.as_u8());
+        outbox.punch_rpt_mode(self.punch_rpt_mode.as_u8());
+        outbox.punch_grid(self.punch_grid_mode.as_u8());
+        outbox.punch_pads(self.punch_pads_fx);
         outbox.clip_gain(SEQ_CLIP_SLOT, self.seq_level);
         outbox.clip_gain(SEQ_DRUM_MIX_SLOT, self.seq_drum_level);
         outbox.clip_gain(SEQ_KAOSS_MIX_SLOT, self.seq_kaoss_level);
         outbox.synth("attack", self.synth_params[3]);
         outbox.synth("release", self.synth_params[4]);
+        outbox.synth("release_drift", self.release_drift);
         outbox.synth("vibrato_always", self.vibrato_always);
         outbox.synth("vibrato_depth", self.vibrato_depth / 2.0);
         outbox.synth(
@@ -2094,11 +2144,13 @@ impl NativeModel {
             tone: self.synth_params[1],
             level: self.synth_params[2],
             drum_level: self.drum_level,
+            input_level: self.input_level,
             seq_level: self.seq_level,
             seq_drum_level: self.seq_drum_level,
             seq_kaoss_level: self.seq_kaoss_level,
             attack: self.synth_params[3],
             release: self.synth_params[4],
+            release_drift: self.release_drift,
             morph_a: self.morph_a,
             morph_b: self.morph_b,
             synth_octave: self.synth_octave,
@@ -2110,6 +2162,10 @@ impl NativeModel {
             kaoss_gate: self.kaoss_gate,
             kaoss_hold: self.kaoss_hold,
             kaoss_fx_target: self.kaoss_fx_target,
+            punch_buffer_prio: self.punch_buffer_prio.as_u8(),
+            punch_rpt_mode: self.punch_rpt_mode.as_u8(),
+            punch_grid_mode: self.punch_grid_mode.as_u8(),
+            punch_pads_fx: self.punch_pads_fx,
             fx_bus: [self.fx_bus[0], self.fx_bus[1], self.fx_bus[2]],
             fx_flanger: self.fx_voice[3],
             fx_flanger_rate: self.fx_flanger_rate,
@@ -2427,6 +2483,18 @@ impl NativeModel {
             } else if self.layout.content.contains(px, py) {
                 self.layout
                     .hit_kaoss_settings(px, py, self.kaoss_settings_scroll)
+            } else {
+                base
+            }
+        } else if self.fx_settings_open {
+            let base = self.layout.hit(self.mode, px, py);
+            if matches!(
+                base,
+                Hit::Nav(_) | Hit::NavBack | Hit::Power | Hit::HomeTile(_) | Hit::PunchSet
+            ) {
+                base
+            } else if self.layout.content.contains(px, py) {
+                self.layout.hit_fx_settings(px, py)
             } else {
                 base
             }
@@ -3636,6 +3704,70 @@ impl NativeModel {
                 self.tap_ui(slot, id, gesture, px, py);
                 self.clear_punch(outbox);
             }
+            Hit::PunchSource => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.cycle_punch_source();
+            }
+            Hit::PunchLock => {
+                let releasing = self.punch_locked;
+                let source = self.punch_source;
+                if releasing {
+                    self.punch_locked = false;
+                    self.punch_grabbing = false;
+                    outbox.punch_lock(source, false);
+                    self.status_line = format!(
+                        "{} GRAB off — live",
+                        jambox_core::PunchSource::from_u8(source).label()
+                    );
+                } else {
+                    self.punch_grabbing = true;
+                    outbox.punch_grab(source, true);
+                    self.status_line = format!(
+                        "{} GRAB — hold to capture",
+                        jambox_core::PunchSource::from_u8(source).label()
+                    );
+                }
+                self.sync_punch_bank();
+                self.fingers[slot] = Finger {
+                    active: true,
+                    id,
+                    gesture,
+                    x: 0.0,
+                    y: 0.0,
+                    px,
+                    py,
+                    surface: Surface::PunchLock { releasing },
+                    gate_on: false,
+                };
+            }
+            Hit::PunchPrio => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.cycle_punch_buffer_prio(outbox);
+            }
+            Hit::PunchRptMode => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.cycle_punch_rpt_mode(outbox);
+            }
+            Hit::PunchGrid => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.cycle_punch_grid(outbox);
+            }
+            Hit::PunchPads => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.punch_pads_fx = !self.punch_pads_fx;
+                outbox.punch_pads(self.punch_pads_fx);
+                self.status_line = if self.punch_pads_fx {
+                    "pads → FX".into()
+                } else {
+                    "pads → drums".into()
+                };
+                self.mark_dirty();
+            }
+            Hit::PunchSet => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.fx_settings_open = !self.fx_settings_open;
+                self.mark_dirty();
+            }
             Hit::MixBus(index) => {
                 self.fingers[slot] = Finger {
                     active: true,
@@ -4228,6 +4360,18 @@ impl NativeModel {
                     self.toggle_punch_arm(index, outbox);
                 }
             }
+            Surface::PunchLock { releasing } => {
+                if !releasing && self.punch_grabbing {
+                    self.punch_grabbing = false;
+                    outbox.punch_grab(self.punch_source, false);
+                    self.punch_locked = true;
+                    self.sync_punch_bank();
+                    self.status_line = format!(
+                        "{} GRAB locked",
+                        jambox_core::PunchSource::from_u8(self.punch_source).label()
+                    );
+                }
+            }
             Surface::Phrase { .. }
             | Surface::SynthSlider { .. }
             | Surface::FmSlider { .. }
@@ -4650,6 +4794,17 @@ impl NativeModel {
             return;
         };
         if index == 5 {
+            if !Self::accept_slider_value(self.release_drift, value, moving) {
+                return;
+            }
+            self.release_drift = value;
+            outbox.synth("release_drift", value);
+            let semis = jambox_core::release_drift_semis(value);
+            self.status_line = format!("release drift {semis:+.1} st");
+            self.mark_dirty();
+            return;
+        }
+        if index == 6 {
             if !Self::accept_slider_value(self.fx_voice[3], value, moving) {
                 return;
             }
@@ -4659,7 +4814,7 @@ impl NativeModel {
             self.mark_dirty();
             return;
         }
-        if index == 6 {
+        if index == 7 {
             if !Self::accept_slider_value(self.fx_flanger_rate, value, moving) {
                 return;
             }
@@ -4824,9 +4979,9 @@ impl NativeModel {
     }
 
     const FX_PARAM_NAMES: [&'static str; 4] = ["drive", "delay_mix", "reverb_mix", "flanger_mix"];
-    const DRUM_MACRO_NAMES: [&'static str; 4] =
-        ["drum_tone", "drum_noise", "drum_pitch", "drum_decay"];
-    const DRUM_MACRO_LABELS: [&'static str; 4] = ["TONE", "SNAP", "PITCH", "DECAY"];
+    const DRUM_MACRO_NAMES: [&'static str; 5] =
+        ["drum_tone", "drum_noise", "drum_pitch", "drum_decay", "drum_amp"];
+    const DRUM_MACRO_LABELS: [&'static str; 5] = ["TONE", "SNAP", "PITCH", "DECAY", "LEVEL"];
 
     fn selected_kit_note(&self) -> u8 {
         let cell = phrases::PHRASE_GRID_CELLS[self.kit_selected.min(15)];
@@ -4837,11 +4992,11 @@ impl NativeModel {
         drum_model_for_note(self.selected_kit_note())
     }
 
-    fn edit_source_macros(&self) -> [f32; 4] {
+    fn edit_source_macros(&self) -> [f32; 5] {
         self.drum_macros[self.selected_drum_model().index()]
     }
 
-    pub fn edit_drum_macros(&self) -> [f32; 4] {
+    pub fn edit_drum_macros(&self) -> [f32; 5] {
         if self.kit_all_drums {
             self.drum_group_macros
         } else {
@@ -5217,7 +5372,7 @@ impl NativeModel {
     }
 
     fn apply_kit_slider(&mut self, index: usize, py: i32, moving: bool, outbox: &mut Outbox) {
-        if index >= 4 {
+        if index >= Self::DRUM_MACRO_NAMES.len() {
             return;
         }
         let track = self.layout.kit_edit_slider(index);
@@ -5262,6 +5417,7 @@ impl NativeModel {
             noise: m[1],
             pitch: m[2],
             decay: m[3],
+            level: m[4],
         };
         let mut buf = [0.0f32; DRUM_PREVIEW_SAMPLES];
         DrumKit::preview(
@@ -5297,6 +5453,13 @@ impl NativeModel {
             self.mark_dirty();
             return;
         }
+        if index == Layout::FX_MIC_LEVEL {
+            self.input_level = value;
+            outbox.synth("input_level", value);
+            self.status_line = format!("mic {:.2}", value);
+            self.mark_dirty();
+            return;
+        }
         let name = Self::FX_PARAM_NAMES[index];
         match self.fx_target {
             FxEditTarget::Bus => {
@@ -5319,7 +5482,67 @@ impl NativeModel {
     }
 
     pub fn punch_active(&self) -> bool {
-        self.punch_armed.iter().any(|on| *on)
+        self.punch_locked
+            || self.punch_grabbing
+            || self.punch_armed.iter().any(|on| *on)
+    }
+
+    fn cycle_punch_buffer_prio(&mut self, outbox: &mut Outbox) {
+        self.punch_buffer_prio = self.punch_buffer_prio.next();
+        outbox.punch_buffer_prio(self.punch_buffer_prio.as_u8());
+        self.status_line = format!(
+            "buffer prio {} — {}",
+            self.punch_buffer_prio.label(),
+            match self.punch_buffer_prio {
+                jambox_core::PunchBufferPrio::TapeRptDrop => "TAPE wins (bounce)",
+                jambox_core::PunchBufferPrio::RptTapeDrop => "RPT wins, keeps the drop pitch",
+                jambox_core::PunchBufferPrio::DropTapeRpt => "DROP wins",
+                jambox_core::PunchBufferPrio::RptOnTape => "repeat on tape",
+                jambox_core::PunchBufferPrio::Engage => "first effect keeps its pitch",
+            }
+        );
+        self.mark_dirty();
+    }
+
+    fn cycle_punch_rpt_mode(&mut self, outbox: &mut Outbox) {
+        self.punch_rpt_mode = self.punch_rpt_mode.next();
+        outbox.punch_rpt_mode(self.punch_rpt_mode.as_u8());
+        self.status_line = match self.punch_rpt_mode {
+            jambox_core::PunchRptMode::Refresh => "RPT↻ — each hit loops what you just heard".into(),
+            jambox_core::PunchRptMode::Hold => "RPTH — keeps that loop until CLEAR".into(),
+        };
+        self.mark_dirty();
+    }
+
+    fn cycle_punch_grid(&mut self, outbox: &mut Outbox) {
+        self.punch_grid_mode = self.punch_grid_mode.next();
+        outbox.punch_grid(self.punch_grid_mode.as_u8());
+        self.status_line = match self.punch_grid_mode {
+            jambox_core::PunchGridMode::Beat => "BEAT — 1/4 1/8 1/16 1/32".into(),
+            jambox_core::PunchGridMode::Smooth => {
+                "SMOOTH — full capture at the bottom, shorter toward the top".into()
+            }
+        };
+        self.mark_dirty();
+    }
+
+    fn clear_punch(&mut self, outbox: &mut Outbox) {
+        for i in 0..Layout::PUNCH_PAD_COUNT {
+            if self.punch_armed[i] {
+                outbox.punch_fx(self.punch_source, i as u8, 0.0);
+            }
+            self.punch_armed[i] = false;
+        }
+        if self.punch_locked || self.punch_grabbing {
+            self.punch_locked = false;
+            self.punch_grabbing = false;
+            outbox.punch_lock(self.punch_source, false);
+        }
+        self.sync_punch_bank();
+        self.status_line = format!(
+            "{} punch off",
+            jambox_core::PunchSource::from_u8(self.punch_source).label()
+        );
     }
 
     fn apply_punch_midi(&mut self, notice: &MidiNotice, outbox: &mut Outbox) -> bool {
@@ -5327,6 +5550,8 @@ impl NativeModel {
             return false;
         }
         let kind = notice.kind.to_ascii_lowercase();
+        // Knobs often share the keys channel; pads are channel 10. Only notes
+        // are gated so keyboard pitches cannot arm punch.
         if kind == "control_change" || kind == "cc" {
             let Some(index) = jambox_core::punch_index_for_knob_cc(notice.control.unwrap_or(255))
             else {
@@ -5335,6 +5560,9 @@ impl NativeModel {
             let unit = (notice.value.unwrap_or(0) as f32 / 127.0).clamp(0.0, 1.0);
             self.set_punch_amount_unit(index, unit, outbox);
             return true;
+        }
+        if notice.channel != DRUM_CHANNEL || !self.punch_pads_fx {
+            return false;
         }
         if kind == "note_on" || kind == "noteon" {
             if notice.velocity.unwrap_or(0) == 0 {
@@ -5366,11 +5594,13 @@ impl NativeModel {
         }
         let amount = amount.clamp(0.0, 1.0);
         self.punch_amount[index] = amount;
+        self.sync_punch_bank();
         if self.punch_armed[index] {
-            outbox.punch_fx(index as u8, amount);
+            outbox.punch_fx(self.punch_source, index as u8, amount);
         }
         self.status_line = format!(
-            "punch {} {:.0}%{}",
+            "{} {} {:.0}%{}",
+            jambox_core::PunchSource::from_u8(self.punch_source).label(),
             jambox_core::PUNCH_LABELS[index],
             amount * 100.0,
             if self.punch_armed[index] { " on" } else { "" }
@@ -5387,23 +5617,40 @@ impl NativeModel {
         } else {
             0.0
         };
-        outbox.punch_fx(index as u8, amount);
+        self.sync_punch_bank();
+        outbox.punch_fx(self.punch_source, index as u8, amount);
         self.status_line = format!(
-            "punch {} {} {:.0}%",
+            "{} {} {} {:.0}%",
+            jambox_core::PunchSource::from_u8(self.punch_source).label(),
             jambox_core::PUNCH_LABELS[index],
             if self.punch_armed[index] { "on" } else { "off" },
             self.punch_amount[index] * 100.0
         );
     }
 
-    fn clear_punch(&mut self, outbox: &mut Outbox) {
-        for i in 0..Layout::PUNCH_PAD_COUNT {
-            if self.punch_armed[i] {
-                outbox.punch_fx(i as u8, 0.0);
-            }
-            self.punch_armed[i] = false;
-        }
-        self.status_line = "punch off".into();
+    fn cycle_punch_source(&mut self) {
+        self.sync_punch_bank();
+        self.punch_source = jambox_core::PunchSource::from_u8(self.punch_source)
+            .next()
+            .as_u8();
+        let s = self.punch_source as usize;
+        self.punch_amount = self.punch_bank[s];
+        self.punch_armed = self.punch_armed_bank[s];
+        self.punch_locked = self.punch_locked_bank[s];
+        self.punch_grabbing = self.punch_grabbing_bank[s];
+        self.status_line = format!(
+            "punch buffer {}",
+            jambox_core::PunchSource::from_u8(self.punch_source).label()
+        );
+        self.mark_dirty();
+    }
+
+    fn sync_punch_bank(&mut self) {
+        let s = (self.punch_source as usize).min(2);
+        self.punch_bank[s] = self.punch_amount;
+        self.punch_armed_bank[s] = self.punch_armed;
+        self.punch_locked_bank[s] = self.punch_locked;
+        self.punch_grabbing_bank[s] = self.punch_grabbing;
     }
 
     fn mix_slider_value(track: Rect, py: i32) -> f32 {
@@ -5442,6 +5689,11 @@ impl NativeModel {
                 self.seq_kaoss_level = gain;
                 outbox.clip_gain(SEQ_KAOSS_MIX_SLOT, gain);
                 self.status_line = format!("SEQ KSS {:.2}", gain);
+            }
+            Layout::MIX_MIC => {
+                self.input_level = t;
+                outbox.synth("input_level", t);
+                self.status_line = format!("MIC {:.2}", t);
             }
             _ => return,
         }
@@ -5865,7 +6117,8 @@ impl NativeModel {
         self.kaoss_touching = remaining > 0;
         if remaining == 0 {
             self.kaoss_usb_pad_up(outbox);
-            // Leave bend at center when the pad is idle (HOLD keeps the latched Y).
+            // Center the wheel for the next note. The engine already copied the
+            // bend onto the voice that is decaying, so this does not snap the tail.
             if !self.kaoss_hold && prog.y_param == "pitch_bend" {
                 self.reset_kaoss_pitch_bend(outbox);
             }
@@ -6959,7 +7212,9 @@ impl NativeModel {
 
     fn factory_reset_synth(&mut self, outbox: &mut Outbox) {
         self.synth_params = [0.5, 0.5, 0.8, 0.05, 0.3];
+        self.release_drift = 0.5;
         self.drum_level = 1.0;
+        self.input_level = 0.0;
         self.vibrato_always = 0.0;
         self.vibrato_depth = 0.5;
         self.vibrato_rate = 5.0;
@@ -6970,8 +7225,10 @@ impl NativeModel {
         outbox.synth("tone", self.synth_params[1]);
         outbox.synth("level", self.synth_params[2]);
         outbox.synth("drum_level", self.drum_level);
+        outbox.synth("input_level", self.input_level);
         outbox.synth("attack", self.synth_params[3]);
         outbox.synth("release", self.synth_params[4]);
+        outbox.synth("release_drift", self.release_drift);
         self.push_vibrato_params(outbox);
         self.sync_wave_bank();
         self.status_line = "synth factory defaults".into();
@@ -10198,7 +10455,7 @@ mod tests {
         model.morph_a = 2;
         model.morph_b = 5;
         let mut out = Outbox::new();
-        let track = model.layout.synth_slider(5);
+        let track = model.layout.synth_slider(6);
         model.finger_down(1, track.x + 4, track.y + 8, &mut out);
         let batch = out.take();
         assert!(batch.iter().any(|r| matches!(
@@ -10227,7 +10484,7 @@ mod tests {
         model.morph_a = 2;
         model.morph_b = 5;
         let mut out = Outbox::new();
-        let track = model.layout.synth_slider(6);
+        let track = model.layout.synth_slider(7);
         model.finger_down(1, track.x + 4, track.y + 8, &mut out);
         let batch = out.take();
         assert!(
@@ -10315,6 +10572,26 @@ mod tests {
     }
 
     #[test]
+    fn fx_mic_sends_input_level() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Fx);
+        assert!((model.input_level - 0.0).abs() < 1e-5);
+        let mut out = Outbox::new();
+        let track = model.layout.settings_fx_slider(Layout::FX_MIC_LEVEL);
+        model.finger_down(1, track.x + 8, track.y + 4, &mut out);
+        let batch = out.take();
+        assert!(
+            batch.iter().any(|r| matches!(
+                r,
+                Request::Synth { param, value, .. }
+                    if param == "input_level" && *value > 0.9
+            )),
+            "expected FX MIC input_level, got {batch:?}"
+        );
+        assert!(model.input_level > 0.9);
+    }
+
+    #[test]
     fn punch_tap_arms_without_changing_stored_amount() {
         let mut model = NativeModel::new();
         model.set_mode(UiMode::Fx);
@@ -10331,7 +10608,7 @@ mod tests {
         assert!(
             up.iter().any(|r| matches!(
                 r,
-                Request::PunchFx { slot: 0, amount } if (*amount - stored).abs() < 1e-5
+                Request::PunchFx { slot: 0, amount, .. } if (*amount - stored).abs() < 1e-5
             )),
             "tap should arm at the stored value, got {up:?}"
         );
@@ -10342,7 +10619,7 @@ mod tests {
         let off = out.take();
         assert!(
             off.iter()
-                .any(|r| matches!(r, Request::PunchFx { slot: 0, amount } if *amount == 0.0)),
+                .any(|r| matches!(r, Request::PunchFx { slot: 0, amount, .. } if *amount == 0.0)),
             "second tap should disarm, got {off:?}"
         );
         assert!(!model.punch_armed[0]);
@@ -10388,7 +10665,7 @@ mod tests {
         assert!(
             batch
                 .iter()
-                .any(|r| matches!(r, Request::PunchFx { slot: 3, amount } if *amount == 0.0)),
+                .any(|r| matches!(r, Request::PunchFx { slot: 3, amount, .. } if *amount == 0.0)),
             "CLEAR should disarm HPF, got {batch:?}"
         );
         assert!(!model.punch_active());
@@ -10436,6 +10713,85 @@ mod tests {
     }
 
     #[test]
+    fn punch_grab_hold_commits_and_tap_unlocks() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Fx);
+        let mut out = Outbox::new();
+        let lock = model.layout.punch_lock();
+        model.finger_down(1, lock.x + 8, lock.y + 8, &mut out);
+        assert!(model.punch_grabbing);
+        assert!(!model.punch_locked);
+        assert!(
+            out.take()
+                .iter()
+                .any(|r| matches!(r, Request::PunchGrab { active: true, .. })),
+            "press must start punch_grab"
+        );
+        model.finger_up(1, &mut out);
+        assert!(!model.punch_grabbing);
+        assert!(model.punch_locked);
+        assert!(
+            out.take()
+                .iter()
+                .any(|r| matches!(r, Request::PunchGrab { active: false, .. })),
+            "release must commit punch_grab"
+        );
+        // Tap while locked unlocks.
+        model.finger_down(2, lock.x + 8, lock.y + 8, &mut out);
+        assert!(!model.punch_locked);
+        assert!(
+            out.take()
+                .iter()
+                .any(|r| matches!(r, Request::PunchLock { locked: false, .. })),
+            "tap GRAB while locked must unlock"
+        );
+        model.finger_up(2, &mut out);
+        assert!(!model.punch_locked);
+        assert!(!model.punch_grabbing);
+        // Re-grab then CLEAR unlocks.
+        model.finger_down(3, lock.x + 8, lock.y + 8, &mut out);
+        model.finger_up(3, &mut out);
+        assert!(model.punch_locked);
+        out.take();
+        let clear = model.layout.punch_clear();
+        model.finger_down(4, clear.x + 8, clear.y + 8, &mut out);
+        model.finger_up(4, &mut out);
+        assert!(!model.punch_locked);
+        assert!(
+            out.take()
+                .iter()
+                .any(|r| matches!(r, Request::PunchLock { locked: false, .. })),
+            "CLEAR must unlock"
+        );
+    }
+
+    #[test]
+    fn punch_prio_cycles_and_sends() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Fx);
+        assert_eq!(
+            model.punch_buffer_prio,
+            jambox_core::PunchBufferPrio::TapeRptDrop
+        );
+        let mut out = Outbox::new();
+        let prio = model.layout.punch_prio();
+        model.fx_settings_open = true;
+        model.finger_down(1, prio.x + 8, prio.y + 8, &mut out);
+        model.finger_up(1, &mut out);
+        assert_eq!(
+            model.punch_buffer_prio,
+            jambox_core::PunchBufferPrio::Engage
+        );
+        assert!(
+            out.take().iter().any(|r| matches!(
+                r,
+                Request::PunchBufferPrio { mode: 4 }
+            )),
+            "PRIO must send punch_buffer_prio"
+        );
+    }
+
+    #[test]
     fn mpk_knob_sets_punch_amount_while_disarmed() {
         let mut model = NativeModel::new();
         model.set_mode(UiMode::Fx);
@@ -10469,7 +10825,7 @@ mod tests {
         assert!(
             on.iter().any(|r| matches!(
                 r,
-                Request::PunchFx { slot: 0, amount } if (*amount - stored).abs() < 1e-5
+                Request::PunchFx { slot: 0, amount, .. } if (*amount - stored).abs() < 1e-5
             )),
             "Bank A pad 1 should arm RPT, got {on:?}"
         );
@@ -10487,7 +10843,48 @@ mod tests {
         assert!(out
             .take()
             .iter()
-            .any(|r| matches!(r, Request::PunchFx { slot: 0, amount } if *amount == 0.0)));
+            .any(|r| matches!(r, Request::PunchFx { slot: 0, amount, .. } if *amount == 0.0)));
+    }
+
+    #[test]
+    fn punch_midi_ignores_keyboard_channel() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Fx);
+        let mut out = Outbox::new();
+        // Same pad note number on channel 1 (keys) must not arm punch.
+        model.on_midi_notice(
+            &MidiNotice {
+                kind: "note_on".into(),
+                channel: 0,
+                note: Some(40),
+                velocity: Some(100),
+                control: None,
+                value: None,
+            },
+            &mut out,
+        );
+        assert!(!model.punch_armed[0]);
+        assert!(
+            out.take()
+                .iter()
+                .all(|r| !matches!(r, Request::PunchFx { .. })),
+            "keyboard channel must not toggle punch"
+        );
+        model.on_midi_notice(
+            &MidiNotice {
+                kind: "control_change".into(),
+                channel: 0,
+                note: None,
+                velocity: None,
+                control: Some(70),
+                value: Some(127),
+            },
+            &mut out,
+        );
+        assert!(
+            (model.punch_amount[0] - 1.0).abs() < 1e-5,
+            "knobs on the keys channel must still set punch depth"
+        );
     }
 
     #[test]
@@ -10548,6 +10945,25 @@ mod tests {
             "expected KIT drum_level, got {batch:?}"
         );
         assert!(model.drum_level < 0.1);
+    }
+
+    #[test]
+    fn mix_mic_sends_input_level() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Mix);
+        let mut out = Outbox::new();
+        let track = model.layout.mix_bus_slider(Layout::MIX_MIC);
+        model.finger_down(1, track.x + 8, track.y + 4, &mut out);
+        let batch = out.take();
+        assert!(
+            batch.iter().any(|r| matches!(
+                r,
+                Request::Synth { param, value, .. }
+                    if param == "input_level" && *value > 0.9
+            )),
+            "expected MIX MIC input_level, got {batch:?}"
+        );
+        assert!(model.input_level > 0.9);
     }
 
     #[test]

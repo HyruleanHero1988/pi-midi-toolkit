@@ -303,6 +303,9 @@ struct FmVoice {
     last: [f32; FM_OP_COUNT],
     releasing: bool,
     age: u64,
+    /// Wheel semitones captured at note-off so the tail does not spring home.
+    bend_semis: f32,
+    release_age: f32,
 }
 
 impl FmVoice {
@@ -322,6 +325,8 @@ impl FmVoice {
             last: [0.0; FM_OP_COUNT],
             releasing: false,
             age: 0,
+            bend_semis: 0.0,
+            release_age: 0.0,
         }
     }
 }
@@ -454,6 +459,8 @@ impl FmSynth {
             v.target = target;
             v.releasing = false;
             v.age = self.serial;
+            v.bend_semis = 0.0;
+            v.release_age = 0.0;
             return;
         }
 
@@ -473,7 +480,19 @@ impl FmSynth {
             last: [0.0; FM_OP_COUNT],
             releasing: false,
             age: self.serial,
+            bend_semis: 0.0,
+            release_age: 0.0,
         };
+    }
+
+    pub fn note_off_latched(&mut self, channel: u8, note: u8, bend_semis: f32) {
+        if let Some(slot) = self.find_playing(channel, note, false) {
+            let v = &mut self.voices[slot];
+            v.bend_semis = bend_semis.clamp(-24.0, 24.0);
+            v.releasing = true;
+            v.target = 0.0;
+            v.release_age = 0.0;
+        }
     }
 
     pub fn note_off(&mut self, channel: u8, note: u8) {
@@ -510,6 +529,8 @@ impl FmSynth {
         let ctx = VoiceContext {
             sample_rate,
             pitch_mul,
+            wheel_mul: 1.0,
+            release_drift_semis: 0.0,
             bend_slew_dt: 0.0,
             attack_sec: 0.0,
             release_sec: 0.0,
@@ -553,11 +574,47 @@ impl FmSynth {
             } else {
                 &mut live[..n]
             };
-            let hz = midi_to_hz(v.note) * pitch_mul.max(0.01) as f64;
+            let hz = midi_to_hz(v.note);
             let mut inc = [0.0f32; FM_OP_COUNT];
             for i in 0..FM_OP_COUNT {
                 inc[i] = (hz * inc_ratio[i] as f64 * SINE_SIZE as f64 / sr as f64) as f32;
             }
+            let wheel = ctx.wheel_mul.max(0.05);
+            let voice = if v.releasing && !v.recorded {
+                crate::voice::semis_to_ratio(v.bend_semis)
+            } else {
+                1.0
+            };
+            let body = if v.releasing && !v.recorded {
+                pitch_mul / wheel
+            } else {
+                pitch_mul
+            };
+            let drift0 = if v.releasing {
+                crate::voice::drift_ratio(v.release_age, ctx.release_sec, ctx.release_drift_semis)
+            } else {
+                1.0
+            };
+            let block_dt = n as f32 / sr;
+            let drift1 = if v.releasing {
+                crate::voice::drift_ratio(
+                    v.release_age + block_dt,
+                    ctx.release_sec,
+                    ctx.release_drift_semis,
+                )
+            } else {
+                1.0
+            };
+            if v.releasing {
+                v.release_age += block_dt;
+            }
+            let mut scale = (body * voice * drift0).max(0.01);
+            let scale_end = (body * voice * drift1).max(0.01);
+            let scale_step = if n > 1 {
+                (scale_end - scale) / (n as f32 - 1.0)
+            } else {
+                0.0
+            };
             let use_lfo = !v.recorded && ctx.tone_lfo_amount > 0.01;
             let static_tone = if v.recorded { v.tone } else { ctx.live_tone };
             let filter_tone = !use_lfo && static_tone < 0.985;
@@ -586,7 +643,7 @@ impl FmSynth {
                     let wave = waveshape(s, patch.ops[i].fold);
                     v.last[i] = wave * v.amp[i];
                     mix += v.last[i] * patch.ops[i].audio;
-                    v.phase[i] += inc[i];
+                    v.phase[i] += inc[i] * scale;
                     if v.phase[i] >= size {
                         v.phase[i] -= size * (v.phase[i] / size).floor();
                     }
@@ -611,6 +668,7 @@ impl FmSynth {
                     );
                 }
                 *sample += mix * VOICE_AMP * if v.recorded { 1.0 } else { ctx.live_gain };
+                scale += scale_step;
             }
             v.tone_lp = tone_lp;
             v.tone_bp = tone_bp;

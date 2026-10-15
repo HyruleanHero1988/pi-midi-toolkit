@@ -18,7 +18,7 @@ use crate::drums::{
 };
 use crate::fm::FmSynth;
 use crate::fx::{FxParams, FxUnit};
-use crate::punch::{boost_send_mix, PunchRack, PUNCH_PAD_COUNT};
+use crate::punch::{boost_send_mix, PunchRack, PunchSource, PUNCH_PAD_COUNT};
 use crate::arp::{
     ArpDivision, ArpEvent, ArpOrder, Arpeggiator, MAX_ARP_EVENTS_PER_BLOCK,
 };
@@ -231,7 +231,7 @@ pub struct JamboxEngine {
     drum_fx: Vec<FxUnit>,
     drum_group_fx: FxUnit,
     bus_fx: FxUnit,
-    punch: PunchRack,
+    punch: [PunchRack; PunchSource::COUNT],
     clip_fx: Vec<FxUnit>,
     clip_table: [[f32; TABLE_SIZE]; MAX_CLIPS],
     clip_baked: [bool; MAX_CLIPS],
@@ -239,6 +239,8 @@ pub struct JamboxEngine {
     key_bus: Vec<f32>,
     drum_bus: Vec<f32>,
     group_buf: Vec<f32>,
+    /// Live capture mixed onto the master before punch-in / bus FX.
+    input_bus: Vec<f32>,
     seq_scratch: Vec<SeqEvent>,
     repeat_scratch: [RepeatEvent; MAX_REPEAT_EVENTS_PER_BLOCK],
     arp_scratch: [ArpEvent; MAX_ARP_EVENTS_PER_BLOCK],
@@ -247,6 +249,8 @@ pub struct JamboxEngine {
     tone: f32,
     level: f32,
     drum_level: f32,
+    /// Mic / line gain. Starts at 0 so a hot USB mic cannot feedback until armed.
+    input_level: f32,
     clip_gain: [f32; MAX_CLIPS],
     attack_sec: f32,
     release_sec: f32,
@@ -260,6 +264,8 @@ pub struct JamboxEngine {
     tone_lfo_phase: f64,
     bend_semis: f32,
     bend_target_semis: f32,
+    /// Signed semitones a note glides across its release. 0 keeps the pitch.
+    release_drift_semis: f32,
     clip_emit: EmitMode,
     kaoss_emit: EmitMode,
     arp_emit: EmitMode,
@@ -321,13 +327,14 @@ impl JamboxEngine {
             drum_fx,
             drum_group_fx: FxUnit::new(sr),
             bus_fx: FxUnit::new(sr),
-            punch: PunchRack::new(sr),
+            punch: std::array::from_fn(|_| PunchRack::new(sr)),
             clip_fx: (0..MAX_CLIPS).map(|_| FxUnit::new(sr)).collect(),
             clip_table: [[0.0; TABLE_SIZE]; MAX_CLIPS],
             clip_baked: [false; MAX_CLIPS],
             key_bus: vec![0.0; MAX_BLOCK],
             drum_bus: vec![0.0; MAX_BLOCK],
             group_buf: vec![0.0; MAX_BLOCK],
+            input_bus: vec![0.0; MAX_BLOCK],
             seq_scratch: vec![
                 SeqEvent {
                     frame: 0,
@@ -359,6 +366,7 @@ impl JamboxEngine {
             tone: 1.0,
             level: 1.0,
             drum_level: 1.0,
+            input_level: 0.0,
             clip_gain: [1.0; MAX_CLIPS],
             attack_sec: 0.012,
             release_sec: 0.030,
@@ -372,6 +380,7 @@ impl JamboxEngine {
             tone_lfo_phase: 0.0,
             bend_semis: 0.0,
             bend_target_semis: 0.0,
+            release_drift_semis: 0.0,
             clip_emit: EmitMode::Both,
             kaoss_emit: EmitMode::Local,
             arp_emit: EmitMode::Both,
@@ -500,14 +509,30 @@ impl JamboxEngine {
         let bus = self.bus_fx.params();
         self.bus_fx = FxUnit::new(sr);
         self.bus_fx.set_params(bus);
-        let punch_amounts: [f32; PUNCH_PAD_COUNT] = std::array::from_fn(|i| self.punch.amount(i as u8));
-        self.punch = PunchRack::new(sr);
-        for (i, amount) in punch_amounts.iter().enumerate() {
-            self.punch.set_amount(i as u8, *amount);
+        let punch_amounts: [[f32; PUNCH_PAD_COUNT]; PunchSource::COUNT] =
+            std::array::from_fn(|src| std::array::from_fn(|i| self.punch[src].amount(i as u8)));
+        let punch_prio = self.punch[0].buffer_prio();
+        let punch_rpt_mode = self.punch[0].rpt_mode();
+        let punch_grid = self.punch[0].grid_mode();
+        self.punch = std::array::from_fn(|_| PunchRack::new(sr));
+        for rack in &mut self.punch {
+            rack.set_buffer_prio(punch_prio);
+            rack.set_rpt_mode(punch_rpt_mode);
+            rack.set_grid_mode(punch_grid);
+        }
+        for (src, amounts) in punch_amounts.iter().enumerate() {
+            for (i, amount) in amounts.iter().enumerate() {
+                self.punch[src].set_amount(i as u8, *amount);
+            }
         }
         self.voices.silence();
         self.fm.silence();
         self.drums.silence();
+    }
+
+    fn punch_src(&mut self, source: u8) -> &mut PunchRack {
+        let index = (source as usize).min(PunchSource::COUNT - 1);
+        &mut self.punch[index]
     }
 
     pub fn fx_params(&self, target: FxTarget) -> FxParams {
@@ -735,9 +760,11 @@ impl JamboxEngine {
             key_bus,
             drum_bus,
             group_buf,
+            input_bus,
             tone,
             level,
             drum_level,
+            input_level,
             clip_gain,
             attack_sec,
             release_sec,
@@ -751,6 +778,7 @@ impl JamboxEngine {
             tone_lfo_phase,
             bend_semis,
             bend_target_semis,
+            release_drift_semis,
             ..
         } = self;
 
@@ -771,11 +799,14 @@ impl JamboxEngine {
 
         let dt = n as f32 / sr.max(8000.0);
         *bend_semis = crate::kaoss::slew_bend(*bend_semis, *bend_target_semis, dt);
+        let wheel_mul = 2f32.powf(*bend_semis / 12.0);
         let pitch_mul = 2f32.powf((*bend_semis + vib) / 12.0);
         bank.rebuild_morph();
         let ctx = VoiceContext {
             sample_rate: sr,
             pitch_mul,
+            wheel_mul,
+            release_drift_semis: *release_drift_semis,
             bend_slew_dt: dt,
             attack_sec: *attack_sec,
             release_sec: *release_sec,
@@ -899,11 +930,25 @@ impl JamboxEngine {
             drum_group_fx.process(&mut drum_bus[..n]);
         }
 
-        // Keys `level` / kit `drum_level` / clip gains are applied at the voice.
+        // Keys, kit, and mic each have their own punch buffer.
+        let bpm = transport.bpm() as f32;
+        punch[PunchSource::Keys as usize].process(&mut key_bus[..n], bpm);
+        punch[PunchSource::Drums as usize].process(&mut drum_bus[..n], bpm);
+        let input_gain = *input_level;
         for i in 0..n {
-            out[i] = key_bus[i] + drum_bus[i];
+            group_buf[i] = input_bus[i] * input_gain;
         }
-        let send = punch.send_amount();
+        punch[PunchSource::Mic as usize].process(&mut group_buf[..n], bpm);
+        for i in 0..n {
+            out[i] = key_bus[i] + drum_bus[i] + group_buf[i];
+        }
+        // Punch first (freeze / RPT / TAPE / filters), then the bus insert so
+        // delay / reverb / flange and SEND wet the loop instead of being
+        // overwritten when GRAB is locked.
+        let send = punch
+            .iter()
+            .map(|rack| rack.send_amount())
+            .fold(0.0f32, f32::max);
         let saved_bus = if send > 0.001 {
             let mut boosted = bus_fx.params();
             let saved = boosted;
@@ -921,8 +966,6 @@ impl JamboxEngine {
         if let Some(saved) = saved_bus {
             bus_fx.set_params(saved);
         }
-        // Always write the punch ring so a repeat/tape hit has history.
-        punch.process(out, transport.bpm() as f32);
 
         for s in out.iter_mut() {
             *s = (*s * OUTPUT_MAKEUP).tanh() * 0.97;
@@ -967,8 +1010,7 @@ impl JamboxEngine {
                         self.apply_arp_voice(ch, n, 0, false, relative_frame, midi_out);
                     }
                 } else if channel != DRUM_CHANNEL {
-                    self.voices.note_off(channel, note);
-                    self.fm.note_off(channel, note);
+                    self.release_keyed_note(channel, note);
                 }
             }
             Command::ClipNoteOn {
@@ -1039,7 +1081,9 @@ impl JamboxEngine {
                 }
                 self.drum_group_fx.reset();
                 self.bus_fx.reset();
-                self.punch.reset();
+                for rack in self.punch.iter_mut() {
+                    rack.reset();
+                }
             }
             Command::SetSynth { param, value } => self.set_synth(param, value),
             Command::SetDrumMacro {
@@ -1052,7 +1096,31 @@ impl JamboxEngine {
                 param,
                 value,
             } => self.set_fx(target, param, value),
-            Command::SetPunchFx { slot, amount } => self.punch.set_amount(slot, amount),
+            Command::SetPunchFx {
+                source,
+                slot,
+                amount,
+            } => self.punch_src(source).set_amount(slot, amount),
+            Command::SetPunchLock { source, locked } => self.punch_src(source).set_locked(locked),
+            Command::SetPunchGrab { source, active } => self.punch_src(source).set_grabbing(active),
+            Command::SetPunchBufferPrio { mode } => {
+                let mode = crate::PunchBufferPrio::from_u8(mode);
+                for rack in &mut self.punch {
+                    rack.set_buffer_prio(mode);
+                }
+            }
+            Command::SetPunchRptMode { mode } => {
+                let mode = crate::PunchRptMode::from_u8(mode);
+                for rack in &mut self.punch {
+                    rack.set_rpt_mode(mode);
+                }
+            }
+            Command::SetPunchGrid { mode } => {
+                let mode = crate::PunchGridMode::from_u8(mode);
+                for rack in &mut self.punch {
+                    rack.set_grid_mode(mode);
+                }
+            }
             Command::SetMorphPair { a, b } => {
                 self.bank.set_morph_pair(a as usize, b as usize);
             }
@@ -1112,7 +1180,7 @@ impl JamboxEngine {
                 } else {
                     let group = self.bank.nearer_index();
                     self.voices.note_on(channel, note, velocity, group);
-                    self.voices.note_off(channel, note);
+                    self.voices.note_off_latched(channel, note, self.bend_semis);
                 }
                 self.repeats.start(
                     owner,
@@ -1140,7 +1208,7 @@ impl JamboxEngine {
                 } else {
                     let group = self.bank.nearer_index();
                     self.voices.note_on(channel, note, velocity, group);
-                    self.voices.note_off(channel, note);
+                    self.voices.note_off_latched(channel, note, self.bend_semis);
                 }
             }
             Command::TouchDown {
@@ -1274,8 +1342,7 @@ impl JamboxEngine {
         midi_out: &mut MidiOutSink,
     ) {
         if self.arp_emit.includes_local() && channel != DRUM_CHANNEL {
-            self.voices.note_off(channel, note);
-            self.fm.note_off(channel, note);
+            self.release_keyed_note(channel, note);
         }
         if self.arp_emit.includes_usb() {
             midi_out.push(
@@ -1289,10 +1356,17 @@ impl JamboxEngine {
         }
     }
 
+    /// Note-off for a live key or Kaoss voice. The current wheel is copied onto
+    /// the voice so a following pitch-bend reset does not yank the decay home.
+    fn release_keyed_note(&mut self, channel: u8, note: u8) {
+        let bend = self.bend_semis;
+        self.voices.note_off_latched(channel, note, bend);
+        self.fm.note_off_latched(channel, note, bend);
+    }
+
     fn sound_on(&mut self, channel: u8, note: u8, velocity: u8, mix: MixSource) {
         if velocity == 0 {
-            self.voices.note_off(channel, note);
-            self.fm.note_off(channel, note);
+            self.release_keyed_note(channel, note);
             return;
         }
         if channel == DRUM_CHANNEL {
@@ -1345,7 +1419,7 @@ impl JamboxEngine {
                         if recorded {
                             self.voices.note_off_recorded(channel, old_note);
                         } else {
-                            self.voices.note_off(channel, old_note);
+                            self.release_keyed_note(channel, old_note);
                         }
                         self.sound_on(channel, new_note, velocity, mix);
                     }
@@ -1363,7 +1437,7 @@ impl JamboxEngine {
                     if recorded {
                         self.voices.note_off_recorded(channel, note);
                     } else {
-                        self.voices.note_off(channel, note);
+                        self.release_keyed_note(channel, note);
                     }
                 }
             }
@@ -1437,6 +1511,21 @@ impl JamboxEngine {
     /// processed in this block wins because `KaossMapper::follow` is idle then.
     ///
     /// Brightness / morph / vibrato come from UI `synth` commands for the active
+    /// Copy a mono capture block for the next [`Self::render`]. Silence when empty.
+    pub fn set_input_block(&mut self, mono: &[f32]) {
+        let n = mono.len().min(MAX_BLOCK);
+        if n > 0 {
+            self.input_bus[..n].copy_from_slice(&mono[..n]);
+        }
+        if n < MAX_BLOCK {
+            self.input_bus[n..].fill(0.0);
+        }
+    }
+
+    pub fn input_level(&self) -> f32 {
+        self.input_level
+    }
+
     /// Kaoss program — this path only retunes pitch from X.
     pub fn sync_touches(&mut self, touches: &[LatestTouch]) {
         for touch in touches {
@@ -1460,6 +1549,9 @@ impl JamboxEngine {
             }
             SynthParam::Release => {
                 self.release_sec = map_exp_time(unit, RELEASE_SEC_MIN, RELEASE_SEC_MAX)
+            }
+            SynthParam::ReleaseDrift => {
+                self.release_drift_semis = crate::voice::release_drift_semis(unit);
             }
             SynthParam::VibratoDepth => self.vib_depth_semis = unit * 2.0,
             SynthParam::VibratoRate => self.vib_rate_hz = 1.0 + unit * 8.0,
@@ -1490,7 +1582,12 @@ impl JamboxEngine {
                 macros.tone = unit;
                 self.drums.set_macros(macros);
             }
+            SynthParam::DrumAmp => {
+                macros.level = unit;
+                self.drums.set_macros(macros);
+            }
             SynthParam::DrumLevel => self.drum_level = unit,
+            SynthParam::InputLevel => self.input_level = unit,
             SynthParam::FmEnable => {
                 let enable = value > 0.5;
                 if enable != self.fm_enabled {
@@ -1531,6 +1628,7 @@ impl JamboxEngine {
             SynthParam::DrumDecay => macros.decay = unit,
             SynthParam::DrumNoise => macros.noise = unit,
             SynthParam::DrumTone => macros.tone = unit,
+            SynthParam::DrumAmp => macros.level = unit,
             _ => return,
         }
         self.drums.set_model_macros(model, macros);
@@ -1606,6 +1704,94 @@ mod tests {
         e.render(&mut out, &[], &mut midi);
         assert_eq!(peak(&out), 0.0);
         assert!(midi.is_empty());
+    }
+
+    fn rising_crossings(buf: &[f32]) -> usize {
+        buf.windows(2)
+            .filter(|w| w[0] <= 0.0 && w[1] > 0.0)
+            .count()
+    }
+
+    #[test]
+    fn bend_stays_on_the_note_after_the_wheel_returns() {
+        let mut held = engine();
+        let mut midi = MidiOutSink::new();
+        apply_now(
+            &mut held,
+            Command::SetSynth {
+                param: SynthParam::Release,
+                value: 1.0,
+            },
+        );
+        apply_now(
+            &mut held,
+            Command::SetSynth {
+                param: SynthParam::PitchBend,
+                value: 12.0,
+            },
+        );
+        let mut out = vec![0.0f32; 2048];
+        held.render(
+            &mut out,
+            &[ScheduledCommand::now(Command::NoteOn {
+                channel: 0,
+                note: 69,
+                velocity: 120,
+            })],
+            &mut midi,
+        );
+        let bent = {
+            let mut tail = vec![0.0f32; 2048];
+            held.render(
+                &mut tail,
+                &[
+                    ScheduledCommand::now(Command::NoteOff {
+                        channel: 0,
+                        note: 69,
+                    }),
+                    ScheduledCommand::now(Command::SetSynth {
+                        param: SynthParam::PitchBend,
+                        value: 0.0,
+                    }),
+                ],
+                &mut midi,
+            );
+            rising_crossings(&tail)
+        };
+
+        let mut plain = engine();
+        apply_now(
+            &mut plain,
+            Command::SetSynth {
+                param: SynthParam::Release,
+                value: 1.0,
+            },
+        );
+        let mut out = vec![0.0f32; 2048];
+        plain.render(
+            &mut out,
+            &[ScheduledCommand::now(Command::NoteOn {
+                channel: 0,
+                note: 69,
+                velocity: 120,
+            })],
+            &mut midi,
+        );
+        let mut tail = vec![0.0f32; 2048];
+        plain.render(
+            &mut tail,
+            &[ScheduledCommand::now(Command::NoteOff {
+                channel: 0,
+                note: 69,
+            })],
+            &mut midi,
+        );
+        let open = rising_crossings(&tail).max(1);
+        let ratio = bent as f32 / open as f32;
+        assert!(
+            (ratio - 2.0).abs() < 0.35,
+            "release should keep the +12 bend after the wheel centers, ratio {ratio} ({open} vs {bent})"
+        );
     }
 
     #[test]
@@ -1765,6 +1951,46 @@ mod tests {
             &mut midi,
         );
         assert_eq!(peak(&out), 0.0, "drum_level 0 must silence the kit");
+    }
+
+    #[test]
+    fn live_input_mixes_onto_master_before_punch() {
+        let mut e = engine();
+        let mut out = vec![0.0f32; 128];
+        let mut midi = MidiOutSink::new();
+        e.set_input_block(&[0.4f32; 128]);
+        e.render(&mut out, &[], &mut midi);
+        assert!(
+            peak(&out) < 1e-4,
+            "input_level defaults to 0 so a mic cannot feedback"
+        );
+        e.render(
+            &mut out,
+            &[ScheduledCommand::now(Command::SetSynth {
+                param: SynthParam::InputLevel,
+                value: 1.0,
+            })],
+            &mut midi,
+        );
+        e.set_input_block(&[0.4f32; 128]);
+        e.render(&mut out, &[], &mut midi);
+        assert!(
+            peak(&out) > 0.2,
+            "armed input_level must put capture on the master, peak={}",
+            peak(&out)
+        );
+        e.render(
+            &mut out,
+            &[ScheduledCommand::now(Command::SetPunchFx {
+                source: PunchSource::Mic as u8,
+                slot: crate::PUNCH_CRUSH,
+                amount: 1.0,
+            })],
+            &mut midi,
+        );
+        e.set_input_block(&[0.4f32; 128]);
+        e.render(&mut out, &[], &mut midi);
+        assert!(peak(&out) > 0.05);
     }
 
     #[test]
@@ -2077,6 +2303,7 @@ mod tests {
         apply_now(
             &mut wet,
             Command::SetPunchFx {
+                source: PunchSource::Keys as u8,
                 slot: crate::PUNCH_CRUSH,
                 amount: 1.0,
             },
@@ -2098,6 +2325,105 @@ mod tests {
             .sum();
         assert!(diff > 1.0, "crush should grit the master, diff={diff}");
         assert!(peak(&wet_buf) > 0.01);
+    }
+
+    #[test]
+    fn drum_crush_does_not_touch_keys() {
+        let mut dry = engine();
+        let mut wet = engine();
+        apply_now(
+            &mut wet,
+            Command::SetPunchFx {
+                source: PunchSource::Drums as u8,
+                slot: crate::PUNCH_CRUSH,
+                amount: 1.0,
+            },
+        );
+        let cmds = [ScheduledCommand::now(Command::NoteOn {
+            channel: 0,
+            note: 69,
+            velocity: 120,
+        })];
+        let mut dry_buf = vec![0.0f32; 1024];
+        let mut wet_buf = vec![0.0f32; 1024];
+        let mut midi = MidiOutSink::new();
+        dry.render(&mut dry_buf, &cmds, &mut midi);
+        wet.render(&mut wet_buf, &cmds, &mut midi);
+        let diff: f32 = dry_buf
+            .iter()
+            .zip(wet_buf.iter())
+            .map(|(a, b)| (a - b).abs())
+            .sum();
+        assert!(diff < 1e-3, "kit punch must leave keys alone, diff={diff}");
+    }
+
+    #[test]
+    fn bus_send_and_delay_wet_a_locked_grab() {
+        let mut dry = engine();
+        let mut wet = engine();
+        let on = [ScheduledCommand::now(Command::NoteOn {
+            channel: 0,
+            note: 69,
+            velocity: 120,
+        })];
+        let mut buf = vec![0.0f32; 4096];
+        let mut midi = MidiOutSink::new();
+        dry.render(&mut buf, &on, &mut midi);
+        wet.render(&mut buf, &on, &mut midi);
+        apply_now(&mut dry, Command::SetPunchLock { source: 0, locked: true });
+        apply_now(&mut wet, Command::SetPunchLock { source: 0, locked: true });
+        apply_now(
+            &mut dry,
+            Command::NoteOff {
+                channel: 0,
+                note: 69,
+            },
+        );
+        apply_now(
+            &mut wet,
+            Command::NoteOff {
+                channel: 0,
+                note: 69,
+            },
+        );
+        apply_now(
+            &mut wet,
+            Command::SetFx {
+                target: FxTarget::Bus,
+                param: FxParam::DelayMix,
+                value: 0.95,
+            },
+        );
+        apply_now(
+            &mut wet,
+            Command::SetFx {
+                target: FxTarget::Bus,
+                param: FxParam::DelayFb,
+                value: 0.7,
+            },
+        );
+        apply_now(
+            &mut wet,
+            Command::SetPunchFx {
+                source: 0,
+                slot: crate::PUNCH_SEND,
+                amount: 1.0,
+            },
+        );
+        let mut dry_buf = vec![0.0f32; 8192];
+        let mut wet_buf = vec![0.0f32; 8192];
+        dry.render(&mut dry_buf, &[], &mut midi);
+        wet.render(&mut wet_buf, &[], &mut midi);
+        assert!(peak(&dry_buf) > 0.05, "locked freeze must keep playing");
+        let diff: f32 = dry_buf
+            .iter()
+            .zip(wet_buf.iter())
+            .map(|(a, b)| (a - b).abs())
+            .sum();
+        assert!(
+            diff > 5.0,
+            "bus delay/SEND must wet the freeze after punch, diff={diff}"
+        );
     }
 
     #[test]

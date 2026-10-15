@@ -180,6 +180,13 @@ pub enum Hit {
     FxSlider(usize),
     PunchPad(usize),
     PunchClear,
+    PunchLock,
+    PunchPads,
+    PunchSource,
+    PunchSet,
+    PunchPrio,
+    PunchRptMode,
+    PunchGrid,
     MixBus(usize),
     MixPad(usize),
     SettingsWifi,
@@ -1886,7 +1893,7 @@ impl Layout {
         }
     }
 
-    pub const SYNTH_SLIDER_COUNT: usize = 7;
+    pub const SYNTH_SLIDER_COUNT: usize = 8;
 
     fn synth_play_bottom(&self) -> i32 {
         self.synth_keys.y + self.synth_keys.h
@@ -2068,7 +2075,7 @@ impl Layout {
     }
 
     pub fn kit_edit_slider(&self, index: usize) -> Rect {
-        let n = 4i32;
+        let n = 5i32;
         let w = self.kit_macros.w / n;
         Rect {
             x: self.kit_macros.x + (index as i32) * w + 8,
@@ -2108,20 +2115,22 @@ impl Layout {
     }
 
     /// One-octave piano keyboard inside `synth_keys`.
-    /// FX page: four insert sliders + KEYS / DRUMS mix levels.
+    /// FX page: four insert sliders + KEYS / DRUMS / MIC mix levels.
     pub const FX_INSERT_COUNT: usize = 4;
-    pub const FX_SLIDER_COUNT: usize = 6;
+    pub const FX_SLIDER_COUNT: usize = 7;
     pub const FX_KEYS_LEVEL: usize = 4;
     pub const FX_DRUMS_LEVEL: usize = 5;
+    pub const FX_MIC_LEVEL: usize = 6;
     pub const PUNCH_PAD_COUNT: usize = 8;
 
-    /// MIX page: LIVE / KIT / SEQ DRM / SEQ KEY / SEQ KSS, then 16 pad faders.
-    pub const MIX_BUS_COUNT: usize = 5;
+    /// MIX page: LIVE / KIT / SEQ DRM / SEQ KEY / SEQ KSS / MIC, then 16 pad faders.
+    pub const MIX_BUS_COUNT: usize = 6;
     pub const MIX_LIVE: usize = 0;
     pub const MIX_KIT: usize = 1;
     pub const MIX_SEQ_DRUM: usize = 2;
     pub const MIX_SEQ_KEY: usize = 3;
     pub const MIX_SEQ_KAOSS: usize = 4;
+    pub const MIX_MIC: usize = 5;
     /// Back-compat alias for the SEQ keys fader.
     pub const MIX_SEQ: usize = Self::MIX_SEQ_KEY;
 
@@ -2710,7 +2719,7 @@ impl Layout {
         if self.kit_edit_play().contains(px, py) {
             return Hit::KitPlay;
         }
-        for index in 0..4 {
+        for index in 0..5 {
             if self.kit_edit_slider(index).contains(px, py) {
                 return Hit::KitSlider(index);
             }
@@ -3333,12 +3342,12 @@ impl Layout {
     }
 
     pub fn settings_fx_slider(&self, index: usize) -> Rect {
-        // Two rows of three so punch pads can own the right half of FX.
+        // Three rows of three so MIC can sit under LEVEL / DRUMS.
         let i = (index % Self::FX_SLIDER_COUNT) as i32;
         let col = i % 3;
         let row = i / 3;
         let w = self.settings_fx.w / 3;
-        let h = (self.settings_fx.h - 16) / 2;
+        let h = (self.settings_fx.h - 16) / 3;
         Rect {
             x: self.settings_fx.x + col * w + 6,
             y: self.settings_fx.y + 22 + row * h,
@@ -3347,12 +3356,70 @@ impl Layout {
         }
     }
 
-    pub fn punch_clear(&self) -> Rect {
+    pub fn punch_tool(&self, index: i32) -> Rect {
+        let w = 92;
+        let gap = 5;
         Rect {
-            x: 588,
-            y: HUD_H + 10,
-            w: 196,
-            h: 44,
+            x: 300 + index * (w + gap),
+            y: HUD_H + 8,
+            w,
+            h: 40,
+        }
+    }
+
+    pub fn punch_clear(&self) -> Rect {
+        self.punch_tool(4)
+    }
+
+    pub fn punch_lock(&self) -> Rect {
+        self.punch_tool(0)
+    }
+
+    pub fn punch_source(&self) -> Rect {
+        self.punch_tool(1)
+    }
+
+    pub fn punch_pads(&self) -> Rect {
+        self.punch_tool(2)
+    }
+
+    pub fn punch_set(&self) -> Rect {
+        self.punch_tool(3)
+    }
+
+    pub fn punch_prio(&self) -> Rect {
+        Rect {
+            x: 40,
+            y: HUD_H + 130,
+            w: 220,
+            h: 72,
+        }
+    }
+
+    pub fn punch_rpt_mode(&self) -> Rect {
+        Rect {
+            x: 280,
+            y: HUD_H + 130,
+            w: 220,
+            h: 72,
+        }
+    }
+
+    pub fn punch_grid_mode(&self) -> Rect {
+        Rect {
+            x: 520,
+            y: HUD_H + 130,
+            w: 220,
+            h: 72,
+        }
+    }
+
+    pub fn punch_settings_close(&self) -> Rect {
+        Rect {
+            x: 40,
+            y: HUD_H + 230,
+            w: 160,
+            h: 56,
         }
     }
 
@@ -3418,6 +3485,18 @@ impl Layout {
         if self.settings_fx_target.contains(px, py) {
             return Hit::FxTarget;
         }
+        if self.punch_lock().contains(px, py) {
+            return Hit::PunchLock;
+        }
+        if self.punch_source().contains(px, py) {
+            return Hit::PunchSource;
+        }
+        if self.punch_pads().contains(px, py) {
+            return Hit::PunchPads;
+        }
+        if self.punch_set().contains(px, py) {
+            return Hit::PunchSet;
+        }
         if self.punch_clear().contains(px, py) {
             return Hit::PunchClear;
         }
@@ -3430,6 +3509,22 @@ impl Layout {
             if self.punch_pad_cell(index).contains(px, py) {
                 return Hit::PunchPad(index);
             }
+        }
+        Hit::None
+    }
+
+    pub fn hit_fx_settings(&self, px: i32, py: i32) -> Hit {
+        if self.punch_prio().contains(px, py) {
+            return Hit::PunchPrio;
+        }
+        if self.punch_rpt_mode().contains(px, py) {
+            return Hit::PunchRptMode;
+        }
+        if self.punch_grid_mode().contains(px, py) {
+            return Hit::PunchGrid;
+        }
+        if self.punch_settings_close().contains(px, py) || self.punch_set().contains(px, py) {
+            return Hit::PunchSet;
         }
         Hit::None
     }
@@ -3450,7 +3545,8 @@ impl Layout {
         let i = (index % 16) as i32;
         let col = i % 4;
         let row = i / 4;
-        let left = self.content.x + 288;
+        // Six bus faders (~54px each) sit left of the pad grid.
+        let left = self.content.x + 340;
         let top = self.content.y + 44;
         let area_w = self.content.x + self.content.w - 12 - left;
         let area_h = self.content.h - 60;
@@ -3574,6 +3670,10 @@ pub enum Surface {
         index: usize,
         start_py: i32,
         dragged: bool,
+    },
+    /// Hold-to-grab freeze button. `releasing` = this press is unlocking a loop.
+    PunchLock {
+        releasing: bool,
     },
     MixBus {
         index: usize,
@@ -3748,7 +3848,7 @@ mod tests {
         assert!(rate.x + rate.w <= layout.synth_scope.x);
         assert_eq!(
             layout.hit(UiMode::Synth, rate.x + 4, rate.y + rate.h / 2),
-            Hit::SynthSlider(6)
+            Hit::SynthSlider(Layout::SYNTH_SLIDER_COUNT - 1)
         );
     }
 
@@ -4106,9 +4206,14 @@ mod tests {
         assert!(last.x + last.w <= layout.settings_fx.x + layout.settings_fx.w);
         assert!(
             last.y > first.y,
-            "DRUMS should sit on the second slider row"
+            "MIC / DRUMS should sit below the first insert row"
         );
         match layout.hit(UiMode::Fx, last.x + 4, last.y + last.h / 2) {
+            Hit::FxSlider(i) if i == Layout::FX_MIC_LEVEL => {}
+            other => panic!("expected mic level slider, got {other:?}"),
+        }
+        let drums = layout.settings_fx_slider(Layout::FX_DRUMS_LEVEL);
+        match layout.hit(UiMode::Fx, drums.x + 4, drums.y + drums.h / 2) {
             Hit::FxSlider(i) if i == Layout::FX_DRUMS_LEVEL => {}
             other => panic!("expected drums level slider, got {other:?}"),
         }
@@ -4130,6 +4235,23 @@ mod tests {
         assert_eq!(
             layout.hit(UiMode::Fx, clear.x + 8, clear.y + 8),
             Hit::PunchClear
+        );
+        let lock = layout.punch_lock();
+        assert_on_screen("punch lock", lock);
+        assert_eq!(
+            layout.hit(UiMode::Fx, lock.x + 8, lock.y + 8),
+            Hit::PunchLock
+        );
+        let prio = layout.punch_prio();
+        assert_on_screen("punch prio", prio);
+        assert_eq!(
+            layout.hit_fx_settings(prio.x + 8, prio.y + 8),
+            Hit::PunchPrio
+        );
+        let set = layout.punch_set();
+        assert_eq!(
+            layout.hit(UiMode::Fx, set.x + 8, set.y + 8),
+            Hit::PunchSet
         );
     }
 
@@ -4156,10 +4278,10 @@ mod tests {
             layout.hit(UiMode::Mix, b8.x + 4, b8.y + b8.h / 2),
             Hit::MixPad(15)
         );
-        let last_bus = layout.mix_bus_slider(Layout::MIX_SEQ_KAOSS);
+        let last_bus = layout.mix_bus_slider(Layout::MIX_MIC);
         assert!(
             a1.x >= last_bus.x + last_bus.w,
-            "pad grid should sit to the right of the SEQ buses"
+            "pad grid must sit right of the MIC bus fader"
         );
     }
 }

@@ -30,9 +30,12 @@ struct Voice {
     target_amp: f32,
     releasing: bool,
     age: u64,
-    /// Extra semitones on this voice only (Kaoss Y bend on a recorded take).
+    /// Extra semitones on this voice only (Kaoss Y bend on a recorded take,
+    /// or the wheel value latched when a live note is released).
     bend_semis: f32,
     bend_target_semis: f32,
+    /// Seconds since note-off. Drives the release pitch glide.
+    release_age: f32,
 }
 
 impl Voice {
@@ -54,6 +57,7 @@ impl Voice {
             age: 0,
             bend_semis: 0.0,
             bend_target_semis: 0.0,
+            release_age: 0.0,
         }
     }
 }
@@ -64,6 +68,11 @@ pub struct VoiceContext {
     pub sample_rate: f32,
     /// Multiplier on frequency (pitch bend × vibrato).
     pub pitch_mul: f32,
+    /// Pitch-wheel part of `pitch_mul` (1 = unison). A releasing live note
+    /// keeps its own latched bend and drops this so the wheel can spring home.
+    pub wheel_mul: f32,
+    /// Signed semitones reached at the end of the release (0 = no glide).
+    pub release_drift_semis: f32,
     /// Seconds in this render span — used to slew per-voice Kaoss bend.
     pub bend_slew_dt: f32,
     pub attack_sec: f32,
@@ -175,6 +184,7 @@ impl VoicePool {
             v.age = self.serial;
             v.bend_semis = 0.0;
             v.bend_target_semis = 0.0;
+            v.release_age = 0.0;
             return;
         }
 
@@ -196,6 +206,7 @@ impl VoicePool {
             age: self.serial,
             bend_semis: 0.0,
             bend_target_semis: 0.0,
+            release_age: 0.0,
         };
     }
 
@@ -221,6 +232,22 @@ impl VoicePool {
             if semis.abs() < 0.01 || self.voices[slot].bend_semis.abs() < 0.01 {
                 self.voices[slot].bend_semis = semis;
             }
+        }
+    }
+
+    /// Release a live note and keep `bend_semis` on it for the decay.
+    ///
+    /// The channel wheel can then return to center without dragging this tail
+    /// back to unison. Recorded notes keep the bend they already stored.
+    pub fn note_off_latched(&mut self, channel: u8, note: u8, bend_semis: f32) {
+        if let Some(slot) = self.find_playing(channel, note, false) {
+            let v = &mut self.voices[slot];
+            let bend = bend_semis.clamp(-24.0, 24.0);
+            v.bend_semis = bend;
+            v.bend_target_semis = bend;
+            v.releasing = true;
+            v.target_amp = 0.0;
+            v.release_age = 0.0;
         }
     }
 
@@ -368,13 +395,16 @@ impl VoicePool {
             };
             audible = true;
             v.bend_semis = crate::kaoss::slew_bend(v.bend_semis, v.bend_target_semis, ctx.bend_slew_dt);
-            let voice_mul = if v.bend_semis.abs() > 0.001 {
-                2f32.powf(v.bend_semis / 12.0)
-            } else {
-                1.0
-            };
-            let hz = midi_to_hz(v.note) * ctx.pitch_mul as f64 * voice_mul as f64;
-            let phase_inc = hz * TABLE_SIZE as f64 / ctx.sample_rate as f64;
+            let (mut phase_inc, inc_step, release_age) = phase_inc_span(
+                v.note,
+                v.bend_semis,
+                v.releasing,
+                v.recorded,
+                v.release_age,
+                &ctx,
+                n,
+            );
+            v.release_age = release_age;
             let use_lfo = !v.recorded && ctx.tone_lfo_amount > 0.01;
             let static_tone = if v.recorded {
                 v.tone
@@ -427,6 +457,7 @@ impl VoicePool {
                 *sample += s * v.amp * g;
 
                 v.phase += phase_inc;
+                phase_inc += inc_step;
                 if v.phase >= TABLE_SIZE as f64 {
                     v.phase -= TABLE_SIZE as f64;
                 }
@@ -484,13 +515,16 @@ impl VoicePool {
             };
             audible = true;
             v.bend_semis = crate::kaoss::slew_bend(v.bend_semis, v.bend_target_semis, ctx.bend_slew_dt);
-            let voice_mul = if v.bend_semis.abs() > 0.001 {
-                2f32.powf(v.bend_semis / 12.0)
-            } else {
-                1.0
-            };
-            let hz = midi_to_hz(v.note) * ctx.pitch_mul as f64 * voice_mul as f64;
-            let phase_inc = hz * TABLE_SIZE as f64 / ctx.sample_rate as f64;
+            let (mut phase_inc, inc_step, release_age) = phase_inc_span(
+                v.note,
+                v.bend_semis,
+                v.releasing,
+                v.recorded,
+                v.release_age,
+                &ctx,
+                n,
+            );
+            v.release_age = release_age;
             let use_lfo = !v.recorded && ctx.tone_lfo_amount > 0.01;
             let static_tone = if v.recorded {
                 v.tone
@@ -543,6 +577,7 @@ impl VoicePool {
                 *sample += s * v.amp * g;
 
                 v.phase += phase_inc;
+                phase_inc += inc_step;
                 if v.phase >= TABLE_SIZE as f64 {
                     v.phase -= TABLE_SIZE as f64;
                 }
@@ -588,6 +623,74 @@ fn linear_env_step(seconds: f32, sample_rate: f32) -> f32 {
     1.0 / (seconds.max(0.0005) * sample_rate).max(1.0)
 }
 
+/// Frequency ratio for a semitone offset. Unison is 1.
+pub fn semis_to_ratio(semis: f32) -> f32 {
+    if semis.abs() < 0.001 {
+        1.0
+    } else {
+        2f32.powf(semis / 12.0)
+    }
+}
+
+/// Glide ratio at `age` seconds into the release. 1 at the note-off.
+pub fn drift_ratio(age: f32, release_sec: f32, drift_semis: f32) -> f32 {
+    if drift_semis.abs() < 0.001 {
+        return 1.0;
+    }
+    let t = (age / release_sec.max(0.02)).clamp(0.0, 1.0);
+    semis_to_ratio(drift_semis * t)
+}
+
+/// Map a DRIFT slider (0..1, center 0.5) to ±12 semitones.
+pub fn release_drift_semis(unit: f32) -> f32 {
+    (unit.clamp(0.0, 1.0) - 0.5) * 24.0
+}
+
+/// Phase increment at the start of the block, and how much it changes per sample.
+///
+/// A releasing live note uses its latched bend instead of the channel wheel, then
+/// adds the release glide. Held notes keep wheel × vibrato × per-voice bend.
+fn phase_inc_span(
+    note: u8,
+    bend_semis: f32,
+    releasing: bool,
+    recorded: bool,
+    release_age: f32,
+    ctx: &VoiceContext,
+    n: usize,
+) -> (f64, f64, f32) {
+    let sr = ctx.sample_rate.max(8000.0);
+    let n = n.max(1);
+    let dt = n as f32 / sr;
+    let base = midi_to_hz(note) * TABLE_SIZE as f64 / sr as f64;
+    let voice = semis_to_ratio(bend_semis);
+    let wheel = ctx.wheel_mul.max(0.05);
+    let drift0 = if releasing {
+        drift_ratio(release_age, ctx.release_sec, ctx.release_drift_semis)
+    } else {
+        1.0
+    };
+    let drift1 = if releasing {
+        drift_ratio(release_age + dt, ctx.release_sec, ctx.release_drift_semis)
+    } else {
+        1.0
+    };
+    let body = if releasing && !recorded {
+        ctx.pitch_mul / wheel
+    } else {
+        ctx.pitch_mul
+    };
+    let inc0 = base * (body * voice * drift0) as f64;
+    let inc1 = base * (body * voice * drift1) as f64;
+    let step = if n > 1 {
+        (inc1 - inc0) / (n - 1) as f64
+    } else {
+        0.0
+    };
+    let age = if releasing { release_age + dt } else { release_age };
+    (inc0, step, age)
+}
+
 #[inline]
 pub fn midi_to_hz(note: u8) -> f64 {
     440.0 * 2f64.powf((note as f64 - 69.0) / 12.0)
@@ -602,6 +705,8 @@ mod tests {
         VoiceContext {
             sample_rate: 48_000.0,
             pitch_mul: 1.0,
+            wheel_mul: 1.0,
+            release_drift_semis: 0.0,
             bend_slew_dt: 0.0,
             attack_sec: 0.002,
             release_sec: 0.010,
@@ -711,5 +816,69 @@ mod tests {
     #[test]
     fn a4_runs_at_concert_pitch() {
         assert!((midi_to_hz(69) - 440.0).abs() < 1e-9);
+    }
+
+    fn zero_crossings(buf: &[f32]) -> usize {
+        buf.windows(2)
+            .filter(|w| w[0] <= 0.0 && w[1] > 0.0)
+            .count()
+    }
+
+    #[test]
+    fn latched_bend_stays_through_the_release() {
+        let bank = WaveBank::with_builtins();
+        let mut ctx = ctx();
+        ctx.attack_sec = 0.001;
+        ctx.release_sec = 1.0;
+        ctx.pitch_mul = 1.0;
+        ctx.wheel_mul = 1.0;
+        let mut plain = VoicePool::new();
+        plain.note_on(0, 69, 127, 0);
+        let mut bent = VoicePool::new();
+        bent.note_on(0, 69, 127, 0);
+        let mut warm = vec![0.0f32; 2048];
+        plain.render_group(0, bank.table(0), &mut warm, ctx);
+        bent.render_group(0, bank.table(0), &mut warm, ctx);
+        plain.note_off_latched(0, 69, 0.0);
+        bent.note_off_latched(0, 69, 12.0);
+        let mut a = vec![0.0f32; 2048];
+        let mut b = vec![0.0f32; 2048];
+        plain.render_group(0, bank.table(0), &mut a, ctx);
+        bent.render_group(0, bank.table(0), &mut b, ctx);
+        let za = zero_crossings(&a).max(1);
+        let zb = zero_crossings(&b);
+        let ratio = zb as f32 / za as f32;
+        assert!(
+            (ratio - 2.0).abs() < 0.25,
+            "octave bend should survive note-off, crossings {za} vs {zb}"
+        );
+    }
+
+    #[test]
+    fn release_drift_glides_away_from_the_latched_pitch() {
+        let bank = WaveBank::with_builtins();
+        let mut ctx = ctx();
+        ctx.attack_sec = 0.001;
+        ctx.release_sec = 0.50;
+        ctx.release_drift_semis = 12.0;
+        let mut pool = VoicePool::new();
+        pool.note_on(0, 57, 127, 0);
+        let mut warm = vec![0.0f32; 2048];
+        pool.render_group(0, bank.table(0), &mut warm, ctx);
+        pool.note_off_latched(0, 57, 0.0);
+        let mut early = vec![0.0f32; 1024];
+        pool.render_group(0, bank.table(0), &mut early, ctx);
+        let mut buf = vec![0.0f32; 1024];
+        // ~0.4s into a 0.5s release: most of the upward glide has happened.
+        for _ in 0..18 {
+            buf.iter_mut().for_each(|s| *s = 0.0);
+            pool.render_group(0, bank.table(0), &mut buf, ctx);
+        }
+        let z0 = zero_crossings(&early).max(1);
+        let z1 = zero_crossings(&buf);
+        assert!(
+            z1 > z0 + z0 / 3,
+            "pitch should rise across the release, crossings {z0} → {z1}"
+        );
     }
 }

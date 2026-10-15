@@ -3,9 +3,13 @@
 //! The callback body is deliberately boring — every expensive thing (allocating a
 //! clip, sending MIDI bytes, writing a log line) happens on another thread.
 //!
-//! The stream stays up once opened. Periodic mixer rescans and stale-callback
-//! reopens used to tear ALSA down every few seconds (heard as dropouts).
-//! Reopen only on SET → AUDIO (`audio_reopen`) or process shutdown.
+//! The stream stays up once opened. Mixer unmute is re-applied for a few
+//! seconds after open (jack-detect races the first `amixer`). A reopen happens
+//! on a stream error or SET → AUDIO.
+//!
+//! Do not re-list devices while the stream is running. cpal's device listing
+//! opens every ALSA plugin (JACK, Pulse, OSS, dmix). On this Pi that pegs a
+//! core and returns POLLERR on the live headphone PCM.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -20,6 +24,7 @@ use jambox_core::{
 use tracing::{info, warn};
 
 use crate::bus::{AudioSide, StatusPacket};
+use crate::capture::CaptureRing;
 
 /// Conservative first explicit period; architecture primary target is 512.
 pub const PREFERRED_BLOCK: u32 = 512;
@@ -46,9 +51,12 @@ pub enum AudioError {
 /// Shared reopen / liveness flags between IPC, the device callback, and the supervisor.
 pub struct AudioHealth {
     last_callback_ms: AtomicU64,
-    error: AtomicBool,
-    /// Edge-triggered IPC / operator request to drop and reopen the stream.
-    reopen: AtomicBool,
+    /// Output stream asked to reopen. Capture uses [`Self::capture_error`] so a
+    /// mic glitch does not tear down the headphone stream.
+    pub(crate) error: AtomicBool,
+    pub(crate) capture_error: AtomicBool,
+    /// Bumped by SET → AUDIO so both output and capture supervisors reopen.
+    reopen_gen: AtomicU64,
 }
 
 impl AudioHealth {
@@ -56,16 +64,17 @@ impl AudioHealth {
         Self {
             last_callback_ms: AtomicU64::new(0),
             error: AtomicBool::new(false),
-            reopen: AtomicBool::new(false),
+            capture_error: AtomicBool::new(false),
+            reopen_gen: AtomicU64::new(0),
         }
     }
 
     pub fn request_reopen(&self) {
-        self.reopen.store(true, Ordering::Relaxed);
+        self.reopen_gen.fetch_add(1, Ordering::Relaxed);
     }
 
-    pub(crate) fn take_reopen(&self) -> bool {
-        self.reopen.swap(false, Ordering::Relaxed)
+    pub(crate) fn reopen_gen(&self) -> u64 {
+        self.reopen_gen.load(Ordering::Relaxed)
     }
 }
 
@@ -83,6 +92,9 @@ struct RenderState {
     scheduled: Vec<ScheduledCommand>,
     midi_out: MidiOutSink,
     mono: Vec<f32>,
+    /// Mic / line samples for this output block (drained from [`CaptureRing`]).
+    input: Vec<f32>,
+    capture: Arc<CaptureRing>,
     touch_scratch: [LatestTouch; MAX_TOUCH_VOICES + 3],
     peak_micros: u32,
     xruns: u64,
@@ -106,7 +118,13 @@ impl StatePtr {
 }
 
 impl RenderState {
-    fn new(audio: AudioSide, bank: WaveBank, sample_rate: u32, channels: u16) -> Self {
+    fn new(
+        audio: AudioSide,
+        bank: WaveBank,
+        sample_rate: u32,
+        channels: u16,
+        capture: Arc<CaptureRing>,
+    ) -> Self {
         let mut engine = JamboxEngine::with_bank(sample_rate as f64, bank);
         engine.sync_fx_slots();
         Self {
@@ -115,6 +133,8 @@ impl RenderState {
             scheduled: Vec::with_capacity(MAX_BLOCK_COMMANDS),
             midi_out: MidiOutSink::new(),
             mono: vec![0.0; SCRATCH_FRAMES],
+            input: vec![0.0; SCRATCH_FRAMES],
+            capture,
             touch_scratch: [LatestTouch {
                 owner: 0,
                 x: 0.0,
@@ -245,11 +265,22 @@ pub fn spawn_output(
     bank: WaveBank,
     preferred_frames: u32,
     health: Arc<AudioHealth>,
+    capture: Arc<CaptureRing>,
     running: Arc<AtomicBool>,
 ) {
     let _ = std::thread::Builder::new()
         .name("jambox-audio-out".into())
-        .spawn(move || supervisor(filter, audio, bank, preferred_frames, health, running));
+        .spawn(move || {
+            supervisor(
+                filter,
+                audio,
+                bank,
+                preferred_frames,
+                health,
+                capture,
+                running,
+            )
+        });
 }
 
 fn supervisor(
@@ -258,6 +289,7 @@ fn supervisor(
     bank: WaveBank,
     preferred_frames: u32,
     health: Arc<AudioHealth>,
+    capture: Arc<CaptureRing>,
     running: Arc<AtomicBool>,
 ) {
     let mut pending_audio = Some(audio);
@@ -310,6 +342,7 @@ fn supervisor(
                     pending_bank.take().expect("wave bank"),
                     sample_rate,
                     channels,
+                    Arc::clone(&capture),
                 )));
                 state.as_mut().expect("state just inserted")
             }
@@ -328,7 +361,7 @@ fn supervisor(
                 watch_stream(&running, &health);
                 drop(stream);
                 if running.load(Ordering::Relaxed) {
-                    info!("audio: SET → AUDIO reopen");
+                    info!("audio: reopening output");
                 }
             }
             Err(err) => {
@@ -343,10 +376,22 @@ fn supervisor(
 fn watch_stream(running: &AtomicBool, health: &AudioHealth) {
     health.error.store(false, Ordering::Relaxed);
     health.last_callback_ms.store(0, Ordering::Relaxed);
-    let _ = health.take_reopen();
+    let start_gen = health.reopen_gen();
+    let started = Instant::now();
+    let mut mixer_kicks = 0u32;
     while running.load(Ordering::Relaxed) {
-        if health.take_reopen() {
+        if health.reopen_gen() != start_gen {
             break;
+        }
+        if health.error.load(Ordering::Relaxed) {
+            warn!("audio: output error — reopening stream");
+            break;
+        }
+        // Jack-detect often mutes the analog path after the stream is already
+        // open. Re-apply the mixer for the first few seconds only.
+        if mixer_kicks < 8 && started.elapsed() < Duration::from_secs(10) {
+            restore_mixer();
+            mixer_kicks += 1;
         }
         std::thread::sleep(WATCH_POLL);
     }
@@ -372,34 +417,51 @@ fn restore_mixer() {
     #[cfg(target_os = "linux")]
     {
         use std::process::{Command, Stdio};
-        for ctrl in [
-            "Headphone",
-            "Headphones",
-            "PCM",
-            "Master",
-            "Speaker",
-            "Digital",
-        ] {
-            let _ = Command::new("amixer")
-                .args(["-q", "sset", ctrl, "unmute"])
+        let quiet = |cmd: &mut Command| {
+            let _ = cmd
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .status();
-        }
-        // 0 dB is well below the bcm2835 PCM ceiling (+4 dB at 100%).
-        for ctrl in ["PCM", "Headphone", "Headphones"] {
-            for level in ["0dB", "85%"] {
-                let ok = Command::new("amixer")
-                    .args(["-q", "sset", ctrl, level])
-                    .stdin(Stdio::null())
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .status()
-                    .map(|s| s.success())
-                    .unwrap_or(false);
-                if ok {
-                    break;
+        };
+        // Unmute every card. The default card is often HDMI, so a bare
+        // `amixer sset Headphone` never touches the analog jack — which is
+        // why sound stays dead until SET → AUDIO after a cable swap.
+        for card in 0..4 {
+            let card = card.to_string();
+            let info = Command::new("amixer")
+                .args(["-c", &card, "info"])
+                .output();
+            let info = info
+                .ok()
+                .filter(|o| o.status.success())
+                .map(|o| String::from_utf8_lossy(&o.stdout).to_ascii_lowercase())
+                .unwrap_or_default();
+            if info.is_empty() {
+                continue;
+            }
+            if info.contains("bcm2835") || info.contains("headphone") {
+                // Force analog. Auto-route stays on HDMI when the Klipsch aux
+                // load does not trip the Pi jack-detect pin.
+                quiet(
+                    Command::new("amixer")
+                        .args(["-q", "-c", &card, "cset", "numid=3", "1"]),
+                );
+            }
+            for ctrl in ["Headphone", "Headphones", "PCM", "Master", "Speaker"] {
+                quiet(Command::new("amixer").args(["-q", "-c", &card, "sset", ctrl, "unmute"]));
+                for level in ["0dB", "85%"] {
+                    let ok = Command::new("amixer")
+                        .args(["-q", "-c", &card, "sset", ctrl, level])
+                        .stdin(Stdio::null())
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null())
+                        .status()
+                        .map(|s| s.success())
+                        .unwrap_or(false);
+                    if ok {
+                        break;
+                    }
                 }
             }
         }
@@ -512,9 +574,16 @@ fn build_stream(
     let ptr = StatePtr(state as *mut RenderState);
 
     let health_err = Arc::clone(&health);
+    let last_log_ms = AtomicU64::new(0);
     let err_fn = move |err| {
         health_err.error.store(true, Ordering::Relaxed);
-        warn!(%err, "audio stream error");
+        // POLLERR can fire every few microseconds; the supervisor reopens once.
+        let now = now_ms();
+        let prev = last_log_ms.load(Ordering::Relaxed);
+        if now.saturating_sub(prev) >= 2_000 {
+            last_log_ms.store(now, Ordering::Relaxed);
+            warn!(%err, "audio stream error");
+        }
     };
 
     let stream = match format {
@@ -609,6 +678,11 @@ fn callback_body<S: Copy>(
     drain(state);
     let n_touch = state.audio.latest.snapshot(&mut state.touch_scratch);
     state.engine.sync_touches(&state.touch_scratch[..n_touch]);
+
+    // Drain mic / line into the engine before render so punch-in hears it.
+    let input = &mut state.input[..frames];
+    state.capture.pull_resampled(input, sample_rate);
+    state.engine.set_input_block(input);
 
     let mut offset = 0usize;
     while offset < frames {
@@ -747,11 +821,12 @@ mod tests {
     }
 
     #[test]
-    fn reopen_request_is_edge_triggered() {
+    fn reopen_request_bumps_generation() {
         let health = AudioHealth::new();
-        assert!(!health.take_reopen());
+        let before = health.reopen_gen();
         health.request_reopen();
-        assert!(health.take_reopen());
-        assert!(!health.take_reopen());
+        assert_ne!(health.reopen_gen(), before);
+        health.request_reopen();
+        assert_eq!(health.reopen_gen(), before + 2);
     }
 }

@@ -87,6 +87,9 @@ pub struct DrumMacros {
     pub decay: f32,
     pub noise: f32,
     pub tone: f32,
+    /// 0.5 keeps the voice at its designed loudness. 1.0 is about 4×, so a
+    /// quiet clap can sit next to the kick.
+    pub level: f32,
 }
 
 impl Default for DrumMacros {
@@ -96,8 +99,15 @@ impl Default for DrumMacros {
             decay: 0.40,
             noise: 0.55,
             tone: 0.60,
+            level: 0.5,
         }
     }
+}
+
+/// Designed loudness at 0.5. The top of the LEVEL bar is 4× that.
+pub fn drum_level_gain(level: f32) -> f32 {
+    let t = level.clamp(0.0, 1.0) * 2.0;
+    t * t
 }
 
 impl DrumMacros {
@@ -107,6 +117,7 @@ impl DrumMacros {
             decay: self.decay.clamp(0.0, 1.0),
             noise: self.noise.clamp(0.0, 1.0),
             tone: self.tone.clamp(0.0, 1.0),
+            level: self.level.clamp(0.0, 1.0),
         }
     }
 }
@@ -144,6 +155,8 @@ struct Hit {
     color_lp: f32,
     elapsed: f32,
     body_amp: f32,
+    /// Per-voice loudness from [`DrumMacros::level`], captured at trigger.
+    level_gain: f32,
     age: u64,
     mix: MixSource,
 }
@@ -169,6 +182,7 @@ impl Hit {
             color_lp: 0.0,
             elapsed: 0.0,
             body_amp: 0.38,
+            level_gain: 1.0,
             age: 0,
             mix: MixSource::Live,
         }
@@ -279,6 +293,7 @@ impl DrumKit {
             click_env: 1.0,
             age: self.serial,
             mix,
+            level_gain: drum_level_gain(m.level),
             ..Hit::silent()
         };
 
@@ -562,7 +577,7 @@ impl DrumKit {
                     }
                 };
 
-                *sample += value * mix_g;
+                *sample += value * mix_g * hit.level_gain;
 
                 hit.body_env *= body_coef;
                 hit.noise_env *= noise_coef;
@@ -768,6 +783,7 @@ mod tests {
             decay: 0.55,
             noise: 0.2,
             tone: 0.55,
+            level: 0.5,
         });
         kit.trigger(DrumModel::Kick, 127);
         let mut buf = vec![0.0f32; 2048];
@@ -820,6 +836,25 @@ mod tests {
         });
         assert!((kit.macros_for(DrumModel::Kick).pitch - 0.2).abs() < 1e-6);
         assert!((kit.macros_for(DrumModel::Snare).pitch - 0.2).abs() < 1e-6);
+    }
+
+    #[test]
+    fn level_bar_can_bring_the_clap_up() {
+        let quiet = peak_of(DrumModel::Clap, 0.5);
+        let loud = peak_of(DrumModel::Clap, 1.0);
+        assert!(quiet > 0.01, "designed clap should be audible, peak={quiet}");
+        assert!(
+            loud > quiet * 3.0,
+            "full LEVEL should be about 4x, quiet={quiet} loud={loud}"
+        );
+    }
+
+    fn peak_of(model: DrumModel, level: f32) -> f32 {
+        let mut buf = [0.0f32; 4_000];
+        let mut macros = DrumMacros::default();
+        macros.level = level;
+        DrumKit::preview(model, macros, 48_000.0, 7, &mut buf);
+        buf.iter().fold(0.0f32, |a, s| a.max(s.abs()))
     }
 
     #[test]
