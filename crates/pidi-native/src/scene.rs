@@ -40,12 +40,26 @@ pub struct GlyphQuad {
     pub color: u32,
 }
 
+/// Submission order. A later fill covers earlier text. GLES and the CPU
+/// rasterizer both walk this list, so one screen cannot leave glyphs on the next.
+#[derive(Debug, Clone, Copy)]
+enum DrawOp {
+    Color(u32),
+    Glyph(u32),
+}
+
+pub enum PaintOp<'a> {
+    Fill(&'a ColorQuad),
+    Glyph(&'a GlyphQuad),
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Scene {
     pub clear: u32,
     pub font_style: FontStyle,
     pub color: Vec<ColorQuad>,
     pub glyphs: Vec<GlyphQuad>,
+    order: Vec<DrawOp>,
 }
 
 /// Unpack 0xRRGGBB (or 0xAARRGGBB) into RGBA floats for GLES.
@@ -91,7 +105,33 @@ impl Scene {
         if w <= 0.0 || h <= 0.0 {
             return;
         }
+        let index = self.color.len() as u32;
         self.color.push(ColorQuad { x, y, w, h, color });
+        self.order.push(DrawOp::Color(index));
+    }
+
+    fn push_glyph(&mut self, glyph: GlyphQuad) {
+        let index = self.glyphs.len() as u32;
+        self.glyphs.push(glyph);
+        self.order.push(DrawOp::Glyph(index));
+    }
+
+    /// Walk fills and glyphs in the order they were submitted.
+    pub fn paint(&self, mut visit: impl FnMut(PaintOp<'_>)) {
+        for op in &self.order {
+            match *op {
+                DrawOp::Color(index) => {
+                    if let Some(quad) = self.color.get(index as usize) {
+                        visit(PaintOp::Fill(quad));
+                    }
+                }
+                DrawOp::Glyph(index) => {
+                    if let Some(quad) = self.glyphs.get(index as usize) {
+                        visit(PaintOp::Glyph(quad));
+                    }
+                }
+            }
+        }
     }
 
     pub fn fill_disc(&mut self, cx: f32, cy: f32, radius: f32, color: u32) {
@@ -165,7 +205,7 @@ impl Scene {
         let stride = GLYPH_STRIDE * scale;
         for ch in s.chars() {
             let (u0, v0, u1, v1) = font::glyph_uv(ch);
-            self.glyphs.push(GlyphQuad {
+            self.push_glyph(GlyphQuad {
                 x: *x as f32,
                 y: y as f32,
                 w: gw as f32,
@@ -205,7 +245,7 @@ impl Scene {
             let gy = bottom - gh;
             let gx = (pen_x + g.xmin * ds).round();
             let gw = (g.width * ds).round().max(1.0);
-            self.glyphs.push(GlyphQuad {
+            self.push_glyph(GlyphQuad {
                 x: gx,
                 y: gy,
                 w: gw,
@@ -269,6 +309,7 @@ pub fn build(model: &NativeModel) -> Scene {
         font_style: model.font_style.resolved(),
         color: Vec::with_capacity(if model.song_viz_open { 900 } else { 200 }),
         glyphs: Vec::with_capacity(240),
+        order: Vec::with_capacity(if model.song_viz_open { 1100 } else { 440 }),
     };
     if model.song_viz_open && !model.screensaver_active() && !model.power_menu_open {
         draw_song_viz(&mut scene, model);
@@ -300,6 +341,7 @@ pub fn build(model: &NativeModel) -> Scene {
             UiMode::Map => draw_map(&mut scene, model),
             UiMode::Ports => draw_ports(&mut scene, model),
             UiMode::Settings => draw_settings(&mut scene, model),
+            UiMode::Fx if model.fx_settings_open => draw_fx_settings(&mut scene, model),
             UiMode::Fx => draw_fx(&mut scene, model),
             UiMode::Mix => draw_mix(&mut scene, model),
             UiMode::Log => draw_log(&mut scene, model),
@@ -2204,18 +2246,38 @@ fn draw_fm(scene: &mut Scene, model: &NativeModel) {
     for index in 0..jambox_core::FM_RECIPE_COUNT {
         let rec = jambox_core::fm_recipe(index);
         let cell = layout.fm_recipe_cell(index);
-        let on = index == model.fm_recipe;
+        let on = !model.fm_user_live && index == model.fm_recipe;
         scene.fill_rect(cell, if on { 0x8ec07c } else { 0x3c3836 });
         scene.text_centered(cell, rec.label, if on { 0x1d2021 } else { 0xfbf1c7 }, 1);
     }
 
     let hint = layout.fm_hint();
+    let hint_text = if model.fm_user_live {
+        "saved sound"
+    } else {
+        jambox_core::fm_recipe(model.fm_recipe).hint
+    };
     scene.text(
         hint.x,
         hint.y + 4,
-        jambox_core::fm_recipe(model.fm_recipe).hint,
+        &clip_text(hint_text, hint.w, 1),
         0xa89984,
     );
+    scene.fill_rect(layout.fm_undo(), 0x504945);
+    scene.text_centered(layout.fm_undo(), "UNDO", 0xfbf1c7, 1);
+    scene.fill_rect(layout.fm_save(), 0x689d6a);
+    scene.text_centered(layout.fm_save(), "SAVE", 0x1d2021, 1);
+    scene.fill_rect(
+        layout.fm_user(),
+        if model.fm_user_live {
+            0xd79921
+        } else if model.fm_user.is_some() {
+            0x458588
+        } else {
+            0x3c3836
+        },
+    );
+    scene.text_centered(layout.fm_user(), "USER", 0xfbf1c7, 1);
     scene.fill_rect(layout.fm_clear(), 0x9d0006);
     scene.text_centered(layout.fm_clear(), "CLEAR", 0xfbf1c7, 1);
     scene.fill_rect(layout.fm_oct_down(), 0x504945);
@@ -3704,20 +3766,12 @@ fn draw_fx(scene: &mut Scene, model: &NativeModel) {
             if armed { 0xfbf1c7 } else { 0xa89984 },
         );
     }
-    if model.fx_settings_open {
-        draw_fx_settings(scene, model);
-    }
 }
 
 fn draw_fx_settings(scene: &mut Scene, model: &NativeModel) {
     let layout = model.layout;
-    let panel = Rect {
-        x: 16,
-        y: crate::layout::HUD_H + 56,
-        w: 768,
-        h: 340,
-    };
-    scene.fill_rect(panel, 0x1d2021);
+    let panel = layout.content;
+    scene.fill_rect(panel, 0x111111);
     scene.text_scaled(panel.x + 24, panel.y + 16, "FX SET", 0xfbf1c7, 2);
     let prio = layout.punch_prio();
     let rpt = layout.punch_rpt_mode();
@@ -4151,6 +4205,45 @@ mod tests {
     }
 
     #[test]
+    fn fx_settings_does_not_draw_the_punch_pads() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Fx);
+        model.fx_settings_open = true;
+        model.punch_grid_mode = jambox_core::PunchGridMode::Beat;
+        let scene = build(&model);
+        assert!(
+            scene
+                .color
+                .iter()
+                .all(|q| q.color != 0xfb4934),
+            "punch pad fills must not be in the settings scene"
+        );
+        assert!(scene.color.iter().any(|q| {
+            q.w > 700.0 && q.y >= crate::layout::HUD_H as f32
+        }));
+    }
+
+    #[test]
+    fn a_later_fill_covers_earlier_text() {
+        let mut scene = Scene {
+            clear: 0x111111,
+            font_style: FontStyle::Retro,
+            color: Vec::new(),
+            glyphs: Vec::new(),
+            order: Vec::new(),
+        };
+        scene.fill(0.0, 0.0, 80.0, 20.0, 0xff0000);
+        scene.text(2, 2, "BEAT", 0xffffff);
+        scene.fill(0.0, 0.0, 80.0, 20.0, 0x00ff00);
+        let mut frame = crate::render::Frame::new();
+        crate::render::rasterize(&mut frame, &scene);
+        let leaked = frame.pixels[..20 * 800]
+            .iter()
+            .any(|px| *px == 0xffffff);
+        assert!(!leaked, "text submitted before a fill must not paint over it");
+    }
+
+    #[test]
     fn fm_mode_draws_recipe_chips_and_keyboard() {
         let mut model = NativeModel::new();
         model.set_mode(UiMode::Fm);
@@ -4335,6 +4428,7 @@ mod tests {
             font_style: FontStyle::Retro,
             color: Vec::new(),
             glyphs: Vec::new(),
+            order: Vec::new(),
         };
         draw_piano_roll(
             &mut scene,

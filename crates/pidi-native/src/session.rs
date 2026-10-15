@@ -307,6 +307,20 @@ pub struct SessionState {
     /// Note-repeat latch: tap instead of hold. Missing in old sessions → hold.
     #[serde(default)]
     pub drum_repeat_lock: bool,
+    /// Touch-drawn FM graph the user saved. Missing in old sessions → none.
+    #[serde(default)]
+    pub fm_user: Option<FmUserPatch>,
+}
+
+/// Saved draw-mode FM graph. Plain arrays so old sessions still load.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct FmUserPatch {
+    pub ratio: [f32; 4],
+    pub audio: [f32; 4],
+    pub fold: [f32; 4],
+    pub env: [f32; 4],
+    pub sustain: [f32; 4],
+    pub matrix: [[f32; 4]; 4],
 }
 
 fn default_drum_level() -> f32 {
@@ -431,6 +445,7 @@ impl Default for SessionState {
             wifi_usb_hold: false,
             full_velocity: default_full_velocity(),
             drum_repeat_lock: false,
+            fm_user: None,
         }
     }
 }

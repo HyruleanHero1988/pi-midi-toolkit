@@ -88,13 +88,19 @@ pub fn draw(frame: &mut Frame, model: &NativeModel) {
 
 pub fn rasterize(frame: &mut Frame, scene: &Scene) {
     frame.clear(scene.clear);
-    for q in &scene.color {
-        frame.fill_rect(q.x as i32, q.y as i32, q.w as i32, q.h as i32, q.color);
-    }
     let (aw, ah, atlas) = font::atlas_rgba_for(scene.font_style.resolved());
-    for g in &scene.glyphs {
-        blit_glyph(frame, g, aw, ah, &atlas);
-    }
+    scene.paint(|op| match op {
+        scene::PaintOp::Fill(quad) => {
+            frame.fill_rect(
+                quad.x as i32,
+                quad.y as i32,
+                quad.w as i32,
+                quad.h as i32,
+                quad.color,
+            );
+        }
+        scene::PaintOp::Glyph(glyph) => blit_glyph(frame, glyph, aw, ah, &atlas),
+    });
 }
 
 fn blit_glyph(frame: &mut Frame, g: &scene::GlyphQuad, aw: u32, ah: u32, atlas: &[u8]) {

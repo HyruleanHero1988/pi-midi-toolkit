@@ -90,6 +90,9 @@ pub enum Hit {
     FmOp(usize),
     FmSlider(usize),
     FmClear,
+    FmUndo,
+    FmSave,
+    FmUser,
     ScrollArea(crate::scroll::ScrollKind),
     DrumMacro(usize),
     KitAllDrums,
@@ -1960,8 +1963,35 @@ impl Layout {
         Rect {
             x: self.content.x + 16,
             y: self.content.y + 46,
-            w: 440,
+            w: 280,
             h: 20,
+        }
+    }
+
+    pub fn fm_undo(&self) -> Rect {
+        Rect {
+            x: self.content.x + self.content.w - 360,
+            y: self.content.y + 44,
+            w: 56,
+            h: 26,
+        }
+    }
+
+    pub fn fm_save(&self) -> Rect {
+        Rect {
+            x: self.content.x + self.content.w - 300,
+            y: self.content.y + 44,
+            w: 56,
+            h: 26,
+        }
+    }
+
+    pub fn fm_user(&self) -> Rect {
+        Rect {
+            x: self.content.x + self.content.w - 240,
+            y: self.content.y + 44,
+            w: 56,
+            h: 26,
         }
     }
 
@@ -2689,6 +2719,15 @@ impl Layout {
             if self.fm_recipe_cell(index).contains(px, py) {
                 return Hit::FmRecipe(index);
             }
+        }
+        if self.fm_undo().contains(px, py) {
+            return Hit::FmUndo;
+        }
+        if self.fm_save().contains(px, py) {
+            return Hit::FmSave;
+        }
+        if self.fm_user().contains(px, py) {
+            return Hit::FmUser;
         }
         if self.fm_clear().contains(px, py) {
             return Hit::FmClear;

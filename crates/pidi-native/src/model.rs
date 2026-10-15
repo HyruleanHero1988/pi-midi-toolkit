@@ -245,6 +245,10 @@ pub struct NativeModel {
     pub fm_ops: [jambox_core::FmOpParams; jambox_core::FM_OP_COUNT],
     pub fm_matrix: [[f32; jambox_core::FM_OP_COUNT]; jambox_core::FM_OP_COUNT],
     pub fm_params: [f32; 4],
+    /// True while the heard graph is the saved user patch, not a recipe.
+    pub fm_user_live: bool,
+    pub fm_user: Option<session::FmUserPatch>,
+    fm_undo: Vec<FmUndo>,
     pub kaoss_picker_scroll: i32,
     pub log_scroll: usize,
     /// Kit macros per model: tone, noise/snap, pitch, decay, level.
@@ -488,6 +492,12 @@ pub struct NativeModel {
     last_logged_drops: u64,
 }
 
+struct FmUndo {
+    recipe: usize,
+    user_live: bool,
+    patch: session::FmUserPatch,
+}
+
 /// Pad FX values from just before a touch, restored on lift when HOLD FX is off.
 #[derive(Clone, Copy)]
 struct KaossFxSpring {
@@ -561,6 +571,9 @@ impl NativeModel {
                 fm_patch.ops[3].fold,
                 fm_patch.ops[3].env,
             ],
+            fm_user_live: false,
+            fm_user: None,
+            fm_undo: Vec::new(),
             kaoss_picker_scroll: 0,
             log_scroll: 0,
             drum_macros: [DEFAULT_DRUM_MACROS; DRUM_MODEL_COUNT],
@@ -2184,6 +2197,7 @@ impl NativeModel {
         self.wifi_usb_hold = s.wifi_usb_hold;
         self.full_vel = s.full_velocity;
         self.drum_repeat_lock = s.drum_repeat_lock;
+        self.fm_user = s.fm_user;
         outbox.midi_select(
             Some(self.midi_in_filter.clone()),
             Some(self.midi_out_filter.clone()),
@@ -2316,6 +2330,7 @@ impl NativeModel {
             wifi_usb_hold: self.wifi_usb_hold,
             full_velocity: self.full_vel,
             drum_repeat_lock: self.drum_repeat_lock,
+            fm_user: self.fm_user,
         }
     }
 
@@ -3170,6 +3185,18 @@ impl NativeModel {
             Hit::FmClear => {
                 self.tap_ui(slot, id, gesture, px, py);
                 self.clear_fm_links(outbox);
+            }
+            Hit::FmUndo => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.undo_fm(outbox);
+            }
+            Hit::FmSave => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.save_fm_user();
+            }
+            Hit::FmUser => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.load_fm_user(outbox);
             }
             Hit::FmSlider(index) => {
                 self.fingers[slot] = Finger {
@@ -5015,10 +5042,45 @@ impl NativeModel {
     fn apply_fm_patch(&mut self, index: usize) {
         let patch = jambox_core::fm_recipe_patch(index);
         self.fm_recipe = index % jambox_core::FM_RECIPE_COUNT;
+        self.fm_user_live = false;
         self.fm_ops = patch.ops;
         self.fm_matrix = patch.matrix;
         self.fm_selected = 3;
         self.sync_fm_sliders_from_op();
+    }
+
+    fn fm_snapshot(&self) -> session::FmUserPatch {
+        session::FmUserPatch {
+            ratio: self.fm_ops.map(|op| op.ratio),
+            audio: self.fm_ops.map(|op| op.audio),
+            fold: self.fm_ops.map(|op| op.fold),
+            env: self.fm_ops.map(|op| op.env),
+            sustain: self.fm_ops.map(|op| op.sustain),
+            matrix: self.fm_matrix,
+        }
+    }
+
+    fn apply_fm_snapshot(&mut self, patch: session::FmUserPatch) {
+        for i in 0..jambox_core::FM_OP_COUNT {
+            self.fm_ops[i].ratio = patch.ratio[i];
+            self.fm_ops[i].audio = patch.audio[i];
+            self.fm_ops[i].fold = patch.fold[i];
+            self.fm_ops[i].env = patch.env[i];
+            self.fm_ops[i].sustain = patch.sustain[i];
+        }
+        self.fm_matrix = patch.matrix;
+        self.sync_fm_sliders_from_op();
+    }
+
+    fn remember_fm(&mut self) {
+        self.fm_undo.push(FmUndo {
+            recipe: self.fm_recipe,
+            user_live: self.fm_user_live,
+            patch: self.fm_snapshot(),
+        });
+        if self.fm_undo.len() > 24 {
+            self.fm_undo.remove(0);
+        }
     }
 
     fn push_fm_params(&self, outbox: &mut Outbox) {
@@ -5044,6 +5106,7 @@ impl NativeModel {
     }
 
     fn select_fm_recipe(&mut self, index: usize, outbox: &mut Outbox) {
+        self.remember_fm();
         self.apply_fm_patch(index);
         self.push_fm_params(outbox);
         let rec = jambox_core::fm_recipe(self.fm_recipe);
@@ -5062,8 +5125,26 @@ impl NativeModel {
     fn connect_fm(&mut self, from: usize, to: usize, amount: f32, outbox: &mut Outbox) {
         let from = from % jambox_core::FM_OP_COUNT;
         let to = to % jambox_core::FM_OP_COUNT;
+        self.remember_fm();
+        if self.fm_matrix[from][to] > 0.02 {
+            self.fm_matrix[from][to] = 0.0;
+            self.fm_user_live = false;
+            self.push_fm_params(outbox);
+            self.status_line = if from == to {
+                format!("erased {} feedback", jambox_core::OP_NAMES[from])
+            } else {
+                format!(
+                    "erased {} → {}",
+                    jambox_core::OP_NAMES[from],
+                    jambox_core::OP_NAMES[to]
+                )
+            };
+            self.mark_dirty();
+            return;
+        }
         let amount = amount.clamp(0.25, 0.95);
         self.fm_matrix[from][to] = amount;
+        self.fm_user_live = false;
         outbox.synth("fm_connect", jambox_core::pack_fm_link(from, to, amount));
         self.status_line = if from == to {
             format!("{} feedback", jambox_core::OP_NAMES[from])
@@ -5078,9 +5159,46 @@ impl NativeModel {
     }
 
     fn clear_fm_links(&mut self, outbox: &mut Outbox) {
+        self.remember_fm();
+        self.fm_user_live = false;
         self.fm_matrix = [[0.0; jambox_core::FM_OP_COUNT]; jambox_core::FM_OP_COUNT];
         outbox.synth("fm_clear", 1.0);
         self.status_line = "links cleared".into();
+        self.mark_dirty();
+    }
+
+    fn undo_fm(&mut self, outbox: &mut Outbox) {
+        let Some(patch) = self.fm_undo.pop() else {
+            self.status_line = "nothing to undo".into();
+            self.mark_dirty();
+            return;
+        };
+        self.fm_recipe = patch.recipe;
+        self.fm_user_live = patch.user_live;
+        self.apply_fm_snapshot(patch.patch);
+        self.push_fm_params(outbox);
+        self.status_line = "undid last FM edit".into();
+        self.mark_dirty();
+    }
+
+    fn save_fm_user(&mut self) {
+        self.fm_user = Some(self.fm_snapshot());
+        self.fm_user_live = true;
+        self.status_line = "FM sound saved".into();
+        self.mark_dirty();
+    }
+
+    fn load_fm_user(&mut self, outbox: &mut Outbox) {
+        let Some(patch) = self.fm_user else {
+            self.status_line = "no saved FM sound".into();
+            self.mark_dirty();
+            return;
+        };
+        self.remember_fm();
+        self.apply_fm_snapshot(patch);
+        self.fm_user_live = true;
+        self.push_fm_params(outbox);
+        self.status_line = "loaded saved FM sound".into();
         self.mark_dirty();
     }
 
@@ -12106,12 +12224,12 @@ mod tests {
         model.switch_mode(UiMode::Fm, &mut out);
         out.take();
         let (ax, ay) = model.layout.fm_op_center(0);
-        let (dx, dy) = model.layout.fm_op_center(3);
+        let (bx, by) = model.layout.fm_op_center(1);
         model.finger_down(1, ax, ay, &mut out);
-        model.finger_move(1, dx, dy, &mut out);
+        model.finger_move(1, bx, by, &mut out);
         model.finger_up(1, &mut out);
         let batch = out.take();
-        let packed = jambox_core::pack_fm_link(0, 3, 0.7);
+        let packed = jambox_core::pack_fm_link(0, 1, 0.7);
         assert!(
             batch.iter().any(|r| matches!(
                 r,
@@ -12120,7 +12238,7 @@ mod tests {
             )),
             "{batch:?}"
         );
-        assert!((model.fm_matrix[0][3] - 0.7).abs() < 0.05);
+        assert!((model.fm_matrix[0][1] - 0.7).abs() < 0.05);
         assert_eq!(model.fm_selected, 0);
 
         let clear = model.layout.fm_clear();
@@ -12131,7 +12249,42 @@ mod tests {
             r,
             Request::Synth { param, .. } if param == "fm_clear"
         )));
-        assert_eq!(model.fm_matrix[0][3], 0.0);
+        assert_eq!(model.fm_matrix[0][1], 0.0);
+    }
+
+    #[test]
+    fn drawing_the_same_fm_link_again_erases_it_and_undo_puts_it_back() {
+        let mut model = NativeModel::new();
+        let mut out = Outbox::new();
+        model.switch_mode(UiMode::Fm, &mut out);
+        out.take();
+        let (ax, ay) = model.layout.fm_op_center(0);
+        let (bx, by) = model.layout.fm_op_center(1);
+        model.finger_down(1, ax, ay, &mut out);
+        model.finger_move(1, bx, by, &mut out);
+        model.finger_up(1, &mut out);
+        assert!((model.fm_matrix[0][1] - 0.7).abs() < 0.05);
+        model.finger_down(1, ax, ay, &mut out);
+        model.finger_move(1, bx, by, &mut out);
+        model.finger_up(1, &mut out);
+        assert_eq!(model.fm_matrix[0][1], 0.0, "drawing an existing link erases it");
+        let undo = model.layout.fm_undo();
+        model.finger_down(2, undo.x + 4, undo.y + 4, &mut out);
+        model.finger_up(2, &mut out);
+        assert!((model.fm_matrix[0][1] - 0.7).abs() < 0.05);
+        let save = model.layout.fm_save();
+        model.finger_down(3, save.x + 4, save.y + 4, &mut out);
+        model.finger_up(3, &mut out);
+        assert!(model.fm_user.is_some());
+        let clear = model.layout.fm_clear();
+        model.finger_down(4, clear.x + 4, clear.y + 4, &mut out);
+        model.finger_up(4, &mut out);
+        assert_eq!(model.fm_matrix[0][1], 0.0);
+        let user = model.layout.fm_user();
+        model.finger_down(5, user.x + 4, user.y + 4, &mut out);
+        model.finger_up(5, &mut out);
+        assert!(model.fm_user_live);
+        assert!((model.fm_matrix[0][1] - 0.7).abs() < 0.05);
     }
 
     #[test]
