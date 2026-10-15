@@ -350,8 +350,10 @@ pub fn pad_label(cell: usize) -> String {
 pub const PHRASE_PAD_BASE: u8 = 36;
 
 /// Screen 4×4 order (top→bottom): A1–A4, A5–A8, B1–B4, B5–B8.
+/// Snare (phrase cell 5, note 37) and rimshot (phrase cell 13, note 45)
+/// trade screen slots. Every other pad stays put.
 pub const PHRASE_GRID_CELLS: [usize; 16] = [
-    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
+    0, 1, 2, 3, 4, 13, 6, 7, 8, 9, 10, 11, 12, 5, 14, 15,
 ];
 
 fn mpk_row_swap(within_bank: usize) -> usize {
