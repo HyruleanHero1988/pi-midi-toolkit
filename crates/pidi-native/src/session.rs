@@ -197,6 +197,9 @@ pub struct SessionState {
     pub kaoss_program: usize,
     pub kaoss_gate: usize,
     pub kaoss_hold: bool,
+    /// When true, Kaoss FX stays at the lift position. When false, it springs back.
+    #[serde(default)]
+    pub kaoss_fx_hold: bool,
     pub fx_bus: [f32; 3],
     /// Per-voice flanger wet (SYNTH FLANGE / FX→VOICE).
     #[serde(default)]
@@ -384,6 +387,7 @@ impl Default for SessionState {
             kaoss_program: 0,
             kaoss_gate: 0,
             kaoss_hold: false,
+            kaoss_fx_hold: false,
             fx_bus: [0.0, 0.0, 0.0],
             fx_flanger: 0.0,
             fx_flanger_rate: default_fx_flanger_rate(),

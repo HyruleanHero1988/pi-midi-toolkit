@@ -228,6 +228,7 @@ pub enum Request {
     SetArpLen {
         len: u8,
     },
+    Scope,
 }
 
 const fn default_velocity() -> u8 {
@@ -346,6 +347,7 @@ pub enum Response {
     /// Unsolicited: a MIDI event the engine heard (notes already went to DSP).
     Midi(MidiNotice),
     MidiPorts(jambox_protocol::MidiPortsReply),
+    Scope(jambox_protocol::ScopeReply),
 }
 
 /// UI-facing MIDI echo. DSP already applied the mapped command.
@@ -493,6 +495,8 @@ pub enum Decoded {
     },
     /// Answer without touching audio.
     StatusRequest,
+    /// Master-mix scope. Read from the lock-free tap; audio is not touched.
+    Scope,
     /// Same path as USB MIDI in (notes, CC, bend).
     MidiIn(midi_core::MidiEvent),
     /// UI mode buttons: keys / drums / fx.
@@ -811,6 +815,7 @@ pub fn decode(request: Request) -> Result<Decoded, String> {
         Request::StopAllClips => Decoded::Command(Command::StopAllClips),
         Request::ClipGain { slot, value } => Decoded::Command(Command::SetClipGain { slot, value }),
         Request::Status => Decoded::StatusRequest,
+        Request::Scope => Decoded::Scope,
         Request::KaossScale {
             scale_index,
             key,

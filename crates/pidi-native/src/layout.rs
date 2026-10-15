@@ -84,6 +84,8 @@ pub enum Hit {
     SynthSaveAs,
     SynthOctUp,
     SynthOctDown,
+    /// Tap the synth or FM scope square: live master mix, or the calculated wave.
+    ScopeMode,
     FmRecipe(usize),
     FmOp(usize),
     FmSlider(usize),
@@ -115,6 +117,7 @@ pub enum Hit {
     KaossOctUp,
     KaossOctDown,
     KaossHold,
+    KaossFxHold,
     KaossGate,
     KaossFull,
     KaossBpmUp,
@@ -322,6 +325,7 @@ pub struct Layout {
     pub kaoss_oct_down: Rect,
     pub kaoss_oct_up: Rect,
     pub kaoss_hold: Rect,
+    pub kaoss_fx_hold: Rect,
     pub kaoss_gate: Rect,
     pub kaoss_full: Rect,
     pub kaoss_bpm_up: Rect,
@@ -556,7 +560,13 @@ impl Layout {
             kaoss_hold: Rect {
                 x: 648,
                 y: HUD_H + content_h - 100,
-                w: 144,
+                w: 70,
+                h: 44,
+            },
+            kaoss_fx_hold: Rect {
+                x: 722,
+                y: HUD_H + content_h - 100,
+                w: 70,
                 h: 44,
             },
             kaoss_gate: Rect {
@@ -1476,6 +1486,12 @@ impl Layout {
                 h: 0,
             };
             self.kaoss_hold = Rect {
+                x: 0,
+                y: 0,
+                w: 0,
+                h: 0,
+            };
+            self.kaoss_fx_hold = Rect {
                 x: 0,
                 y: 0,
                 w: 0,
@@ -2506,6 +2522,9 @@ impl Layout {
         if self.kaoss_hold.contains(px, py) {
             return Hit::KaossHold;
         }
+        if self.kaoss_fx_hold.w > 0 && self.kaoss_fx_hold.contains(px, py) {
+            return Hit::KaossFxHold;
+        }
         if self.kaoss_gate.contains(px, py) {
             return Hit::KaossGate;
         }
@@ -2659,6 +2678,9 @@ impl Layout {
         if let Some(note) = self.synth_keyboard_note_at(px, py) {
             return Hit::SynthKey { note };
         }
+        if self.synth_scope_rect().contains(px, py) {
+            return Hit::ScopeMode;
+        }
         Hit::None
     }
 
@@ -2687,6 +2709,9 @@ impl Layout {
         }
         if let Some(note) = self.synth_keyboard_note_at(px, py) {
             return Hit::SynthKey { note };
+        }
+        if self.fm_scope().contains(px, py) {
+            return Hit::ScopeMode;
         }
         Hit::None
     }
@@ -2879,11 +2904,15 @@ impl Layout {
             crate::kaoss_ui::KaossPicker::Scale => 4,
         };
         let _ = show_all;
+        let mut viewport = self.kaoss;
+        // Leave a strip for the picker hint so it does not sit on the first row.
+        viewport.y += 22;
+        viewport.h = (viewport.h - 22).max(1);
         crate::scroll::GridScroll {
             cols,
             cell_h: 52,
             item_count,
-            viewport: self.kaoss,
+            viewport,
         }
     }
 
@@ -3838,6 +3867,17 @@ mod tests {
     }
 
     #[test]
+    fn layout_audit_kaoss_picker_clears_hint() {
+        let layout = Layout::new();
+        let grid = layout.kaoss_picker_grid(crate::kaoss_ui::KaossPicker::Program, 9, false);
+        let cell = grid.cell_rect(0, 0);
+        assert!(
+            cell.y >= layout.kaoss.y + 22,
+            "picker tiles must start below the hint line"
+        );
+    }
+
+    #[test]
     fn layout_audit_synth_sliders_clear_scope() {
         let layout = Layout::new();
         assert!(
@@ -3849,6 +3889,11 @@ mod tests {
         assert_eq!(
             layout.hit(UiMode::Synth, rate.x + 4, rate.y + rate.h / 2),
             Hit::SynthSlider(Layout::SYNTH_SLIDER_COUNT - 1)
+        );
+        let scope = layout.synth_scope_rect();
+        assert_eq!(
+            layout.hit(UiMode::Synth, scope.x + scope.w / 2, scope.y + scope.h / 2),
+            Hit::ScopeMode
         );
     }
 

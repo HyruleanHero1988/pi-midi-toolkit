@@ -9,6 +9,8 @@
 use serde::{Deserialize, Serialize};
 
 pub const PROTOCOL_VERSION: u16 = 1;
+/// Columns in one live master-mix scope frame (min/max pair per column).
+pub const SCOPE_COLUMNS: usize = 192;
 pub const NATIVE_FEATURES: &[&str] = &[
     "touch_sessions",
     "disconnect_release",
@@ -282,6 +284,8 @@ pub enum Request {
     SetArpLen {
         len: u8,
     },
+    /// Latest master-mix oscilloscope frame. One in flight; the engine does not queue these.
+    Scope,
 }
 
 const fn default_velocity() -> u8 {
@@ -397,6 +401,20 @@ pub enum Response {
     Status(StatusReply),
     Midi(MidiNotice),
     MidiPorts(MidiPortsReply),
+    Scope(ScopeReply),
+}
+
+/// One triggered view of the master mix. Each column is the min and max sample
+/// that landed in that pixel, so a peak between pixels is not dropped.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct ScopeReply {
+    pub rate: u32,
+    /// Lowest sample in each column, −32767..32767. Length is [`SCOPE_COLUMNS`].
+    #[serde(default)]
+    pub min: Vec<i16>,
+    /// Highest sample in each column.
+    #[serde(default)]
+    pub max: Vec<i16>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
