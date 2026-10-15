@@ -736,13 +736,13 @@ impl Layout {
                 x: 24,
                 y: HUD_H + 72,
                 w: 536,
-                h: 160,
+                h: 240,
             },
             synth_scope: Rect {
                 x: 568,
                 y: HUD_H + 72,
                 w: 208,
-                h: 160,
+                h: 240,
             },
             kit_scope: Rect {
                 x: 24,
@@ -794,9 +794,9 @@ impl Layout {
             },
             synth_keys: Rect {
                 x: 24,
-                y: HUD_H + 240,
+                y: HUD_H + 316,
                 w: 752,
-                h: content_h - 248,
+                h: content_h - 324,
             },
             synth_wave_a: Rect {
                 x: 16,
@@ -1913,31 +1913,29 @@ impl Layout {
         r
     }
 
-    /// Two rows of four. Each cell holds a full name and a horizontal bar.
+    /// One column of eight. Each row is the full width left of the scope.
     fn synth_slider_cell(&self, index: usize) -> Rect {
-        let index = index % Self::SYNTH_SLIDER_COUNT;
-        let cols = 4i32;
-        let col = (index % 4) as i32;
-        let row = (index / 4) as i32;
-        let w = self.synth_sliders.w / cols;
-        let h = self.synth_play_h() / 2;
+        let index = (index % Self::SYNTH_SLIDER_COUNT) as i32;
+        let rows = Self::SYNTH_SLIDER_COUNT as i32;
+        let h = self.synth_play_h() / rows;
         Rect {
-            x: self.synth_sliders.x + col * w,
-            y: self.synth_sliders.y + row * h,
-            w,
+            x: self.synth_sliders.x,
+            y: self.synth_sliders.y + index * h,
+            w: self.synth_sliders.w,
             h,
         }
     }
 
-    /// Horizontal track under the label. The name is drawn just above `y`.
+    /// Horizontal track under the label, spanning the slider column.
+    /// The name is drawn just above `y`.
     pub fn synth_slider(&self, index: usize) -> Rect {
         let cell = self.synth_slider_cell(index);
-        let bar_h = 40.min((cell.h - 24).max(28));
+        let label_h = 16;
         Rect {
-            x: cell.x + 4,
-            y: cell.y + 20,
-            w: cell.w - 12,
-            h: bar_h,
+            x: cell.x,
+            y: cell.y + label_h,
+            w: cell.w,
+            h: (cell.h - label_h - 2).max(8),
         }
     }
 
@@ -4145,8 +4143,17 @@ mod tests {
                 track.w
             );
             assert!(track.y >= layout.synth_sliders.y + 16, "{label} covers its name");
+            assert_eq!(track.x, layout.synth_sliders.x, "{label} should span the column");
+            assert_eq!(track.w, layout.synth_sliders.w);
+            if index > 0 {
+                let prev = layout.synth_slider(index - 1);
+                assert!(
+                    prev.y + prev.h <= track.y,
+                    "{label} overlaps the bar above it"
+                );
+            }
         }
-        assert!(layout.synth_slider(0).y + layout.synth_slider(0).h <= layout.synth_slider(4).y);
+        assert!(layout.synth_slider(0).y + layout.synth_slider(0).h <= layout.synth_slider(7).y);
     }
 
     #[test]
@@ -4156,18 +4163,18 @@ mod tests {
         let compact_fm = layout.fm_graph().h;
         let key = layout.synth_keyboard_white_rect(0);
         layout.show_on_screen_keys = false;
-        let slider = layout.synth_slider(4);
+        let slider = layout.synth_slider(Layout::SYNTH_SLIDER_COUNT - 1);
         assert!(layout.synth_scope_rect().h > compact_scope);
         assert!(layout.fm_graph().h > compact_fm);
         assert!(
             layout
                 .synth_keys
                 .contains(slider.x + 4, slider.y + slider.h / 2),
-            "the lower slider row should occupy the former piano strip"
+            "the lowest slider should occupy the former piano strip"
         );
         assert_eq!(layout.synth_keyboard_note_at(key.x + 4, key.y + 8), None);
         match layout.hit(UiMode::Synth, slider.x + 4, slider.y + slider.h / 2) {
-            Hit::SynthSlider(4) => {}
+            Hit::SynthSlider(index) if index + 1 == Layout::SYNTH_SLIDER_COUNT => {}
             other => panic!("former key strip should hit a slider, got {other:?}"),
         }
         let bottom = layout.synth_keys.y + layout.synth_keys.h;

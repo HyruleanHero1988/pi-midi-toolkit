@@ -11274,7 +11274,7 @@ mod tests {
             model.layout.synth_play_h() > model.layout.synth_sliders.h,
             "SYNTH sliders/scope should grow into the former keybed"
         );
-        let grown = model.layout.synth_slider(4);
+        let grown = model.layout.synth_slider(Layout::SYNTH_SLIDER_COUNT - 1);
         assert!(
             model
                 .layout
