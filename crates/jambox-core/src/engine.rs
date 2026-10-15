@@ -210,6 +210,10 @@ pub struct EngineStatus {
     pub arp_latched: bool,
     pub arp_root: u8,
     pub arp_step: u8,
+    /// How many authored intervals the arp is playing.
+    pub arp_len: u8,
+    /// Intervals from the root, in press order. Unused slots stay 0.
+    pub arp_steps: [i8; crate::arp::MAX_ARP_STEPS],
 }
 
 pub struct JamboxEngine {
@@ -732,6 +736,13 @@ impl JamboxEngine {
             arp_latched: self.arp.latched(),
             arp_root: self.arp.root(),
             arp_step: self.arp.cursor(),
+            arp_len: self.arp.step_len(),
+            arp_steps: {
+                let mut steps = [0i8; crate::arp::MAX_ARP_STEPS];
+                let live = self.arp.steps();
+                steps[..live.len()].copy_from_slice(live);
+                steps
+            },
         };
     }
 
@@ -1034,8 +1045,20 @@ impl JamboxEngine {
                 } else {
                     // Clips stay on the wavetable path so FM mode cannot rewrite a take.
                     let group = self.bank.nearer_index();
-                    self.voices
-                        .note_on_recorded(channel, note, velocity, group, tone, mix);
+                    let drift_semis = self
+                        .sequencer
+                        .slot(slot as usize)
+                        .and_then(|s| s.playback_drift())
+                        .map(crate::voice::release_drift_semis);
+                    self.voices.note_on_recorded(
+                        channel,
+                        note,
+                        velocity,
+                        group,
+                        tone,
+                        mix,
+                        drift_semis,
+                    );
                 }
             }
             Command::ClipNoteOff { channel, note } => {
@@ -3225,6 +3248,87 @@ mod tests {
             "live voice FX must not rewrite a locked pad insert"
         );
         assert!(e.voice_fx[0].params().delay_mix < 0.01);
+    }
+
+    #[test]
+    fn pad_keeps_baked_drift_when_the_live_slider_is_centered() {
+        let mut e = engine();
+        apply_now(
+            &mut e,
+            Command::SetSynth {
+                param: SynthParam::Release,
+                value: 1.0,
+            },
+        );
+        apply_now(
+            &mut e,
+            Command::SetSynth {
+                param: SynthParam::ReleaseDrift,
+                value: 0.5,
+            },
+        );
+        let clip = Clip::new(
+            vec![
+                ClipEvent {
+                    tick: 0,
+                    kind: ClipEventKind::NoteOn {
+                        channel: 0,
+                        note: 57,
+                        velocity: 120,
+                    },
+                },
+                ClipEvent {
+                    tick: 192,
+                    kind: ClipEventKind::NoteOff {
+                        channel: 0,
+                        note: 57,
+                    },
+                },
+            ],
+            PPQ * 4,
+        );
+        let voice = ClipVoice {
+            locked: true,
+            release_drift: Some(1.0),
+            ..ClipVoice::default()
+        };
+        let _ = e.apply_clip_update(
+            0,
+            Some(Box::new(clip)),
+            Some(LaunchMode::Loop),
+            None,
+            Some(voice),
+        );
+        apply_now(
+            &mut e,
+            Command::LaunchClip {
+                slot: 0,
+                quantize: Quantize::Off,
+            },
+        );
+        let mut midi = MidiOutSink::new();
+        let mut block = vec![0.0f32; 1024];
+        for _ in 0..5 {
+            e.render(&mut block, &[], &mut midi);
+        }
+        let mut early = vec![0.0f32; 1024];
+        e.render(&mut early, &[], &mut midi);
+        let mut late = vec![0.0f32; 1024];
+        for _ in 0..20 {
+            e.render(&mut late, &[], &mut midi);
+        }
+        let z0 = zero_crossings(&early).max(1);
+        let z1 = zero_crossings(&late);
+        assert!(
+            z1 > z0 + z0 / 3,
+            "saved pad drift should rise while the live slider is centered, crossings {z0} → {z1}"
+        );
+    }
+
+    fn zero_crossings(buf: &[f32]) -> usize {
+        buf.windows(2)
+            .filter(|w| w[0] <= 0.0 && w[1] > 0.0)
+            .count()
     }
 
     #[test]

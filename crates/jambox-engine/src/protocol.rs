@@ -228,6 +228,7 @@ pub enum Request {
     SetArpLen {
         len: u8,
     },
+    Scope,
 }
 
 const fn default_velocity() -> u8 {
@@ -346,6 +347,7 @@ pub enum Response {
     /// Unsolicited: a MIDI event the engine heard (notes already went to DSP).
     Midi(MidiNotice),
     MidiPorts(jambox_protocol::MidiPortsReply),
+    Scope(jambox_protocol::ScopeReply),
 }
 
 /// UI-facing MIDI echo. DSP already applied the mapped command.
@@ -468,6 +470,10 @@ pub struct StatusReply {
     pub arp_root: u8,
     #[serde(default)]
     pub arp_step: u8,
+    #[serde(default)]
+    pub arp_len: u8,
+    #[serde(default)]
+    pub arp_steps: [i8; 16],
 }
 
 /// What the control thread decides to do with a request.
@@ -489,6 +495,8 @@ pub enum Decoded {
     },
     /// Answer without touching audio.
     StatusRequest,
+    /// Master-mix scope. Read from the lock-free tap; audio is not touched.
+    Scope,
     /// Same path as USB MIDI in (notes, CC, bend).
     MidiIn(midi_core::MidiEvent),
     /// UI mode buttons: keys / drums / fx.
@@ -562,6 +570,7 @@ fn clip_voice_from_wire(voice: jambox_protocol::WireClipVoice) -> jambox_core::C
         delay_mix: voice.delay_mix,
         reverb_mix: voice.reverb_mix,
         flanger_mix: voice.flanger_mix,
+        release_drift: voice.release_drift.map(|v| v.clamp(0.0, 1.0)),
     }
 }
 
@@ -806,6 +815,7 @@ pub fn decode(request: Request) -> Result<Decoded, String> {
         Request::StopAllClips => Decoded::Command(Command::StopAllClips),
         Request::ClipGain { slot, value } => Decoded::Command(Command::SetClipGain { slot, value }),
         Request::Status => Decoded::StatusRequest,
+        Request::Scope => Decoded::Scope,
         Request::KaossScale {
             scale_index,
             key,

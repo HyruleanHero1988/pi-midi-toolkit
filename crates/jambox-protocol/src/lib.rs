@@ -9,6 +9,8 @@
 use serde::{Deserialize, Serialize};
 
 pub const PROTOCOL_VERSION: u16 = 1;
+/// Columns in one live master-mix scope frame (min/max pair per column).
+pub const SCOPE_COLUMNS: usize = 192;
 pub const NATIVE_FEATURES: &[&str] = &[
     "touch_sessions",
     "disconnect_release",
@@ -282,6 +284,8 @@ pub enum Request {
     SetArpLen {
         len: u8,
     },
+    /// Latest master-mix oscilloscope frame. One in flight; the engine does not queue these.
+    Scope,
 }
 
 const fn default_velocity() -> u8 {
@@ -383,6 +387,9 @@ pub struct WireClipVoice {
     pub reverb_mix: f32,
     #[serde(default)]
     pub flanger_mix: f32,
+    /// DRIFT slider captured with the take. Absent follows the live slider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_drift: Option<f32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -394,6 +401,20 @@ pub enum Response {
     Status(StatusReply),
     Midi(MidiNotice),
     MidiPorts(MidiPortsReply),
+    Scope(ScopeReply),
+}
+
+/// One triggered view of the master mix. Each column is the min and max sample
+/// that landed in that pixel, so a peak between pixels is not dropped.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct ScopeReply {
+    pub rate: u32,
+    /// Lowest sample in each column, −32767..32767. Length is [`SCOPE_COLUMNS`].
+    #[serde(default)]
+    pub min: Vec<i16>,
+    /// Highest sample in each column.
+    #[serde(default)]
+    pub max: Vec<i16>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
@@ -455,6 +476,12 @@ pub struct StatusReply {
     pub arp_root: u8,
     #[serde(default)]
     pub arp_step: u8,
+    /// Authored interval count. 0 means the engine has not reported a pattern yet.
+    #[serde(default)]
+    pub arp_len: u8,
+    /// Intervals from the root, press order. Only the first `arp_len` entries count.
+    #[serde(default)]
+    pub arp_steps: [i8; 16],
 }
 
 #[cfg(test)]

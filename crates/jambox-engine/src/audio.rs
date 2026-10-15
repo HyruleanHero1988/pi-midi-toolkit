@@ -25,6 +25,7 @@ use tracing::{info, warn};
 
 use crate::bus::{AudioSide, StatusPacket};
 use crate::capture::CaptureRing;
+use crate::scope::ScopeTap;
 
 /// Conservative first explicit period; architecture primary target is 512.
 pub const PREFERRED_BLOCK: u32 = 512;
@@ -95,6 +96,7 @@ struct RenderState {
     /// Mic / line samples for this output block (drained from [`CaptureRing`]).
     input: Vec<f32>,
     capture: Arc<CaptureRing>,
+    scope: Arc<ScopeTap>,
     touch_scratch: [LatestTouch; MAX_TOUCH_VOICES + 3],
     peak_micros: u32,
     xruns: u64,
@@ -124,9 +126,11 @@ impl RenderState {
         sample_rate: u32,
         channels: u16,
         capture: Arc<CaptureRing>,
+        scope: Arc<ScopeTap>,
     ) -> Self {
         let mut engine = JamboxEngine::with_bank(sample_rate as f64, bank);
         engine.sync_fx_slots();
+        scope.set_rate(sample_rate);
         Self {
             audio,
             engine,
@@ -135,6 +139,7 @@ impl RenderState {
             mono: vec![0.0; SCRATCH_FRAMES],
             input: vec![0.0; SCRATCH_FRAMES],
             capture,
+            scope,
             touch_scratch: [LatestTouch {
                 owner: 0,
                 x: 0.0,
@@ -153,6 +158,7 @@ impl RenderState {
         self.engine.set_sample_rate(sample_rate as f64);
         self.sample_rate = sample_rate;
         self.channels = channels;
+        self.scope.set_rate(sample_rate);
     }
 }
 
@@ -266,6 +272,7 @@ pub fn spawn_output(
     preferred_frames: u32,
     health: Arc<AudioHealth>,
     capture: Arc<CaptureRing>,
+    scope: Arc<ScopeTap>,
     running: Arc<AtomicBool>,
 ) {
     let _ = std::thread::Builder::new()
@@ -278,6 +285,7 @@ pub fn spawn_output(
                 preferred_frames,
                 health,
                 capture,
+                scope,
                 running,
             )
         });
@@ -290,6 +298,7 @@ fn supervisor(
     preferred_frames: u32,
     health: Arc<AudioHealth>,
     capture: Arc<CaptureRing>,
+    scope: Arc<ScopeTap>,
     running: Arc<AtomicBool>,
 ) {
     let mut pending_audio = Some(audio);
@@ -343,6 +352,7 @@ fn supervisor(
                     sample_rate,
                     channels,
                     Arc::clone(&capture),
+                    Arc::clone(&scope),
                 )));
                 state.as_mut().expect("state just inserted")
             }
@@ -695,6 +705,8 @@ fn callback_body<S: Copy>(
         }
         offset += n;
     }
+
+    state.scope.push_block(&state.mono[..frames]);
 
     for (i, frame_out) in data.chunks_mut(channels).enumerate() {
         let sample = to_sample(block_sample(&state.mono, i));

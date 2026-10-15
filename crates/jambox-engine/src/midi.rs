@@ -31,6 +31,8 @@ const OUT_POLL: Duration = Duration::from_millis(2);
 const HOTPLUG_POLL: Duration = Duration::from_millis(400);
 
 /// MPK mini factory knobs (Prog Select → Pad 1 / MPC program).
+/// K1–K8 are CC 70–77 in order. The names below are the drum/FM/FX bindings.
+/// Keys mode maps the same eight CCs onto the synth sliders left to right.
 pub const CC_MOD: u8 = 1;
 pub const CC_MORPH: u8 = 70;
 pub const CC_TONE: u8 = 71;
@@ -359,22 +361,47 @@ impl MidiMap {
             };
             return Some(Command::SetSynth { param, value: unit });
         }
-        let param = match controller {
-            CC_MORPH => SynthParam::Morph,
-            CC_TONE => SynthParam::Tone,
-            CC_ATTACK => SynthParam::Attack,
-            CC_RELEASE => SynthParam::Release,
-            CC_VIB_DEPTH => SynthParam::VibratoDepth,
-            CC_VIB_RATE => SynthParam::VibratoRate,
-            CC_LEVEL => {
-                return Some(Command::SetSynth {
-                    param: SynthParam::Level,
-                    value: unit.powf(1.15),
-                });
-            }
-            _ => return None,
-        };
-        Some(Command::SetSynth { param, value: unit })
+        // MPK mini knobs K1–K8 are CC 70–77, left to right. On the synth page
+        // that is the slider row: morph, tone, level, attack, release, drift,
+        // flange mix, flange rate. Drum / FM / FX maps above keep their own CCs.
+        // CC1 is the joystick and is handled before this match.
+        match controller {
+            CC_MORPH => Some(Command::SetSynth {
+                param: SynthParam::Morph,
+                value: unit,
+            }),
+            CC_TONE => Some(Command::SetSynth {
+                param: SynthParam::Tone,
+                value: unit,
+            }),
+            CC_ATTACK => Some(Command::SetSynth {
+                param: SynthParam::Level,
+                value: unit,
+            }),
+            CC_RELEASE => Some(Command::SetSynth {
+                param: SynthParam::Attack,
+                value: unit,
+            }),
+            CC_VIB_DEPTH => Some(Command::SetSynth {
+                param: SynthParam::Release,
+                value: unit,
+            }),
+            CC_VIB_RATE => Some(Command::SetSynth {
+                param: SynthParam::ReleaseDrift,
+                value: unit,
+            }),
+            76 => Some(Command::SetFx {
+                target: FxTarget::Voice(self.fx_index.load(Ordering::Relaxed)),
+                param: FxParam::FlangerMix,
+                value: unit,
+            }),
+            CC_LEVEL => Some(Command::SetFx {
+                target: FxTarget::Voice(self.fx_index.load(Ordering::Relaxed)),
+                param: FxParam::FlangerRate,
+                value: unit,
+            }),
+            _ => None,
+        }
     }
 }
 
@@ -916,6 +943,64 @@ mod tests {
             command,
             Command::SetSynth {
                 param: SynthParam::Tone,
+                value: 1.0
+            }
+        );
+        let level = map
+            .interpret(MidiEvent::ControlChange {
+                channel: 0,
+                controller: CC_ATTACK,
+                value: 127,
+            })
+            .unwrap();
+        assert_eq!(
+            level,
+            Command::SetSynth {
+                param: SynthParam::Level,
+                value: 1.0
+            }
+        );
+        let drift = map
+            .interpret(MidiEvent::ControlChange {
+                channel: 0,
+                controller: CC_VIB_RATE,
+                value: 64,
+            })
+            .unwrap();
+        match drift {
+            Command::SetSynth {
+                param: SynthParam::ReleaseDrift,
+                value,
+            } => assert!((value - 64.0 / 127.0).abs() < 0.001),
+            other => panic!("{other:?}"),
+        }
+        let flange = map
+            .interpret(MidiEvent::ControlChange {
+                channel: 0,
+                controller: 76,
+                value: 127,
+            })
+            .unwrap();
+        assert_eq!(
+            flange,
+            Command::SetFx {
+                target: FxTarget::Voice(0),
+                param: FxParam::FlangerMix,
+                value: 1.0
+            }
+        );
+        let rate = map
+            .interpret(MidiEvent::ControlChange {
+                channel: 0,
+                controller: CC_LEVEL,
+                value: 127,
+            })
+            .unwrap();
+        assert_eq!(
+            rate,
+            Command::SetFx {
+                target: FxTarget::Voice(0),
+                param: FxParam::FlangerRate,
                 value: 1.0
             }
         );

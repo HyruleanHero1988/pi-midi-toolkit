@@ -57,6 +57,13 @@ struct Cli {
     windowed: bool,
 }
 
+fn copy_scope(src: &[i16], dst: &mut [i16]) {
+    dst.fill(0);
+    for (slot, sample) in dst.iter_mut().zip(src.iter()) {
+        *slot = *sample;
+    }
+}
+
 fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -131,12 +138,26 @@ fn main() {
             }
             status_tick = Instant::now();
         }
+        if client.scope_waiting && client.scope_sent.elapsed() > Duration::from_millis(100) {
+            client.scope_waiting = false;
+        }
+        if client.connected && !client.scope_waiting {
+            client.outbox.scope();
+            client.scope_waiting = true;
+            client.scope_sent = Instant::now();
+        }
         client.flush();
+        if !client.connected {
+            client.scope_waiting = false;
+        }
         for notice in client.midi_inbox.drain(..) {
             model.on_midi_notice(&notice, &mut client.outbox);
         }
         model.note_engine_link(client.connected, &mut client.outbox);
         model.status = client.last_status;
+        copy_scope(&client.last_scope.min, &mut model.scope_min);
+        copy_scope(&client.last_scope.max, &mut model.scope_max);
+        model.sync_arp_pattern_from_status();
         model.apply_midi_ports(&client.last_midi_ports);
         model.tick(dt, &mut client.outbox);
         model.maybe_autosave();

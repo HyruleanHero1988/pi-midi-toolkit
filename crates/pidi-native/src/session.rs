@@ -197,6 +197,9 @@ pub struct SessionState {
     pub kaoss_program: usize,
     pub kaoss_gate: usize,
     pub kaoss_hold: bool,
+    /// When true, Kaoss FX stays at the lift position. When false, it springs back.
+    #[serde(default)]
+    pub kaoss_fx_hold: bool,
     pub fx_bus: [f32; 3],
     /// Per-voice flanger wet (SYNTH FLANGE / FX→VOICE).
     #[serde(default)]
@@ -304,6 +307,32 @@ pub struct SessionState {
     /// Note-repeat latch: tap instead of hold. Missing in old sessions → hold.
     #[serde(default)]
     pub drum_repeat_lock: bool,
+    /// Touch-drawn FM graph the user saved. Missing in old sessions → none.
+    /// Kept so an older file still loads; new saves live in `fm_patches`.
+    #[serde(default)]
+    pub fm_user: Option<FmUserPatch>,
+    /// Named FM patches. Missing in old sessions → empty (then `fm_user` is imported).
+    #[serde(default)]
+    pub fm_patches: Vec<FmNamedPatch>,
+}
+
+/// A named draw-mode patch. The operator data is the same shape as `FmUserPatch`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FmNamedPatch {
+    pub name: String,
+    #[serde(flatten)]
+    pub patch: FmUserPatch,
+}
+
+/// Saved draw-mode FM graph. Plain arrays so old sessions still load.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct FmUserPatch {
+    pub ratio: [f32; 4],
+    pub audio: [f32; 4],
+    pub fold: [f32; 4],
+    pub env: [f32; 4],
+    pub sustain: [f32; 4],
+    pub matrix: [[f32; 4]; 4],
 }
 
 fn default_drum_level() -> f32 {
@@ -384,6 +413,7 @@ impl Default for SessionState {
             kaoss_program: 0,
             kaoss_gate: 0,
             kaoss_hold: false,
+            kaoss_fx_hold: false,
             fx_bus: [0.0, 0.0, 0.0],
             fx_flanger: 0.0,
             fx_flanger_rate: default_fx_flanger_rate(),
@@ -427,6 +457,8 @@ impl Default for SessionState {
             wifi_usb_hold: false,
             full_velocity: default_full_velocity(),
             drum_repeat_lock: false,
+            fm_user: None,
+            fm_patches: Vec::new(),
         }
     }
 }

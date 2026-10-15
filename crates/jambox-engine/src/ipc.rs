@@ -18,6 +18,7 @@ use crate::audio::AudioHealth;
 use crate::bus::{ClipUpdate, ControlSide, MidiInSide};
 use crate::midi::{ingest, MidiIo, MidiMap};
 use crate::protocol::{decode, Decoded, MidiNotice, Request, Response, StatusReply};
+use crate::scope::ScopeTap;
 use jambox_protocol::{
     HelloReply, RepeatPhase, TouchPhase, NATIVE_FEATURES, PROTOCOL_VERSION,
 };
@@ -103,6 +104,8 @@ impl StatusCache {
             arp_latched: s.arp_latched,
             arp_root: s.arp_root,
             arp_step: s.arp_step,
+            arp_len: s.arp_len,
+            arp_steps: s.arp_steps,
         }
     }
 }
@@ -168,6 +171,7 @@ fn serve_client<R: BufRead>(
     midi_in: &Mutex<MidiInSide>,
     midi_io: &MidiIo,
     health: &AudioHealth,
+    scope: &ScopeTap,
 ) {
     let mut session = ClientSession::new();
     for line in reader.lines() {
@@ -201,6 +205,7 @@ fn serve_client<R: BufRead>(
                 midi_in,
                 midi_io,
                 health,
+                scope,
                 &mut session,
             )
         };
@@ -266,6 +271,7 @@ pub fn handle_line(
     midi_in: &Mutex<MidiInSide>,
     midi_io: &MidiIo,
     health: &AudioHealth,
+    scope: &ScopeTap,
     session: &mut ClientSession,
 ) -> Response {
     control.collect_garbage();
@@ -306,6 +312,7 @@ pub fn handle_line(
             })
         }
         Ok(Decoded::StatusRequest) => Response::Status(cache.reply(control.latest.overwrites())),
+        Ok(Decoded::Scope) => Response::Scope(scope.frame()),
         Ok(Decoded::KnobMap {
             mode,
             fx_kind,
@@ -532,6 +539,7 @@ pub fn serve(
     midi_in: Arc<Mutex<MidiInSide>>,
     midi_io: Arc<MidiIo>,
     health: Arc<AudioHealth>,
+    scope: Arc<ScopeTap>,
     running: Arc<AtomicBool>,
 ) {
     let shared: Shared = Arc::new(Mutex::new((control, StatusCache::default())));
@@ -563,6 +571,7 @@ pub fn serve(
                             &midi_in,
                             &midi_io,
                             &health,
+                            &scope,
                             &running,
                         )
                     }
@@ -594,6 +603,7 @@ pub fn serve(
                             &midi_in,
                             &midi_io,
                             &health,
+                            &scope,
                             &running,
                         )
                     }
@@ -636,6 +646,7 @@ fn spawn_client<S: ClientStream>(
     midi_in: &Arc<Mutex<MidiInSide>>,
     midi_io: &Arc<MidiIo>,
     health: &Arc<AudioHealth>,
+    scope: &Arc<ScopeTap>,
     running: &Arc<AtomicBool>,
 ) {
     let reader = match stream.duplicate() {
@@ -654,6 +665,7 @@ fn spawn_client<S: ClientStream>(
     let midi_in = Arc::clone(midi_in);
     let midi_io = Arc::clone(midi_io);
     let health = Arc::clone(health);
+    let scope = Arc::clone(scope);
     std::thread::spawn(move || {
         serve_client(
             BufReader::new(reader),
@@ -665,6 +677,7 @@ fn spawn_client<S: ClientStream>(
             &midi_in,
             &midi_io,
             &health,
+            &scope,
         );
     });
     std::thread::spawn(move || {
@@ -698,6 +711,7 @@ mod tests {
             midi_in,
             &MidiIo::default(),
             &AudioHealth::new(),
+            &ScopeTap::new(),
             session,
         )
     }
@@ -923,6 +937,7 @@ mod tests {
             &midi_in,
             &MidiIo::default(),
             &health,
+            &ScopeTap::new(),
             &mut session,
         );
         assert!(matches!(response, Response::Ok));
@@ -945,6 +960,7 @@ mod tests {
             &midi_in,
             &io,
             &AudioHealth::new(),
+            &ScopeTap::new(),
             &mut session,
         );
         match response {

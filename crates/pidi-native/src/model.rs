@@ -198,6 +198,12 @@ pub struct NativeModel {
     /// Per-kit-voice note repeat. Off is a single tap; other values hold-to-repeat.
     pub drum_repeat: [RepeatDivisionChoice; DRUM_MODEL_COUNT],
     pub status: StatusReply,
+    /// Master-mix scope. Each column is the min and max sample in that pixel.
+    pub scope_min: [i16; jambox_protocol::SCOPE_COLUMNS],
+    pub scope_max: [i16; jambox_protocol::SCOPE_COLUMNS],
+    /// Synth and FM scope squares. True draws the master mix; false draws the
+    /// calculated oscillator cycle.
+    pub scope_live: bool,
     pub fps: f32,
     pub connected: bool,
     pub frame: u64,
@@ -239,6 +245,19 @@ pub struct NativeModel {
     pub fm_ops: [jambox_core::FmOpParams; jambox_core::FM_OP_COUNT],
     pub fm_matrix: [[f32; jambox_core::FM_OP_COUNT]; jambox_core::FM_OP_COUNT],
     pub fm_params: [f32; 4],
+    /// True while the heard graph is the saved user patch, not a recipe.
+    pub fm_user_live: bool,
+    pub fm_user_index: Option<usize>,
+    /// Name shown on the play-screen patch button.
+    pub fm_patch_name: String,
+    pub fm_patches: Vec<session::FmNamedPatch>,
+    pub fm_patches_open: bool,
+    pub fm_patch_scroll: i32,
+    pub fm_name_open: bool,
+    pub fm_name_buf: String,
+    /// Last single save, kept so an older session file still round-trips.
+    pub fm_user: Option<session::FmUserPatch>,
+    fm_undo: Vec<FmUndo>,
     pub kaoss_picker_scroll: i32,
     pub log_scroll: usize,
     /// Kit macros per model: tone, noise/snap, pitch, decay, level.
@@ -263,6 +282,13 @@ pub struct NativeModel {
     /// Finger parked in the bottom exit strip while full — hold to leave.
     pub kaoss_full_exit_since: Option<Instant>,
     pub kaoss_hold: bool,
+    /// When true, pad FX stays after the finger lifts. When false, it springs back.
+    pub kaoss_fx_hold: bool,
+    kaoss_fx_spring: Option<KaossFxSpring>,
+    kaoss_delay_time: f32,
+    kaoss_delay_fb: f32,
+    kaoss_reverb_size: f32,
+    kaoss_tone_lfo_amount: f32,
     pub kaoss_program: usize,
     pub kaoss_gate: usize,
     pub kaoss_show_all: bool,
@@ -406,11 +432,25 @@ pub struct NativeModel {
     pub ui_shift: (i32, i32),
     screensaver_elapsed: f32,
     screensaver_orbit: f32,
-    /// Last USB Kaoss note (for retune / release).
-    kaoss_usb_note: Option<u8>,
+    /// USB MIDI note each Kaoss finger is holding. Same pitch can be shared.
+    kaoss_usb_notes: [Option<u8>; MAX_FINGERS],
+    /// Note latched by HOLD after the last finger lifts.
+    kaoss_usb_hold: Option<u8>,
     kaoss_cc_x_sent: Option<u8>,
     kaoss_cc_y_sent: Option<u8>,
     kaoss_cc_touch_sent: Option<u8>,
+    /// Last channel-wide Kaoss MIDI CC (expression, brightness, glide, pan, mod).
+    kaoss_gesture_cc: [Option<u8>; 128],
+    kaoss_gesture_pressure: Option<u8>,
+    /// Pad bend in semitones. Combined with the vibrato LFO and sent as pitch wheel.
+    kaoss_expr_bend: f32,
+    kaoss_expr_phase: f32,
+    /// True while the vibrato LFO is being written to MIDI pitch bend.
+    kaoss_expr_vib: bool,
+    /// Last pitch-wheel value sent per channel. 8192 means center, not yet moved.
+    kaoss_expr_wheel: [u16; 16],
+    /// Notes currently held from USB MIDI in, per channel. Pitch wheel follows these.
+    midi_held: [u8; 16],
     pub session_dirty: bool,
     pub last_autosave: Instant,
     /// Pad visualizer: LED cells vs soft radial glow.
@@ -461,6 +501,53 @@ pub struct NativeModel {
     last_logged_drops: u64,
 }
 
+struct FmUndo {
+    recipe: usize,
+    user_live: bool,
+    user_index: Option<usize>,
+    name: String,
+    patch: session::FmUserPatch,
+}
+
+fn clean_fm_patch_name(raw: &str) -> String {
+    let mut out = String::new();
+    for ch in raw.chars() {
+        let c = ch.to_ascii_uppercase();
+        if c.is_ascii_alphanumeric() || c == ' ' || c == '-' {
+            if c == ' ' && (out.is_empty() || out.ends_with(' ')) {
+                continue;
+            }
+            out.push(c);
+            if out.len() >= 12 {
+                break;
+            }
+        }
+    }
+    let out = out.trim().to_string();
+    if out.is_empty() {
+        "PATCH".into()
+    } else {
+        out
+    }
+}
+
+/// Pad FX values from just before a touch, restored on lift when HOLD FX is off.
+#[derive(Clone, Copy)]
+struct KaossFxSpring {
+    synth_params: [f32; 5],
+    vibrato_depth: f32,
+    vibrato_always: f32,
+    vibrato_rate: f32,
+    fx_voice: [f32; 4],
+    fx_drum: [f32; 4],
+    fx_flanger_rate: f32,
+    delay_time: f32,
+    delay_fb: f32,
+    reverb_size: f32,
+    tone_lfo_amount: f32,
+    bend: f32,
+}
+
 impl Default for NativeModel {
     fn default() -> Self {
         Self::new()
@@ -475,6 +562,9 @@ impl NativeModel {
             mode: UiMode::Home,
             drum_repeat: [RepeatDivisionChoice::Off; DRUM_MODEL_COUNT],
             status: StatusReply::default(),
+            scope_min: [0; jambox_protocol::SCOPE_COLUMNS],
+            scope_max: [0; jambox_protocol::SCOPE_COLUMNS],
+            scope_live: true,
             fps: 0.0,
             connected: false,
             frame: 0,
@@ -514,6 +604,16 @@ impl NativeModel {
                 fm_patch.ops[3].fold,
                 fm_patch.ops[3].env,
             ],
+            fm_user_live: false,
+            fm_user_index: None,
+            fm_patch_name: "BELL".into(),
+            fm_patches: Vec::new(),
+            fm_patches_open: false,
+            fm_patch_scroll: 0,
+            fm_name_open: false,
+            fm_name_buf: String::new(),
+            fm_user: None,
+            fm_undo: Vec::new(),
             kaoss_picker_scroll: 0,
             log_scroll: 0,
             drum_macros: [DEFAULT_DRUM_MACROS; DRUM_MODEL_COUNT],
@@ -531,6 +631,12 @@ impl NativeModel {
             kaoss_full: false,
             kaoss_full_exit_since: None,
             kaoss_hold: false,
+            kaoss_fx_hold: false,
+            kaoss_fx_spring: None,
+            kaoss_delay_time: 0.0,
+            kaoss_delay_fb: 0.0,
+            kaoss_reverb_size: 0.0,
+            kaoss_tone_lfo_amount: 0.0,
             kaoss_program: 0,
             kaoss_gate: 0,
             kaoss_show_all: false,
@@ -650,10 +756,18 @@ impl NativeModel {
             ui_shift: (0, 0),
             screensaver_elapsed: 0.0,
             screensaver_orbit: 0.0,
-            kaoss_usb_note: None,
+            kaoss_usb_notes: [None; MAX_FINGERS],
+            kaoss_usb_hold: None,
             kaoss_cc_x_sent: None,
             kaoss_cc_y_sent: None,
             kaoss_cc_touch_sent: None,
+            kaoss_gesture_cc: [None; 128],
+            kaoss_gesture_pressure: None,
+            kaoss_expr_bend: 0.0,
+            kaoss_expr_phase: 0.0,
+            kaoss_expr_vib: false,
+            kaoss_expr_wheel: [8192; 16],
+            midi_held: [0; 16],
             session_dirty: false,
             last_autosave: Instant::now(),
             kaoss_viz_style: crate::kaoss_viz::KaossVizStyle::Cells,
@@ -793,8 +907,12 @@ impl NativeModel {
         self.synth_pick_a = None;
         self.synth_vib_open = false;
         self.synth_pick_scroll = 0;
+        self.fm_patches_open = false;
+        self.fm_name_open = false;
+        self.fm_patch_scroll = 0;
         self.kit_edit_open = false;
         self.kit_repeat_open = false;
+        self.fx_settings_open = false;
         self.chords_overlay = None;
         self.chords_arm = false;
         self.map_out_edit = None;
@@ -844,7 +962,11 @@ impl NativeModel {
             self.enter_arp_mode(outbox);
         }
         if mode == UiMode::Fm {
-            self.status_line = format!("FM · {}", jambox_core::fm_recipe(self.fm_recipe).title);
+            self.status_line = if self.fm_user_live {
+                self.fm_patch_name.clone()
+            } else {
+                jambox_core::fm_recipe(self.fm_recipe).hint.into()
+            };
         }
         if mode == UiMode::Ports {
             outbox.midi_ports();
@@ -952,11 +1074,23 @@ impl NativeModel {
         if self.kit_repeat_open {
             return Some("kit_repeat");
         }
+        if self.fx_settings_open {
+            return Some("fx_settings");
+        }
+        if self.chords_overlay.is_some() {
+            return Some("chords");
+        }
         if self.map_out_edit.is_some() {
             return Some("map_out");
         }
         if self.song_viz_open {
             return Some("song_viz");
+        }
+        if self.fm_name_open {
+            return Some("fm_name");
+        }
+        if self.fm_patches_open {
+            return Some("fm_patches");
         }
         None
     }
@@ -988,9 +1122,9 @@ impl NativeModel {
         self.push_arp_pattern(outbox);
         outbox.emit_mode("arp", self.arp.out.wire());
         self.status_line = if self.arp.latch {
-            "ARP LATCH · play a root, then retarget".into()
+            "ARP LATCH · hold a chord, let go, then play a key to move it".into()
         } else {
-            "ARP · hold a root, LATCH to keep it".into()
+            "ARP · hold the notes, in order. LATCH keeps them when you let go".into()
         };
     }
 
@@ -1017,6 +1151,39 @@ impl NativeModel {
         );
         outbox.emit_mode("arp", self.arp.out.wire());
         self.session_dirty = true;
+    }
+
+    /// Mirror a chord the engine just captured onto the step boxes.
+    ///
+    /// A status poll that still shows the previous pattern is left alone, so a
+    /// step tweak or a saved chord is not overwritten before the engine has it.
+    pub fn sync_arp_pattern_from_status(&mut self) {
+        let len = self.status.arp_len as usize;
+        if len == 0 || len > jambox_core::MAX_ARP_STEPS {
+            return;
+        }
+        let incoming = &self.status.arp_steps[..len];
+        let same_as_echo = self.arp.echoed
+            && self.arp.echoed_len as usize == len
+            && self.arp.echoed_steps[..len] == *incoming;
+        self.arp.echoed = true;
+        self.arp.echoed_len = len as u8;
+        self.arp.echoed_steps[..len].copy_from_slice(incoming);
+        if !self.status.arp_enabled {
+            return;
+        }
+        if self.arp.len as usize == len && self.arp.steps[..len] == *incoming {
+            return;
+        }
+        if same_as_echo {
+            return;
+        }
+        self.arp.len = len as u8;
+        self.arp.steps[..len].copy_from_slice(incoming);
+        if self.arp.selected >= len {
+            self.arp.selected = len - 1;
+        }
+        self.mark_dirty();
     }
 
     fn push_arp_pattern(&mut self, outbox: &mut Outbox) {
@@ -1115,11 +1282,27 @@ impl NativeModel {
                 self.kit_repeat_open = false;
                 self.status_line.clear();
             }
+            Some("fx_settings") => {
+                self.fx_settings_open = false;
+                self.status_line.clear();
+            }
+            Some("chords") => {
+                self.chords_overlay = None;
+                self.status_line.clear();
+            }
             Some("map_out") => {
                 self.map_out_edit = None;
                 self.status_line = "MAP".into();
             }
             Some("song_viz") => self.close_song_viz(),
+            Some("fm_name") => {
+                self.fm_name_open = false;
+                self.status_line = self.fm_patch_name.clone();
+            }
+            Some("fm_patches") => {
+                self.fm_patches_open = false;
+                self.status_line = self.fm_patch_name.clone();
+            }
             _ => {
                 if let Some(prev) = self.nav_stack.pop() {
                     self.nav_back_navigating = true;
@@ -1283,6 +1466,7 @@ impl NativeModel {
         }
         self.tick_song_playhead(dt);
         self.tick_kaoss_gate(outbox);
+        self.tick_kaoss_midi_expression(dt, outbox);
         self.tick_chords_combo_grace(dt, outbox);
         self.capture_held_repeats_at(Instant::now());
         self.tick_screensaver(dt);
@@ -2017,6 +2201,7 @@ impl NativeModel {
             s.kaoss_gate % kaoss_ui::GATE_PATTERNS.len()
         };
         self.kaoss_hold = s.kaoss_hold;
+        self.kaoss_fx_hold = s.kaoss_fx_hold;
         self.kaoss_fx_target = s.kaoss_fx_target;
         self.punch_buffer_prio = jambox_core::PunchBufferPrio::from_u8(s.punch_buffer_prio);
         self.punch_rpt_mode = jambox_core::PunchRptMode::from_u8(s.punch_rpt_mode);
@@ -2073,6 +2258,16 @@ impl NativeModel {
         self.wifi_usb_hold = s.wifi_usb_hold;
         self.full_vel = s.full_velocity;
         self.drum_repeat_lock = s.drum_repeat_lock;
+        self.fm_patches = s.fm_patches.clone();
+        if self.fm_patches.is_empty() {
+            if let Some(old) = s.fm_user {
+                self.fm_patches.push(session::FmNamedPatch {
+                    name: "USER".into(),
+                    patch: old,
+                });
+            }
+        }
+        self.fm_user = self.fm_patches.last().map(|p| p.patch);
         outbox.midi_select(
             Some(self.midi_in_filter.clone()),
             Some(self.midi_out_filter.clone()),
@@ -2161,6 +2356,7 @@ impl NativeModel {
             kaoss_program: self.kaoss_program,
             kaoss_gate: self.kaoss_gate,
             kaoss_hold: self.kaoss_hold,
+            kaoss_fx_hold: self.kaoss_fx_hold,
             kaoss_fx_target: self.kaoss_fx_target,
             punch_buffer_prio: self.punch_buffer_prio.as_u8(),
             punch_rpt_mode: self.punch_rpt_mode.as_u8(),
@@ -2204,6 +2400,8 @@ impl NativeModel {
             wifi_usb_hold: self.wifi_usb_hold,
             full_velocity: self.full_vel,
             drum_repeat_lock: self.drum_repeat_lock,
+            fm_user: self.fm_user,
+            fm_patches: self.fm_patches.clone(),
         }
     }
 
@@ -2230,6 +2428,7 @@ impl NativeModel {
         }
         if kind == "note_on" || kind == "noteon" {
             if vel > 0 {
+                self.note_midi_held(notice.channel, true);
                 if notice.channel == DRUM_CHANNEL
                     && self.handle_hardware_drum_repeat(note, true, outbox)
                 {
@@ -2245,6 +2444,7 @@ impl NativeModel {
                     format!("IN  ch{} n{} v{}", notice.channel + 1, note, vel);
                 self.push_log(format!("midi on ch{} n{} v{}", notice.channel, note, vel));
             } else if self.mode != UiMode::Arp {
+                self.note_midi_held(notice.channel, false);
                 if notice.channel == DRUM_CHANNEL {
                     self.handle_hardware_drum_repeat(note, false, outbox);
                 }
@@ -2253,6 +2453,7 @@ impl NativeModel {
                 self.push_log(format!("midi off ch{} n{}", notice.channel, note));
             }
         } else if kind == "note_off" || kind == "noteoff" {
+            self.note_midi_held(notice.channel, false);
             if notice.channel == DRUM_CHANNEL {
                 self.handle_hardware_drum_repeat(note, false, outbox);
             }
@@ -2262,12 +2463,13 @@ impl NativeModel {
             }
             self.push_log(format!("midi off ch{} n{}", notice.channel, note));
         } else if kind == "control_change" || kind == "cc" {
-            self.last_midi_activity = format!(
-                "IN  ch{} cc{} v{}",
-                notice.channel + 1,
-                notice.control.unwrap_or(0),
-                notice.value.unwrap_or(0)
-            );
+            let cc = notice.control.unwrap_or(0);
+            let raw = notice.value.unwrap_or(0);
+            self.last_midi_activity =
+                format!("IN  ch{} cc{} v{}", notice.channel + 1, cc, raw);
+            if self.mode == UiMode::Synth && cc != 1 {
+                self.apply_synth_knob(cc, raw.min(127) as u8, outbox);
+            }
         }
     }
 
@@ -2442,6 +2644,20 @@ impl NativeModel {
         self.apply_seq_action(action, outbox);
         self.clear_punch(outbox);
         self.clear_drum_repeats(outbox);
+        self.kaoss_usb_notes = [None; MAX_FINGERS];
+        self.kaoss_usb_hold = None;
+        self.midi_held = [0; 16];
+        self.panic_midi_notes(outbox);
+    }
+
+    /// USB all-sound-off plus all-notes-off on every channel, and lift the
+    /// sustain pedal so a held damper cannot keep the notes ringing.
+    fn panic_midi_notes(&mut self, outbox: &mut Outbox) {
+        for channel in 0..16u8 {
+            outbox.midi_emit("cc", channel, None, None, Some(120), Some(0));
+            outbox.midi_emit("cc", channel, None, None, Some(123), Some(0));
+            outbox.midi_emit("cc", channel, None, None, Some(64), Some(0));
+        }
     }
 
     pub fn finger_down(&mut self, id: i32, px: i32, py: i32, outbox: &mut Outbox) {
@@ -2461,7 +2677,11 @@ impl NativeModel {
         let gesture = self.next_gesture;
         self.next_gesture = self.next_gesture.wrapping_add(1).max(1);
 
-        let hit = if self.kaoss_color_picker_open {
+        // Chrome (back, home, power, mode tabs) sits above every menu. Overlays
+        // used to eat those taps, so VIB / settings could not be left.
+        let hit = if self.layout.nav.contains(px, py) {
+            self.layout.hit(self.mode, px, py)
+        } else if self.kaoss_color_picker_open {
             let base = self.layout.hit(self.mode, px, py);
             if matches!(
                 base,
@@ -2508,6 +2728,7 @@ impl NativeModel {
                 | Hit::KaossOctUp
                 | Hit::KaossOctDown
                 | Hit::KaossHold
+                | Hit::KaossFxHold
                 | Hit::KaossGate
                 | Hit::KaossBpmUp
                 | Hit::KaossBpmDown
@@ -2535,15 +2756,9 @@ impl NativeModel {
                 }
             }
         } else if self.power_menu_open {
-            let base = self.layout.hit(self.mode, px, py);
-            if matches!(
-                base,
-                Hit::Nav(_) | Hit::NavBack | Hit::Power | Hit::HomeTile(_) | Hit::SeqRec
-            ) {
-                base
-            } else {
-                self.layout.hit_power_menu(px, py)
-            }
+            // The menu is painted over the current page. Do not let that page
+            // (home tiles, especially) steal Shut down / Screen off.
+            self.layout.hit_power_menu(px, py)
         } else if self.update_panel_open {
             let base = self.layout.hit(self.mode, px, py);
             if matches!(
@@ -2574,6 +2789,23 @@ impl NativeModel {
                 base
             } else {
                 self.layout.hit_wifi_panel(px, py)
+            }
+        } else if self.mode == UiMode::Fm && (self.fm_patches_open || self.fm_name_open) {
+            let base = self.layout.hit(self.mode, px, py);
+            if matches!(
+                base,
+                Hit::Nav(_) | Hit::NavBack | Hit::Power | Hit::HomeTile(_)
+            ) {
+                base
+            } else if self.fm_name_open {
+                self.layout.hit_fm_name(px, py)
+            } else {
+                self.layout.hit_fm_patches(
+                    px,
+                    py,
+                    jambox_core::FM_RECIPE_COUNT + self.fm_patches.len(),
+                    self.fm_patch_scroll,
+                )
             }
         } else if self.mode == UiMode::Synth
             && (self.synth_pick_a.is_some() || self.synth_vib_open)
@@ -2926,6 +3158,10 @@ impl NativeModel {
                 self.tap_ui(slot, id, gesture, px, py);
                 self.nudge_synth_octave(1);
             }
+            Hit::ScopeMode => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.scope_live = !self.scope_live;
+            }
             Hit::SynthVibAlways => {
                 self.tap_ui(slot, id, gesture, px, py);
                 self.toggle_vibrato_always(outbox);
@@ -3022,6 +3258,30 @@ impl NativeModel {
                 self.tap_ui(slot, id, gesture, px, py);
                 self.select_fm_recipe(index, outbox);
             }
+            Hit::FmPatches => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.open_fm_patches();
+            }
+            Hit::FmPatchDone => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.fm_patches_open = false;
+                self.status_line = self.fm_patch_name.clone();
+                self.mark_dirty();
+            }
+            Hit::FmNameOk => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.commit_fm_name();
+            }
+            Hit::FmNameCancel => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.fm_name_open = false;
+                self.status_line = self.fm_patch_name.clone();
+                self.mark_dirty();
+            }
+            Hit::FmNameKey(index) => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.type_fm_name(index);
+            }
             Hit::FmOp(index) => {
                 self.fingers[slot] = Finger {
                     active: true,
@@ -3038,6 +3298,18 @@ impl NativeModel {
             Hit::FmClear => {
                 self.tap_ui(slot, id, gesture, px, py);
                 self.clear_fm_links(outbox);
+            }
+            Hit::FmUndo => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.undo_fm(outbox);
+            }
+            Hit::FmSave => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.open_fm_name();
+            }
+            Hit::FmUser => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.open_fm_patches();
             }
             Hit::FmSlider(index) => {
                 self.fingers[slot] = Finger {
@@ -3106,6 +3378,10 @@ impl NativeModel {
             Hit::KaossHold => {
                 self.tap_ui(slot, id, gesture, px, py);
                 self.toggle_kaoss_hold(outbox);
+            }
+            Hit::KaossFxHold => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.toggle_kaoss_fx_hold(outbox);
             }
             Hit::KaossGate => {
                 self.tap_ui(slot, id, gesture, px, py);
@@ -4304,7 +4580,14 @@ impl NativeModel {
         match finger.surface {
             Surface::Kaoss => {
                 self.watch_kaoss_full_exit(0, false);
-                self.end_kaoss_touch(finger.gesture, finger.x, finger.y, finger.gate_on, outbox);
+                self.end_kaoss_touch(
+                    slot,
+                    finger.gesture,
+                    finger.x,
+                    finger.y,
+                    finger.gate_on,
+                    outbox,
+                );
             }
             Surface::Drum { note, repeat } => {
                 self.release_screen_drum(note, finger.gesture, repeat, outbox);
@@ -4728,6 +5011,7 @@ impl NativeModel {
         pad.fx_delay_mix = self.fx_voice[1].clamp(0.0, 1.0);
         pad.fx_reverb_mix = self.fx_voice[2].clamp(0.0, 1.0);
         pad.fx_flanger_mix = self.fx_voice[3].clamp(0.0, 1.0);
+        pad.release_drift = Some(self.release_drift.clamp(0.0, 1.0));
     }
 
     fn apply_live_voice_snapshot_at(&mut self, index: usize) {
@@ -4749,6 +5033,7 @@ impl NativeModel {
         pad.fx_delay_mix = fx[1];
         pad.fx_reverb_mix = fx[2];
         pad.fx_flanger_mix = fx[3];
+        pad.release_drift = Some(self.release_drift.clamp(0.0, 1.0));
     }
 
     fn phrase_clip_voice(pad: &PhrasePad) -> WireClipVoice {
@@ -4761,6 +5046,7 @@ impl NativeModel {
             delay_mix: pad.fx_delay_mix,
             reverb_mix: pad.fx_reverb_mix,
             flanger_mix: pad.fx_flanger_mix,
+            release_drift: pad.release_drift,
         }
     }
 
@@ -4781,6 +5067,23 @@ impl NativeModel {
         !moving || (next - prev).abs() <= Self::SLIDER_JUMP
     }
 
+    /// MPK mini K1–K8 (CC 70–77) while the synth page is up.
+    fn apply_synth_knob(&mut self, cc: u8, value: u8, outbox: &mut Outbox) {
+        let index = match cc {
+            70 => 0,
+            71 => 1,
+            72 => 2,
+            73 => 3,
+            74 => 4,
+            75 => 5,
+            76 => 6,
+            77 => 7,
+            _ => return,
+        };
+        let unit = (value as f32 / 127.0).clamp(0.0, 1.0);
+        self.set_synth_slider_unit(index, unit, false, outbox);
+    }
+
     fn apply_synth_slider(
         &mut self,
         index: usize,
@@ -4793,6 +5096,16 @@ impl NativeModel {
         let Some(value) = Self::vertical_slider_t(track, py) else {
             return;
         };
+        self.set_synth_slider_unit(index, value, moving, outbox);
+    }
+
+    fn set_synth_slider_unit(
+        &mut self,
+        index: usize,
+        value: f32,
+        moving: bool,
+        outbox: &mut Outbox,
+    ) {
         if index == 5 {
             if !Self::accept_slider_value(self.release_drift, value, moving) {
                 return;
@@ -4869,10 +5182,49 @@ impl NativeModel {
     fn apply_fm_patch(&mut self, index: usize) {
         let patch = jambox_core::fm_recipe_patch(index);
         self.fm_recipe = index % jambox_core::FM_RECIPE_COUNT;
+        self.fm_user_live = false;
+        self.fm_user_index = None;
+        self.fm_patch_name = jambox_core::fm_recipe(self.fm_recipe).label.into();
         self.fm_ops = patch.ops;
         self.fm_matrix = patch.matrix;
         self.fm_selected = 3;
         self.sync_fm_sliders_from_op();
+    }
+
+    fn fm_snapshot(&self) -> session::FmUserPatch {
+        session::FmUserPatch {
+            ratio: self.fm_ops.map(|op| op.ratio),
+            audio: self.fm_ops.map(|op| op.audio),
+            fold: self.fm_ops.map(|op| op.fold),
+            env: self.fm_ops.map(|op| op.env),
+            sustain: self.fm_ops.map(|op| op.sustain),
+            matrix: self.fm_matrix,
+        }
+    }
+
+    fn apply_fm_snapshot(&mut self, patch: session::FmUserPatch) {
+        for i in 0..jambox_core::FM_OP_COUNT {
+            self.fm_ops[i].ratio = patch.ratio[i];
+            self.fm_ops[i].audio = patch.audio[i];
+            self.fm_ops[i].fold = patch.fold[i];
+            self.fm_ops[i].env = patch.env[i];
+            self.fm_ops[i].sustain = patch.sustain[i];
+        }
+        self.fm_matrix = patch.matrix;
+        self.sync_fm_sliders_from_op();
+    }
+
+    fn remember_fm(&mut self) {
+        self.fm_undo.push(FmUndo {
+            recipe: self.fm_recipe,
+            user_live: self.fm_user_live,
+            user_index: self.fm_user_index,
+            name: self.fm_patch_name.clone(),
+            patch: self.fm_snapshot(),
+        });
+        if self.fm_undo.len() > 24 {
+            self.fm_undo.remove(0);
+        }
     }
 
     fn push_fm_params(&self, outbox: &mut Outbox) {
@@ -4898,10 +5250,11 @@ impl NativeModel {
     }
 
     fn select_fm_recipe(&mut self, index: usize, outbox: &mut Outbox) {
+        self.remember_fm();
         self.apply_fm_patch(index);
         self.push_fm_params(outbox);
         let rec = jambox_core::fm_recipe(self.fm_recipe);
-        self.status_line = format!("FM · {}", rec.title);
+        self.status_line = rec.hint.into();
         self.mark_dirty();
     }
 
@@ -4916,8 +5269,28 @@ impl NativeModel {
     fn connect_fm(&mut self, from: usize, to: usize, amount: f32, outbox: &mut Outbox) {
         let from = from % jambox_core::FM_OP_COUNT;
         let to = to % jambox_core::FM_OP_COUNT;
+        self.remember_fm();
+        if self.fm_matrix[from][to] > 0.02 {
+            self.fm_matrix[from][to] = 0.0;
+            self.fm_user_live = false;
+            self.fm_user_index = None;
+            self.push_fm_params(outbox);
+            self.status_line = if from == to {
+                format!("erased {} feedback", jambox_core::OP_NAMES[from])
+            } else {
+                format!(
+                    "erased {} → {}",
+                    jambox_core::OP_NAMES[from],
+                    jambox_core::OP_NAMES[to]
+                )
+            };
+            self.mark_dirty();
+            return;
+        }
         let amount = amount.clamp(0.25, 0.95);
         self.fm_matrix[from][to] = amount;
+        self.fm_user_live = false;
+        self.fm_user_index = None;
         outbox.synth("fm_connect", jambox_core::pack_fm_link(from, to, amount));
         self.status_line = if from == to {
             format!("{} feedback", jambox_core::OP_NAMES[from])
@@ -4932,9 +5305,113 @@ impl NativeModel {
     }
 
     fn clear_fm_links(&mut self, outbox: &mut Outbox) {
+        self.remember_fm();
+        self.fm_user_live = false;
+        self.fm_user_index = None;
         self.fm_matrix = [[0.0; jambox_core::FM_OP_COUNT]; jambox_core::FM_OP_COUNT];
         outbox.synth("fm_clear", 1.0);
         self.status_line = "links cleared".into();
+        self.mark_dirty();
+    }
+
+    fn undo_fm(&mut self, outbox: &mut Outbox) {
+        let Some(patch) = self.fm_undo.pop() else {
+            self.status_line = "nothing to undo".into();
+            self.mark_dirty();
+            return;
+        };
+        self.fm_recipe = patch.recipe;
+        self.fm_user_live = patch.user_live;
+        self.fm_user_index = patch.user_index;
+        self.fm_patch_name = patch.name;
+        self.apply_fm_snapshot(patch.patch);
+        self.push_fm_params(outbox);
+        self.status_line = "undid last FM edit".into();
+        self.mark_dirty();
+    }
+
+    fn open_fm_patches(&mut self) {
+        self.fm_name_open = false;
+        self.fm_patches_open = true;
+        self.fm_patch_scroll = 0;
+        self.status_line = "patches · tap to load".into();
+        self.mark_dirty();
+    }
+
+    fn open_fm_name(&mut self) {
+        self.fm_patches_open = false;
+        self.fm_name_open = true;
+        self.fm_name_buf = self.fm_patch_name.clone();
+        self.status_line = "name this patch".into();
+        self.mark_dirty();
+    }
+
+    fn type_fm_name(&mut self, index: u8) {
+        let label = crate::layout::fm_name_key_label(index as usize);
+        match label {
+            "DEL" => {
+                self.fm_name_buf.pop();
+            }
+            "SP" => {
+                if !self.fm_name_buf.is_empty()
+                    && !self.fm_name_buf.ends_with(' ')
+                    && self.fm_name_buf.len() < 12
+                {
+                    self.fm_name_buf.push(' ');
+                }
+            }
+            "" => {}
+            other => {
+                if self.fm_name_buf.len() < 12 {
+                    self.fm_name_buf.push_str(other);
+                }
+            }
+        }
+        self.mark_dirty();
+    }
+
+    fn commit_fm_name(&mut self) {
+        let name = clean_fm_patch_name(&self.fm_name_buf);
+        let body = self.fm_snapshot();
+        if let Some(index) = self.fm_patches.iter().position(|p| p.name == name) {
+            self.fm_patches[index].patch = body;
+            self.fm_user_index = Some(index);
+        } else if self.fm_patches.len() >= 32 {
+            self.status_line = "patch list is full".into();
+            self.mark_dirty();
+            return;
+        } else {
+            self.fm_patches.push(session::FmNamedPatch {
+                name: name.clone(),
+                patch: body,
+            });
+            self.fm_user_index = Some(self.fm_patches.len() - 1);
+        }
+        self.fm_patch_name = name;
+        self.fm_user_live = true;
+        self.fm_user = Some(body);
+        self.fm_name_open = false;
+        self.status_line = format!("saved {}", self.fm_patch_name);
+        self.mark_dirty();
+    }
+
+    fn load_fm_patch_index(&mut self, index: usize, outbox: &mut Outbox) {
+        if index < jambox_core::FM_RECIPE_COUNT {
+            self.select_fm_recipe(index, outbox);
+            return;
+        }
+        let user = index - jambox_core::FM_RECIPE_COUNT;
+        let Some(named) = self.fm_patches.get(user).cloned() else {
+            return;
+        };
+        self.remember_fm();
+        self.apply_fm_snapshot(named.patch);
+        self.fm_user_live = true;
+        self.fm_user_index = Some(user);
+        self.fm_patch_name = named.name;
+        self.fm_user = Some(named.patch);
+        self.push_fm_params(outbox);
+        self.status_line = self.fm_patch_name.clone();
         self.mark_dirty();
     }
 
@@ -5830,6 +6307,9 @@ impl NativeModel {
                 if prev.y_param == "tone_lfo" && p.y_param != "tone_lfo" {
                     self.reset_kaoss_tone_lfo(outbox);
                 }
+                if prev.midi_gesture() != p.midi_gesture() {
+                    self.release_kaoss_midi_gesture(prev, outbox);
+                }
                 // HOLD drone survives program changes — reassert XY so FILTER/FLANGE
                 // immediately ride the latched lead without requiring a fresh press.
                 if self.kaoss_hold
@@ -5910,19 +6390,28 @@ impl NativeModel {
                 self.release_kaoss_gate(outbox);
             }
             self.kaoss_usb_silence(outbox, true);
-            if !self.kaoss_touching {
+            if !self.kaoss_touching && !self.kaoss_fx_hold {
                 let prog = kaoss_ui::program(self.kaoss_program);
-                if prog.y_param == "pitch_bend" {
-                    self.reset_kaoss_pitch_bend(outbox);
-                }
-                if prog.y_param == "tone_lfo" {
-                    self.reset_kaoss_tone_lfo(outbox);
-                }
+                self.spring_kaoss_fx(prog, outbox);
             }
             self.status_line = "HOLD off".into();
         } else {
             self.status_line = "HOLD on — latch last pad".into();
         }
+        self.mark_dirty();
+    }
+
+    fn toggle_kaoss_fx_hold(&mut self, outbox: &mut Outbox) {
+        self.kaoss_fx_hold = !self.kaoss_fx_hold;
+        if !self.kaoss_fx_hold && !self.kaoss_touching && !self.kaoss_hold {
+            let prog = kaoss_ui::program(self.kaoss_program);
+            self.spring_kaoss_fx(prog, outbox);
+        }
+        self.status_line = if self.kaoss_fx_hold {
+            "HOLD FX on — stays after lift".into()
+        } else {
+            "HOLD FX off — springs back".into()
+        };
         self.mark_dirty();
     }
 
@@ -5939,26 +6428,15 @@ impl NativeModel {
         if !prog.note || kaoss_ui::gate(self.kaoss_gate).beats > 0.0 {
             return;
         }
-        let live: Vec<(f32, f32)> = self
-            .fingers
-            .iter()
-            .filter(|f| f.active && f.surface == Surface::Kaoss)
-            .map(|f| (f.x, f.y))
-            .collect();
-        if live.is_empty() {
-            return;
-        }
-        let held: Vec<u8> = live
-            .iter()
-            .map(|&(x, _)| self.kaoss_note_at(x))
-            .collect();
-        if let Some(current) = self.kaoss_usb_note {
-            if held.contains(&current) {
-                return;
+        for slot in 0..MAX_FINGERS {
+            let finger = self.fingers[slot];
+            if finger.active && finger.surface == Surface::Kaoss {
+                if self.kaoss_usb_notes[slot].is_none() {
+                    self.kaoss_usb_assign_slot(slot, finger.x, finger.y, outbox);
+                }
+            } else if self.kaoss_usb_notes[slot].is_some() {
+                self.kaoss_usb_release_slot(slot, outbox);
             }
-        }
-        if let Some(&(x, y)) = live.last() {
-            self.kaoss_usb_note_follow(x, y, outbox);
         }
     }
 
@@ -5992,7 +6470,13 @@ impl NativeModel {
             self.kaoss_touch_edge(gesture, TouchPhase::Down, x, y, outbox);
             self.record_kaoss_note(true, x, y);
             self.record_kaoss_gesture(crate::seq::GesturePhase::Down, gesture, x, y);
-            self.kaoss_usb_note_on(x, y, outbox);
+            if let Some(slot) = self
+                .fingers
+                .iter()
+                .position(|f| f.active && f.gesture == gesture)
+            {
+                self.kaoss_usb_assign_slot(slot, x, y, outbox);
+            }
         } else if gated {
             // Shared clock; this gesture joins on the next tick. Mark ownership
             // so HOLD can latch the last contact.
@@ -6007,6 +6491,7 @@ impl NativeModel {
         }
         if others == 0 {
             self.kaoss_usb_pad_down(x, y, outbox);
+            self.kaoss_fx_spring = Some(self.capture_kaoss_fx_spring());
         } else {
             self.kaoss_usb_xy(x, y, outbox);
         }
@@ -6022,7 +6507,13 @@ impl NativeModel {
         if prog.note && !gated {
             self.kaoss_touch_edge(gesture, TouchPhase::Move, x, y, outbox);
             self.record_kaoss_gesture(crate::seq::GesturePhase::Move, gesture, x, y);
-            self.kaoss_usb_note_follow(x, y, outbox);
+            if let Some(slot) = self
+                .fingers
+                .iter()
+                .position(|f| f.active && f.gesture == gesture)
+            {
+                self.kaoss_usb_assign_slot(slot, x, y, outbox);
+            }
         } else if gated {
             // While the shared gate is in the on phase, slide this voice.
             if let Some(slot) = self
@@ -6033,7 +6524,7 @@ impl NativeModel {
                 if self.fingers[slot].gate_on {
                     self.kaoss_touch_edge(gesture, TouchPhase::Move, x, y, outbox);
                     self.record_kaoss_gesture(crate::seq::GesturePhase::Move, gesture, x, y);
-                    self.kaoss_usb_note_follow(x, y, outbox);
+                    self.kaoss_usb_assign_slot(slot, x, y, outbox);
                 }
             } else if self.kaoss_hold
                 && self.kaoss_gate_on
@@ -6041,7 +6532,7 @@ impl NativeModel {
             {
                 self.kaoss_touch_edge(gesture, TouchPhase::Move, x, y, outbox);
                 self.record_kaoss_gesture(crate::seq::GesturePhase::Move, gesture, x, y);
-                self.kaoss_usb_note_follow(x, y, outbox);
+                self.kaoss_usb_assign_hold(x, y, outbox);
             }
         }
         self.kaoss_usb_xy(x, y, outbox);
@@ -6050,6 +6541,7 @@ impl NativeModel {
 
     fn end_kaoss_touch(
         &mut self,
+        slot: usize,
         gesture: u32,
         x: f32,
         y: f32,
@@ -6063,10 +6555,16 @@ impl NativeModel {
         if self.kaoss_hold && remaining == 0 {
             if prog.note {
                 if !gated {
+                    self.kaoss_usb_slot_to_hold(slot, outbox);
                     self.kaoss_hold_gesture = Some(gesture);
                     self.kaoss_latched_xy = (x, y);
                 } else {
                     // Preserve on-phase across the latch so HOLD doesn't click off.
+                    if was_gate_on {
+                        self.kaoss_usb_slot_to_hold(slot, outbox);
+                    } else {
+                        self.kaoss_usb_release_slot(slot, outbox);
+                    }
                     self.kaoss_gate_gesture = Some(gesture);
                     self.kaoss_latched_xy = (x, y);
                     self.kaoss_gate_on = was_gate_on;
@@ -6090,9 +6588,10 @@ impl NativeModel {
                 self.kaoss_touch_edge(gesture, TouchPhase::Up, x, y, outbox);
                 self.record_kaoss_note(false, x, y);
                 self.record_kaoss_gesture(crate::seq::GesturePhase::Up, gesture, x, y);
+                self.kaoss_usb_release_slot(slot, outbox);
             }
             if remaining == 0 {
-                self.kaoss_usb_note_off(outbox);
+                self.kaoss_usb_release_hold(outbox);
                 self.kaoss_gate_on = false;
                 if !self.kaoss_hold {
                     self.kaoss_gate_gesture = None;
@@ -6109,9 +6608,7 @@ impl NativeModel {
             self.kaoss_touch_edge(gesture, TouchPhase::Up, x, y, outbox);
             self.record_kaoss_note(false, x, y);
             self.record_kaoss_gesture(crate::seq::GesturePhase::Up, gesture, x, y);
-            if remaining == 0 {
-                self.kaoss_usb_note_off(outbox);
-            }
+            self.kaoss_usb_release_slot(slot, outbox);
         }
         self.reconcile_kaoss_from_fingers(outbox);
         self.kaoss_touching = remaining > 0;
@@ -6119,11 +6616,8 @@ impl NativeModel {
             self.kaoss_usb_pad_up(outbox);
             // Center the wheel for the next note. The engine already copied the
             // bend onto the voice that is decaying, so this does not snap the tail.
-            if !self.kaoss_hold && prog.y_param == "pitch_bend" {
-                self.reset_kaoss_pitch_bend(outbox);
-            }
-            if !self.kaoss_hold && prog.y_param == "tone_lfo" {
-                self.reset_kaoss_tone_lfo(outbox);
+            if !self.kaoss_hold && !self.kaoss_fx_hold {
+                self.spring_kaoss_fx(prog, outbox);
             }
         }
     }
@@ -6139,6 +6633,7 @@ impl NativeModel {
                 let fx = self.fingers[slot].x;
                 let fy = self.fingers[slot].y;
                 self.kaoss_touch_edge(g, TouchPhase::Up, fx, fy, outbox);
+                self.kaoss_usb_release_slot(slot, outbox);
                 self.fingers[slot].gate_on = false;
             }
         }
@@ -6153,7 +6648,7 @@ impl NativeModel {
                     self.kaoss_touch_edge(g, TouchPhase::Up, x, y, outbox);
                 }
             }
-            self.kaoss_usb_note_off(outbox);
+            self.kaoss_usb_release_hold(outbox);
             self.kaoss_gate_on = false;
         }
         if self.kaoss_active_count() == 0 {
@@ -6211,57 +6706,46 @@ impl NativeModel {
                 self.kaoss_touch_edge(gesture, TouchPhase::Down, x, y, outbox);
                 self.record_kaoss_note(true, x, y);
                 self.record_kaoss_gesture(crate::seq::GesturePhase::Down, gesture, x, y);
-                self.kaoss_usb_note_on(x, y, outbox);
+                self.kaoss_usb_assign_hold(x, y, outbox);
                 self.kaoss_gate_on = true;
             } else if !want_on && self.kaoss_gate_on {
                 self.kaoss_touch_edge(gesture, TouchPhase::Up, x, y, outbox);
                 self.record_kaoss_note(false, x, y);
                 self.record_kaoss_gesture(crate::seq::GesturePhase::Up, gesture, x, y);
-                self.kaoss_usb_note_off(outbox);
+                self.kaoss_usb_release_hold(outbox);
                 self.kaoss_gate_on = false;
             } else if want_on && self.kaoss_gate_on {
                 self.kaoss_touch_edge(gesture, TouchPhase::Move, x, y, outbox);
                 self.record_kaoss_gesture(crate::seq::GesturePhase::Move, gesture, x, y);
-                self.kaoss_usb_note_follow(x, y, outbox);
+                self.kaoss_usb_assign_hold(x, y, outbox);
             }
             return;
         }
 
-        // Polyphonic: every live Kaoss contact shares the gate clock.
+        // Every live Kaoss contact shares the gate clock, including USB notes.
         let mut any_on = false;
-        let mut usb_xy = self.kaoss_latched_xy;
         for (gesture, x, y, slot) in live {
             let was = self.fingers[slot].gate_on;
             if want_on && !was {
                 self.kaoss_touch_edge(gesture, TouchPhase::Down, x, y, outbox);
                 self.record_kaoss_note(true, x, y);
                 self.record_kaoss_gesture(crate::seq::GesturePhase::Down, gesture, x, y);
+                self.kaoss_usb_assign_slot(slot, x, y, outbox);
                 self.fingers[slot].gate_on = true;
-                usb_xy = (x, y);
             } else if !want_on && was {
                 self.kaoss_touch_edge(gesture, TouchPhase::Up, x, y, outbox);
                 self.record_kaoss_note(false, x, y);
                 self.record_kaoss_gesture(crate::seq::GesturePhase::Up, gesture, x, y);
+                self.kaoss_usb_release_slot(slot, outbox);
                 self.fingers[slot].gate_on = false;
             } else if want_on && was {
                 self.kaoss_touch_edge(gesture, TouchPhase::Move, x, y, outbox);
                 self.record_kaoss_gesture(crate::seq::GesturePhase::Move, gesture, x, y);
-                usb_xy = (x, y);
+                self.kaoss_usb_assign_slot(slot, x, y, outbox);
             }
             any_on |= self.fingers[slot].gate_on;
         }
-        // USB MIDI out stays monophonic (last/primary XY) so CC/note don't thrash.
-        if want_on && any_on {
-            if !self.kaoss_gate_on {
-                self.kaoss_usb_note_on(usb_xy.0, usb_xy.1, outbox);
-            } else {
-                self.kaoss_usb_note_follow(usb_xy.0, usb_xy.1, outbox);
-            }
-            self.kaoss_gate_on = true;
-        } else if self.kaoss_gate_on {
-            self.kaoss_usb_note_off(outbox);
-            self.kaoss_gate_on = false;
-        }
+        self.kaoss_gate_on = any_on;
     }
 
     fn record_kaoss_note(&mut self, on: bool, x: f32, y: f32) {
@@ -6464,29 +6948,27 @@ impl NativeModel {
         self.kaoss_emit_cc(KAOSS_CC_Y, Self::midi_cc01(y), outbox);
     }
 
-    fn kaoss_usb_note_on(&mut self, x: f32, y: f32, outbox: &mut Outbox) {
-        if !self.kaoss_out.includes_usb() {
-            return;
-        }
-        let note = self.kaoss_note_at(x);
-        let velocity = if kaoss_ui::program(self.kaoss_program).y_param == "pitch_bend" {
+    fn kaoss_usb_velocity(&self, y: f32) -> u8 {
+        if kaoss_ui::program(self.kaoss_program).y_param == "pitch_bend" {
             100
         } else {
             velocity_at_y(y)
-        };
-        if let Some(old) = self.kaoss_usb_note {
-            if old != note {
-                outbox.midi_emit(
-                    "note_off",
-                    self.kaoss_channel,
-                    Some(old),
-                    Some(0),
-                    None,
-                    None,
-                );
-            } else {
-                return;
-            }
+        }
+    }
+
+    /// True when some other finger or the HOLD latch is already sounding `note`.
+    fn kaoss_usb_note_live(&self, except_slot: Option<usize>, except_hold: bool, note: u8) -> bool {
+        if !except_hold && self.kaoss_usb_hold == Some(note) {
+            return true;
+        }
+        self.kaoss_usb_notes.iter().enumerate().any(|(i, held)| {
+            Some(i) != except_slot && *held == Some(note)
+        })
+    }
+
+    fn kaoss_usb_emit_on(&self, note: u8, velocity: u8, outbox: &mut Outbox) {
+        if !self.kaoss_out.includes_usb() {
+            return;
         }
         outbox.midi_emit(
             "note_on",
@@ -6496,71 +6978,97 @@ impl NativeModel {
             None,
             None,
         );
-        self.kaoss_usb_note = Some(note);
     }
 
-    fn kaoss_usb_note_follow(&mut self, x: f32, y: f32, outbox: &mut Outbox) {
+    fn kaoss_usb_emit_off(&self, note: u8, outbox: &mut Outbox) {
+        if !self.kaoss_out.includes_usb() {
+            return;
+        }
+        outbox.midi_emit(
+            "note_off",
+            self.kaoss_channel,
+            Some(note),
+            Some(0),
+            None,
+            None,
+        );
+    }
+
+    fn kaoss_usb_assign_slot(&mut self, slot: usize, x: f32, y: f32, outbox: &mut Outbox) {
         if !self.kaoss_out.includes_usb() {
             return;
         }
         let note = self.kaoss_note_at(x);
-        let velocity = if kaoss_ui::program(self.kaoss_program).y_param == "pitch_bend" {
-            100
-        } else {
-            velocity_at_y(y)
-        };
-        match self.kaoss_usb_note {
-            Some(old) if old == note => {}
-            Some(old) => {
-                outbox.midi_emit(
-                    "note_off",
-                    self.kaoss_channel,
-                    Some(old),
-                    Some(0),
-                    None,
-                    None,
-                );
-                outbox.midi_emit(
-                    "note_on",
-                    self.kaoss_channel,
-                    Some(note),
-                    Some(velocity),
-                    None,
-                    None,
-                );
-                self.kaoss_usb_note = Some(note);
+        if self.kaoss_usb_notes[slot] == Some(note) {
+            return;
+        }
+        if let Some(old) = self.kaoss_usb_notes[slot].take() {
+            if !self.kaoss_usb_note_live(None, false, old) {
+                self.kaoss_usb_emit_off(old, outbox);
             }
-            None => {
-                outbox.midi_emit(
-                    "note_on",
-                    self.kaoss_channel,
-                    Some(note),
-                    Some(velocity),
-                    None,
-                    None,
-                );
-                self.kaoss_usb_note = Some(note);
+        }
+        let already = self.kaoss_usb_note_live(None, false, note);
+        self.kaoss_usb_notes[slot] = Some(note);
+        if !already {
+            self.kaoss_usb_emit_on(note, self.kaoss_usb_velocity(y), outbox);
+        }
+    }
+
+    fn kaoss_usb_release_slot(&mut self, slot: usize, outbox: &mut Outbox) {
+        if let Some(note) = self.kaoss_usb_notes[slot].take() {
+            if !self.kaoss_usb_note_live(None, false, note) {
+                self.kaoss_usb_emit_off(note, outbox);
             }
         }
     }
 
-    fn kaoss_usb_note_off(&mut self, outbox: &mut Outbox) {
-        if let Some(note) = self.kaoss_usb_note.take() {
-            if self.kaoss_out.includes_usb() {
-                outbox.midi_emit(
-                    "note_off",
-                    self.kaoss_channel,
-                    Some(note),
-                    Some(0),
-                    None,
-                    None,
-                );
+    fn kaoss_usb_assign_hold(&mut self, x: f32, y: f32, outbox: &mut Outbox) {
+        if !self.kaoss_out.includes_usb() {
+            return;
+        }
+        let note = self.kaoss_note_at(x);
+        if self.kaoss_usb_hold == Some(note) {
+            return;
+        }
+        if let Some(old) = self.kaoss_usb_hold.take() {
+            if !self.kaoss_usb_note_live(None, true, old) {
+                self.kaoss_usb_emit_off(old, outbox);
             }
         }
+        let already = self.kaoss_usb_note_live(None, true, note);
+        self.kaoss_usb_hold = Some(note);
+        if !already {
+            self.kaoss_usb_emit_on(note, self.kaoss_usb_velocity(y), outbox);
+        }
+    }
+
+    fn kaoss_usb_release_hold(&mut self, outbox: &mut Outbox) {
+        if let Some(note) = self.kaoss_usb_hold.take() {
+            if !self.kaoss_usb_note_live(None, true, note) {
+                self.kaoss_usb_emit_off(note, outbox);
+            }
+        }
+    }
+
+    /// Move a lifted finger's note onto the HOLD latch without a note-off.
+    fn kaoss_usb_slot_to_hold(&mut self, slot: usize, outbox: &mut Outbox) {
+        let note = self.kaoss_usb_notes[slot].take();
+        if self.kaoss_usb_hold == note {
+            return;
+        }
+        if let Some(old) = self.kaoss_usb_hold.take() {
+            if !self.kaoss_usb_note_live(None, true, old) {
+                self.kaoss_usb_emit_off(old, outbox);
+            }
+        }
+        self.kaoss_usb_hold = note;
     }
 
     fn kaoss_usb_silence(&mut self, outbox: &mut Outbox, clear_touch_cc: bool) {
-        self.kaoss_usb_note_off(outbox);
+        for slot in 0..MAX_FINGERS {
+            self.kaoss_usb_release_slot(slot, outbox);
+        }
+        self.kaoss_usb_release_hold(outbox);
         if clear_touch_cc {
             self.kaoss_usb_pad_up(outbox);
         }
@@ -6593,6 +7101,7 @@ impl NativeModel {
                 // X plays the scale; Y is how fast the tone filter wobbles.
                 outbox.synth("tone_lfo_rate", y.clamp(0.0, 1.0));
                 outbox.synth("tone_lfo_amount", 1.0);
+                self.kaoss_tone_lfo_amount = 1.0;
                 self.mark_dirty();
             } else if prog.y_param == "pitch_bend" {
                 self.apply_kaoss_pitch_bend(y, outbox);
@@ -6600,6 +7109,9 @@ impl NativeModel {
                 self.apply_named_param(prog.y_param, y, outbox);
                 self.mark_dirty();
             }
+        } else if prog.midi_gesture().is_some() {
+            self.apply_kaoss_midi_gesture(prog, x, y, false, outbox);
+            self.mark_dirty();
         } else {
             if let Some(xp) = prog.x_param {
                 self.apply_named_param(xp, x, outbox);
@@ -6613,6 +7125,7 @@ impl NativeModel {
             } else if prog.y_param == "tone_lfo" {
                 outbox.synth("tone_lfo_rate", y.clamp(0.0, 1.0));
                 outbox.synth("tone_lfo_amount", 1.0);
+                self.kaoss_tone_lfo_amount = 1.0;
             } else if prog.y_param == "pitch_bend" {
                 self.apply_kaoss_pitch_bend(y, outbox);
             } else {
@@ -6622,6 +7135,106 @@ impl NativeModel {
         }
     }
 
+    fn emit_gesture_cc(&mut self, cc: u8, value: u8, outbox: &mut Outbox) {
+        if !self.kaoss_out.includes_usb() {
+            return;
+        }
+        let cc = cc & 0x7f;
+        let value = value & 0x7f;
+        if self.kaoss_gesture_cc[cc as usize] == Some(value) {
+            return;
+        }
+        self.kaoss_gesture_cc[cc as usize] = Some(value);
+        outbox.midi_emit(
+            "cc",
+            self.kaoss_channel,
+            None,
+            None,
+            Some(cc),
+            Some(u16::from(value)),
+        );
+    }
+
+    fn emit_gesture_pressure(&mut self, value: u8, outbox: &mut Outbox) {
+        if !self.kaoss_out.includes_usb() {
+            return;
+        }
+        let value = value & 0x7f;
+        if self.kaoss_gesture_pressure == Some(value) {
+            return;
+        }
+        self.kaoss_gesture_pressure = Some(value);
+        outbox.midi_emit(
+            "channel_pressure",
+            self.kaoss_channel,
+            None,
+            None,
+            None,
+            Some(u16::from(value)),
+        );
+    }
+
+    /// `release` is a finger-up or program change. Every gesture returns to rest.
+    /// HOLD FX skips this on lift so the last value stays.
+    fn apply_kaoss_midi_gesture(
+        &mut self,
+        prog: kaoss_ui::KaossProgram,
+        x: f32,
+        y: f32,
+        release: bool,
+        outbox: &mut Outbox,
+    ) {
+        let Some(gesture) = prog.midi_gesture() else {
+            return;
+        };
+        match gesture {
+            kaoss_ui::KaossMidiGesture::Expression => {
+                let value = if release { 127 } else { Self::midi_cc01(y) };
+                self.emit_gesture_cc(11, value, outbox);
+            }
+            kaoss_ui::KaossMidiGesture::Brightness => {
+                if release {
+                    self.emit_gesture_cc(74, 127, outbox);
+                    self.emit_gesture_cc(71, 0, outbox);
+                } else {
+                    self.emit_gesture_cc(74, Self::midi_cc01(y), outbox);
+                    self.emit_gesture_cc(71, Self::midi_cc01(x), outbox);
+                }
+            }
+            kaoss_ui::KaossMidiGesture::Pressure => {
+                let value = if release { 0 } else { Self::midi_cc01(y) };
+                self.emit_gesture_pressure(value, outbox);
+            }
+            kaoss_ui::KaossMidiGesture::Glide => {
+                if release {
+                    self.emit_gesture_cc(65, 0, outbox);
+                } else {
+                    self.emit_gesture_cc(65, 127, outbox);
+                    self.emit_gesture_cc(5, Self::midi_cc01(y), outbox);
+                }
+            }
+            kaoss_ui::KaossMidiGesture::Pan => {
+                let value = if release { 64 } else { Self::midi_cc01(x) };
+                self.emit_gesture_cc(10, value, outbox);
+            }
+            kaoss_ui::KaossMidiGesture::ModWheel => {
+                let value = if release { 0 } else { Self::midi_cc01(y) };
+                self.emit_gesture_cc(1, value, outbox);
+            }
+        }
+    }
+
+    fn release_kaoss_midi_gesture(
+        &mut self,
+        prog: kaoss_ui::KaossProgram,
+        outbox: &mut Outbox,
+    ) {
+        if prog.midi_gesture().is_none() {
+            return;
+        }
+        self.apply_kaoss_midi_gesture(prog, 0.0, 0.0, true, outbox);
+    }
+
     fn apply_named_param(&mut self, name: &str, value: f32, outbox: &mut Outbox) {
         let v = value.clamp(0.0, 1.0);
         if Self::is_pad_fx_param(name) {
@@ -6629,6 +7242,10 @@ impl NativeModel {
             return;
         }
         outbox.synth(name, v);
+        if name == "vibrato_rate" {
+            // Engine maps 0..1 to 1–9 Hz. MIDI vibrato uses the Hz field.
+            self.vibrato_rate = 1.0 + v * 8.0;
+        }
         if let Some(i) = Self::synth_param_index(name) {
             self.synth_params[i] = v;
             if i == 0 {
@@ -6638,6 +7255,12 @@ impl NativeModel {
     }
 
     fn push_kaoss_fx(&mut self, name: &str, value: f32, outbox: &mut Outbox) {
+        match name {
+            "delay_time" => self.kaoss_delay_time = value,
+            "delay_fb" => self.kaoss_delay_fb = value,
+            "reverb_size" => self.kaoss_reverb_size = value,
+            _ => {}
+        }
         if self.kaoss_fx_target.includes_voice() {
             if let Some(i) = Self::voice_fx_slider_index(name) {
                 self.fx_voice[i] = value;
@@ -6655,8 +7278,66 @@ impl NativeModel {
         }
     }
 
+    fn note_midi_held(&mut self, channel: u8, on: bool) {
+        if channel == DRUM_CHANNEL {
+            return;
+        }
+        let slot = &mut self.midi_held[(channel & 0x0f) as usize];
+        if on {
+            *slot = slot.saturating_add(1);
+        } else {
+            *slot = slot.saturating_sub(1);
+        }
+    }
+
+    /// VIB is a local pitch LFO. Mirror it as pitch bend so USB MIDI notes wobble
+    /// the same way. Bend already sends its own wheel; this rides on top of it.
+    fn tick_kaoss_midi_expression(&mut self, dt: f32, outbox: &mut Outbox) {
+        let vib_on = self.vibrato_always > 0.01 && self.vibrato_depth > 0.001;
+        if !vib_on {
+            if self.kaoss_expr_vib {
+                self.kaoss_expr_vib = false;
+                let wheel = kaoss_ui::semis_to_pitch_bend_midi(self.kaoss_expr_bend);
+                self.emit_expr_wheel(wheel, outbox);
+            }
+            return;
+        }
+        self.kaoss_expr_vib = true;
+        self.kaoss_expr_phase =
+            (self.kaoss_expr_phase + std::f32::consts::TAU * self.vibrato_rate.max(0.1) * dt)
+                % std::f32::consts::TAU;
+        let semis = (self.kaoss_expr_bend
+            + self.kaoss_expr_phase.sin() * self.vibrato_depth * self.vibrato_always.clamp(0.0, 1.0))
+            .clamp(-12.0, 12.0);
+        let wheel = kaoss_ui::semis_to_pitch_bend_midi(semis);
+        self.emit_expr_wheel(wheel, outbox);
+    }
+
+    fn emit_expr_wheel(&mut self, wheel: u16, outbox: &mut Outbox) {
+        let mut mask = 0u16;
+        if self.kaoss_out.includes_usb() {
+            mask |= 1u16 << (self.kaoss_channel & 0x0f);
+        }
+        for ch in 0..16 {
+            if self.midi_held[ch] > 0 {
+                mask |= 1u16 << ch;
+            }
+        }
+        for ch in 0..16u8 {
+            if mask & (1u16 << ch) == 0 {
+                continue;
+            }
+            if self.kaoss_expr_wheel[ch as usize] == wheel {
+                continue;
+            }
+            outbox.midi_emit("pitch_bend", ch, None, None, None, Some(wheel));
+            self.kaoss_expr_wheel[ch as usize] = wheel;
+        }
+    }
+
     fn apply_kaoss_pitch_bend(&mut self, y: f32, outbox: &mut Outbox) {
         let semis = kaoss_ui::y_to_pitch_bend_semis(y);
+        self.kaoss_expr_bend = semis;
         outbox.synth("pitch_bend", semis);
         if self.kaoss_out.includes_usb() {
             let wheel = kaoss_ui::y_to_pitch_bend_midi(y);
@@ -6673,6 +7354,7 @@ impl NativeModel {
     }
 
     fn reset_kaoss_pitch_bend(&mut self, outbox: &mut Outbox) {
+        self.kaoss_expr_bend = 0.0;
         outbox.synth("pitch_bend", 0.0);
         if self.kaoss_out.includes_usb() {
             outbox.midi_emit(
@@ -6687,7 +7369,119 @@ impl NativeModel {
     }
 
     fn reset_kaoss_tone_lfo(&mut self, outbox: &mut Outbox) {
+        self.kaoss_tone_lfo_amount = 0.0;
         outbox.synth("tone_lfo_amount", 0.0);
+    }
+
+    fn capture_kaoss_fx_spring(&self) -> KaossFxSpring {
+        KaossFxSpring {
+            synth_params: self.synth_params,
+            vibrato_depth: self.vibrato_depth,
+            vibrato_always: self.vibrato_always,
+            vibrato_rate: self.vibrato_rate,
+            fx_voice: self.fx_voice,
+            fx_drum: self.fx_drum,
+            fx_flanger_rate: self.fx_flanger_rate,
+            delay_time: self.kaoss_delay_time,
+            delay_fb: self.kaoss_delay_fb,
+            reverb_size: self.kaoss_reverb_size,
+            tone_lfo_amount: self.kaoss_tone_lfo_amount,
+            bend: self.kaoss_expr_bend,
+        }
+    }
+
+    /// Last finger up with HOLD FX off: put pad FX back where it was before the touch.
+    fn spring_kaoss_fx(&mut self, prog: kaoss_ui::KaossProgram, outbox: &mut Outbox) {
+        if let Some(snap) = self.kaoss_fx_spring {
+            self.restore_kaoss_fx_spring(snap, outbox);
+        } else {
+            if prog.y_param == "pitch_bend" {
+                self.reset_kaoss_pitch_bend(outbox);
+            }
+            if prog.y_param == "tone_lfo" {
+                self.reset_kaoss_tone_lfo(outbox);
+            }
+        }
+        self.release_kaoss_midi_gesture(prog, outbox);
+    }
+
+    fn restore_kaoss_fx_spring(&mut self, snap: KaossFxSpring, outbox: &mut Outbox) {
+        const SYNTH: [&str; 5] = ["morph", "tone", "level", "attack", "release"];
+        for i in 0..5 {
+            if (self.synth_params[i] - snap.synth_params[i]).abs() <= 0.001 {
+                continue;
+            }
+            self.synth_params[i] = snap.synth_params[i];
+            outbox.synth(SYNTH[i], snap.synth_params[i]);
+            if i == 0 {
+                self.sync_wave_bank();
+            }
+        }
+        if (self.vibrato_depth - snap.vibrato_depth).abs() > 0.001
+            || (self.vibrato_always - snap.vibrato_always).abs() > 0.001
+        {
+            self.vibrato_depth = snap.vibrato_depth;
+            self.vibrato_always = snap.vibrato_always;
+            outbox.synth(
+                "vibrato_depth",
+                (snap.vibrato_depth * 0.5).clamp(0.0, 1.0),
+            );
+            outbox.synth("vibrato_always", snap.vibrato_always);
+        }
+        if (self.vibrato_rate - snap.vibrato_rate).abs() > 0.001 {
+            self.vibrato_rate = snap.vibrato_rate;
+            outbox.synth(
+                "vibrato_rate",
+                ((snap.vibrato_rate - 1.0) / 8.0).clamp(0.0, 1.0),
+            );
+        }
+        const FX: [&str; 4] = ["drive", "delay_mix", "reverb_mix", "flanger_mix"];
+        for i in 0..4 {
+            if (self.fx_voice[i] - snap.fx_voice[i]).abs() > 0.001 {
+                self.fx_voice[i] = snap.fx_voice[i];
+                self.push_voice_fx(FX[i], snap.fx_voice[i], outbox);
+            }
+            if (self.fx_drum[i] - snap.fx_drum[i]).abs() > 0.001 {
+                self.fx_drum[i] = snap.fx_drum[i];
+                outbox.fx_drum_group(FX[i], snap.fx_drum[i]);
+            }
+        }
+        if (self.fx_flanger_rate - snap.fx_flanger_rate).abs() > 0.001 {
+            self.fx_flanger_rate = snap.fx_flanger_rate;
+            self.push_voice_fx("flanger_rate", snap.fx_flanger_rate, outbox);
+        }
+        for (name, current, saved) in [
+            ("delay_time", self.kaoss_delay_time, snap.delay_time),
+            ("delay_fb", self.kaoss_delay_fb, snap.delay_fb),
+            ("reverb_size", self.kaoss_reverb_size, snap.reverb_size),
+        ] {
+            if (current - saved).abs() > 0.001 {
+                self.push_kaoss_fx(name, saved, outbox);
+            }
+        }
+        if (self.kaoss_tone_lfo_amount - snap.tone_lfo_amount).abs() > 0.001 {
+            self.kaoss_tone_lfo_amount = snap.tone_lfo_amount;
+            outbox.synth("tone_lfo_amount", snap.tone_lfo_amount);
+        }
+        if (self.kaoss_expr_bend - snap.bend).abs() > 0.01 {
+            if snap.bend.abs() < 0.01 {
+                self.reset_kaoss_pitch_bend(outbox);
+            } else {
+                self.kaoss_expr_bend = snap.bend;
+                outbox.synth("pitch_bend", snap.bend);
+                if self.kaoss_out.includes_usb() {
+                    let wheel = kaoss_ui::semis_to_pitch_bend_midi(snap.bend);
+                    outbox.midi_emit(
+                        "pitch_bend",
+                        self.kaoss_channel,
+                        None,
+                        None,
+                        None,
+                        Some(wheel),
+                    );
+                }
+            }
+        }
     }
 
     fn synth_param_index(name: &str) -> Option<usize> {
@@ -6837,6 +7631,7 @@ impl NativeModel {
             ScrollKind::Home => self.home_scroll,
             ScrollKind::SongList => self.song_scroll as i32,
             ScrollKind::Log => self.log_scroll as i32,
+            ScrollKind::FmPatches => self.fm_patch_scroll,
         }
     }
 
@@ -6869,6 +7664,11 @@ impl NativeModel {
                 let list = self.layout.log_list_scroll(self.log_lines.len());
                 self.log_scroll = list.clamp_scroll(value.max(0) as usize);
             }
+            ScrollKind::FmPatches => {
+                let n = jambox_core::FM_RECIPE_COUNT + self.fm_patches.len();
+                let grid = self.layout.fm_patch_grid(n);
+                self.fm_patch_scroll = grid.clamp_scroll(value);
+            }
         }
         self.mark_dirty();
     }
@@ -6884,7 +7684,8 @@ impl NativeModel {
             ScrollKind::SynthMorphPick
             | ScrollKind::KaossPicker
             | ScrollKind::KaossSettings
-            | ScrollKind::Home => {
+            | ScrollKind::Home
+            | ScrollKind::FmPatches => {
                 let delta = start_py - py;
                 self.set_scroll_offset(kind, scroll_at_start + delta);
             }
@@ -6958,6 +7759,13 @@ impl NativeModel {
                     let mode = crate::layout::HOME_TILES[index].0;
                     self.push_nav_history(mode);
                     self.switch_mode(mode, outbox);
+                }
+            }
+            ScrollKind::FmPatches => {
+                let n = jambox_core::FM_RECIPE_COUNT + self.fm_patches.len();
+                let grid = self.layout.fm_patch_grid(n);
+                if let Some(index) = grid.index_at(px, py, self.fm_patch_scroll) {
+                    self.load_fm_patch_index(index, outbox);
                 }
             }
         }
@@ -7643,9 +8451,22 @@ impl NativeModel {
             }
             self.kaoss_usb_silence(outbox, true);
         }
+        self.wipe_kaoss_midi_gestures(outbox);
         self.status_line = "KAOSS FX wiped".into();
         self.push_log("KAOSS FX wiped");
         self.mark_dirty();
+    }
+
+    /// Return channel-wide Kaoss MIDI to rest: expression full, filter open,
+    /// resonance off, pressure off, glide off, pan centered, mod wheel down.
+    fn wipe_kaoss_midi_gestures(&mut self, outbox: &mut Outbox) {
+        let rests = [(11u8, 127u8), (74, 127), (71, 0), (65, 0), (5, 0), (10, 64), (1, 0)];
+        for (cc, value) in rests {
+            self.kaoss_gesture_cc[cc as usize] = None;
+            self.emit_gesture_cc(cc, value, outbox);
+        }
+        self.kaoss_gesture_pressure = None;
+        self.emit_gesture_pressure(0, outbox);
     }
 
     fn cycle_pads_channel(&mut self) {
@@ -8428,6 +9249,44 @@ mod tests {
     }
 
     #[test]
+    fn kaoss_vib_fx_x_sets_rate_and_y_sets_depth() {
+        let mut model = model_on_kaoss();
+        model.kaoss_program = kaoss_ui::KAOSS_PROGRAMS
+            .iter()
+            .position(|p| p.id == "vib_fx")
+            .expect("vib_fx program");
+        let prog = kaoss_ui::program(model.kaoss_program);
+        assert!(!prog.note);
+        assert_eq!(prog.x_param, Some("vibrato_rate"));
+        let mut out = Outbox::new();
+        let k = model.layout.kaoss;
+        // Right edge, high on the pad: fast rate, deep vibrato.
+        model.finger_down(1, k.x + k.w - 8, k.y + 8, &mut out);
+        let batch = out.take();
+        assert!(
+            batch.iter().any(|r| matches!(
+                r,
+                Request::Synth { param, value, .. }
+                    if param == "vibrato_rate" && *value > 0.7
+            )),
+            "VIB FX X should set vibrato rate: {batch:?}"
+        );
+        assert!(
+            batch.iter().any(|r| matches!(
+                r,
+                Request::Synth { param, value, .. }
+                    if param == "vibrato_depth" && *value > 0.5
+            )),
+            "VIB FX Y should set vibrato depth: {batch:?}"
+        );
+        assert!(model.vibrato_rate > 7.0, "rate field should track pad X");
+        assert!(
+            !batch.iter().any(|r| matches!(r, Request::Touch { .. })),
+            "VIB FX must not start a pad note: {batch:?}"
+        );
+    }
+
+    #[test]
     fn kaoss_wah_fx_sculpts_without_starting_a_note() {
         let mut model = model_on_kaoss();
         model.kaoss_program = kaoss_ui::KAOSS_PROGRAMS
@@ -8483,6 +9342,28 @@ mod tests {
             !batch.iter().any(|r| matches!(r, Request::Touch { .. })),
             "BEND FX must not start a local pad note: {batch:?}"
         );
+    }
+
+    #[test]
+    fn kaoss_vib_sends_a_pitch_wheel_wobble() {
+        let mut model = model_on_kaoss();
+        model.kaoss_out = OutMode::Both;
+        model.vibrato_always = 1.0;
+        model.vibrato_depth = 1.0;
+        model.vibrato_rate = 8.0;
+        let mut out = Outbox::new();
+        model.tick(0.05, &mut out);
+        let batch = out.take();
+        let wheel = batch.iter().find_map(|r| match r {
+            Request::MidiEmit {
+                kind,
+                value: Some(wheel),
+                ..
+            } if kind == "pitch_bend" => Some(*wheel),
+            _ => None,
+        });
+        let wheel = wheel.expect(&format!("VIB should emit pitch bend: {batch:?}"));
+        assert!(wheel != 8192, "a quarter-cycle of vibrato should leave center, got {wheel}");
     }
 
     #[test]
@@ -8564,7 +9445,7 @@ mod tests {
         model.drum_repeat[jambox_core::DrumModel::Kick.index()] = RepeatDivisionChoice::Quarter;
         let mut out = Outbox::new();
         let kick = model.layout.kit_pad_cell(4);
-        let snare = model.layout.kit_pad_cell(5);
+        let snare = model.layout.kit_pad_cell(13);
         model.finger_down(1, kick.x + 4, kick.y + 4, &mut out);
         model.finger_down(2, snare.x + 4, snare.y + 4, &mut out);
         assert_eq!(model.active_fingers(), 2);
@@ -8819,17 +9700,42 @@ mod tests {
     }
 
     #[test]
-    fn kaoss_usb_reconciles_to_the_remaining_finger() {
-        let mut model = NativeModel::new();
+    fn kaoss_usb_sends_a_note_per_finger() {
+        let mut model = model_on_kaoss();
         model.kaoss_out = OutMode::Usb;
         let mut out = Outbox::new();
         let a = model.layout.kaoss_cell(1, 3);
         let b = model.layout.kaoss_cell(10, 3);
+        let note_a = model.kaoss_note_at(model.layout.kaoss.pad_xy(a.x + 4, a.y + 4).0);
+        let note_b = model.kaoss_note_at(model.layout.kaoss.pad_xy(b.x + 4, b.y + 4).0);
+        assert_ne!(note_a, note_b, "the two pad cells must be different pitches");
+
         model.finger_down(1, a.x + 4, a.y + 4, &mut out);
         model.finger_down(2, b.x + 4, b.y + 4, &mut out);
-        out.take();
+        let downs = out.take();
+        let ons: Vec<u8> = downs
+            .iter()
+            .filter_map(|r| match r {
+                Request::MidiEmit {
+                    kind,
+                    note: Some(n),
+                    ..
+                } if kind == "note_on" => Some(*n),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            ons.contains(&note_a) && ons.contains(&note_b),
+            "each finger should send its own note-on: {downs:?}"
+        );
+        assert!(
+            downs.iter().all(|r| !matches!(
+                r,
+                Request::MidiEmit { kind, .. } if kind == "note_off"
+            )),
+            "the second finger must not silence the first: {downs:?}"
+        );
 
-        let keep = model.kaoss_note_at(model.layout.kaoss.pad_xy(a.x + 4, a.y + 4).0);
         model.finger_up(2, &mut out);
         let lift = out.take();
         assert!(
@@ -8839,9 +9745,9 @@ mod tests {
                     kind,
                     note: Some(n),
                     ..
-                } if kind == "note_on" && *n == keep
+                } if kind == "note_off" && *n == note_b
             )),
-            "USB out should retarget the remaining finger's note: {lift:?}"
+            "lifting one finger releases only that pitch: {lift:?}"
         );
         assert!(
             lift.iter().all(|r| !matches!(
@@ -8850,9 +9756,9 @@ mod tests {
                     kind,
                     note: Some(n),
                     ..
-                } if kind == "note_off" && *n == keep
+                } if (kind == "note_off" || kind == "note_on") && *n == note_a
             )),
-            "USB must not note-off the remaining pitch: {lift:?}"
+            "the remaining pitch stays held: {lift:?}"
         );
     }
 
@@ -8985,6 +9891,222 @@ mod tests {
                 ..
             } if param == "drive"
         )));
+    }
+
+    fn midi_ccs(batch: &[Request], cc: u8) -> Vec<u16> {
+        batch
+            .iter()
+            .filter_map(|r| match r {
+                Request::MidiEmit {
+                    kind,
+                    control: Some(c),
+                    value: Some(v),
+                    ..
+                } if kind == "cc" && *c == cc => Some(*v),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn kaoss_midi_gesture_programs() {
+        let mut model = model_on_kaoss();
+        model.kaoss_out = OutMode::Usb;
+        let mut out = Outbox::new();
+        let k = model.layout.kaoss;
+        let top = k.y + 6;
+        let bottom = k.y + k.h - 6;
+        let left = k.x + 4;
+        let right = k.x + k.w - 6;
+        let mid_x = k.x + k.w / 2;
+
+        select_kaoss_program(&mut model, "expr");
+        model.finger_down(1, mid_x, bottom, &mut out);
+        let down = out.take();
+        assert!(
+            midi_ccs(&down, 11).iter().any(|v| *v < 20),
+            "low Y ducks expression: {down:?}"
+        );
+        assert!(
+            !down.iter().any(|r| matches!(r, Request::Touch { .. })),
+            "EXPR must not start a pad note"
+        );
+        model.finger_up(1, &mut out);
+        let lift = out.take();
+        assert!(
+            midi_ccs(&lift, 11).contains(&127),
+            "expression springs back to full: {lift:?}"
+        );
+
+        select_kaoss_program(&mut model, "bright");
+        model.finger_down(1, right, top, &mut out);
+        let down = out.take();
+        assert!(
+            midi_ccs(&down, 74).iter().any(|v| *v > 100),
+            "Y opens brightness: {down:?}"
+        );
+        assert!(
+            midi_ccs(&down, 71).iter().any(|v| *v > 100),
+            "X raises resonance: {down:?}"
+        );
+        model.finger_up(1, &mut out);
+        let lift = out.take();
+        assert!(
+            midi_ccs(&lift, 74).contains(&127) && midi_ccs(&lift, 71).contains(&0),
+            "brightness springs back when HOLD FX is off: {lift:?}"
+        );
+
+        select_kaoss_program(&mut model, "press");
+        model.finger_down(1, mid_x, top, &mut out);
+        let down = out.take();
+        assert!(
+            down.iter().any(|r| matches!(
+                r,
+                Request::MidiEmit {
+                    kind,
+                    value: Some(v),
+                    ..
+                } if kind == "channel_pressure" && *v > 100
+            )),
+            "Y is channel pressure: {down:?}"
+        );
+        model.finger_up(1, &mut out);
+        let lift = out.take();
+        assert!(
+            lift.iter().any(|r| matches!(
+                r,
+                Request::MidiEmit {
+                    kind,
+                    value: Some(0),
+                    ..
+                } if kind == "channel_pressure"
+            )),
+            "pressure springs to zero: {lift:?}"
+        );
+
+        select_kaoss_program(&mut model, "glide");
+        model.finger_down(1, mid_x, top, &mut out);
+        let down = out.take();
+        assert!(
+            midi_ccs(&down, 65).contains(&127),
+            "glide switch turns on: {down:?}"
+        );
+        assert!(
+            midi_ccs(&down, 5).iter().any(|v| *v > 100),
+            "Y is glide time: {down:?}"
+        );
+        model.finger_up(1, &mut out);
+        let lift = out.take();
+        assert!(
+            midi_ccs(&lift, 65).contains(&0),
+            "glide turns off on lift: {lift:?}"
+        );
+
+        select_kaoss_program(&mut model, "pan");
+        model.finger_down(1, mid_x, top, &mut out);
+        let down = out.take();
+        assert!(
+            midi_ccs(&down, 10).contains(&64),
+            "center of the pad is center pan: {down:?}"
+        );
+        model.finger_up(1, &mut out);
+        out.take();
+        model.finger_down(1, left, top, &mut out);
+        let down = out.take();
+        assert!(
+            midi_ccs(&down, 10).iter().any(|v| *v < 10),
+            "left edge pans left: {down:?}"
+        );
+        model.finger_up(1, &mut out);
+        let lift = out.take();
+        assert!(
+            midi_ccs(&lift, 10).contains(&64),
+            "pan springs back to center when HOLD FX is off: {lift:?}"
+        );
+
+        select_kaoss_program(&mut model, "mod");
+        model.finger_down(1, mid_x, top, &mut out);
+        let down = out.take();
+        assert!(
+            midi_ccs(&down, 1).iter().any(|v| *v > 100),
+            "Y is the mod wheel: {down:?}"
+        );
+        model.finger_up(1, &mut out);
+        let lift = out.take();
+        assert!(
+            midi_ccs(&lift, 1).contains(&0),
+            "mod wheel springs back when HOLD FX is off: {lift:?}"
+        );
+    }
+
+    #[test]
+    fn kaoss_hold_fx_keeps_the_pad_and_springs_when_off() {
+        let mut model = model_on_kaoss();
+        model.kaoss_out = OutMode::Usb;
+        let mut out = Outbox::new();
+        let k = model.layout.kaoss;
+        let top = k.y + 6;
+        let right = k.x + k.w - 6;
+        let btn = model.layout.kaoss_fx_hold;
+
+        model.finger_down(1, btn.x + 4, btn.y + 4, &mut out);
+        model.finger_up(1, &mut out);
+        out.take();
+        assert!(model.kaoss_fx_hold, "HFX button turns HOLD FX on");
+
+        select_kaoss_program(&mut model, "bright");
+        model.finger_down(1, right, top, &mut out);
+        out.take();
+        model.finger_up(1, &mut out);
+        let lift = out.take();
+        assert!(
+            midi_ccs(&lift, 74).is_empty() && midi_ccs(&lift, 71).is_empty(),
+            "HOLD FX keeps brightness: {lift:?}"
+        );
+
+        select_kaoss_program(&mut model, "echo");
+        model.finger_down(1, right, top, &mut out);
+        let down = out.take();
+        assert!(
+            down.iter().any(|r| matches!(
+                r,
+                Request::Fx { param, value, .. } if param == "delay_mix" && *value > 0.5
+            )),
+            "echo raises delay mix: {down:?}"
+        );
+        model.finger_up(1, &mut out);
+        let lift = out.take();
+        assert!(
+            !lift.iter().any(|r| matches!(
+                r,
+                Request::Fx { param, .. } if param == "delay_mix"
+            )),
+            "HOLD FX keeps the echo: {lift:?}"
+        );
+
+        model.finger_down(1, btn.x + 4, btn.y + 4, &mut out);
+        model.finger_up(1, &mut out);
+        let toggled = out.take();
+        assert!(!model.kaoss_fx_hold, "HFX button turns HOLD FX off");
+        assert!(
+            toggled.iter().any(|r| matches!(
+                r,
+                Request::Fx { param, value, .. } if param == "delay_mix" && *value < 0.01
+            )),
+            "turning HOLD FX off springs the stuck echo: {toggled:?}"
+        );
+
+        model.finger_down(1, right, top, &mut out);
+        out.take();
+        model.finger_up(1, &mut out);
+        let lift = out.take();
+        assert!(
+            lift.iter().any(|r| matches!(
+                r,
+                Request::Fx { param, value, .. } if param == "delay_mix" && *value < 0.01
+            )),
+            "echo springs back on lift when HOLD FX is off: {lift:?}"
+        );
     }
 
     fn select_kaoss_program(model: &mut NativeModel, id: &str) {
@@ -9180,6 +10302,90 @@ mod tests {
     }
 
     #[test]
+    fn power_menu_buttons_do_not_open_the_page_underneath() {
+        let mut model = NativeModel::new();
+        assert_eq!(model.mode, UiMode::Home);
+        let mut out = Outbox::new();
+        let power = model.layout.nav_power();
+        model.finger_down(1, power.x + 8, power.y + 8, &mut out);
+        model.finger_up(1, &mut out);
+        assert!(model.power_menu_open, "POWER should open the menu");
+
+        let shut = model.layout.power_shutdown;
+        model.finger_down(2, shut.x + shut.w / 2, shut.y + shut.h / 2, &mut out);
+        model.finger_up(2, &mut out);
+        assert_eq!(model.mode, UiMode::Home, "shut down must not open a home tile");
+        assert!(
+            model.power_menu_open,
+            "the power menu stays up while shut down runs"
+        );
+        assert!(
+            model.status_line.to_ascii_lowercase().contains("power"),
+            "shut down should run the power action, got {}",
+            model.status_line
+        );
+
+        let screen = model.layout.power_screen_off;
+        model.finger_down(3, screen.x + screen.w / 2, screen.y + 8, &mut out);
+        model.finger_up(3, &mut out);
+        assert_eq!(model.mode, UiMode::Home);
+        assert!(model.screensaver_active(), "screen off should blank");
+        assert!(!model.power_menu_open);
+    }
+
+    #[test]
+    fn panic_sends_midi_all_notes_off_on_every_channel() {
+        let mut model = NativeModel::new();
+        let mut out = Outbox::new();
+        model.panic_ui_state(&mut out);
+        let batch = out.take();
+        for channel in 0..16u8 {
+            for cc in [120u8, 123, 64] {
+                assert!(
+                    batch.iter().any(|r| matches!(
+                        r,
+                        Request::MidiEmit {
+                            kind,
+                            channel: ch,
+                            control: Some(c),
+                            value: Some(0),
+                            ..
+                        } if kind == "cc" && *ch == channel && *c == cc
+                    )),
+                    "channel {channel} missing CC {cc}: {batch:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn kaoss_wipe_fx_clears_midi_gestures() {
+        let mut model = model_on_kaoss();
+        model.kaoss_out = OutMode::Usb;
+        let mut out = Outbox::new();
+        model.wipe_kaoss_fx(&mut out);
+        let batch = out.take();
+        assert!(midi_ccs(&batch, 11).contains(&127), "expression back to full: {batch:?}");
+        assert!(midi_ccs(&batch, 74).contains(&127), "brightness open: {batch:?}");
+        assert!(midi_ccs(&batch, 71).contains(&0), "resonance off: {batch:?}");
+        assert!(midi_ccs(&batch, 65).contains(&0), "glide off: {batch:?}");
+        assert!(midi_ccs(&batch, 5).contains(&0), "glide time cleared: {batch:?}");
+        assert!(midi_ccs(&batch, 10).contains(&64), "pan centered: {batch:?}");
+        assert!(midi_ccs(&batch, 1).contains(&0), "mod wheel down: {batch:?}");
+        assert!(
+            batch.iter().any(|r| matches!(
+                r,
+                Request::MidiEmit {
+                    kind,
+                    value: Some(0),
+                    ..
+                } if kind == "channel_pressure"
+            )),
+            "pressure cleared: {batch:?}"
+        );
+    }
+
+    #[test]
     fn kaoss_wipe_fx_clears_voice_delay_and_reverb() {
         let mut model = NativeModel::new();
         model.set_mode(UiMode::Kaoss);
@@ -9249,7 +10455,7 @@ mod tests {
         let mut model = NativeModel::new();
         model.set_mode(UiMode::Drums);
         let mut out = Outbox::new();
-        let snare = model.layout.kit_pad_cell(5);
+        let snare = model.layout.kit_pad_cell(13);
         model.finger_down(1, snare.x + 4, snare.y + 4, &mut out);
         model.finger_up(1, &mut out);
         out.take();
@@ -9352,7 +10558,7 @@ mod tests {
         model.set_mode(UiMode::Drums);
         let mut out = Outbox::new();
         let kick = model.layout.kit_pad_cell(4);
-        let snare = model.layout.kit_pad_cell(5);
+        let snare = model.layout.kit_pad_cell(13);
         model.finger_down(1, kick.x + 4, kick.y + 4, &mut out);
         model.finger_up(1, &mut out);
         out.take();
@@ -11201,6 +12407,68 @@ mod tests {
     }
 
     #[test]
+    fn synth_knobs_move_the_on_screen_sliders() {
+        let mut model = NativeModel::new();
+        let mut out = Outbox::new();
+        model.set_mode(UiMode::Synth);
+        model.on_midi_notice(
+            &MidiNotice {
+                kind: "cc".into(),
+                channel: 0,
+                note: None,
+                velocity: None,
+                control: Some(70),
+                value: Some(127),
+            },
+            &mut out,
+        );
+        assert!((model.synth_params[0] - 1.0).abs() < 0.01);
+        let batch = out.take();
+        assert!(batch.iter().any(|r| matches!(
+            r,
+            Request::Synth { param, value, .. } if param == "morph" && *value > 0.99
+        )));
+        model.on_midi_notice(
+            &MidiNotice {
+                kind: "cc".into(),
+                channel: 0,
+                note: None,
+                velocity: None,
+                control: Some(1),
+                value: Some(100),
+            },
+            &mut out,
+        );
+        assert!((model.synth_params[0] - 1.0).abs() < 0.01, "CC1 is the joystick");
+        model.on_midi_notice(
+            &MidiNotice {
+                kind: "cc".into(),
+                channel: 0,
+                note: None,
+                velocity: None,
+                control: Some(76),
+                value: Some(64),
+            },
+            &mut out,
+        );
+        assert!((model.fx_voice[3] - 64.0 / 127.0).abs() < 0.02);
+        model.set_mode(UiMode::Fm);
+        let before = model.synth_params[1];
+        model.on_midi_notice(
+            &MidiNotice {
+                kind: "cc".into(),
+                channel: 0,
+                note: None,
+                velocity: None,
+                control: Some(71),
+                value: Some(10),
+            },
+            &mut out,
+        );
+        assert!((model.synth_params[1] - before).abs() < 0.001);
+    }
+
+    #[test]
     fn fm_mode_enables_engine_and_plays_a_key() {
         let mut model = NativeModel::new();
         let mut out = Outbox::new();
@@ -11219,10 +12487,20 @@ mod tests {
             Request::KnobMap { mode, .. } if mode == "fm"
         )));
 
-        let rec = model.layout.fm_recipe_cell(1);
-        model.finger_down(2, rec.x + 4, rec.y + 4, &mut out);
+        let open = model.layout.fm_patch_button();
+        model.finger_down(2, open.x + 4, open.y + 4, &mut out);
         model.finger_up(2, &mut out);
+        assert!(model.fm_patches_open);
+        let grid = model.layout.fm_patch_grid(jambox_core::FM_RECIPE_COUNT);
+        let rec = grid.cell_rect(1, 0);
+        model.finger_down(3, rec.x + 4, rec.y + 4, &mut out);
+        model.finger_up(3, &mut out);
         assert_eq!(model.fm_recipe, 1);
+        assert_eq!(model.fm_patch_name, "E.PIANO");
+        let done = model.layout.fm_patch_done();
+        model.finger_down(4, done.x + 4, done.y + 4, &mut out);
+        model.finger_up(4, &mut out);
+        assert!(!model.fm_patches_open);
         let batch = out.take();
         assert!(batch.iter().any(|r| matches!(
             r,
@@ -11245,12 +12523,12 @@ mod tests {
         model.switch_mode(UiMode::Fm, &mut out);
         out.take();
         let (ax, ay) = model.layout.fm_op_center(0);
-        let (dx, dy) = model.layout.fm_op_center(3);
+        let (bx, by) = model.layout.fm_op_center(1);
         model.finger_down(1, ax, ay, &mut out);
-        model.finger_move(1, dx, dy, &mut out);
+        model.finger_move(1, bx, by, &mut out);
         model.finger_up(1, &mut out);
         let batch = out.take();
-        let packed = jambox_core::pack_fm_link(0, 3, 0.7);
+        let packed = jambox_core::pack_fm_link(0, 1, 0.7);
         assert!(
             batch.iter().any(|r| matches!(
                 r,
@@ -11259,7 +12537,7 @@ mod tests {
             )),
             "{batch:?}"
         );
-        assert!((model.fm_matrix[0][3] - 0.7).abs() < 0.05);
+        assert!((model.fm_matrix[0][1] - 0.7).abs() < 0.05);
         assert_eq!(model.fm_selected, 0);
 
         let clear = model.layout.fm_clear();
@@ -11270,7 +12548,57 @@ mod tests {
             r,
             Request::Synth { param, .. } if param == "fm_clear"
         )));
-        assert_eq!(model.fm_matrix[0][3], 0.0);
+        assert_eq!(model.fm_matrix[0][1], 0.0);
+    }
+
+    #[test]
+    fn drawing_the_same_fm_link_again_erases_it_and_undo_puts_it_back() {
+        let mut model = NativeModel::new();
+        let mut out = Outbox::new();
+        model.switch_mode(UiMode::Fm, &mut out);
+        out.take();
+        let (ax, ay) = model.layout.fm_op_center(0);
+        let (bx, by) = model.layout.fm_op_center(1);
+        model.finger_down(1, ax, ay, &mut out);
+        model.finger_move(1, bx, by, &mut out);
+        model.finger_up(1, &mut out);
+        assert!((model.fm_matrix[0][1] - 0.7).abs() < 0.05);
+        model.finger_down(1, ax, ay, &mut out);
+        model.finger_move(1, bx, by, &mut out);
+        model.finger_up(1, &mut out);
+        assert_eq!(model.fm_matrix[0][1], 0.0, "drawing an existing link erases it");
+        let undo = model.layout.fm_undo();
+        model.finger_down(2, undo.x + 4, undo.y + 4, &mut out);
+        model.finger_up(2, &mut out);
+        assert!((model.fm_matrix[0][1] - 0.7).abs() < 0.05);
+        let save = model.layout.fm_save();
+        model.finger_down(3, save.x + 4, save.y + 4, &mut out);
+        model.finger_up(3, &mut out);
+        assert!(model.fm_name_open);
+        let key = model.layout.fm_name_key(0);
+        model.finger_down(4, key.x + 4, key.y + 4, &mut out);
+        model.finger_up(4, &mut out);
+        let ok = model.layout.fm_name_ok();
+        model.finger_down(5, ok.x + 4, ok.y + 4, &mut out);
+        model.finger_up(5, &mut out);
+        assert!(model.fm_user_live);
+        assert_eq!(model.fm_patches.len(), 1);
+        assert!(model.fm_patch_name.starts_with('Q') || model.fm_patch_name.contains('Q'));
+        let clear = model.layout.fm_clear();
+        model.finger_down(6, clear.x + 4, clear.y + 4, &mut out);
+        model.finger_up(6, &mut out);
+        assert_eq!(model.fm_matrix[0][1], 0.0);
+        let open = model.layout.fm_patch_button();
+        model.finger_down(7, open.x + 4, open.y + 4, &mut out);
+        model.finger_up(7, &mut out);
+        let grid = model
+            .layout
+            .fm_patch_grid(jambox_core::FM_RECIPE_COUNT + 1);
+        let user = grid.cell_rect(jambox_core::FM_RECIPE_COUNT, 0);
+        model.finger_down(8, user.x + 4, user.y + 4, &mut out);
+        model.finger_up(8, &mut out);
+        assert!(model.fm_user_live);
+        assert!((model.fm_matrix[0][1] - 0.7).abs() < 0.05);
     }
 
     #[test]
@@ -11288,6 +12616,41 @@ mod tests {
             r,
             Request::Synth { param, value, .. } if param == "fm_op" && (*value - 1.0).abs() < 0.1
         )));
+    }
+
+    #[test]
+    fn back_from_fm_patches_stays_on_the_drawing_board() {
+        let mut model = NativeModel::new();
+        let mut out = Outbox::new();
+        model.set_mode(UiMode::Home);
+        let tile = model.layout.home_tile(1, 0);
+        model.finger_down(1, tile.x + 8, tile.y + 8, &mut out);
+        model.finger_up(1, &mut out);
+        assert_eq!(model.mode, UiMode::Fm);
+
+        let open = model.layout.fm_patch_button();
+        model.finger_down(2, open.x + 4, open.y + 4, &mut out);
+        model.finger_up(2, &mut out);
+        assert!(model.fm_patches_open);
+
+        let back = model.layout.nav_back();
+        model.finger_down(3, back.x + 4, back.y + 4, &mut out);
+        model.finger_up(3, &mut out);
+        assert_eq!(model.mode, UiMode::Fm);
+        assert!(!model.fm_patches_open);
+
+        let save = model.layout.fm_save();
+        model.finger_down(4, save.x + 4, save.y + 4, &mut out);
+        model.finger_up(4, &mut out);
+        assert!(model.fm_name_open);
+        model.finger_down(5, back.x + 4, back.y + 4, &mut out);
+        model.finger_up(5, &mut out);
+        assert_eq!(model.mode, UiMode::Fm);
+        assert!(!model.fm_name_open);
+
+        model.finger_down(6, back.x + 4, back.y + 4, &mut out);
+        model.finger_up(6, &mut out);
+        assert_eq!(model.mode, UiMode::Home);
     }
 
     #[test]
@@ -11548,6 +12911,26 @@ mod tests {
             model.song_scroll > 0,
             "lift with vertical delta should scroll the list"
         );
+    }
+
+    #[test]
+    fn back_closes_synth_vib_and_fx_settings() {
+        let mut model = NativeModel::new();
+        let mut out = Outbox::new();
+        model.set_mode(UiMode::Synth);
+        model.synth_vib_open = true;
+        let back = model.layout.nav_back();
+        model.finger_down(1, back.x + 8, back.y + 8, &mut out);
+        model.finger_up(1, &mut out);
+        assert!(!model.synth_vib_open, "BACK should leave the VIB menu");
+        assert_eq!(model.mode, UiMode::Synth);
+
+        model.set_mode(UiMode::Fx);
+        model.fx_settings_open = true;
+        model.finger_down(1, back.x + 8, back.y + 8, &mut out);
+        model.finger_up(1, &mut out);
+        assert!(!model.fx_settings_open, "BACK should close FX settings");
+        assert_eq!(model.mode, UiMode::Fx);
     }
 
     #[test]

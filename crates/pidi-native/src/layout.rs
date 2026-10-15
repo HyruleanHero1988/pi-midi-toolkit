@@ -84,10 +84,21 @@ pub enum Hit {
     SynthSaveAs,
     SynthOctUp,
     SynthOctDown,
+    /// Tap the synth or FM scope square: live master mix, or the calculated wave.
+    ScopeMode,
     FmRecipe(usize),
     FmOp(usize),
     FmSlider(usize),
     FmClear,
+    FmUndo,
+    FmSave,
+    FmUser,
+    /// Open the patch list.
+    FmPatches,
+    FmPatchDone,
+    FmNameOk,
+    FmNameCancel,
+    FmNameKey(u8),
     ScrollArea(crate::scroll::ScrollKind),
     DrumMacro(usize),
     KitAllDrums,
@@ -115,6 +126,7 @@ pub enum Hit {
     KaossOctUp,
     KaossOctDown,
     KaossHold,
+    KaossFxHold,
     KaossGate,
     KaossFull,
     KaossBpmUp,
@@ -322,6 +334,7 @@ pub struct Layout {
     pub kaoss_oct_down: Rect,
     pub kaoss_oct_up: Rect,
     pub kaoss_hold: Rect,
+    pub kaoss_fx_hold: Rect,
     pub kaoss_gate: Rect,
     pub kaoss_full: Rect,
     pub kaoss_bpm_up: Rect,
@@ -556,7 +569,13 @@ impl Layout {
             kaoss_hold: Rect {
                 x: 648,
                 y: HUD_H + content_h - 100,
-                w: 144,
+                w: 70,
+                h: 44,
+            },
+            kaoss_fx_hold: Rect {
+                x: 722,
+                y: HUD_H + content_h - 100,
+                w: 70,
                 h: 44,
             },
             kaoss_gate: Rect {
@@ -1481,6 +1500,12 @@ impl Layout {
                 w: 0,
                 h: 0,
             };
+            self.kaoss_fx_hold = Rect {
+                x: 0,
+                y: 0,
+                w: 0,
+                h: 0,
+            };
             self.kaoss_gate = Rect {
                 x: 0,
                 y: 0,
@@ -1926,53 +1951,130 @@ impl Layout {
         }
     }
 
-    pub fn fm_recipe_cell(&self, index: usize) -> Rect {
-        let n = jambox_core::FM_RECIPE_COUNT as i32;
-        let gap = 6;
-        let x0 = self.content.x + 12;
-        let w_total = self.content.w - 24;
-        let w = (w_total - (n - 1) * gap) / n;
+    /// Opens the patch list. The label is the current patch name.
+    pub fn fm_patch_button(&self) -> Rect {
         Rect {
-            x: x0 + (index as i32) * (w + gap),
-            y: self.content.y + 6,
-            w,
-            h: 36,
+            x: 12,
+            y: self.content.y + 8,
+            w: 292,
+            h: 44,
         }
     }
 
-    pub fn fm_hint(&self) -> Rect {
-        Rect {
-            x: self.content.x + 16,
-            y: self.content.y + 46,
-            w: 440,
-            h: 20,
+    fn fm_tool(&self, slot: i32, w: i32) -> Rect {
+        let gap = 8;
+        let mut x = 316;
+        let widths = [72, 72, 80, 64, 64];
+        for i in 0..slot {
+            x += widths[i as usize] + gap;
         }
+        Rect {
+            x,
+            y: self.content.y + 8,
+            w,
+            h: 44,
+        }
+    }
+
+    pub fn fm_undo(&self) -> Rect {
+        self.fm_tool(0, 72)
+    }
+
+    pub fn fm_save(&self) -> Rect {
+        self.fm_tool(1, 72)
     }
 
     pub fn fm_clear(&self) -> Rect {
-        Rect {
-            x: self.content.x + self.content.w - 180,
-            y: self.content.y + 44,
-            w: 52,
-            h: 26,
-        }
+        self.fm_tool(2, 80)
     }
 
     pub fn fm_oct_down(&self) -> Rect {
-        Rect {
-            x: self.content.x + self.content.w - 120,
-            y: self.content.y + 44,
-            w: 52,
-            h: 26,
-        }
+        self.fm_tool(3, 64)
     }
 
     pub fn fm_oct_up(&self) -> Rect {
+        self.fm_tool(4, 64)
+    }
+
+    pub fn fm_patch_done(&self) -> Rect {
         Rect {
-            x: self.content.x + self.content.w - 64,
-            y: self.content.y + 44,
-            w: 52,
-            h: 26,
+            x: 16,
+            y: self.content.y + self.content.h - 56,
+            w: self.content.w - 32,
+            h: 48,
+        }
+    }
+
+    pub fn fm_patch_grid(&self, item_count: usize) -> crate::scroll::GridScroll {
+        crate::scroll::GridScroll {
+            cols: 4,
+            cell_h: 64,
+            item_count,
+            viewport: Rect {
+                x: 16,
+                y: self.content.y + 44,
+                w: self.content.w - 32,
+                h: self.content.h - 44 - 64,
+            },
+        }
+    }
+
+    pub fn fm_name_entry(&self) -> Rect {
+        Rect {
+            x: 16,
+            y: self.content.y + 48,
+            w: self.content.w - 32,
+            h: 48,
+        }
+    }
+
+    pub fn fm_name_ok(&self) -> Rect {
+        Rect {
+            x: 16,
+            y: self.content.y + self.content.h - 60,
+            w: (self.content.w - 40) / 2,
+            h: 48,
+        }
+    }
+
+    pub fn fm_name_cancel(&self) -> Rect {
+        let ok = self.fm_name_ok();
+        Rect {
+            x: ok.x + ok.w + 8,
+            y: ok.y,
+            w: ok.w,
+            h: ok.h,
+        }
+    }
+
+    /// Three rows: letters, then space and delete.
+    pub fn fm_name_key(&self, index: usize) -> Rect {
+        let labels = fm_name_key_labels();
+        let mut cursor = 0usize;
+        let origin_y = self.content.y + 112;
+        let row_h = 62;
+        let x0 = 12;
+        let width = self.content.w - 24;
+        for (row, keys) in labels.iter().enumerate() {
+            let n = keys.len() as i32;
+            let key_w = width / n;
+            for col in 0..keys.len() {
+                if cursor == index {
+                    return Rect {
+                        x: x0 + col as i32 * key_w + 2,
+                        y: origin_y + row as i32 * row_h + 2,
+                        w: key_w - 4,
+                        h: row_h - 6,
+                    };
+                }
+                cursor += 1;
+            }
+        }
+        Rect {
+            x: 0,
+            y: 0,
+            w: 0,
+            h: 0,
         }
     }
 
@@ -1986,12 +2088,12 @@ impl Layout {
 
     /// 2×2 operator graph. Swipe one circle into another to patch.
     pub fn fm_graph(&self) -> Rect {
-        let y = self.content.y + 74;
+        let y = self.content.y + 60;
         Rect {
             x: 12,
             y,
             w: 400,
-            h: self.fm_expanded_h(y, 158, 0),
+            h: self.fm_expanded_h(y, 170, 0),
         }
     }
 
@@ -2025,12 +2127,12 @@ impl Layout {
     }
 
     pub fn fm_scope(&self) -> Rect {
-        let y = self.content.y + 74;
+        let y = self.content.y + 60;
         Rect {
             x: 420,
             y,
             w: 168,
-            h: self.fm_expanded_h(y, 158, 0),
+            h: self.fm_expanded_h(y, 170, 0),
         }
     }
 
@@ -2039,7 +2141,7 @@ impl Layout {
         let area_x = 600;
         let area_w = 188;
         let w = area_w / n;
-        let y = self.content.y + 92;
+        let y = self.content.y + 78;
         // Room for the clang-ratio label under the tracks when keys are gone.
         let pad = if self.show_on_screen_keys { 0 } else { 22 };
         Rect {
@@ -2506,6 +2608,9 @@ impl Layout {
         if self.kaoss_hold.contains(px, py) {
             return Hit::KaossHold;
         }
+        if self.kaoss_fx_hold.w > 0 && self.kaoss_fx_hold.contains(px, py) {
+            return Hit::KaossFxHold;
+        }
         if self.kaoss_gate.contains(px, py) {
             return Hit::KaossGate;
         }
@@ -2659,14 +2764,21 @@ impl Layout {
         if let Some(note) = self.synth_keyboard_note_at(px, py) {
             return Hit::SynthKey { note };
         }
+        if self.synth_scope_rect().contains(px, py) {
+            return Hit::ScopeMode;
+        }
         Hit::None
     }
 
     fn hit_fm(&self, px: i32, py: i32) -> Hit {
-        for index in 0..jambox_core::FM_RECIPE_COUNT {
-            if self.fm_recipe_cell(index).contains(px, py) {
-                return Hit::FmRecipe(index);
-            }
+        if self.fm_patch_button().contains(px, py) {
+            return Hit::FmPatches;
+        }
+        if self.fm_undo().contains(px, py) {
+            return Hit::FmUndo;
+        }
+        if self.fm_save().contains(px, py) {
+            return Hit::FmSave;
         }
         if self.fm_clear().contains(px, py) {
             return Hit::FmClear;
@@ -2687,6 +2799,36 @@ impl Layout {
         }
         if let Some(note) = self.synth_keyboard_note_at(px, py) {
             return Hit::SynthKey { note };
+        }
+        if self.fm_scope().contains(px, py) {
+            return Hit::ScopeMode;
+        }
+        Hit::None
+    }
+
+    pub fn hit_fm_patches(&self, px: i32, py: i32, item_count: usize, scroll_y: i32) -> Hit {
+        if self.fm_patch_done().contains(px, py) {
+            return Hit::FmPatchDone;
+        }
+        let grid = self.fm_patch_grid(item_count);
+        if grid.viewport.contains(px, py) {
+            return Hit::ScrollArea(crate::scroll::ScrollKind::FmPatches);
+        }
+        let _ = scroll_y;
+        Hit::None
+    }
+
+    pub fn hit_fm_name(&self, px: i32, py: i32) -> Hit {
+        if self.fm_name_ok().contains(px, py) {
+            return Hit::FmNameOk;
+        }
+        if self.fm_name_cancel().contains(px, py) {
+            return Hit::FmNameCancel;
+        }
+        for index in 0..fm_name_key_count() {
+            if self.fm_name_key(index).contains(px, py) {
+                return Hit::FmNameKey(index as u8);
+            }
         }
         Hit::None
     }
@@ -2879,11 +3021,15 @@ impl Layout {
             crate::kaoss_ui::KaossPicker::Scale => 4,
         };
         let _ = show_all;
+        let mut viewport = self.kaoss;
+        // Leave a strip for the picker hint so it does not sit on the first row.
+        viewport.y += 22;
+        viewport.h = (viewport.h - 22).max(1);
         crate::scroll::GridScroll {
             cols,
             cell_h: 52,
             item_count,
-            viewport: self.kaoss,
+            viewport,
         }
     }
 
@@ -3637,6 +3783,29 @@ impl Layout {
     }
 }
 
+pub fn fm_name_key_labels() -> &'static [&'static [&'static str]] {
+    &[
+        &["Q", "W", "E", "R", "T", "Y", "U", "I", "O", "P"],
+        &["A", "S", "D", "F", "G", "H", "J", "K", "L", "-"],
+        &["Z", "X", "C", "V", "B", "N", "M", "SP", "DEL"],
+    ]
+}
+
+pub fn fm_name_key_count() -> usize {
+    fm_name_key_labels().iter().map(|row| row.len()).sum()
+}
+
+pub fn fm_name_key_label(index: usize) -> &'static str {
+    let mut cursor = 0usize;
+    for row in fm_name_key_labels() {
+        if index < cursor + row.len() {
+            return row[index - cursor];
+        }
+        cursor += row.len();
+    }
+    ""
+}
+
 /// Which performance surface a captured finger owns until lift.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Surface {
@@ -3838,6 +4007,17 @@ mod tests {
     }
 
     #[test]
+    fn layout_audit_kaoss_picker_clears_hint() {
+        let layout = Layout::new();
+        let grid = layout.kaoss_picker_grid(crate::kaoss_ui::KaossPicker::Program, 9, false);
+        let cell = grid.cell_rect(0, 0);
+        assert!(
+            cell.y >= layout.kaoss.y + 22,
+            "picker tiles must start below the hint line"
+        );
+    }
+
+    #[test]
     fn layout_audit_synth_sliders_clear_scope() {
         let layout = Layout::new();
         assert!(
@@ -3849,6 +4029,11 @@ mod tests {
         assert_eq!(
             layout.hit(UiMode::Synth, rate.x + 4, rate.y + rate.h / 2),
             Hit::SynthSlider(Layout::SYNTH_SLIDER_COUNT - 1)
+        );
+        let scope = layout.synth_scope_rect();
+        assert_eq!(
+            layout.hit(UiMode::Synth, scope.x + scope.w / 2, scope.y + scope.h / 2),
+            Hit::ScopeMode
         );
     }
 
@@ -3877,6 +4062,29 @@ mod tests {
         }
         let bottom = layout.synth_keys.y + layout.synth_keys.h;
         assert!(layout.synth_scope_rect().y + layout.synth_scope_rect().h >= bottom - 2);
+    }
+
+    #[test]
+    fn snare_and_rimshot_trade_screen_cells() {
+        let layout = Layout::new();
+        let snare = layout.kit_pad_cell(13);
+        let rimshot = layout.kit_pad_cell(5);
+        match layout.hit(UiMode::Drums, snare.x + 4, snare.y + 4) {
+            Hit::Drum { index: 13, note: 37 } => {}
+            other => panic!("snare should sit on the old rimshot cell, got {other:?}"),
+        }
+        match layout.hit(UiMode::Drums, rimshot.x + 4, rimshot.y + 4) {
+            Hit::Drum { index: 5, note: 45 } => {}
+            other => panic!("rimshot should sit on the old snare cell, got {other:?}"),
+        }
+        assert_eq!(
+            jambox_core::drum_model_for_note(37),
+            jambox_core::DrumModel::Snare
+        );
+        assert_eq!(
+            jambox_core::drum_model_for_note(45),
+            jambox_core::DrumModel::Rimshot
+        );
     }
 
     #[test]
@@ -3974,10 +4182,10 @@ mod tests {
     #[test]
     fn fm_recipe_and_keyboard_hit() {
         let layout = Layout::new();
-        let bell = layout.fm_recipe_cell(0);
+        let patch = layout.fm_patch_button();
         assert_eq!(
-            layout.hit(UiMode::Fm, bell.x + 4, bell.y + 4),
-            Hit::FmRecipe(0)
+            layout.hit(UiMode::Fm, patch.x + 4, patch.y + 4),
+            Hit::FmPatches
         );
         let slider = layout.fm_slider(0);
         assert_eq!(
