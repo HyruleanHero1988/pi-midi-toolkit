@@ -1,6 +1,6 @@
 target=armv7-unknown-linux-gnueabihf
-built_utc=2026-10-02T20:54:33Z
+built_utc=2026-10-15T13:40:38Z
 host=Linux x86_64
 host_glibc=2.35
-git_sha=d0aa226061bb7ecbd5ead66a63243d2c43fdcae3
-crates=pidi-native
+git_sha=616f6aac17d948cca6f4a5d5ab5d917a54d03402
+crates=midi-engine,jambox-engine,pidi-native
