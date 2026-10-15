@@ -11,6 +11,8 @@ use serde::{Deserialize, Serialize};
 pub const PROTOCOL_VERSION: u16 = 1;
 /// Columns in one live master-mix scope frame (min/max pair per column).
 pub const SCOPE_COLUMNS: usize = 192;
+/// Points in one three-signal wave frame (left, right, and low-passed sub).
+pub const WAVE_VIZ_POINTS: usize = 256;
 pub const NATIVE_FEATURES: &[&str] = &[
     "touch_sessions",
     "disconnect_release",
@@ -102,6 +104,14 @@ pub enum Request {
     },
     PunchBufferPrio {
         mode: u8,
+    },
+    /// Idle punch-history ring. Armed buffer FX still records.
+    PunchHistory {
+        enabled: bool,
+    },
+    /// Copy capture to the headphones with no synth, punch, or bus FX.
+    InputBypass {
+        enabled: bool,
     },
     PunchRptMode {
         mode: u8,
@@ -285,7 +295,15 @@ pub enum Request {
         len: u8,
     },
     /// Latest master-mix oscilloscope frame. One in flight; the engine does not queue these.
-    Scope,
+    /// `wave` also returns left, right, and sub traces. `sub_hz` updates the
+    /// crossover when it is above zero (sub low-pass, left/right high-pass);
+    /// zero leaves the current cutoff.
+    Scope {
+        #[serde(default)]
+        wave: bool,
+        #[serde(default)]
+        sub_hz: f32,
+    },
 }
 
 const fn default_velocity() -> u8 {
@@ -415,6 +433,16 @@ pub struct ScopeReply {
     /// Highest sample in each column.
     #[serde(default)]
     pub max: Vec<i16>,
+    /// Recent left-channel samples, oldest first. Length is [`WAVE_VIZ_POINTS`]
+    /// when the request asked for the wave view; otherwise empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub left: Vec<i16>,
+    /// Recent right-channel samples, oldest first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub right: Vec<i16>,
+    /// Recent sub samples: the bus summed, then low-passed. Oldest first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sub: Vec<i16>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
@@ -630,5 +658,4 @@ mod tests {
             }
         ));
     }
-
 }

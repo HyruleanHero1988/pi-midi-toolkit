@@ -4,19 +4,19 @@
 //! rasterizer uses the same list so dummy/PPM output matches the GPU path.
 
 use crate::font::{self, FontStyle, GLYPH_H, GLYPH_STRIDE, GLYPH_W};
-use jambox_protocol::SCOPE_COLUMNS;
 use crate::kaoss_ui;
 use crate::kaoss_viz;
 use crate::layout::{Layout, Rect, HUD_H};
-use crate::piano_roll;
-use crate::song_viz;
 use crate::mode::UiMode;
 use crate::model::{NativeModel, RepeatDivisionChoice, LED_COLS, LED_ROWS};
 use crate::phrases;
+use crate::piano_roll;
 use crate::render::{SCREEN_H, SCREEN_W};
 use crate::screensaver;
+use crate::song_viz;
 use crate::waves;
 use jambox_core::drum_model_for_note;
+use jambox_protocol::SCOPE_COLUMNS;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ColorQuad {
@@ -40,17 +40,112 @@ pub struct GlyphQuad {
     pub color: u32,
 }
 
+/// Thick polyline submitted as one vector stroke. Both backends expand it
+/// through [`stroke_mesh`] into two triangles per segment, so a 256-point
+/// wave costs a few hundred vertices instead of thousands of square fills.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Stroke {
+    pub points: Vec<(f32, f32)>,
+    pub color: u32,
+    pub thickness: f32,
+}
+
+impl Stroke {
+    /// Triangle-list vertices (x, y) in screen pixels: six per segment.
+    pub fn mesh(&self) -> Vec<[f32; 2]> {
+        stroke_mesh(&self.points, self.thickness)
+    }
+}
+
+/// Extrude a polyline into a triangle list with mitered joins.
+///
+/// Each point gets a left/right offset along the averaged normal of its two
+/// neighbouring segments (miter length capped so acute kick spikes do not
+/// grow a tail). Consecutive duplicate points are dropped. The result is
+/// `6 * (segments)` vertices, independent of how many pixels the line spans.
+pub fn stroke_mesh(pts: &[(f32, f32)], thickness: f32) -> Vec<[f32; 2]> {
+    const MITER_LIMIT: f32 = 2.0;
+    let half = thickness.clamp(1.0, 8.0) * 0.5;
+
+    let mut path: Vec<(f32, f32)> = Vec::with_capacity(pts.len());
+    for &p in pts {
+        if !p.0.is_finite() || !p.1.is_finite() {
+            continue;
+        }
+        match path.last() {
+            Some(&(lx, ly)) if (lx - p.0).abs() < 1e-3 && (ly - p.1).abs() < 1e-3 => {}
+            _ => path.push(p),
+        }
+    }
+    if path.len() < 2 {
+        return Vec::new();
+    }
+
+    // Unit normal of each segment.
+    let normals: Vec<(f32, f32)> = path
+        .windows(2)
+        .map(|w| {
+            let dx = w[1].0 - w[0].0;
+            let dy = w[1].1 - w[0].1;
+            let len = (dx * dx + dy * dy).sqrt();
+            (-dy / len, dx / len)
+        })
+        .collect();
+
+    // Per-point offset vector (already scaled to half thickness).
+    let offsets: Vec<(f32, f32)> = (0..path.len())
+        .map(|i| {
+            if i == 0 {
+                let n = normals[0];
+                (n.0 * half, n.1 * half)
+            } else if i == path.len() - 1 {
+                let n = normals[i - 1];
+                (n.0 * half, n.1 * half)
+            } else {
+                let a = normals[i - 1];
+                let b = normals[i];
+                let sx = a.0 + b.0;
+                let sy = a.1 + b.1;
+                let slen = (sx * sx + sy * sy).sqrt();
+                if slen < 1e-4 {
+                    // 180° reversal: fall back to the incoming normal.
+                    return (a.0 * half, a.1 * half);
+                }
+                let mx = sx / slen;
+                let my = sy / slen;
+                let cos = (mx * a.0 + my * a.1).max(1.0 / MITER_LIMIT);
+                let scale = half / cos;
+                (mx * scale, my * scale)
+            }
+        })
+        .collect();
+
+    let mut out = Vec::with_capacity((path.len() - 1) * 6);
+    for i in 0..path.len() - 1 {
+        let (p0, o0) = (path[i], offsets[i]);
+        let (p1, o1) = (path[i + 1], offsets[i + 1]);
+        let l0 = [p0.0 + o0.0, p0.1 + o0.1];
+        let r0 = [p0.0 - o0.0, p0.1 - o0.1];
+        let l1 = [p1.0 + o1.0, p1.1 + o1.1];
+        let r1 = [p1.0 - o1.0, p1.1 - o1.1];
+        out.extend_from_slice(&[l0, r0, r1, l0, r1, l1]);
+    }
+    out
+}
+
 /// Submission order. A later fill covers earlier text. GLES and the CPU
 /// rasterizer both walk this list, so one screen cannot leave glyphs on the next.
 #[derive(Debug, Clone, Copy)]
 enum DrawOp {
     Color(u32),
     Glyph(u32),
+    Stroke(u32),
 }
 
 pub enum PaintOp<'a> {
     Fill(&'a ColorQuad),
     Glyph(&'a GlyphQuad),
+    Stroke(&'a Stroke),
 }
 
 #[derive(Debug, Clone, Default)]
@@ -59,6 +154,7 @@ pub struct Scene {
     pub font_style: FontStyle,
     pub color: Vec<ColorQuad>,
     pub glyphs: Vec<GlyphQuad>,
+    pub strokes: Vec<Stroke>,
     order: Vec<DrawOp>,
 }
 
@@ -116,8 +212,22 @@ impl Scene {
         self.order.push(DrawOp::Glyph(index));
     }
 
-    /// Walk fills and glyphs in the order they were submitted.
-    pub fn paint(&self, mut visit: impl FnMut(PaintOp<'_>)) {
+    /// Thick polyline as a single vector stroke (one mesh per call).
+    pub fn stroke(&mut self, points: &[(f32, f32)], color: u32, thickness: f32) {
+        if points.len() < 2 {
+            return;
+        }
+        let index = self.strokes.len() as u32;
+        self.strokes.push(Stroke {
+            points: points.to_vec(),
+            color,
+            thickness: thickness.clamp(1.0, 8.0),
+        });
+        self.order.push(DrawOp::Stroke(index));
+    }
+
+    /// Walk fills, glyphs, and strokes in the order they were submitted.
+    pub fn paint<'a>(&'a self, mut visit: impl FnMut(PaintOp<'a>)) {
         for op in &self.order {
             match *op {
                 DrawOp::Color(index) => {
@@ -128,6 +238,11 @@ impl Scene {
                 DrawOp::Glyph(index) => {
                     if let Some(quad) = self.glyphs.get(index as usize) {
                         visit(PaintOp::Glyph(quad));
+                    }
+                }
+                DrawOp::Stroke(index) => {
+                    if let Some(stroke) = self.strokes.get(index as usize) {
+                        visit(PaintOp::Stroke(stroke));
                     }
                 }
             }
@@ -309,10 +424,22 @@ pub fn build(model: &NativeModel) -> Scene {
         font_style: model.font_style.resolved(),
         color: Vec::with_capacity(if model.song_viz_open { 900 } else { 200 }),
         glyphs: Vec::with_capacity(240),
+        strokes: Vec::new(),
         order: Vec::with_capacity(if model.song_viz_open { 1100 } else { 440 }),
     };
     if model.song_viz_open && !model.screensaver_active() && !model.power_menu_open {
         draw_song_viz(&mut scene, model);
+        draw_power_warn(&mut scene, model);
+        return scene;
+    }
+    if model.mode == UiMode::Wave
+        && model.wave_fullscreen
+        && !model.wave_setup
+        && !model.screensaver_active()
+        && !model.power_menu_open
+        && !model.update_panel_open
+    {
+        draw_wave(&mut scene, model);
         draw_power_warn(&mut scene, model);
         return scene;
     }
@@ -345,6 +472,7 @@ pub fn build(model: &NativeModel) -> Scene {
             UiMode::Fx => draw_fx(&mut scene, model),
             UiMode::Mix => draw_mix(&mut scene, model),
             UiMode::Log => draw_log(&mut scene, model),
+            UiMode::Wave => draw_wave(&mut scene, model),
             UiMode::Chords => draw_chords(&mut scene, model),
             UiMode::Arp => draw_arp(&mut scene, model),
         }
@@ -418,7 +546,13 @@ fn draw_power_menu(scene: &mut Scene, model: &NativeModel) {
 fn draw_update_panel(scene: &mut Scene, model: &NativeModel) {
     let layout = model.layout;
     scene.fill_rect(layout.content, 0x111111);
-    scene.text_scaled(layout.content.x + 12, layout.content.y + 12, "UPDATE", 0xfbf1c7, 3);
+    scene.text_scaled(
+        layout.content.x + 12,
+        layout.content.y + 12,
+        "UPDATE",
+        0xfbf1c7,
+        3,
+    );
     scene.button(layout.update_close, 0x504945);
     scene.text_centered(layout.update_close, "CLOSE", 0xffffff, 2);
 
@@ -478,7 +612,13 @@ fn draw_update_panel(scene: &mut Scene, model: &NativeModel) {
 fn draw_wifi_panel(scene: &mut Scene, model: &NativeModel) {
     let layout = model.layout;
     scene.fill_rect(layout.content, 0x111111);
-    scene.text_scaled(layout.content.x + 12, layout.content.y + 12, "WIFI", 0xfbf1c7, 3);
+    scene.text_scaled(
+        layout.content.x + 12,
+        layout.content.y + 12,
+        "WIFI",
+        0xfbf1c7,
+        3,
+    );
     scene.button(layout.wifi_close(), 0x504945);
     scene.text_centered(layout.wifi_close(), "CLOSE", 0xffffff, 2);
 
@@ -536,13 +676,24 @@ fn draw_wifi_panel(scene: &mut Scene, model: &NativeModel) {
 fn draw_wifi_keyboard(scene: &mut Scene, model: &NativeModel) {
     let layout = model.layout;
     scene.fill_rect(layout.content, 0x111111);
-    scene.text_scaled(layout.content.x + 12, layout.content.y + 10, "PASSWORD", 0xfbf1c7, 2);
+    scene.text_scaled(
+        layout.content.x + 12,
+        layout.content.y + 10,
+        "PASSWORD",
+        0xfbf1c7,
+        2,
+    );
     let sub = if model.wifi_kb_ssid.len() > 28 {
         format!("{}…", &model.wifi_kb_ssid[..27])
     } else {
         model.wifi_kb_ssid.clone()
     };
-    scene.text(layout.content.x + 200, layout.content.y + 14, &sub, 0xa89984);
+    scene.text(
+        layout.content.x + 200,
+        layout.content.y + 14,
+        &sub,
+        0xa89984,
+    );
     scene.button(layout.wifi_kb_cancel(), 0x9d0006);
     scene.text_centered(layout.wifi_kb_cancel(), "CANCEL", 0xffffff, 1);
 
@@ -694,7 +845,11 @@ fn draw_power_warn(scene: &mut Scene, model: &NativeModel) {
         0xd79921
     };
     let pill_bg = if active { 0x9d0006 } else { 0x3c3836 };
-    let fg = if active && flash_on { 0x1d2021 } else { 0xfbf1c7 };
+    let fg = if active && flash_on {
+        0x1d2021
+    } else {
+        0xfbf1c7
+    };
 
     // Overlay only — never grows HUD or shifts mode layout.
     let bar = model.layout.status_bar;
@@ -804,6 +959,13 @@ fn chrome_status(model: &NativeModel) -> String {
                 "MAP".into()
             }
         }
+        UiMode::Wave => {
+            if model.wave_setup {
+                format!("SPLIT {:.0} HZ", model.wave_sub_hz)
+            } else {
+                "WAVE".into()
+            }
+        }
         UiMode::Ports => {
             if model.status_line.is_empty() {
                 "PORTS".into()
@@ -820,7 +982,6 @@ fn chrome_status(model: &NativeModel) -> String {
         }
     }
 }
-
 
 fn draw_kaoss(scene: &mut Scene, model: &NativeModel) {
     let layout = model.layout;
@@ -1332,8 +1493,7 @@ fn draw_kaoss_glow(scene: &mut Scene, pad: crate::layout::Rect, model: &NativeMo
     let wash_sat = kaoss_viz::glow_ring_sat(color_idx) * 0.6;
 
     // Mostly dark membrane with a faint under-wash (idle or held).
-    let wash_v = (0.025 + 0.04 * pulse + if hold { 0.02 } else { 0.0 })
-        * (0.55 + 0.45 * amp_max);
+    let wash_v = (0.025 + 0.04 * pulse + if hold { 0.02 } else { 0.0 }) * (0.55 + 0.45 * amp_max);
     scene.fill_rect(pad, kaoss_viz::hsv_color(wash_hue, wash_sat * 0.55, wash_v));
 
     let pad_w = pad.w as f32;
@@ -1489,11 +1649,7 @@ fn draw_kaoss_grid(
 }
 
 /// Fixed note HUD (chord-mode style) — never sits under the finger.
-fn draw_kaoss_note_readout(
-    scene: &mut Scene,
-    pad: crate::layout::Rect,
-    model: &NativeModel,
-) {
+fn draw_kaoss_note_readout(scene: &mut Scene, pad: crate::layout::Rect, model: &NativeModel) {
     let Some(fx) = model.kaoss_sounding_x() else {
         return;
     };
@@ -1787,9 +1943,9 @@ fn draw_chords(scene: &mut Scene, model: &NativeModel) {
         scene.text(play.x + 8, play.y + 2, &spec.name(), 0xfe8019);
     }
     let spec_root = model.chords_current.map(|spec| spec.root);
-    let strum_notes = model.chords_current.map(|spec| {
-        spec.strum_strings_at(chords::strum_base_for_octave(model.chords_octave))
-    });
+    let strum_notes = model
+        .chords_current
+        .map(|spec| spec.strum_strings_at(chords::strum_base_for_octave(model.chords_octave)));
     let n = strum_notes
         .as_ref()
         .map(|plate| plate.len())
@@ -1965,7 +2121,6 @@ fn draw_arp(scene: &mut Scene, model: &NativeModel) {
             scene.fill_rect(layout.arp_keyboard_black_rect(i), 0x1d2021);
         }
     }
-
 }
 
 fn draw_scroll_wave_grid(
@@ -2339,15 +2494,13 @@ fn draw_fm_patches(scene: &mut Scene, model: &NativeModel) {
                 .get(user)
                 .map(|p| p.name.as_str())
                 .unwrap_or("");
-            (name, model.fm_user_live && model.fm_user_index == Some(user))
+            (
+                name,
+                model.fm_user_live && model.fm_user_index == Some(user),
+            )
         };
         scene.fill_rect(cell, if on { 0x8ec07c } else { 0x3c3836 });
-        scene.text_centered(
-            cell,
-            label,
-            if on { 0x1d2021 } else { 0xfbf1c7 },
-            2,
-        );
+        scene.text_centered(cell, label, if on { 0x1d2021 } else { 0xfbf1c7 }, 2);
     }
     scene.fill_rect(layout.fm_patch_done(), 0x458588);
     scene.text_centered(layout.fm_patch_done(), "DONE", 0xffffff, 2);
@@ -2676,12 +2829,24 @@ fn draw_drums(scene: &mut Scene, model: &NativeModel) {
     );
     scene.fill_rect(
         layout.kit_repeat_lock,
-        if model.drum_repeat_lock { 0xd79921 } else { 0x3c3836 },
+        if model.drum_repeat_lock {
+            0xd79921
+        } else {
+            0x3c3836
+        },
     );
     scene.text_centered(
         layout.kit_repeat_lock,
-        if model.drum_repeat_lock { "LOCK" } else { "HOLD" },
-        if model.drum_repeat_lock { 0x1d2021 } else { 0xfbf1c7 },
+        if model.drum_repeat_lock {
+            "LOCK"
+        } else {
+            "HOLD"
+        },
+        if model.drum_repeat_lock {
+            0x1d2021
+        } else {
+            0xfbf1c7
+        },
         2,
     );
 
@@ -2786,7 +2951,11 @@ fn draw_kit_repeat(scene: &mut Scene, model: &NativeModel) {
 
     scene.fill_rect(
         layout.kit_repeat_lock_row(),
-        if model.drum_repeat_lock { 0xd79921 } else { 0x3c3836 },
+        if model.drum_repeat_lock {
+            0xd79921
+        } else {
+            0x3c3836
+        },
     );
     scene.text_centered(
         layout.kit_repeat_lock_row(),
@@ -2795,7 +2964,11 @@ fn draw_kit_repeat(scene: &mut Scene, model: &NativeModel) {
         } else {
             "HOLD — keep a pad down to repeat · LOCK latches it"
         },
-        if model.drum_repeat_lock { 0x1d2021 } else { 0xfbf1c7 },
+        if model.drum_repeat_lock {
+            0x1d2021
+        } else {
+            0xfbf1c7
+        },
         2,
     );
 }
@@ -3083,7 +3256,13 @@ fn draw_song_overview(
             let x1 = bar.x as f32 + (note.end.min(length) as f32 / length as f32) * w;
             let y = bar.y as f32
                 + (1.0 - (note.note.saturating_sub(lo) as f32 + 0.5) / span) * (split - 1.0);
-            scene.fill(x0, y, (x1 - x0).max(1.0), 1.5, song_viz::note_color(note, false));
+            scene.fill(
+                x0,
+                y,
+                (x1 - x0).max(1.0),
+                1.5,
+                song_viz::note_color(note, false),
+            );
         }
     }
     if !drums.is_empty() {
@@ -3298,7 +3477,13 @@ pub fn draw_piano_overview(
         let x0 = bar.x as f32 + (note.start as f32 / length as f32) * w;
         let x1 = bar.x as f32 + (note.end.min(length) as f32 / length as f32) * w;
         let y = bar.y as f32 + (1.0 - (note.note.saturating_sub(lo) as f32 + 0.5) / span) * h;
-        scene.fill(x0, y, (x1 - x0).max(1.5), 2.0, song_viz::note_color(note, false));
+        scene.fill(
+            x0,
+            y,
+            (x1 - x0).max(1.5),
+            2.0,
+            song_viz::note_color(note, false),
+        );
     }
     let px = bar.x as f32 + (playhead.min(length) as f32 / length as f32) * w;
     scene.fill(px, bar.y as f32, 2.0, h, 0xfbf1c7);
@@ -3349,7 +3534,8 @@ pub fn draw_piano_roll(
         if note.note < lo || note.note > hi {
             return;
         }
-        let x0 = piano_roll::tick_x(start, playhead as i64, roll).max(keys.x as f32 + keys.w as f32);
+        let x0 =
+            piano_roll::tick_x(start, playhead as i64, roll).max(keys.x as f32 + keys.w as f32);
         let x1 = piano_roll::tick_x(end, playhead as i64, roll).min((roll.x + roll.w) as f32);
         if x1 < keys.x as f32 + keys.w as f32 || x0 > (roll.x + roll.w) as f32 {
             return;
@@ -3436,7 +3622,11 @@ fn draw_map_port_rows(
     row: impl Fn(usize) -> crate::layout::Rect,
 ) {
     let filter_lc = filter.trim().to_ascii_lowercase();
-    for (index, name) in names.iter().take(crate::layout::Layout::MAP_PORT_ROWS).enumerate() {
+    for (index, name) in names
+        .iter()
+        .take(crate::layout::Layout::MAP_PORT_ROWS)
+        .enumerate()
+    {
         let rect = row(index);
         let name_lc = name.to_ascii_lowercase();
         let selected = if filter_lc.is_empty() {
@@ -3455,7 +3645,12 @@ fn draw_map_port_rows(
             0x504945
         };
         scene.fill_rect(rect, color);
-        scene.text(rect.x + 8, rect.y + 8, midi_core::short_port_label(name), 0xffffff);
+        scene.text(
+            rect.x + 8,
+            rect.y + 8,
+            midi_core::short_port_label(name),
+            0xffffff,
+        );
     }
 }
 
@@ -3482,7 +3677,12 @@ fn draw_map(scene: &mut Scene, model: &NativeModel) {
         return;
     }
 
-    scene.text(layout.content.x + 16, layout.content.y + 10, "MAP", 0xfbf1c7);
+    scene.text(
+        layout.content.x + 16,
+        layout.content.y + 10,
+        "MAP",
+        0xfbf1c7,
+    );
     scene.text(
         layout.content.x + 80,
         layout.content.y + 12,
@@ -3623,9 +3823,114 @@ fn draw_ports(scene: &mut Scene, model: &NativeModel) {
     );
 }
 
+fn draw_wave(scene: &mut Scene, model: &NativeModel) {
+    let content = if model.wave_fullscreen {
+        crate::layout::Rect {
+            x: 0,
+            y: 0,
+            w: crate::layout::SCREEN_W,
+            h: crate::layout::SCREEN_H,
+        }
+    } else {
+        model.layout.content
+    };
+    scene.fill_rect(content, 0x0c0c10);
+    if model.wave_setup {
+        draw_wave_setup(scene, model);
+        return;
+    }
+    let traces = [
+        (model.wave_signals[0], model.wave_left.as_slice()),
+        (model.wave_signals[1], model.wave_right.as_slice()),
+        (model.wave_signals[2], model.wave_sub.as_slice()),
+    ];
+    for (signal, samples) in traces {
+        let pts = crate::wave_viz::trace(signal, samples, content);
+        scene.stroke(&pts, signal.color(), signal.thickness);
+    }
+    if model.wave_fullscreen {
+        return;
+    }
+    let chrome = crate::wave_viz::chrome(content);
+    scene.button(chrome.setup, 0x076678);
+    scene.text_centered(chrome.setup, "SETUP", 0xfbf1c7, 2);
+}
+
+fn draw_wave_setup(scene: &mut Scene, model: &NativeModel) {
+    let content = model.layout.content;
+    let chrome = crate::wave_viz::chrome(content);
+    const NAMES: [&str; 3] = ["LEFT", "RIGHT", "SUB"];
+    for (i, col) in chrome.cols.iter().enumerate() {
+        let signal = model.wave_signals[i];
+        scene.text(col.orient.x, content.y + 8, NAMES[i], 0xfbf1c7);
+        scene.button(col.orient, 0x3c3836);
+        scene.text_centered(col.orient, signal.orient.label(), 0xfbf1c7, 2);
+        let values = [
+            (signal.orient.offset_label(), signal.offset),
+            ("THICK", crate::wave_viz::thick_unit(signal.thickness)),
+            ("AMP", crate::wave_viz::amp_unit(signal.amplitude)),
+            ("R", signal.rgb[0] as f32 / 255.0),
+            ("G", signal.rgb[1] as f32 / 255.0),
+            ("B", signal.rgb[2] as f32 / 255.0),
+        ];
+        for (row, (label, unit)) in col.rows.iter().zip(values) {
+            draw_wave_slider(scene, *row, label, unit, signal.color());
+        }
+    }
+    draw_wave_slider(
+        scene,
+        chrome.cutoff,
+        "SPLIT",
+        crate::wave_viz::cutoff_unit(model.wave_sub_hz),
+        0xcc241d,
+    );
+    scene.button(
+        chrome.bypass,
+        if model.input_bypass { 0x689d6a } else { 0x3c3836 },
+    );
+    scene.text_centered(
+        chrome.bypass,
+        if model.input_bypass { "DRY" } else { "BYP" },
+        if model.input_bypass { 0x1d2021 } else { 0xfbf1c7 },
+        2,
+    );
+    scene.button(
+        chrome.history,
+        if model.punch_history { 0x689d6a } else { 0x3c3836 },
+    );
+    scene.text_centered(
+        chrome.history,
+        if model.punch_history { "HIST" } else { "HIST OFF" },
+        if model.punch_history { 0x1d2021 } else { 0xfbf1c7 },
+        2,
+    );
+    scene.button(chrome.done, 0x689d6a);
+    scene.text_centered(chrome.done, "DONE", 0x1d2021, 2);
+}
+
+fn draw_wave_slider(
+    scene: &mut Scene,
+    row: crate::layout::Rect,
+    label: &str,
+    unit: f32,
+    color: u32,
+) {
+    scene.text(row.x, row.y + 6, label, 0xa89984);
+    let track = crate::wave_viz::track(row);
+    scene.fill_rect(track, 0x282828);
+    let w = (track.w as f32 * unit.clamp(0.0, 1.0)).max(2.0);
+    scene.fill(track.x as f32, track.y as f32, w, track.h as f32, color);
+}
+
 fn draw_settings(scene: &mut Scene, model: &NativeModel) {
     let layout = model.layout;
-    scene.text_scaled(layout.content.x + 12, layout.content.y + 8, "SETTINGS", 0xfbf1c7, 2);
+    scene.text_scaled(
+        layout.content.x + 12,
+        layout.content.y + 8,
+        "SETTINGS",
+        0xfbf1c7,
+        2,
+    );
     scene.fill_rect(layout.settings_panic, 0x9d0006);
     scene.text_centered(layout.settings_panic, "PANIC", 0xffffff, 2);
     scene.fill_rect(layout.settings_all_off, 0x504945);
@@ -3683,7 +3988,11 @@ fn draw_settings(scene: &mut Scene, model: &NativeModel) {
     );
     scene.fill_rect(
         layout.settings_wifi_usb,
-        if model.wifi_usb_hold { 0x689d6a } else { 0x3c3836 },
+        if model.wifi_usb_hold {
+            0x689d6a
+        } else {
+            0x3c3836
+        },
     );
     scene.text_centered(
         layout.settings_wifi_usb,
@@ -3768,23 +4077,36 @@ fn draw_fx(scene: &mut Scene, model: &NativeModel) {
     scene.text_centered(source, buf.label(), 0xffffff, 2);
     scene.fill_rect(
         pads,
-        if model.punch_pads_fx { 0x689d6a } else { 0x3c3836 },
+        if model.punch_pads_fx {
+            0x689d6a
+        } else {
+            0x3c3836
+        },
     );
     scene.text_centered(
         pads,
-        if model.punch_pads_fx { "PAD FX" } else { "DRUMS" },
+        if model.punch_pads_fx {
+            "PAD FX"
+        } else {
+            "DRUMS"
+        },
         0xffffff,
         2,
     );
     scene.fill_rect(
         set,
-        if model.fx_settings_open { 0x458588 } else { 0x3c3836 },
+        if model.fx_settings_open {
+            0x458588
+        } else {
+            0x3c3836
+        },
     );
     scene.text_centered(set, "SET", 0xffffff, 2);
     scene.fill_rect(clear, if punch_live { 0xcc241d } else { 0x3c3836 });
     scene.text_centered(clear, "CLEAR", 0xffffff, 2);
-    const LABELS: [&str; Layout::FX_SLIDER_COUNT] =
-        ["DRIVE", "DELAY", "REVERB", "FLANGE", "LEVEL", "DRUMS", "MIC"];
+    const LABELS: [&str; Layout::FX_SLIDER_COUNT] = [
+        "DRIVE", "DELAY", "REVERB", "FLANGE", "LEVEL", "DRUMS", "MIC",
+    ];
     let inserts = match model.fx_target {
         crate::model::FxEditTarget::Bus => &model.fx_bus,
         crate::model::FxEditTarget::Voice => &model.fx_voice,
@@ -3873,10 +4195,7 @@ fn draw_fx(scene: &mut Scene, model: &NativeModel) {
                 );
             }
             const BAND_MIDS: [f32; 4] = [0.125, 0.375, 0.625, 0.875];
-            for (label, mid) in jambox_core::PUNCH_GRID_LABELS
-                .iter()
-                .zip(BAND_MIDS.iter())
-            {
+            for (label, mid) in jambox_core::PUNCH_GRID_LABELS.iter().zip(BAND_MIDS.iter()) {
                 let y = (inner_top + inner_h * (1.0 - mid) - 6.0).round() as i32;
                 scene.text_scaled(cell.x + 10, y, label, label_color, 1);
             }
@@ -3936,7 +4255,13 @@ fn draw_fx_settings(scene: &mut Scene, model: &NativeModel) {
 
 fn draw_mix(scene: &mut Scene, model: &NativeModel) {
     let layout = model.layout;
-    scene.text_scaled(layout.content.x + 12, layout.content.y + 8, "MIX", 0xfbf1c7, 2);
+    scene.text_scaled(
+        layout.content.x + 12,
+        layout.content.y + 8,
+        "MIX",
+        0xfbf1c7,
+        2,
+    );
     const BUS: [(&str, u32); 6] = [
         ("LIVE", 0x689d6a),
         ("KIT", 0xd79921),
@@ -3966,7 +4291,13 @@ fn draw_mix(scene: &mut Scene, model: &NativeModel) {
         };
         scene.fill_rect(fill, BUS[index].1);
     }
-    scene.text_scaled(layout.content.x + 340, layout.content.y + 8, "PADS", 0xfbf1c7, 2);
+    scene.text_scaled(
+        layout.content.x + 340,
+        layout.content.y + 8,
+        "PADS",
+        0xfbf1c7,
+        2,
+    );
     for index in 0..16 {
         let cell = layout.mix_pad_cell(index);
         let pad = &model.phrases[index];
@@ -4112,11 +4443,7 @@ mod tests {
             0,
             "continuous pads should not get grid ticks"
         );
-        let labels = scene
-            .glyphs
-            .iter()
-            .filter(|g| g.color == 0xa89984)
-            .count();
+        let labels = scene.glyphs.iter().filter(|g| g.color == 0xa89984).count();
         assert!(labels >= 8, "RPT and SLICE should label 1/4 1/8 1/16 1/32");
     }
 
@@ -4204,8 +4531,14 @@ mod tests {
         model.kaoss_picker = Some(kaoss_ui::KaossPicker::Program);
         model.kaoss_show_all = true;
         let scene = build(&model);
-        let note_tile = scene.color.iter().any(|q| q.color == 0x458588 && q.w > 40.0);
-        let fx_tile = scene.color.iter().any(|q| q.color == 0xd65d0e && q.w > 40.0);
+        let note_tile = scene
+            .color
+            .iter()
+            .any(|q| q.color == 0x458588 && q.w > 40.0);
+        let fx_tile = scene
+            .color
+            .iter()
+            .any(|q| q.color == 0xd65d0e && q.w > 40.0);
         assert!(note_tile, "NOTE programs should paint teal tiles");
         assert!(fx_tile, "FX programs should paint orange tiles");
     }
@@ -4334,15 +4667,113 @@ mod tests {
         model.punch_grid_mode = jambox_core::PunchGridMode::Beat;
         let scene = build(&model);
         assert!(
-            scene
-                .color
-                .iter()
-                .all(|q| q.color != 0xfb4934),
+            scene.color.iter().all(|q| q.color != 0xfb4934),
             "punch pad fills must not be in the settings scene"
         );
-        assert!(scene.color.iter().any(|q| {
-            q.w > 700.0 && q.y >= crate::layout::HUD_H as f32
-        }));
+        assert!(scene
+            .color
+            .iter()
+            .any(|q| { q.w > 700.0 && q.y >= crate::layout::HUD_H as f32 }));
+    }
+
+    #[test]
+    fn stroke_mesh_is_linear_in_points_not_pixels() {
+        // A 256-point trace with a full-height kick spike on every other
+        // sample. The old rasterizer emitted a square per step, so this
+        // would have been thousands of fills.
+        let pts: Vec<(f32, f32)> = (0..256)
+            .map(|i| {
+                let x = 10.0 + i as f32 * 3.0;
+                let y = if i % 2 == 0 { 20.0 } else { 460.0 };
+                (x, y)
+            })
+            .collect();
+        let mesh = stroke_mesh(&pts, 3.0);
+        let segments = pts.len() - 1;
+        assert_eq!(mesh.len(), segments * 6, "six vertices per segment");
+        assert!(mesh.len() % 3 == 0);
+        // Far fewer primitives than one fill per pixel of span.
+        let pixel_fills: usize = pts
+            .windows(2)
+            .map(|w| ((w[1].1 - w[0].1).abs().max((w[1].0 - w[0].0).abs())) as usize)
+            .sum();
+        assert!(
+            mesh.len() / 3 < pixel_fills / 20,
+            "{} triangles vs {} per-pixel fills",
+            mesh.len() / 3,
+            pixel_fills
+        );
+        // Degenerate input produces nothing rather than NaN geometry.
+        assert!(stroke_mesh(&[(5.0, 5.0)], 3.0).is_empty());
+        assert!(stroke_mesh(&[(5.0, 5.0), (5.0, 5.0)], 3.0).is_empty());
+        assert!(mesh.iter().all(|v| v[0].is_finite() && v[1].is_finite()));
+    }
+
+    #[test]
+    fn wave_mode_submits_one_stroke_per_trace() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Wave);
+        for (i, s) in model.wave_left.iter_mut().enumerate() {
+            *s = ((i % 7) as i16 - 3) * 4000;
+        }
+        for (i, s) in model.wave_right.iter_mut().enumerate() {
+            *s = ((i % 5) as i16 - 2) * 6000;
+        }
+        for (i, s) in model.wave_sub.iter_mut().enumerate() {
+            *s = if i % 32 == 0 { 20000 } else { 0 };
+        }
+        let scene = build(&model);
+        assert_eq!(scene.strokes.len(), 3, "left, right, sub");
+        for (stroke, signal) in scene.strokes.iter().zip(model.wave_signals) {
+            assert_eq!(stroke.color, signal.color());
+            assert_eq!(stroke.thickness, signal.thickness.clamp(1.0, 8.0));
+            assert!(stroke.points.len() >= jambox_protocol::WAVE_VIZ_POINTS);
+        }
+        // No per-pixel square spam: the fill count is chrome only, so it does
+        // not move when the waves go from silence to full-scale spikes.
+        let mut silent = NativeModel::new();
+        silent.set_mode(UiMode::Wave);
+        let quiet = build(&silent);
+        assert_eq!(
+            scene.color.len(),
+            quiet.color.len(),
+            "wave samples must not change the number of color quads"
+        );
+    }
+
+    #[test]
+    fn cpu_rasterizer_paints_stroke_at_its_thickness() {
+        let mut scene = Scene {
+            clear: 0x000000,
+            font_style: FontStyle::Retro,
+            color: Vec::new(),
+            glyphs: Vec::new(),
+            strokes: Vec::new(),
+            order: Vec::new(),
+        };
+        // Horizontal run then a vertical spike: exercises the miter join.
+        scene.stroke(
+            &[(100.0, 200.0), (300.0, 200.0), (300.0, 50.0)],
+            0x00ff00,
+            4.0,
+        );
+        let mut frame = crate::render::Frame::new();
+        crate::render::rasterize(&mut frame, &scene);
+        let lit_in_col = |x: usize| {
+            (0..480)
+                .filter(|y| frame.pixels[y * 800 + x] == 0x00ff00)
+                .count()
+        };
+        let lit_in_row = |y: usize| {
+            (0..800)
+                .filter(|x| frame.pixels[y * 800 + x] == 0x00ff00)
+                .count()
+        };
+        assert_eq!(lit_in_col(200), 4, "horizontal run is 4px tall");
+        assert_eq!(lit_in_row(120), 4, "vertical spike is 4px wide");
+        assert_eq!(lit_in_col(50), 0, "nothing before the first point");
+        // The outer corner of the join is filled, not notched.
+        assert_eq!(frame.pixels[198 * 800 + 301], 0x00ff00);
     }
 
     #[test]
@@ -4352,6 +4783,7 @@ mod tests {
             font_style: FontStyle::Retro,
             color: Vec::new(),
             glyphs: Vec::new(),
+            strokes: Vec::new(),
             order: Vec::new(),
         };
         scene.fill(0.0, 0.0, 80.0, 20.0, 0xff0000);
@@ -4359,10 +4791,11 @@ mod tests {
         scene.fill(0.0, 0.0, 80.0, 20.0, 0x00ff00);
         let mut frame = crate::render::Frame::new();
         crate::render::rasterize(&mut frame, &scene);
-        let leaked = frame.pixels[..20 * 800]
-            .iter()
-            .any(|px| *px == 0xffffff);
-        assert!(!leaked, "text submitted before a fill must not paint over it");
+        let leaked = frame.pixels[..20 * 800].iter().any(|px| *px == 0xffffff);
+        assert!(
+            !leaked,
+            "text submitted before a fill must not paint over it"
+        );
     }
 
     #[test]
@@ -4418,7 +4851,10 @@ mod tests {
             .any(|q| q.color == 0x9d0006 && q.w > 100.0 && q.h < 28.0);
         assert!(pill, "expected LOW PWR status pill");
         assert!(
-            scene.glyphs.iter().any(|g| g.color == 0x1d2021 || g.color == 0xfbf1c7),
+            scene
+                .glyphs
+                .iter()
+                .any(|g| g.color == 0x1d2021 || g.color == 0xfbf1c7),
             "badge label missing"
         );
     }
@@ -4479,7 +4915,10 @@ mod tests {
                 && (q.x - rec.x as f32).abs() < 3.0
                 && (q.y - rec.y as f32).abs() < 3.0
         });
-        assert!(!idle_gray, "chrome REC must not look disabled after backbone");
+        assert!(
+            !idle_gray,
+            "chrome REC must not look disabled after backbone"
+        );
     }
 
     #[test]
@@ -4526,12 +4965,12 @@ mod tests {
         assert!(lit_key, "playing notes should light the matching keys");
         let overview = crate::layout::Layout::song_viz_overview();
         let window = scene.color.iter().any(|q| {
-            q.color == 0xfbf1c7
-                && (q.y - overview.y as f32).abs() < 1.0
-                && q.h <= 3.0
-                && q.w > 4.0
+            q.color == 0xfbf1c7 && (q.y - overview.y as f32).abs() < 1.0 && q.h <= 3.0 && q.w > 4.0
         });
-        assert!(window, "overview should frame the visible falling-notes span");
+        assert!(
+            window,
+            "overview should frame the visible falling-notes span"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -4549,6 +4988,7 @@ mod tests {
             font_style: FontStyle::Retro,
             color: Vec::new(),
             glyphs: Vec::new(),
+            strokes: Vec::new(),
             order: Vec::new(),
         };
         draw_piano_roll(

@@ -43,6 +43,48 @@ impl Frame {
         self.fill_rect(x, y, w, 1, color);
     }
 
+    /// Solid triangle, any winding. Pixel centers inside (or on) all three
+    /// edges are set, so the two triangles of a stroke segment tile with no
+    /// seam.
+    pub fn fill_triangle(&mut self, a: [f32; 2], b: [f32; 2], c: [f32; 2], color: u32) {
+        let min_x = a[0].min(b[0]).min(c[0]).floor().max(0.0) as i32;
+        let max_x = a[0].max(b[0]).max(c[0]).ceil().min(SCREEN_W as f32) as i32;
+        let min_y = a[1].min(b[1]).min(c[1]).floor().max(0.0) as i32;
+        let max_y = a[1].max(b[1]).max(c[1]).ceil().min(SCREEN_H as f32) as i32;
+        if min_x >= max_x || min_y >= max_y {
+            return;
+        }
+        let edge = |p: [f32; 2], q: [f32; 2], x: f32, y: f32| {
+            (q[0] - p[0]) * (y - p[1]) - (q[1] - p[1]) * (x - p[0])
+        };
+        let area = edge(a, b, c[0], c[1]);
+        if area.abs() < 1e-6 {
+            return;
+        }
+        let sign = area.signum();
+        for py in min_y..max_y {
+            let y = py as f32 + 0.5;
+            let row = py as usize * SCREEN_W;
+            for px in min_x..max_x {
+                let x = px as f32 + 0.5;
+                let w0 = edge(a, b, x, y) * sign;
+                let w1 = edge(b, c, x, y) * sign;
+                let w2 = edge(c, a, x, y) * sign;
+                if w0 >= 0.0 && w1 >= 0.0 && w2 >= 0.0 {
+                    self.pixels[row + px as usize] = color;
+                }
+            }
+        }
+    }
+
+    /// Rasterize a vector stroke with the same mesh GLES uploads.
+    pub fn stroke(&mut self, stroke: &scene::Stroke) {
+        let mesh = stroke.mesh();
+        for tri in mesh.chunks_exact(3) {
+            self.fill_triangle(tri[0], tri[1], tri[2], stroke.color);
+        }
+    }
+
     pub fn text(&mut self, mut x: i32, y: i32, s: &str, color: u32) {
         for ch in s.chars() {
             let glyph = font::glyph(ch);
@@ -100,6 +142,7 @@ pub fn rasterize(frame: &mut Frame, scene: &Scene) {
             );
         }
         scene::PaintOp::Glyph(glyph) => blit_glyph(frame, glyph, aw, ah, &atlas),
+        scene::PaintOp::Stroke(stroke) => frame.stroke(stroke),
     });
 }
 
