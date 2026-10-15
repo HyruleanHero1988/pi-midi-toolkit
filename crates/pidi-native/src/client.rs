@@ -280,6 +280,14 @@ impl Outbox {
         self.reliable.push_back(Request::PunchBufferPrio { mode });
     }
 
+    pub fn punch_history(&mut self, enabled: bool) {
+        self.reliable.push_back(Request::PunchHistory { enabled });
+    }
+
+    pub fn input_bypass(&mut self, enabled: bool) {
+        self.reliable.push_back(Request::InputBypass { enabled });
+    }
+
     pub fn punch_rpt_mode(&mut self, mode: u8) {
         self.reliable.push_back(Request::PunchRptMode { mode });
     }

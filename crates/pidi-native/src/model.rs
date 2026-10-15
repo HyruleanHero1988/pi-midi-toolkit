@@ -211,6 +211,8 @@ pub struct NativeModel {
     pub wave_signals: [crate::wave_viz::WaveSignal; 3],
     pub wave_sub_hz: f32,
     pub wave_setup: bool,
+    /// Live wave with nav, status, and SETUP hidden. A second tap restores them.
+    pub wave_fullscreen: bool,
     pub wave_left: [i16; jambox_protocol::WAVE_VIZ_POINTS],
     pub wave_right: [i16; jambox_protocol::WAVE_VIZ_POINTS],
     pub wave_sub: [i16; jambox_protocol::WAVE_VIZ_POINTS],
@@ -373,6 +375,10 @@ pub struct NativeModel {
     pub punch_grid_mode: jambox_core::PunchGridMode,
     /// Bank A pads arm punch FX. Off: those pads play the kit.
     pub punch_pads_fx: bool,
+    /// Idle 4-second punch rings. Off skips them until a buffer effect, LOCK, or GRAB is on.
+    pub punch_history: bool,
+    /// Headphones play the capture ring only. Synth, punch, and bus FX stay quiet.
+    pub input_bypass: bool,
     /// FX SET sheet (granularity, prio, repeat mode).
     pub fx_settings_open: bool,
     /// Kit bus trim (FX DRUMS / MIX KIT). Independent of melody `synth_params[2]` (LEVEL).
@@ -589,6 +595,7 @@ impl NativeModel {
             wave_signals: crate::wave_viz::default_signals(),
             wave_sub_hz: crate::wave_viz::default_sub_hz(),
             wave_setup: false,
+            wave_fullscreen: false,
             wave_left: [0; jambox_protocol::WAVE_VIZ_POINTS],
             wave_right: [0; jambox_protocol::WAVE_VIZ_POINTS],
             wave_sub: [0; jambox_protocol::WAVE_VIZ_POINTS],
@@ -724,6 +731,8 @@ impl NativeModel {
             punch_rpt_mode: jambox_core::PunchRptMode::Refresh,
             punch_grid_mode: jambox_core::PunchGridMode::Beat,
             punch_pads_fx: true,
+            punch_history: true,
+            input_bypass: false,
             fx_settings_open: false,
             drum_level: 1.0,
             input_level: 0.0,
@@ -960,6 +969,7 @@ impl NativeModel {
             self.kit_wave_dirty = true;
         }
         self.wave_setup = false;
+        self.wave_fullscreen = false;
         if mode != UiMode::Kaoss && self.kaoss_full {
             self.kaoss_full = false;
             self.kaoss_full_exit_since = None;
@@ -2343,6 +2353,8 @@ impl NativeModel {
         self.punch_rpt_mode = jambox_core::PunchRptMode::from_u8(s.punch_rpt_mode);
         self.punch_grid_mode = jambox_core::PunchGridMode::from_u8(s.punch_grid_mode);
         self.punch_pads_fx = s.punch_pads_fx;
+        self.punch_history = s.punch_history;
+        self.input_bypass = s.input_bypass;
         self.kaoss_show_all = s.kaoss_show_all;
         self.kaoss_channel = s.kaoss_channel & 0x0f;
         self.fx_bus = [
@@ -2449,6 +2461,8 @@ impl NativeModel {
         outbox.punch_rpt_mode(self.punch_rpt_mode.as_u8());
         outbox.punch_grid(self.punch_grid_mode.as_u8());
         outbox.punch_pads(self.punch_pads_fx);
+        outbox.punch_history(self.punch_history);
+        outbox.input_bypass(self.input_bypass);
         outbox.clip_gain(SEQ_CLIP_SLOT, self.seq_level);
         outbox.clip_gain(SEQ_DRUM_MIX_SLOT, self.seq_drum_level);
         outbox.clip_gain(SEQ_KAOSS_MIX_SLOT, self.seq_kaoss_level);
@@ -2515,6 +2529,8 @@ impl NativeModel {
             punch_rpt_mode: self.punch_rpt_mode.as_u8(),
             punch_grid_mode: self.punch_grid_mode.as_u8(),
             punch_pads_fx: self.punch_pads_fx,
+            punch_history: self.punch_history,
+            input_bypass: self.input_bypass,
             fx_bus: [self.fx_bus[0], self.fx_bus[1], self.fx_bus[2]],
             fx_flanger: self.fx_voice[3],
             fx_flanger_rate: self.fx_flanger_rate,
@@ -2847,6 +2863,12 @@ impl NativeModel {
         };
         let gesture = self.next_gesture;
         self.next_gesture = self.next_gesture.wrapping_add(1).max(1);
+
+        if self.mode == UiMode::Wave && self.wave_fullscreen && !self.power_menu_open {
+            self.tap_ui(slot, id, gesture, px, py);
+            self.wave_fullscreen = false;
+            return;
+        }
 
         // Chrome (back, home, power, mode tabs) sits above every menu. Overlays
         // used to eat those taps, so VIB / settings could not be left.
@@ -4675,6 +4697,28 @@ impl NativeModel {
                 self.wave_setup = false;
                 self.mark_dirty();
             }
+            Hit::WaveVizHistory => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.punch_history = !self.punch_history;
+                outbox.punch_history(self.punch_history);
+                self.status_line = if self.punch_history {
+                    "punch history on".into()
+                } else {
+                    "punch history off — GRAB has no pre-roll".into()
+                };
+                self.mark_dirty();
+            }
+            Hit::WaveVizBypass => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.input_bypass = !self.input_bypass;
+                outbox.input_bypass(self.input_bypass);
+                self.status_line = if self.input_bypass {
+                    "dry input — synth paused, mic trim only".into()
+                } else {
+                    "input through the mixer again".into()
+                };
+                self.mark_dirty();
+            }
             Hit::WaveVizOrient(index) => {
                 self.tap_ui(slot, id, gesture, px, py);
                 if let Some(signal) = self.wave_signals.get_mut(index) {
@@ -4704,7 +4748,12 @@ impl NativeModel {
                 self.status_line = "all notes off".into();
                 self.push_log("all notes off");
             }
-            Hit::None => {}
+            Hit::None => {
+                if self.mode == UiMode::Wave && !self.wave_setup {
+                    self.tap_ui(slot, id, gesture, px, py);
+                    self.wave_fullscreen = true;
+                }
+            }
         }
     }
 
@@ -13396,6 +13445,19 @@ mod tests {
             "off should pass keyboard velocity, got {}",
             model.last_midi_activity
         );
+    }
+
+    #[test]
+    fn wave_tap_hides_chrome_until_the_next_tap() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Wave);
+        let mut out = Outbox::new();
+        let area = model.layout.content;
+        model.finger_down(1, area.x + area.w / 2, area.y + area.h / 2, &mut out);
+        assert!(model.wave_fullscreen, "a tap on the wave should hide the chrome");
+        model.finger_up(1, &mut out);
+        model.finger_down(2, 8, 8, &mut out);
+        assert!(!model.wave_fullscreen, "the next tap should bring the chrome back");
     }
 
     #[test]

@@ -255,6 +255,8 @@ pub struct JamboxEngine {
     drum_level: f32,
     /// Mic / line gain. Starts at 0 so a hot USB mic cannot feedback until armed.
     input_level: f32,
+    /// When set, the output callback copies capture and does not render.
+    input_bypass: bool,
     clip_gain: [f32; MAX_CLIPS],
     attack_sec: f32,
     release_sec: f32,
@@ -371,6 +373,7 @@ impl JamboxEngine {
             level: 1.0,
             drum_level: 1.0,
             input_level: 0.0,
+            input_bypass: false,
             clip_gain: [1.0; MAX_CLIPS],
             attack_sec: 0.012,
             release_sec: 0.030,
@@ -1132,6 +1135,14 @@ impl JamboxEngine {
                     rack.set_buffer_prio(mode);
                 }
             }
+            Command::SetPunchHistory { enabled } => {
+                for rack in &mut self.punch {
+                    rack.set_history(enabled);
+                }
+            }
+            Command::SetInputBypass { enabled } => {
+                self.input_bypass = enabled;
+            }
             Command::SetPunchRptMode { mode } => {
                 let mode = crate::PunchRptMode::from_u8(mode);
                 for rack in &mut self.punch {
@@ -1542,6 +1553,19 @@ impl JamboxEngine {
         }
         if n < MAX_BLOCK {
             self.input_bus[n..].fill(0.0);
+        }
+    }
+
+    pub fn input_bypass(&self) -> bool {
+        self.input_bypass
+    }
+
+    /// Apply control commands without rendering a block. The dry-input path
+    /// uses this so bypass can be turned off without waiting for a render.
+    pub fn apply_scheduled(&mut self, commands: &[ScheduledCommand], midi_out: &mut MidiOutSink) {
+        let absolute = self.transport.position();
+        for cmd in commands.iter().take(MAX_BLOCK_COMMANDS) {
+            self.apply(cmd.command, absolute, cmd.frame, midi_out);
         }
     }
 
@@ -1974,6 +1998,27 @@ mod tests {
             &mut midi,
         );
         assert_eq!(peak(&out), 0.0, "drum_level 0 must silence the kit");
+    }
+
+    #[test]
+    fn input_bypass_flag_follows_the_command() {
+        let mut e = engine();
+        let mut out = vec![0.0f32; 32];
+        let mut midi = MidiOutSink::new();
+        assert!(!e.input_bypass());
+        e.render(
+            &mut out,
+            &[ScheduledCommand::now(Command::SetInputBypass { enabled: true })],
+            &mut midi,
+        );
+        assert!(e.input_bypass());
+        e.apply_scheduled(
+            &[ScheduledCommand::now(Command::SetInputBypass {
+                enabled: false,
+            })],
+            &mut midi,
+        );
+        assert!(!e.input_bypass());
     }
 
     #[test]

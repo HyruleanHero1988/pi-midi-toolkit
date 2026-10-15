@@ -40,17 +40,112 @@ pub struct GlyphQuad {
     pub color: u32,
 }
 
+/// Thick polyline submitted as one vector stroke. Both backends expand it
+/// through [`stroke_mesh`] into two triangles per segment, so a 256-point
+/// wave costs a few hundred vertices instead of thousands of square fills.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Stroke {
+    pub points: Vec<(f32, f32)>,
+    pub color: u32,
+    pub thickness: f32,
+}
+
+impl Stroke {
+    /// Triangle-list vertices (x, y) in screen pixels: six per segment.
+    pub fn mesh(&self) -> Vec<[f32; 2]> {
+        stroke_mesh(&self.points, self.thickness)
+    }
+}
+
+/// Extrude a polyline into a triangle list with mitered joins.
+///
+/// Each point gets a left/right offset along the averaged normal of its two
+/// neighbouring segments (miter length capped so acute kick spikes do not
+/// grow a tail). Consecutive duplicate points are dropped. The result is
+/// `6 * (segments)` vertices, independent of how many pixels the line spans.
+pub fn stroke_mesh(pts: &[(f32, f32)], thickness: f32) -> Vec<[f32; 2]> {
+    const MITER_LIMIT: f32 = 2.0;
+    let half = thickness.clamp(1.0, 8.0) * 0.5;
+
+    let mut path: Vec<(f32, f32)> = Vec::with_capacity(pts.len());
+    for &p in pts {
+        if !p.0.is_finite() || !p.1.is_finite() {
+            continue;
+        }
+        match path.last() {
+            Some(&(lx, ly)) if (lx - p.0).abs() < 1e-3 && (ly - p.1).abs() < 1e-3 => {}
+            _ => path.push(p),
+        }
+    }
+    if path.len() < 2 {
+        return Vec::new();
+    }
+
+    // Unit normal of each segment.
+    let normals: Vec<(f32, f32)> = path
+        .windows(2)
+        .map(|w| {
+            let dx = w[1].0 - w[0].0;
+            let dy = w[1].1 - w[0].1;
+            let len = (dx * dx + dy * dy).sqrt();
+            (-dy / len, dx / len)
+        })
+        .collect();
+
+    // Per-point offset vector (already scaled to half thickness).
+    let offsets: Vec<(f32, f32)> = (0..path.len())
+        .map(|i| {
+            if i == 0 {
+                let n = normals[0];
+                (n.0 * half, n.1 * half)
+            } else if i == path.len() - 1 {
+                let n = normals[i - 1];
+                (n.0 * half, n.1 * half)
+            } else {
+                let a = normals[i - 1];
+                let b = normals[i];
+                let sx = a.0 + b.0;
+                let sy = a.1 + b.1;
+                let slen = (sx * sx + sy * sy).sqrt();
+                if slen < 1e-4 {
+                    // 180° reversal: fall back to the incoming normal.
+                    return (a.0 * half, a.1 * half);
+                }
+                let mx = sx / slen;
+                let my = sy / slen;
+                let cos = (mx * a.0 + my * a.1).max(1.0 / MITER_LIMIT);
+                let scale = half / cos;
+                (mx * scale, my * scale)
+            }
+        })
+        .collect();
+
+    let mut out = Vec::with_capacity((path.len() - 1) * 6);
+    for i in 0..path.len() - 1 {
+        let (p0, o0) = (path[i], offsets[i]);
+        let (p1, o1) = (path[i + 1], offsets[i + 1]);
+        let l0 = [p0.0 + o0.0, p0.1 + o0.1];
+        let r0 = [p0.0 - o0.0, p0.1 - o0.1];
+        let l1 = [p1.0 + o1.0, p1.1 + o1.1];
+        let r1 = [p1.0 - o1.0, p1.1 - o1.1];
+        out.extend_from_slice(&[l0, r0, r1, l0, r1, l1]);
+    }
+    out
+}
+
 /// Submission order. A later fill covers earlier text. GLES and the CPU
 /// rasterizer both walk this list, so one screen cannot leave glyphs on the next.
 #[derive(Debug, Clone, Copy)]
 enum DrawOp {
     Color(u32),
     Glyph(u32),
+    Stroke(u32),
 }
 
 pub enum PaintOp<'a> {
     Fill(&'a ColorQuad),
     Glyph(&'a GlyphQuad),
+    Stroke(&'a Stroke),
 }
 
 #[derive(Debug, Clone, Default)]
@@ -59,6 +154,7 @@ pub struct Scene {
     pub font_style: FontStyle,
     pub color: Vec<ColorQuad>,
     pub glyphs: Vec<GlyphQuad>,
+    pub strokes: Vec<Stroke>,
     order: Vec<DrawOp>,
 }
 
@@ -116,8 +212,22 @@ impl Scene {
         self.order.push(DrawOp::Glyph(index));
     }
 
-    /// Walk fills and glyphs in the order they were submitted.
-    pub fn paint(&self, mut visit: impl FnMut(PaintOp<'_>)) {
+    /// Thick polyline as a single vector stroke (one mesh per call).
+    pub fn stroke(&mut self, points: &[(f32, f32)], color: u32, thickness: f32) {
+        if points.len() < 2 {
+            return;
+        }
+        let index = self.strokes.len() as u32;
+        self.strokes.push(Stroke {
+            points: points.to_vec(),
+            color,
+            thickness: thickness.clamp(1.0, 8.0),
+        });
+        self.order.push(DrawOp::Stroke(index));
+    }
+
+    /// Walk fills, glyphs, and strokes in the order they were submitted.
+    pub fn paint<'a>(&'a self, mut visit: impl FnMut(PaintOp<'a>)) {
         for op in &self.order {
             match *op {
                 DrawOp::Color(index) => {
@@ -128,6 +238,11 @@ impl Scene {
                 DrawOp::Glyph(index) => {
                     if let Some(quad) = self.glyphs.get(index as usize) {
                         visit(PaintOp::Glyph(quad));
+                    }
+                }
+                DrawOp::Stroke(index) => {
+                    if let Some(stroke) = self.strokes.get(index as usize) {
+                        visit(PaintOp::Stroke(stroke));
                     }
                 }
             }
@@ -309,10 +424,22 @@ pub fn build(model: &NativeModel) -> Scene {
         font_style: model.font_style.resolved(),
         color: Vec::with_capacity(if model.song_viz_open { 900 } else { 200 }),
         glyphs: Vec::with_capacity(240),
+        strokes: Vec::new(),
         order: Vec::with_capacity(if model.song_viz_open { 1100 } else { 440 }),
     };
     if model.song_viz_open && !model.screensaver_active() && !model.power_menu_open {
         draw_song_viz(&mut scene, model);
+        draw_power_warn(&mut scene, model);
+        return scene;
+    }
+    if model.mode == UiMode::Wave
+        && model.wave_fullscreen
+        && !model.wave_setup
+        && !model.screensaver_active()
+        && !model.power_menu_open
+        && !model.update_panel_open
+    {
+        draw_wave(&mut scene, model);
         draw_power_warn(&mut scene, model);
         return scene;
     }
@@ -834,7 +961,7 @@ fn chrome_status(model: &NativeModel) -> String {
         }
         UiMode::Wave => {
             if model.wave_setup {
-                format!("SUB {:.0} HZ", model.wave_sub_hz)
+                format!("SPLIT {:.0} HZ", model.wave_sub_hz)
             } else {
                 "WAVE".into()
             }
@@ -3697,7 +3824,16 @@ fn draw_ports(scene: &mut Scene, model: &NativeModel) {
 }
 
 fn draw_wave(scene: &mut Scene, model: &NativeModel) {
-    let content = model.layout.content;
+    let content = if model.wave_fullscreen {
+        crate::layout::Rect {
+            x: 0,
+            y: 0,
+            w: crate::layout::SCREEN_W,
+            h: crate::layout::SCREEN_H,
+        }
+    } else {
+        model.layout.content
+    };
     scene.fill_rect(content, 0x0c0c10);
     if model.wave_setup {
         draw_wave_setup(scene, model);
@@ -3710,7 +3846,10 @@ fn draw_wave(scene: &mut Scene, model: &NativeModel) {
     ];
     for (signal, samples) in traces {
         let pts = crate::wave_viz::trace(signal, samples, content);
-        stroke_poly(scene, &pts, signal.color(), signal.thickness);
+        scene.stroke(&pts, signal.color(), signal.thickness);
+    }
+    if model.wave_fullscreen {
+        return;
     }
     let chrome = crate::wave_viz::chrome(content);
     scene.button(chrome.setup, 0x076678);
@@ -3740,9 +3879,29 @@ fn draw_wave_setup(scene: &mut Scene, model: &NativeModel) {
     draw_wave_slider(
         scene,
         chrome.cutoff,
-        "HZ",
+        "SPLIT",
         crate::wave_viz::cutoff_unit(model.wave_sub_hz),
         0xcc241d,
+    );
+    scene.button(
+        chrome.bypass,
+        if model.input_bypass { 0x689d6a } else { 0x3c3836 },
+    );
+    scene.text_centered(
+        chrome.bypass,
+        if model.input_bypass { "DRY" } else { "BYP" },
+        if model.input_bypass { 0x1d2021 } else { 0xfbf1c7 },
+        2,
+    );
+    scene.button(
+        chrome.history,
+        if model.punch_history { 0x689d6a } else { 0x3c3836 },
+    );
+    scene.text_centered(
+        chrome.history,
+        if model.punch_history { "HIST" } else { "HIST OFF" },
+        if model.punch_history { 0x1d2021 } else { 0xfbf1c7 },
+        2,
     );
     scene.button(chrome.done, 0x689d6a);
     scene.text_centered(chrome.done, "DONE", 0x1d2021, 2);
@@ -3760,23 +3919,6 @@ fn draw_wave_slider(
     scene.fill_rect(track, 0x282828);
     let w = (track.w as f32 * unit.clamp(0.0, 1.0)).max(2.0);
     scene.fill(track.x as f32, track.y as f32, w, track.h as f32, color);
-}
-
-fn stroke_poly(scene: &mut Scene, pts: &[(f32, f32)], color: u32, thickness: f32) {
-    let t = thickness.clamp(1.0, 8.0);
-    for pair in pts.windows(2) {
-        let (x0, y0) = pair[0];
-        let (x1, y1) = pair[1];
-        let dx = x1 - x0;
-        let dy = y1 - y0;
-        let steps = dx.abs().max(dy.abs()).max(1.0) as i32;
-        for i in 0..=steps {
-            let u = i as f32 / steps as f32;
-            let x = x0 + dx * u - t * 0.5;
-            let y = y0 + dy * u - t * 0.5;
-            scene.fill(x, y, t, t, color);
-        }
-    }
 }
 
 fn draw_settings(scene: &mut Scene, model: &NativeModel) {
@@ -4534,12 +4676,113 @@ mod tests {
     }
 
     #[test]
+    fn stroke_mesh_is_linear_in_points_not_pixels() {
+        // A 256-point trace with a full-height kick spike on every other
+        // sample. The old rasterizer emitted a square per step, so this
+        // would have been thousands of fills.
+        let pts: Vec<(f32, f32)> = (0..256)
+            .map(|i| {
+                let x = 10.0 + i as f32 * 3.0;
+                let y = if i % 2 == 0 { 20.0 } else { 460.0 };
+                (x, y)
+            })
+            .collect();
+        let mesh = stroke_mesh(&pts, 3.0);
+        let segments = pts.len() - 1;
+        assert_eq!(mesh.len(), segments * 6, "six vertices per segment");
+        assert!(mesh.len() % 3 == 0);
+        // Far fewer primitives than one fill per pixel of span.
+        let pixel_fills: usize = pts
+            .windows(2)
+            .map(|w| ((w[1].1 - w[0].1).abs().max((w[1].0 - w[0].0).abs())) as usize)
+            .sum();
+        assert!(
+            mesh.len() / 3 < pixel_fills / 20,
+            "{} triangles vs {} per-pixel fills",
+            mesh.len() / 3,
+            pixel_fills
+        );
+        // Degenerate input produces nothing rather than NaN geometry.
+        assert!(stroke_mesh(&[(5.0, 5.0)], 3.0).is_empty());
+        assert!(stroke_mesh(&[(5.0, 5.0), (5.0, 5.0)], 3.0).is_empty());
+        assert!(mesh.iter().all(|v| v[0].is_finite() && v[1].is_finite()));
+    }
+
+    #[test]
+    fn wave_mode_submits_one_stroke_per_trace() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Wave);
+        for (i, s) in model.wave_left.iter_mut().enumerate() {
+            *s = ((i % 7) as i16 - 3) * 4000;
+        }
+        for (i, s) in model.wave_right.iter_mut().enumerate() {
+            *s = ((i % 5) as i16 - 2) * 6000;
+        }
+        for (i, s) in model.wave_sub.iter_mut().enumerate() {
+            *s = if i % 32 == 0 { 20000 } else { 0 };
+        }
+        let scene = build(&model);
+        assert_eq!(scene.strokes.len(), 3, "left, right, sub");
+        for (stroke, signal) in scene.strokes.iter().zip(model.wave_signals) {
+            assert_eq!(stroke.color, signal.color());
+            assert_eq!(stroke.thickness, signal.thickness.clamp(1.0, 8.0));
+            assert!(stroke.points.len() >= jambox_protocol::WAVE_VIZ_POINTS);
+        }
+        // No per-pixel square spam: the fill count is chrome only, so it does
+        // not move when the waves go from silence to full-scale spikes.
+        let mut silent = NativeModel::new();
+        silent.set_mode(UiMode::Wave);
+        let quiet = build(&silent);
+        assert_eq!(
+            scene.color.len(),
+            quiet.color.len(),
+            "wave samples must not change the number of color quads"
+        );
+    }
+
+    #[test]
+    fn cpu_rasterizer_paints_stroke_at_its_thickness() {
+        let mut scene = Scene {
+            clear: 0x000000,
+            font_style: FontStyle::Retro,
+            color: Vec::new(),
+            glyphs: Vec::new(),
+            strokes: Vec::new(),
+            order: Vec::new(),
+        };
+        // Horizontal run then a vertical spike: exercises the miter join.
+        scene.stroke(
+            &[(100.0, 200.0), (300.0, 200.0), (300.0, 50.0)],
+            0x00ff00,
+            4.0,
+        );
+        let mut frame = crate::render::Frame::new();
+        crate::render::rasterize(&mut frame, &scene);
+        let lit_in_col = |x: usize| {
+            (0..480)
+                .filter(|y| frame.pixels[y * 800 + x] == 0x00ff00)
+                .count()
+        };
+        let lit_in_row = |y: usize| {
+            (0..800)
+                .filter(|x| frame.pixels[y * 800 + x] == 0x00ff00)
+                .count()
+        };
+        assert_eq!(lit_in_col(200), 4, "horizontal run is 4px tall");
+        assert_eq!(lit_in_row(120), 4, "vertical spike is 4px wide");
+        assert_eq!(lit_in_col(50), 0, "nothing before the first point");
+        // The outer corner of the join is filled, not notched.
+        assert_eq!(frame.pixels[198 * 800 + 301], 0x00ff00);
+    }
+
+    #[test]
     fn a_later_fill_covers_earlier_text() {
         let mut scene = Scene {
             clear: 0x111111,
             font_style: FontStyle::Retro,
             color: Vec::new(),
             glyphs: Vec::new(),
+            strokes: Vec::new(),
             order: Vec::new(),
         };
         scene.fill(0.0, 0.0, 80.0, 20.0, 0xff0000);
@@ -4744,6 +4987,7 @@ mod tests {
             font_style: FontStyle::Retro,
             color: Vec::new(),
             glyphs: Vec::new(),
+            strokes: Vec::new(),
             order: Vec::new(),
         };
         draw_piano_roll(

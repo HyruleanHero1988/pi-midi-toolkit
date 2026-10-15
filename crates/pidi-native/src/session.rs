@@ -225,6 +225,12 @@ pub struct SessionState {
     /// Bank A pads arm punch FX. Missing → on (previous FX-page behavior).
     #[serde(default = "default_full_velocity")]
     pub punch_pads_fx: bool,
+    /// Idle punch-history rings. Missing → on, so GRAB still has a pre-roll.
+    #[serde(default = "default_punch_history")]
+    pub punch_history: bool,
+    /// Dry capture passthrough. Missing → off, so punch-in stays the mix path.
+    #[serde(default)]
+    pub input_bypass: bool,
     #[serde(default)]
     pub kaoss_show_all: bool,
     #[serde(default)]
@@ -393,6 +399,10 @@ fn default_full_velocity() -> bool {
     true
 }
 
+fn default_punch_history() -> bool {
+    true
+}
+
 impl Default for SessionState {
     fn default() -> Self {
         Self {
@@ -429,6 +439,8 @@ impl Default for SessionState {
             punch_rpt_mode: 0,
             punch_grid_mode: 0,
             punch_pads_fx: true,
+            punch_history: default_punch_history(),
+            input_bypass: false,
             kaoss_show_all: false,
             kaoss_channel: 0,
             vibrato_always: 0.0,

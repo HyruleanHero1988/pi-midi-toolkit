@@ -63,6 +63,12 @@ pub enum Request {
     PunchBufferPrio {
         mode: u8,
     },
+    PunchHistory {
+        enabled: bool,
+    },
+    InputBypass {
+        enabled: bool,
+    },
     PunchRptMode {
         mode: u8,
     },
@@ -229,7 +235,8 @@ pub enum Request {
         len: u8,
     },
     /// `wave` also returns left, right, and sub traces. `sub_hz` updates the
-    /// sub low-pass when it is above zero; zero leaves the current cutoff.
+    /// crossover when it is above zero (sub low-pass, left/right high-pass);
+    /// zero leaves the current cutoff.
     Scope {
         #[serde(default)]
         wave: bool,
@@ -773,6 +780,8 @@ pub fn decode(request: Request) -> Result<Decoded, String> {
             Decoded::Command(Command::SetPunchGrab { source, active })
         }
         Request::PunchBufferPrio { mode } => Decoded::Command(Command::SetPunchBufferPrio { mode }),
+        Request::PunchHistory { enabled } => Decoded::Command(Command::SetPunchHistory { enabled }),
+        Request::InputBypass { enabled } => Decoded::Command(Command::SetInputBypass { enabled }),
         Request::PunchRptMode { mode } => Decoded::Command(Command::SetPunchRptMode { mode }),
         Request::PunchGrid { mode } => Decoded::Command(Command::SetPunchGrid { mode }),
         Request::PunchPads { armed } => Decoded::PunchPads { armed },

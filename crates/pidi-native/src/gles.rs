@@ -3,7 +3,7 @@
 use glow::{HasContext, NativeBuffer, NativeProgram, NativeTexture, NativeUniformLocation};
 
 use crate::font::{self, FontStyle};
-use crate::scene::{ColorQuad, GlyphQuad, Scene};
+use crate::scene::{ColorQuad, GlyphQuad, Scene, Stroke};
 
 const SCREEN_W: f32 = 800.0;
 const SCREEN_H: f32 = 480.0;
@@ -179,24 +179,32 @@ impl Renderer {
         gl.clear_color(cr, cg, cb, 1.0);
         gl.clear(glow::COLOR_BUFFER_BIT);
 
-        enum Batch {
-            Color(ColorQuad),
-            Glyph(GlyphQuad),
+        // Fills and strokes both go through the flat-color program, so they
+        // share one batch; a wave stroke is a triangle mesh, not GL lines
+        // (GLES 2 `glLineWidth` > 1 is unreliable on the Pi).
+        enum Batch<'a> {
+            Color(&'a ColorQuad),
+            Stroke(&'a Stroke),
+            Glyph(&'a GlyphQuad),
         }
         let mut items = Vec::new();
         scene.paint(|op| match op {
-            crate::scene::PaintOp::Fill(quad) => items.push(Batch::Color(*quad)),
-            crate::scene::PaintOp::Glyph(glyph) => items.push(Batch::Glyph(*glyph)),
+            crate::scene::PaintOp::Fill(quad) => items.push(Batch::Color(quad)),
+            crate::scene::PaintOp::Stroke(stroke) => items.push(Batch::Stroke(stroke)),
+            crate::scene::PaintOp::Glyph(glyph) => items.push(Batch::Glyph(glyph)),
         });
 
         let mut i = 0;
         while i < items.len() {
             match items[i] {
-                Batch::Color(_) => {
+                Batch::Color(_) | Batch::Stroke(_) => {
                     let mut verts = Vec::new();
                     while i < items.len() {
-                        let Batch::Color(quad) = items[i] else { break };
-                        push_color_quad(&mut verts, &quad);
+                        match items[i] {
+                            Batch::Color(quad) => push_color_quad(&mut verts, quad),
+                            Batch::Stroke(stroke) => push_stroke(&mut verts, stroke),
+                            Batch::Glyph(_) => break,
+                        }
                         i += 1;
                     }
                     gl.use_program(Some(self.color_prog));
@@ -230,7 +238,7 @@ impl Renderer {
                     let mut verts = Vec::new();
                     while i < items.len() {
                         let Batch::Glyph(quad) = items[i] else { break };
-                        push_glyph_quad(&mut verts, &quad);
+                        push_glyph_quad(&mut verts, quad);
                         i += 1;
                     }
                     gl.enable(glow::BLEND);
@@ -349,6 +357,16 @@ fn push_color_quad(out: &mut Vec<f32>, q: &ColorQuad) {
         x0, y0, r, g, b, a, x1, y0, r, g, b, a, x1, y1, r, g, b, a, x0, y0, r, g, b, a, x1, y1, r,
         g, b, a, x0, y1, r, g, b, a,
     ]);
+}
+
+/// One stroke = one triangle mesh in the color vertex format (x, y, r, g, b, a).
+fn push_stroke(out: &mut Vec<f32>, stroke: &Stroke) {
+    let [r, g, b, a] = unpack_rgb(stroke.color);
+    let mesh = stroke.mesh();
+    out.reserve(mesh.len() * 6);
+    for [x, y] in mesh {
+        out.extend_from_slice(&[x, y, r, g, b, a]);
+    }
 }
 
 fn push_glyph_quad(out: &mut Vec<f32>, q: &GlyphQuad) {

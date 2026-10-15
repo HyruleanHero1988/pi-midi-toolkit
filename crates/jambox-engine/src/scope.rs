@@ -23,7 +23,8 @@ pub struct ScopeTap {
     sub: Box<[AtomicU32]>,
     write: AtomicU32,
     rate: AtomicU32,
-    /// Subwoofer cutoff in millihertz. Default 80 Hz.
+    /// Crossover in millihertz. The sub is low-passed here and left/right are
+    /// high-passed here, so a drum hit stays in the sub wave. Default 80 Hz.
     sub_hz_milli: AtomicU32,
     coeff_stamp: AtomicU32,
     b0: AtomicU32,
@@ -35,6 +36,32 @@ pub struct ScopeTap {
     x2: AtomicU32,
     y1: AtomicU32,
     y2: AtomicU32,
+    hp_b0: AtomicU32,
+    hp_b1: AtomicU32,
+    hp_b2: AtomicU32,
+    hp_a1: AtomicU32,
+    hp_a2: AtomicU32,
+    lx1: AtomicU32,
+    lx2: AtomicU32,
+    ly1: AtomicU32,
+    ly2: AtomicU32,
+    rx1: AtomicU32,
+    rx2: AtomicU32,
+    ry1: AtomicU32,
+    ry2: AtomicU32,
+    /// Second Butterworth stage so the split is 24 dB/octave.
+    lp2_x1: AtomicU32,
+    lp2_x2: AtomicU32,
+    lp2_y1: AtomicU32,
+    lp2_y2: AtomicU32,
+    l2_x1: AtomicU32,
+    l2_x2: AtomicU32,
+    l2_y1: AtomicU32,
+    l2_y2: AtomicU32,
+    r2_x1: AtomicU32,
+    r2_x2: AtomicU32,
+    r2_y1: AtomicU32,
+    r2_y2: AtomicU32,
     /// Last accepted period, in samples. Zero means "not locked yet".
     period: AtomicU32,
     /// Trigger position as samples back from the end of the snapshot, modulo the period.
@@ -71,6 +98,31 @@ impl ScopeTap {
             x2: AtomicU32::new(0),
             y1: AtomicU32::new(0),
             y2: AtomicU32::new(0),
+            hp_b0: AtomicU32::new(0),
+            hp_b1: AtomicU32::new(0),
+            hp_b2: AtomicU32::new(0),
+            hp_a1: AtomicU32::new(0),
+            hp_a2: AtomicU32::new(0),
+            lx1: AtomicU32::new(0),
+            lx2: AtomicU32::new(0),
+            ly1: AtomicU32::new(0),
+            ly2: AtomicU32::new(0),
+            rx1: AtomicU32::new(0),
+            rx2: AtomicU32::new(0),
+            ry1: AtomicU32::new(0),
+            ry2: AtomicU32::new(0),
+            lp2_x1: AtomicU32::new(0),
+            lp2_x2: AtomicU32::new(0),
+            lp2_y1: AtomicU32::new(0),
+            lp2_y2: AtomicU32::new(0),
+            l2_x1: AtomicU32::new(0),
+            l2_x2: AtomicU32::new(0),
+            l2_y1: AtomicU32::new(0),
+            l2_y2: AtomicU32::new(0),
+            r2_x1: AtomicU32::new(0),
+            r2_x2: AtomicU32::new(0),
+            r2_y1: AtomicU32::new(0),
+            r2_y2: AtomicU32::new(0),
             period: AtomicU32::new(0),
             phase: AtomicU32::new(u32::MAX),
             pending: AtomicU32::new(0),
@@ -78,7 +130,8 @@ impl ScopeTap {
         })
     }
 
-    /// Sub low-pass cutoff in Hz. Clamped to a subwoofer range.
+    /// Crossover in Hz. Sub keeps what is below it; left and right keep what
+    /// is above it. Clamped to a subwoofer range.
     pub fn set_sub_hz(&self, hz: f32) {
         let milli = (hz.clamp(20.0, 200.0) * 1000.0).round() as u32;
         self.sub_hz_milli.store(milli.max(1), Ordering::Relaxed);
@@ -96,18 +149,39 @@ impl ScopeTap {
         self.push_channels(block, block);
     }
 
-    /// Audio thread. Stores left, right, and a low-passed sum, then publishes
-    /// the write index. The existing scope picture uses the summed bus.
+    /// Audio thread. Stores a low-passed sum and high-passed left/right, then
+    /// publishes the write index. The existing scope picture uses the full
+    /// summed bus.
     pub fn push_channels(&self, left: &[f32], right: &[f32]) {
         let n = left.len().min(right.len());
         if n == 0 {
             return;
         }
-        let (b0, b1, b2, a1, a2) = self.sub_coeffs();
+        let (b0, b1, b2, a1, a2, hb0, hb1, hb2, ha1, ha2) = self.sub_coeffs();
         let mut x1 = f32::from_bits(self.x1.load(Ordering::Relaxed));
         let mut x2 = f32::from_bits(self.x2.load(Ordering::Relaxed));
         let mut y1 = f32::from_bits(self.y1.load(Ordering::Relaxed));
         let mut y2 = f32::from_bits(self.y2.load(Ordering::Relaxed));
+        let mut lx1 = f32::from_bits(self.lx1.load(Ordering::Relaxed));
+        let mut lx2 = f32::from_bits(self.lx2.load(Ordering::Relaxed));
+        let mut ly1 = f32::from_bits(self.ly1.load(Ordering::Relaxed));
+        let mut ly2 = f32::from_bits(self.ly2.load(Ordering::Relaxed));
+        let mut rx1 = f32::from_bits(self.rx1.load(Ordering::Relaxed));
+        let mut rx2 = f32::from_bits(self.rx2.load(Ordering::Relaxed));
+        let mut ry1 = f32::from_bits(self.ry1.load(Ordering::Relaxed));
+        let mut ry2 = f32::from_bits(self.ry2.load(Ordering::Relaxed));
+        let mut lp2_x1 = f32::from_bits(self.lp2_x1.load(Ordering::Relaxed));
+        let mut lp2_x2 = f32::from_bits(self.lp2_x2.load(Ordering::Relaxed));
+        let mut lp2_y1 = f32::from_bits(self.lp2_y1.load(Ordering::Relaxed));
+        let mut lp2_y2 = f32::from_bits(self.lp2_y2.load(Ordering::Relaxed));
+        let mut l2_x1 = f32::from_bits(self.l2_x1.load(Ordering::Relaxed));
+        let mut l2_x2 = f32::from_bits(self.l2_x2.load(Ordering::Relaxed));
+        let mut l2_y1 = f32::from_bits(self.l2_y1.load(Ordering::Relaxed));
+        let mut l2_y2 = f32::from_bits(self.l2_y2.load(Ordering::Relaxed));
+        let mut r2_x1 = f32::from_bits(self.r2_x1.load(Ordering::Relaxed));
+        let mut r2_x2 = f32::from_bits(self.r2_x2.load(Ordering::Relaxed));
+        let mut r2_y1 = f32::from_bits(self.r2_y1.load(Ordering::Relaxed));
+        let mut r2_y2 = f32::from_bits(self.r2_y2.load(Ordering::Relaxed));
         let mut w = self.write.load(Ordering::Relaxed);
         for i in 0..n {
             let l = left[i];
@@ -119,31 +193,83 @@ impl ScopeTap {
             x1 = mono;
             y2 = y1;
             y1 = y;
+            let sub = b0 * y + b1 * lp2_x1 + b2 * lp2_x2 - a1 * lp2_y1 - a2 * lp2_y2;
+            lp2_x2 = lp2_x1;
+            lp2_x1 = y;
+            lp2_y2 = lp2_y1;
+            lp2_y1 = sub;
+            let hl = hb0 * l + hb1 * lx1 + hb2 * lx2 - ha1 * ly1 - ha2 * ly2;
+            lx2 = lx1;
+            lx1 = l;
+            ly2 = ly1;
+            ly1 = hl;
+            let left_hp = hb0 * hl + hb1 * l2_x1 + hb2 * l2_x2 - ha1 * l2_y1 - ha2 * l2_y2;
+            l2_x2 = l2_x1;
+            l2_x1 = hl;
+            l2_y2 = l2_y1;
+            l2_y1 = left_hp;
+            let hr = hb0 * r + hb1 * rx1 + hb2 * rx2 - ha1 * ry1 - ha2 * ry2;
+            rx2 = rx1;
+            rx1 = r;
+            ry2 = ry1;
+            ry1 = hr;
+            let right_hp = hb0 * hr + hb1 * r2_x1 + hb2 * r2_x2 - ha1 * r2_y1 - ha2 * r2_y2;
+            r2_x2 = r2_x1;
+            r2_x1 = hr;
+            r2_y2 = r2_y1;
+            r2_y1 = right_hp;
             let idx = (w & RING_MASK) as usize;
             self.samples[idx].store(mono.to_bits(), Ordering::Relaxed);
-            self.left[idx].store(l.to_bits(), Ordering::Relaxed);
-            self.right[idx].store(r.to_bits(), Ordering::Relaxed);
-            self.sub[idx].store(y.to_bits(), Ordering::Relaxed);
+            self.left[idx].store(left_hp.to_bits(), Ordering::Relaxed);
+            self.right[idx].store(right_hp.to_bits(), Ordering::Relaxed);
+            self.sub[idx].store(sub.to_bits(), Ordering::Relaxed);
             w = w.wrapping_add(1);
         }
         self.x1.store(x1.to_bits(), Ordering::Relaxed);
         self.x2.store(x2.to_bits(), Ordering::Relaxed);
         self.y1.store(y1.to_bits(), Ordering::Relaxed);
         self.y2.store(y2.to_bits(), Ordering::Relaxed);
+        self.lx1.store(lx1.to_bits(), Ordering::Relaxed);
+        self.lx2.store(lx2.to_bits(), Ordering::Relaxed);
+        self.ly1.store(ly1.to_bits(), Ordering::Relaxed);
+        self.ly2.store(ly2.to_bits(), Ordering::Relaxed);
+        self.rx1.store(rx1.to_bits(), Ordering::Relaxed);
+        self.rx2.store(rx2.to_bits(), Ordering::Relaxed);
+        self.ry1.store(ry1.to_bits(), Ordering::Relaxed);
+        self.ry2.store(ry2.to_bits(), Ordering::Relaxed);
+        self.lp2_x1.store(lp2_x1.to_bits(), Ordering::Relaxed);
+        self.lp2_x2.store(lp2_x2.to_bits(), Ordering::Relaxed);
+        self.lp2_y1.store(lp2_y1.to_bits(), Ordering::Relaxed);
+        self.lp2_y2.store(lp2_y2.to_bits(), Ordering::Relaxed);
+        self.l2_x1.store(l2_x1.to_bits(), Ordering::Relaxed);
+        self.l2_x2.store(l2_x2.to_bits(), Ordering::Relaxed);
+        self.l2_y1.store(l2_y1.to_bits(), Ordering::Relaxed);
+        self.l2_y2.store(l2_y2.to_bits(), Ordering::Relaxed);
+        self.r2_x1.store(r2_x1.to_bits(), Ordering::Relaxed);
+        self.r2_x2.store(r2_x2.to_bits(), Ordering::Relaxed);
+        self.r2_y1.store(r2_y1.to_bits(), Ordering::Relaxed);
+        self.r2_y2.store(r2_y2.to_bits(), Ordering::Relaxed);
         self.write.store(w, Ordering::Release);
     }
 
-    fn sub_coeffs(&self) -> (f32, f32, f32, f32, f32) {
+    fn sub_coeffs(&self) -> (f32, f32, f32, f32, f32, f32, f32, f32, f32, f32) {
         let rate = self.rate.load(Ordering::Relaxed).max(1);
         let milli = self.sub_hz_milli.load(Ordering::Relaxed).max(1);
         let stamp = rate ^ milli.rotate_left(1);
         if stamp != self.coeff_stamp.load(Ordering::Relaxed) {
-            let (b0, b1, b2, a1, a2) = design_lowpass(rate as f32, milli as f32 / 1000.0);
+            let hz = milli as f32 / 1000.0;
+            let (b0, b1, b2, a1, a2) = design_lowpass(rate as f32, hz);
+            let (hb0, hb1, hb2, ha1, ha2) = design_highpass(rate as f32, hz);
             self.b0.store(b0.to_bits(), Ordering::Relaxed);
             self.b1.store(b1.to_bits(), Ordering::Relaxed);
             self.b2.store(b2.to_bits(), Ordering::Relaxed);
             self.a1.store(a1.to_bits(), Ordering::Relaxed);
             self.a2.store(a2.to_bits(), Ordering::Relaxed);
+            self.hp_b0.store(hb0.to_bits(), Ordering::Relaxed);
+            self.hp_b1.store(hb1.to_bits(), Ordering::Relaxed);
+            self.hp_b2.store(hb2.to_bits(), Ordering::Relaxed);
+            self.hp_a1.store(ha1.to_bits(), Ordering::Relaxed);
+            self.hp_a2.store(ha2.to_bits(), Ordering::Relaxed);
             self.coeff_stamp.store(stamp, Ordering::Relaxed);
         }
         (
@@ -152,6 +278,11 @@ impl ScopeTap {
             f32::from_bits(self.b2.load(Ordering::Relaxed)),
             f32::from_bits(self.a1.load(Ordering::Relaxed)),
             f32::from_bits(self.a2.load(Ordering::Relaxed)),
+            f32::from_bits(self.hp_b0.load(Ordering::Relaxed)),
+            f32::from_bits(self.hp_b1.load(Ordering::Relaxed)),
+            f32::from_bits(self.hp_b2.load(Ordering::Relaxed)),
+            f32::from_bits(self.hp_a1.load(Ordering::Relaxed)),
+            f32::from_bits(self.hp_a2.load(Ordering::Relaxed)),
         )
     }
 
@@ -219,6 +350,24 @@ fn design_lowpass(sample_rate: f32, cutoff_hz: f32) -> (f32, f32, f32, f32, f32)
     let b0 = (1.0 - cos) * 0.5;
     let b1 = 1.0 - cos;
     let b2 = (1.0 - cos) * 0.5;
+    let a0 = 1.0 + alpha;
+    let a1 = -2.0 * cos;
+    let a2 = 1.0 - alpha;
+    (b0 / a0, b1 / a0, b2 / a0, a1 / a0, a2 / a0)
+}
+
+/// Butterworth high-pass at the same cutoff as [`design_lowpass`].
+fn design_highpass(sample_rate: f32, cutoff_hz: f32) -> (f32, f32, f32, f32, f32) {
+    let fs = sample_rate.max(1.0);
+    let fc = cutoff_hz.clamp(10.0, fs * 0.45);
+    let q = std::f32::consts::FRAC_1_SQRT_2;
+    let w0 = std::f32::consts::TAU * fc / fs;
+    let cos = w0.cos();
+    let sin = w0.sin();
+    let alpha = sin / (2.0 * q);
+    let b0 = (1.0 + cos) * 0.5;
+    let b1 = -(1.0 + cos);
+    let b2 = (1.0 + cos) * 0.5;
     let a0 = 1.0 + alpha;
     let a1 = -2.0 * cos;
     let a2 = 1.0 - alpha;
@@ -708,12 +857,51 @@ mod tests {
         high_only.set_sub_hz(80.0);
         push_pair(&high_only, &high, &silent);
         let peak = |samples: &[i16]| samples.iter().map(|s| s.unsigned_abs()).max().unwrap_or(0);
-        let bass_peak = peak(&low_only.frame_with_wave(true).sub);
-        let high_peak = peak(&high_only.frame_with_wave(true).sub);
+        let low_frame = low_only.frame_with_wave(true);
+        let high_frame = high_only.frame_with_wave(true);
+        let bass_peak = peak(&low_frame.sub);
+        let high_peak = peak(&high_frame.sub);
         assert!(bass_peak > 8_000, "sub lost the bass, peak {bass_peak}");
         assert!(
             high_peak * 8 < bass_peak,
             "sub kept the highs, bass {bass_peak} high {high_peak}"
+        );
+        let bass_side = peak(&low_frame.left);
+        let high_side = peak(&high_frame.left);
+        assert!(high_side > 8_000, "left lost the highs, peak {high_side}");
+        assert!(
+            bass_side * 4 < high_side,
+            "left kept the drum thump, bass {bass_side} high {high_side}"
+        );
+    }
+
+    #[test]
+    fn raising_the_split_pulls_bass_off_the_sides() {
+        let rate = 48_000u32;
+        let bass = tone(rate, 40.0, 0.8);
+        let open = ScopeTap::new();
+        open.set_rate(rate);
+        open.set_sub_hz(20.0);
+        push_pair(&open, &bass, &bass);
+        let closed = ScopeTap::new();
+        closed.set_rate(rate);
+        closed.set_sub_hz(180.0);
+        push_pair(&closed, &bass, &bass);
+        let peak = |samples: &[i16]| samples.iter().map(|s| s.unsigned_abs()).max().unwrap_or(0);
+        let open_side = peak(&open.frame_with_wave(true).left);
+        let closed_side = peak(&closed.frame_with_wave(true).left);
+        let closed_sub = peak(&closed.frame_with_wave(true).sub);
+        assert!(
+            open_side > 8_000,
+            "a 40 Hz thump should stay on the sides when the split is 20 Hz, peak {open_side}"
+        );
+        assert!(
+            closed_side * 4 < open_side,
+            "split did not move the thump, open {open_side} closed {closed_side}"
+        );
+        assert!(
+            closed_sub > 4_000,
+            "sub lost the thump at 180 Hz, peak {closed_sub}"
         );
     }
 }

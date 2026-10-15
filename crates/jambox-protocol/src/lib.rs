@@ -105,6 +105,14 @@ pub enum Request {
     PunchBufferPrio {
         mode: u8,
     },
+    /// Idle punch-history ring. Armed buffer FX still records.
+    PunchHistory {
+        enabled: bool,
+    },
+    /// Copy capture to the headphones with no synth, punch, or bus FX.
+    InputBypass {
+        enabled: bool,
+    },
     PunchRptMode {
         mode: u8,
     },
@@ -288,7 +296,8 @@ pub enum Request {
     },
     /// Latest master-mix oscilloscope frame. One in flight; the engine does not queue these.
     /// `wave` also returns left, right, and sub traces. `sub_hz` updates the
-    /// sub low-pass when it is above zero; zero leaves the current cutoff.
+    /// crossover when it is above zero (sub low-pass, left/right high-pass);
+    /// zero leaves the current cutoff.
     Scope {
         #[serde(default)]
         wave: bool,

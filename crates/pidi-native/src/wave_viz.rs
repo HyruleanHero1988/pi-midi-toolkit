@@ -131,6 +131,8 @@ pub struct WaveCol {
 pub struct WaveChrome {
     pub setup: Rect,
     pub done: Rect,
+    pub history: Rect,
+    pub bypass: Rect,
     pub cols: [WaveCol; 3],
     pub cutoff: Rect,
 }
@@ -148,10 +150,22 @@ pub fn chrome(content: Rect) -> WaveChrome {
         w: 108,
         h: 40,
     };
+    let bypass = Rect {
+        x: done.x - 232,
+        y: done.y,
+        w: 100,
+        h: 40,
+    };
+    let history = Rect {
+        x: done.x - 116,
+        y: done.y,
+        w: 100,
+        h: 40,
+    };
     let cutoff = Rect {
         x: content.x + 12,
         y: done.y,
-        w: (done.x - content.x - 20).max(40),
+        w: (bypass.x - content.x - 20).max(40),
         h: 40,
     };
     let top = content.y + 8;
@@ -197,6 +211,8 @@ pub fn chrome(content: Rect) -> WaveChrome {
         setup,
         done,
         cols,
+        history,
+        bypass,
         cutoff,
     }
 }
@@ -221,6 +237,12 @@ pub fn hit(content: Rect, px: i32, py: i32, setup: bool) -> Hit {
     if setup {
         if chrome.done.contains(px, py) {
             return Hit::WaveVizDone;
+        }
+        if chrome.history.contains(px, py) {
+            return Hit::WaveVizHistory;
+        }
+        if chrome.bypass.contains(px, py) {
+            return Hit::WaveVizBypass;
         }
         if chrome.cutoff.contains(px, py) {
             return Hit::WaveVizSlider {
