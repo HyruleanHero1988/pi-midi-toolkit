@@ -267,11 +267,13 @@ impl Outbox {
     }
 
     pub fn punch_lock(&mut self, source: u8, locked: bool) {
-        self.reliable.push_back(Request::PunchLock { source, locked });
+        self.reliable
+            .push_back(Request::PunchLock { source, locked });
     }
 
     pub fn punch_grab(&mut self, source: u8, active: bool) {
-        self.reliable.push_back(Request::PunchGrab { source, active });
+        self.reliable
+            .push_back(Request::PunchGrab { source, active });
     }
 
     pub fn punch_buffer_prio(&mut self, mode: u8) {
@@ -362,7 +364,8 @@ impl Outbox {
     }
 
     pub fn set_arp_step(&mut self, index: u8, interval: i8) {
-        self.reliable.push_back(Request::SetArpStep { index, interval });
+        self.reliable
+            .push_back(Request::SetArpStep { index, interval });
     }
 
     pub fn set_arp_len(&mut self, len: u8) {
@@ -373,8 +376,8 @@ impl Outbox {
         self.reliable.push_back(Request::Status);
     }
 
-    pub fn scope(&mut self) {
-        self.reliable.push_back(Request::Scope);
+    pub fn scope(&mut self, wave: bool, sub_hz: f32) {
+        self.reliable.push_back(Request::Scope { wave, sub_hz });
     }
 
     pub fn midi_ports(&mut self) {
@@ -382,7 +385,8 @@ impl Outbox {
     }
 
     pub fn midi_select(&mut self, input: Option<String>, output: Option<String>) {
-        self.reliable.push_back(Request::MidiSelect { input, output });
+        self.reliable
+            .push_back(Request::MidiSelect { input, output });
     }
 
     pub fn channel_map(&mut self, bits: [u16; 16]) {
@@ -394,7 +398,8 @@ impl Outbox {
     }
 
     pub fn drum_repeat_map(&mut self, slots: [u8; 16], latch: bool) {
-        self.reliable.push_back(Request::DrumRepeat { slots, latch });
+        self.reliable
+            .push_back(Request::DrumRepeat { slots, latch });
     }
 
     pub fn hello(&mut self) {

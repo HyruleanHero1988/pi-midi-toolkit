@@ -314,6 +314,12 @@ pub struct SessionState {
     /// Named FM patches. Missing in old sessions → empty (then `fm_user` is imported).
     #[serde(default)]
     pub fm_patches: Vec<FmNamedPatch>,
+    /// Left, right, and sub wave layout. Missing → the first test layout.
+    #[serde(default = "crate::wave_viz::default_signals")]
+    pub wave_signals: [crate::wave_viz::WaveSignal; 3],
+    /// Sub low-pass cutoff in Hz. Missing → 80.
+    #[serde(default = "crate::wave_viz::default_sub_hz")]
+    pub wave_sub_hz: f32,
 }
 
 /// A named draw-mode patch. The operator data is the same shape as `FmUserPatch`.
@@ -459,6 +465,8 @@ impl Default for SessionState {
             drum_repeat_lock: false,
             fm_user: None,
             fm_patches: Vec::new(),
+            wave_signals: crate::wave_viz::default_signals(),
+            wave_sub_hz: crate::wave_viz::default_sub_hz(),
         }
     }
 }

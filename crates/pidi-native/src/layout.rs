@@ -24,7 +24,7 @@ pub const JAM_MODES: [UiMode; 6] = [
 ];
 
 /// Home grid entries (5-col). LOG / PORTS live under Settings.
-pub const HOME_TILES: [(UiMode, &'static str, u32); 14] = [
+pub const HOME_TILES: [(UiMode, &'static str, u32); 15] = [
     (UiMode::Synth, "SYNTH", 0x458588),
     (UiMode::Fm, "FM", 0x8ec07c),
     (UiMode::Drums, "DRUMS", 0x98971a),
@@ -38,14 +38,21 @@ pub const HOME_TILES: [(UiMode, &'static str, u32); 14] = [
     (UiMode::Fx, "FX", 0xb16286),
     (UiMode::Mix, "MIX", 0xfabd2f),
     (UiMode::Map, "MAP", 0x458588),
+    (UiMode::Wave, "WAVE", 0x076678),
     (UiMode::Settings, "SETTINGS", 0x665c54),
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Hit {
     Nav(UiMode),
-    Kaoss { x: f32, y: f32 },
-    Drum { index: usize, note: u8 },
+    Kaoss {
+        x: f32,
+        y: f32,
+    },
+    Drum {
+        index: usize,
+        note: u8,
+    },
     Division(usize),
     PhrasePad(usize),
     StopAllClips,
@@ -70,7 +77,9 @@ pub enum Hit {
     PowerBlankCycle,
     NavBack,
     SynthSlider(usize),
-    SynthKey { note: u8 },
+    SynthKey {
+        note: u8,
+    },
     SynthWaveA,
     SynthWaveB,
     SynthSwap,
@@ -232,12 +241,22 @@ pub enum Hit {
     WifiRow(usize),
     WifiKbCancel,
     WifiKbShow,
-    WifiKbKey { row: usize, col: usize },
+    WifiKbKey {
+        row: usize,
+        col: usize,
+    },
     LogClear,
     LogAllOff,
-    ChordsButton { col: usize, row: usize },
-    ChordsStrum { y: f32 },
-    ChordsPalette { slot: usize },
+    ChordsButton {
+        col: usize,
+        row: usize,
+    },
+    ChordsStrum {
+        y: f32,
+    },
+    ChordsPalette {
+        slot: usize,
+    },
     ChordsOut,
     ChordsHold,
     ChordsKey,
@@ -262,6 +281,15 @@ pub enum Hit {
     ArpDel,
     ArpKeyOctDown,
     ArpKeyOctUp,
+    WaveVizSetup,
+    WaveVizDone,
+    WaveVizOrient(usize),
+    /// `signal` 0..2 is left/right/sub. `3` is the sub cutoff slider.
+    /// `param` 0 offset, 1 thickness, 2 red, 3 green, 4 blue.
+    WaveVizSlider {
+        signal: usize,
+        param: u8,
+    },
     None,
 }
 
@@ -2412,7 +2440,8 @@ impl Layout {
             }
         }
         let w = keys.w / Self::SYNTH_WHITE_COUNT as i32;
-        let white = ((px - keys.x) / w.max(1)).clamp(0, Self::SYNTH_WHITE_COUNT as i32 - 1) as usize;
+        let white =
+            ((px - keys.x) / w.max(1)).clamp(0, Self::SYNTH_WHITE_COUNT as i32 - 1) as usize;
         const WHITE_NOTES: [u8; 7] = [60, 62, 64, 65, 67, 69, 71];
         Some(WHITE_NOTES[white])
     }
@@ -2571,6 +2600,7 @@ impl Layout {
             UiMode::Ports => self.hit_map(px, py),
             UiMode::Chords => self.hit_chords(px, py),
             UiMode::Arp => self.hit_arp(px, py),
+            UiMode::Wave => Hit::None,
         }
     }
 
@@ -3217,7 +3247,11 @@ impl Layout {
     pub fn song_viz_fall(drum_cols: usize) -> Rect {
         let keys = Self::song_viz_keyboard();
         let drums = Self::song_viz_drums(drum_cols);
-        let x = if drums.w > 0 { drums.x + drums.w + 4 } else { 8 };
+        let x = if drums.w > 0 {
+            drums.x + drums.w + 4
+        } else {
+            8
+        };
         Rect {
             x,
             y: 78,
@@ -3961,6 +3995,10 @@ pub enum Surface {
         dragging: bool,
     },
     UiTap,
+    WaveSlider {
+        signal: usize,
+        param: u8,
+    },
 }
 
 #[cfg(test)]
@@ -4142,8 +4180,14 @@ mod tests {
                 "{label} is {label_w}px and the bar is {}px",
                 track.w
             );
-            assert!(track.y >= layout.synth_sliders.y + 16, "{label} covers its name");
-            assert_eq!(track.x, layout.synth_sliders.x, "{label} should span the column");
+            assert!(
+                track.y >= layout.synth_sliders.y + 16,
+                "{label} covers its name"
+            );
+            assert_eq!(
+                track.x, layout.synth_sliders.x,
+                "{label} should span the column"
+            );
             assert_eq!(track.w, layout.synth_sliders.w);
             if index > 0 {
                 let prev = layout.synth_slider(index - 1);
@@ -4187,7 +4231,10 @@ mod tests {
         let snare = layout.kit_pad_cell(13);
         let rimshot = layout.kit_pad_cell(5);
         match layout.hit(UiMode::Drums, snare.x + 4, snare.y + 4) {
-            Hit::Drum { index: 13, note: 37 } => {}
+            Hit::Drum {
+                index: 13,
+                note: 37,
+            } => {}
             other => panic!("snare should sit on the old rimshot cell, got {other:?}"),
         }
         match layout.hit(UiMode::Drums, rimshot.x + 4, rimshot.y + 4) {
@@ -4276,14 +4323,8 @@ mod tests {
     fn chrome_rec_is_hit_from_any_mode() {
         let layout = Layout::new();
         let rec = layout.nav_chrome_rec();
-        assert_eq!(
-            layout.hit(UiMode::Synth, rec.x + 4, rec.y + 4),
-            Hit::SeqRec
-        );
-        assert_eq!(
-            layout.hit(UiMode::Kaoss, rec.x + 4, rec.y + 4),
-            Hit::SeqRec
-        );
+        assert_eq!(layout.hit(UiMode::Synth, rec.x + 4, rec.y + 4), Hit::SeqRec);
+        assert_eq!(layout.hit(UiMode::Kaoss, rec.x + 4, rec.y + 4), Hit::SeqRec);
     }
 
     #[test]
@@ -4363,7 +4404,8 @@ mod tests {
         let settings = layout.home_tile(settings_idx, 0);
         let grid = layout.home_grid();
         assert!(
-            grid.viewport.contains(settings.x + 4, settings.y + settings.h / 2),
+            grid.viewport
+                .contains(settings.x + 4, settings.y + settings.h / 2),
             "settings tile should be reachable at scroll 0"
         );
     }
@@ -4452,11 +4494,7 @@ mod tests {
             other => panic!("expected strum at right, got {other:?}"),
         }
         let label = layout.chords_oct_label();
-        match layout.hit(
-            UiMode::Chords,
-            label.x + label.w / 2,
-            label.y + label.h / 2,
-        ) {
+        match layout.hit(UiMode::Chords, label.x + label.w / 2, label.y + label.h / 2) {
             Hit::ChordsStrum { .. } => {}
             other => panic!("expected strum on octave label, got {other:?}"),
         }
@@ -4574,10 +4612,7 @@ mod tests {
             Hit::PunchPrio
         );
         let set = layout.punch_set();
-        assert_eq!(
-            layout.hit(UiMode::Fx, set.x + 8, set.y + 8),
-            Hit::PunchSet
-        );
+        assert_eq!(layout.hit(UiMode::Fx, set.x + 8, set.y + 8), Hit::PunchSet);
     }
 
     #[test]
