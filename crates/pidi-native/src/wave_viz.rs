@@ -12,6 +12,9 @@ pub const SUB_HZ_MIN: f32 = 20.0;
 pub const SUB_HZ_MAX: f32 = 200.0;
 pub const THICK_MIN: f32 = 1.0;
 pub const THICK_MAX: f32 = 8.0;
+/// Display gain. 1 leaves the trace as sampled. Below 1 shrinks it, above 1 exaggerates it.
+pub const AMP_MIN: f32 = 0.25;
+pub const AMP_MAX: f32 = 8.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
@@ -57,6 +60,9 @@ pub struct WaveSignal {
     pub rgb: [u8; 3],
     #[serde(default = "default_thickness")]
     pub thickness: f32,
+    /// How far the line moves from its baseline. Does not change the audio.
+    #[serde(default = "default_amplitude")]
+    pub amplitude: f32,
 }
 
 fn default_offset() -> f32 {
@@ -69,6 +75,10 @@ fn default_rgb() -> [u8; 3] {
 
 fn default_thickness() -> f32 {
     3.0
+}
+
+fn default_amplitude() -> f32 {
+    1.0
 }
 
 impl WaveSignal {
@@ -85,18 +95,21 @@ pub fn default_signals() -> [WaveSignal; 3] {
             offset: 0.5,
             rgb: [40, 130, 255],
             thickness: 3.0,
+            amplitude: 1.0,
         },
         WaveSignal {
             orient: WaveOrient::Vertical,
             offset: 0.5,
             rgb: [40, 210, 70],
             thickness: 3.0,
+            amplitude: 1.0,
         },
         WaveSignal {
             orient: WaveOrient::Circular,
             offset: 0.62,
             rgb: [230, 40, 40],
             thickness: 3.0,
+            amplitude: 1.0,
         },
     ]
 }
@@ -121,10 +134,20 @@ pub fn thick_unit(px: f32) -> f32 {
     ((px.clamp(THICK_MIN, THICK_MAX) - THICK_MIN) / (THICK_MAX - THICK_MIN)).clamp(0.0, 1.0)
 }
 
+pub fn amp_from_unit(unit: f32) -> f32 {
+    let t = unit.clamp(0.0, 1.0);
+    AMP_MIN * (AMP_MAX / AMP_MIN).powf(t)
+}
+
+pub fn amp_unit(gain: f32) -> f32 {
+    let g = gain.clamp(AMP_MIN, AMP_MAX);
+    (g / AMP_MIN).ln() / (AMP_MAX / AMP_MIN).ln()
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct WaveCol {
     pub orient: Rect,
-    pub rows: [Rect; 5],
+    pub rows: [Rect; 6],
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -184,7 +207,7 @@ pub fn chrome(content: Rect) -> WaveChrome {
             y: 0,
             w: 1,
             h: 1,
-        }; 5],
+        }; 6],
     }; 3];
     for i in 0..3 {
         let x = content.x + 12 + i as i32 * (col_w + gap);
@@ -195,13 +218,13 @@ pub fn chrome(content: Rect) -> WaveChrome {
             h: 36,
         };
         let row_top = orient.y + orient.h + 6;
-        let row_h = ((bottom - row_top) / 5).clamp(28, 44);
+        let row_h = ((bottom - row_top) / 6).clamp(28, 44);
         let mut rows = [Rect {
             x,
             y: 0,
             w: col_w,
             h: row_h,
-        }; 5];
+        }; 6];
         for (n, row) in rows.iter_mut().enumerate() {
             row.y = row_top + n as i32 * row_h;
         }
@@ -278,6 +301,7 @@ pub fn trace(signal: WaveSignal, samples: &[i16], area: Rect) -> Vec<(f32, f32)>
     let n = samples.len().max(2);
     let mut pts = Vec::with_capacity(n + 1);
     let offset = signal.offset.clamp(0.0, 1.0);
+    let gain = signal.amplitude.clamp(AMP_MIN, AMP_MAX);
     match signal.orient {
         WaveOrient::Horizontal => {
             let margin = 10.0;
@@ -286,7 +310,7 @@ pub fn trace(signal: WaveSignal, samples: &[i16], area: Rect) -> Vec<(f32, f32)>
             let amp = area.h as f32 * 0.22;
             for i in 0..n {
                 let x = area.x as f32 + margin + span * i as f32 / (n - 1) as f32;
-                let s = sample_at(samples, i, n);
+                let s = sample_at(samples, i, n) * gain;
                 pts.push((x, base - s * amp));
             }
         }
@@ -297,7 +321,7 @@ pub fn trace(signal: WaveSignal, samples: &[i16], area: Rect) -> Vec<(f32, f32)>
             let amp = area.w as f32 * 0.16;
             for i in 0..n {
                 let y = area.y as f32 + margin + span * i as f32 / (n - 1) as f32;
-                let s = sample_at(samples, i, n);
+                let s = sample_at(samples, i, n) * gain;
                 pts.push((base + s * amp, y));
             }
         }
@@ -310,7 +334,7 @@ pub fn trace(signal: WaveSignal, samples: &[i16], area: Rect) -> Vec<(f32, f32)>
             for i in 0..n {
                 let ang =
                     (i as f32 / n as f32) * std::f32::consts::TAU - std::f32::consts::FRAC_PI_2;
-                let s = sample_at(samples, i, n);
+                let s = sample_at(samples, i, n) * gain;
                 let r = (radius + s * spike).max(0.0);
                 pts.push((cx + r * ang.cos(), cy + r * ang.sin()));
             }
@@ -390,6 +414,22 @@ mod tests {
         hot.offset = 0.4;
         let spiked = trace(hot, &[32767i16; 64], area());
         assert!(rad(&spiked) > rad(&quiet) + 10.0);
+    }
+
+    #[test]
+    fn amplitude_stretches_the_drawing_and_leaves_the_baseline() {
+        let mut signal = default_signals()[0];
+        signal.amplitude = 1.0;
+        let samples = [32767i16; 8];
+        let unit = trace(signal, &samples, area());
+        signal.amplitude = 4.0;
+        let stretched = trace(signal, &samples, area());
+        let baseline = trace(signal, &[0i16; 8], area());
+        let d1 = (unit[0].1 - baseline[0].1).abs();
+        let d4 = (stretched[0].1 - baseline[0].1).abs();
+        assert!(d1 > 1.0, "a full sample should leave the baseline");
+        assert!((d4 / d1 - 4.0).abs() < 0.05, "4x display gain, {d4} vs {d1}");
+        assert!((baseline[0].1 - trace(default_signals()[0], &[0i16; 8], area())[0].1).abs() < 0.01);
     }
 
     #[test]

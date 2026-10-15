@@ -3868,6 +3868,7 @@ fn draw_wave_setup(scene: &mut Scene, model: &NativeModel) {
         let values = [
             (signal.orient.offset_label(), signal.offset),
             ("THICK", crate::wave_viz::thick_unit(signal.thickness)),
+            ("AMP", crate::wave_viz::amp_unit(signal.amplitude)),
             ("R", signal.rgb[0] as f32 / 255.0),
             ("G", signal.rgb[1] as f32 / 255.0),
             ("B", signal.rgb[2] as f32 / 255.0),

@@ -2296,9 +2296,10 @@ impl NativeModel {
         match param {
             0 => sig.offset = unit,
             1 => sig.thickness = crate::wave_viz::thick_from_unit(unit),
-            2 => sig.rgb[0] = (unit * 255.0).round() as u8,
-            3 => sig.rgb[1] = (unit * 255.0).round() as u8,
-            4 => sig.rgb[2] = (unit * 255.0).round() as u8,
+            2 => sig.amplitude = crate::wave_viz::amp_from_unit(unit),
+            3 => sig.rgb[0] = (unit * 255.0).round() as u8,
+            4 => sig.rgb[1] = (unit * 255.0).round() as u8,
+            5 => sig.rgb[2] = (unit * 255.0).round() as u8,
             _ => return,
         }
         self.mark_dirty();
@@ -2419,6 +2420,9 @@ impl NativeModel {
             signal.thickness = signal
                 .thickness
                 .clamp(crate::wave_viz::THICK_MIN, crate::wave_viz::THICK_MAX);
+            signal.amplitude = signal
+                .amplitude
+                .clamp(crate::wave_viz::AMP_MIN, crate::wave_viz::AMP_MAX);
         }
         self.wave_sub_hz = s
             .wave_sub_hz

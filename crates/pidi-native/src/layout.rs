@@ -287,7 +287,7 @@ pub enum Hit {
     WaveVizBypass,
     WaveVizOrient(usize),
     /// `signal` 0..2 is left/right/sub. `3` is the sub cutoff slider.
-    /// `param` 0 offset, 1 thickness, 2 red, 3 green, 4 blue.
+    /// `param` 0 offset, 1 thickness, 2 amplitude, 3 red, 4 green, 5 blue.
     WaveVizSlider {
         signal: usize,
         param: u8,
