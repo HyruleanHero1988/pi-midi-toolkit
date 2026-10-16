@@ -2289,6 +2289,7 @@ impl NativeModel {
         self.midi_in_connected = ports.input_connected.clone();
         self.midi_out_connected = ports.output_connected.clone();
         self.controller_profile = self.live_controller_profile();
+        self.layout.pad_notes = self.controller_profile.phrase_notes;
         self.layout.show_on_screen_keys = !self.hardware_keybed_connected();
     }
 
@@ -5027,7 +5028,7 @@ impl NativeModel {
 
     fn selected_kit_note(&self) -> u8 {
         let cell = phrases::PHRASE_GRID_CELLS[self.kit_selected.min(15)];
-        phrases::mpk_note_for_phrase_cell(cell)
+        self.controller_profile.note_for_phrase_cell(cell)
     }
 
     pub fn selected_drum_model(&self) -> DrumModel {
@@ -9903,6 +9904,8 @@ mod tests {
         );
         assert_eq!(model.controller_profile.id, "smk-37-elite");
         assert_eq!(model.controller_profile.knob_ccs[0], 48);
+        assert_eq!(model.layout.pad_notes[0], 36);
+        assert_eq!(model.controller_profile.punch_index_for_pad(36), Some(0));
     }
 
     #[test]

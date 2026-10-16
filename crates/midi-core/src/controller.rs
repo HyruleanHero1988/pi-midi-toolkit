@@ -85,6 +85,11 @@ pub fn mpk_phrase_notes() -> [u8; 16] {
     notes
 }
 
+/// Screen-order 4×4 starting at C1 (36), no row-swap — SMK / Launchpad style.
+pub fn sequential_phrase_notes() -> [u8; 16] {
+    std::array::from_fn(|i| 36 + i as u8)
+}
+
 /// Factory MPK pad notes start at 36; each 8-pad bank is row-swapped.
 pub fn mpk_note_for_phrase_cell(cell: usize) -> u8 {
     let c = cell & 0x0f;
@@ -153,8 +158,8 @@ impl ControllerProfile {
             knob_channel: None,
             fader_ccs: [20, 21, 22, 23, 24, 25, 26, 27],
             fader_channel: None,
-            punch_pad_notes: mpk_punch_pad_notes(),
-            phrase_notes: mpk_phrase_notes(),
+            punch_pad_notes: [36, 37, 38, 39, 40, 41, 42, 43],
+            phrase_notes: sequential_phrase_notes(),
             transport_notes: Vec::new(),
             feedback_port_hints: vec!["external".into(), "third".into()],
             skip_audio: true,
@@ -404,6 +409,13 @@ mod tests {
         let back: ControllerProfile = serde_json::from_str(&text).unwrap();
         assert_eq!(p, back);
         assert_eq!(p.knob_ccs, [48, 49, 50, 51, 52, 53, 54, 55]);
+        assert_eq!(p.note_for_phrase_cell(0), 36);
+        assert_eq!(p.punch_index_for_pad(36), Some(0));
+        assert_eq!(
+            ControllerProfile::mpk_mini().punch_index_for_pad(36),
+            Some(4),
+            "MPK Bank A bottom-left stays SEND"
+        );
     }
 }
 
