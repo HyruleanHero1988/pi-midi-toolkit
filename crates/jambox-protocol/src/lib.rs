@@ -429,6 +429,9 @@ pub struct MidiNotice {
     pub control: Option<u8>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub value: Option<u16>,
+    /// Live controller profile id (`mpk-mini`, `smk-37-elite`, …).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub controller: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
@@ -603,5 +606,4 @@ mod tests {
             }
         ));
     }
-
 }

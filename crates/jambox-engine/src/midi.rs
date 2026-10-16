@@ -10,15 +10,16 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use midi_core::{
-    fanout_dest_mask, is_virtual_port_name, matching_port_names, pick_port_name, MidiEvent,
+    fanout_dest_mask, is_virtual_port_name, matching_port_names, pick_thru_output_name,
+    profile_for_port_name, ControllerProfile, KnobEncoding, MidiEvent,
 };
 use midir::{MidiInput, MidiInputConnection, MidiOutput, MidiOutputConnection};
 use tracing::{info, warn};
 
 use crate::bus::{MidiInSide, MidiOutSide};
 use jambox_core::{
-    drum_model_for_note, punch_index_for_knob_cc, punch_index_for_pad_note, Command, FxParam,
-    FxTarget, RepeatDivision, SynthParam, DRUM_CHANNEL, DRUM_MODEL_COUNT,
+    drum_model_for_note, Command, FxParam, FxTarget, RepeatDivision, SynthParam, DRUM_CHANNEL,
+    DRUM_MODEL_COUNT, SEQ_CLIP_SLOT, SEQ_DRUM_MIX_SLOT, SEQ_KAOSS_MIX_SLOT,
 };
 
 /// Repeat-lane owners for hardware pads (`0x1000 | note`).
@@ -75,6 +76,8 @@ pub struct MidiMap {
     repeat_latch: AtomicBool,
     hw_latched: [AtomicBool; DRUM_MODEL_COUNT],
     hw_note: [AtomicU8; DRUM_MODEL_COUNT],
+    /// Last absolute 0..=10000 for relative encoders (knobs 0..7, bank2 8..15).
+    cc_last: [AtomicU16; 16],
 }
 
 impl Default for MidiMap {
@@ -89,6 +92,7 @@ impl Default for MidiMap {
             repeat_latch: AtomicBool::new(false),
             hw_latched: std::array::from_fn(|_| AtomicBool::new(false)),
             hw_note: std::array::from_fn(|_| AtomicU8::new(0)),
+            cc_last: std::array::from_fn(|_| AtomicU16::new(0)),
         }
     }
 }
@@ -239,17 +243,26 @@ impl MidiMap {
         }
     }
 
-    /// One MIDI event → zero or more audio-thread commands.
+    /// One MIDI event → zero or more audio-thread commands (MPK factory map).
     pub fn interpret(&self, event: MidiEvent) -> Option<Command> {
+        self.interpret_with(&ControllerProfile::mpk_mini(), event)
+    }
+
+    /// One MIDI event through a live controller map. Unknown devices use
+    /// [`ControllerProfile::generic`] (MPK-compatible knobs/pads).
+    pub fn interpret_with(&self, profile: &ControllerProfile, event: MidiEvent) -> Option<Command> {
         match event {
             MidiEvent::NoteOn {
                 channel,
                 note,
                 velocity,
             } => {
+                if profile.is_transport_note(note) {
+                    return None;
+                }
                 if self.mode.load(Ordering::Relaxed) == MODE_PUNCH
                     && self.pads_to_fx()
-                    && punch_index_for_pad_note(note).is_some()
+                    && profile.punch_index_for_pad(note).is_some()
                 {
                     return None;
                 }
@@ -265,9 +278,12 @@ impl MidiMap {
                 })
             }
             MidiEvent::NoteOff { channel, note, .. } => {
+                if profile.is_transport_note(note) {
+                    return None;
+                }
                 if self.mode.load(Ordering::Relaxed) == MODE_PUNCH
                     && self.pads_to_fx()
-                    && punch_index_for_pad_note(note).is_some()
+                    && profile.punch_index_for_pad(note).is_some()
                 {
                     return None;
                 }
@@ -285,35 +301,81 @@ impl MidiMap {
                 })
             }
             MidiEvent::ControlChange {
-                controller, value, ..
-            } => self.interpret_cc(controller, value),
+                channel,
+                controller,
+                value,
+            } => self.interpret_cc(profile, channel, controller, value),
             _ => None,
         }
     }
 
-    fn interpret_cc(&self, controller: u8, value: u8) -> Option<Command> {
-        let unit = (value as f32 / 127.0).clamp(0.0, 1.0);
+    fn cc_unit(&self, slot: usize, encoding: KnobEncoding, value: u8) -> f32 {
+        let last = if slot < self.cc_last.len() {
+            self.cc_last[slot].load(Ordering::Relaxed) as f32 / 10_000.0
+        } else {
+            0.0
+        };
+        let unit = midi_core::apply_knob_cc(encoding, last, value);
+        if slot < self.cc_last.len() {
+            self.cc_last[slot].store((unit * 10_000.0).round() as u16, Ordering::Relaxed);
+        }
+        unit
+    }
+
+    fn interpret_cc(
+        &self,
+        profile: &ControllerProfile,
+        channel: u8,
+        controller: u8,
+        value: u8,
+    ) -> Option<Command> {
         if controller == CC_MOD {
+            let unit = (value as f32 / 127.0).clamp(0.0, 1.0);
             // Wheel scales existing depth; it must not overwrite Knob 5.
             return Some(Command::SetSynth {
                 param: SynthParam::VibratoMod,
                 value: unit,
             });
         }
+        if controller == 64
+            && profile.fader_index(64).is_none()
+            && profile.knob_index(64).is_none()
+            && profile.knob_bank2_index(64).is_none()
+        {
+            return Some(Command::SetSynth {
+                param: SynthParam::Sustain,
+                value: if value >= 64 { 1.0 } else { 0.0 },
+            });
+        }
+        if profile.faders_on_channel(channel) {
+            if let Some(index) = profile.fader_index(controller) {
+                let unit = (value as f32 / 127.0).clamp(0.0, 1.0);
+                return mix_fader_command(index, unit);
+            }
+        }
+        if !profile.knobs_on_channel(channel) {
+            return None;
+        }
+        if let Some(index) = profile.knob_bank2_index(controller) {
+            let unit = self.cc_unit(8 + index, profile.knob_encoding, value);
+            return bank2_fx_command(index, unit);
+        }
+        let knob = profile.knob_index(controller)?;
+        let unit = self.cc_unit(knob, profile.knob_encoding, value);
         let mode = self.mode.load(Ordering::Relaxed);
-        if mode == MODE_PUNCH && punch_index_for_knob_cc(controller).is_some() {
+        if mode == MODE_PUNCH && profile.punch_index_for_knob(controller).is_some() {
             // Amounts / arming live in the kiosk so a disarmed slide stays dry.
             return None;
         }
         if mode == MODE_FX {
-            let param = match controller {
-                CC_MORPH => FxParam::Drive,
-                CC_TONE => FxParam::DelayTime,
-                CC_ATTACK => FxParam::DelayFb,
-                CC_RELEASE => FxParam::DelayMix,
-                CC_VIB_DEPTH => FxParam::ReverbSize,
-                CC_VIB_RATE => FxParam::ReverbMix,
-                CC_LEVEL => {
+            let param = match knob {
+                0 => FxParam::Drive,
+                1 => FxParam::DelayTime,
+                2 => FxParam::DelayFb,
+                3 => FxParam::DelayMix,
+                4 => FxParam::ReverbSize,
+                5 => FxParam::ReverbMix,
+                7 => {
                     return Some(Command::SetSynth {
                         param: SynthParam::Level,
                         value: unit.powf(1.15),
@@ -328,12 +390,12 @@ impl MidiMap {
             });
         }
         if mode == MODE_DRUMS {
-            let param = match controller {
-                CC_MORPH => SynthParam::DrumPitch,
-                CC_TONE => SynthParam::DrumTone,
-                CC_ATTACK => SynthParam::DrumDecay,
-                CC_RELEASE => SynthParam::DrumNoise,
-                CC_LEVEL => {
+            let param = match knob {
+                0 => SynthParam::DrumPitch,
+                1 => SynthParam::DrumTone,
+                2 => SynthParam::DrumDecay,
+                3 => SynthParam::DrumNoise,
+                7 => {
                     return Some(Command::SetSynth {
                         param: SynthParam::DrumLevel,
                         value: unit.powf(1.15),
@@ -344,12 +406,12 @@ impl MidiMap {
             return Some(Command::SetSynth { param, value: unit });
         }
         if mode == MODE_FM {
-            let param = match controller {
-                CC_MORPH => SynthParam::FmBright,
-                CC_TONE => SynthParam::FmClang,
-                CC_ATTACK => SynthParam::FmHit,
-                CC_RELEASE => SynthParam::FmTail,
-                CC_LEVEL => {
+            let param = match knob {
+                0 => SynthParam::FmBright,
+                1 => SynthParam::FmClang,
+                2 => SynthParam::FmHit,
+                3 => SynthParam::FmTail,
+                7 => {
                     return Some(Command::SetSynth {
                         param: SynthParam::Level,
                         value: unit.powf(1.15),
@@ -359,14 +421,14 @@ impl MidiMap {
             };
             return Some(Command::SetSynth { param, value: unit });
         }
-        let param = match controller {
-            CC_MORPH => SynthParam::Morph,
-            CC_TONE => SynthParam::Tone,
-            CC_ATTACK => SynthParam::Attack,
-            CC_RELEASE => SynthParam::Release,
-            CC_VIB_DEPTH => SynthParam::VibratoDepth,
-            CC_VIB_RATE => SynthParam::VibratoRate,
-            CC_LEVEL => {
+        let param = match knob {
+            0 => SynthParam::Morph,
+            1 => SynthParam::Tone,
+            2 => SynthParam::Attack,
+            3 => SynthParam::Release,
+            4 => SynthParam::VibratoDepth,
+            5 => SynthParam::VibratoRate,
+            7 => {
                 return Some(Command::SetSynth {
                     param: SynthParam::Level,
                     value: unit.powf(1.15),
@@ -378,6 +440,55 @@ impl MidiMap {
     }
 }
 
+fn bank2_fx_command(index: usize, unit: f32) -> Option<Command> {
+    let param = match index {
+        0 => FxParam::Drive,
+        1 => FxParam::DelayTime,
+        2 => FxParam::DelayFb,
+        3 => FxParam::DelayMix,
+        4 => FxParam::ReverbSize,
+        5 => FxParam::ReverbMix,
+        6 => FxParam::FlangerMix,
+        7 => FxParam::FlangerRate,
+        _ => return None,
+    };
+    Some(Command::SetFx {
+        target: FxTarget::Bus,
+        param,
+        value: unit,
+    })
+}
+
+fn mix_fader_command(index: usize, unit: f32) -> Option<Command> {
+    match index {
+        0 => Some(Command::SetSynth {
+            param: SynthParam::Level,
+            value: unit,
+        }),
+        1 => Some(Command::SetSynth {
+            param: SynthParam::DrumLevel,
+            value: unit,
+        }),
+        2 => Some(Command::SetClipGain {
+            slot: SEQ_DRUM_MIX_SLOT,
+            value: (unit * 2.0).clamp(0.0, 2.0),
+        }),
+        3 => Some(Command::SetClipGain {
+            slot: SEQ_CLIP_SLOT,
+            value: (unit * 2.0).clamp(0.0, 2.0),
+        }),
+        4 => Some(Command::SetClipGain {
+            slot: SEQ_KAOSS_MIX_SLOT,
+            value: (unit * 2.0).clamp(0.0, 2.0),
+        }),
+        5 => Some(Command::SetSynth {
+            param: SynthParam::InputLevel,
+            value: unit,
+        }),
+        _ => None,
+    }
+}
+
 /// Push a MIDI event into DSP and to every UI client.
 ///
 /// `dest_mask` is the live channel-map bitmask (`bit j` = emit on channel `j`).
@@ -386,6 +497,7 @@ pub fn ingest(
     dest_mask: u16,
     hub: &crate::ipc::ClientHub,
     map: &MidiMap,
+    profile: &ControllerProfile,
     mut send: impl FnMut(Command) -> bool,
 ) {
     let event = map.apply_velocity(event);
@@ -395,8 +507,8 @@ pub fn ingest(
             continue;
         }
         let mapped = event.with_channel(dest);
-        hub.broadcast_midi(mapped);
-        if let Some(command) = map.interpret(mapped) {
+        hub.broadcast_midi(mapped, Some(profile.id.as_str()));
+        if let Some(command) = map.interpret_with(profile, mapped) {
             let _ = send(command);
         }
     }
@@ -431,6 +543,8 @@ pub struct MidiIo {
     in_connected: Mutex<String>,
     out_connected: Mutex<String>,
     channel_map: Mutex<[u16; 16]>,
+    /// Pad LED note/velocity pairs for the controller's External/Third port.
+    led_queue: Mutex<Vec<(u8, u8)>>,
 }
 
 impl MidiIo {
@@ -441,28 +555,46 @@ impl MidiIo {
             in_connected: Mutex::new(String::new()),
             out_connected: Mutex::new(String::new()),
             channel_map: Mutex::new([0; 16]),
+            led_queue: Mutex::new(Vec::new()),
         }
     }
 
-    pub fn set_channel_map(&self, bits: [u16; 16]) {
-        *self
-            .channel_map
+    pub fn queue_clip_led(&self, command: &Command) {
+        match *command {
+            Command::LaunchClip { slot, .. } if slot < 16 => self.queue_pad_led(slot, true),
+            Command::StopClip { slot, .. } if slot < 16 => self.queue_pad_led(slot, false),
+            Command::StopAllClips => {
+                for slot in 0..16u8 {
+                    self.queue_pad_led(slot, false);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn queue_pad_led(&self, slot: u8, on: bool) {
+        let profile = profile_for_port_name(&self.input_connected());
+        if profile.feedback_port_hints.is_empty() {
+            return;
+        }
+        let note = profile.note_for_phrase_cell(slot as usize);
+        self.led_queue
             .lock()
-            .unwrap_or_else(|p| p.into_inner()) = bits;
+            .unwrap_or_else(|p| p.into_inner())
+            .push((note, if on { 127 } else { 0 }));
+    }
+
+    pub fn set_channel_map(&self, bits: [u16; 16]) {
+        *self.channel_map.lock().unwrap_or_else(|p| p.into_inner()) = bits;
     }
 
     pub fn dest_mask(&self, channel: u8) -> u16 {
-        let bits = *self
-            .channel_map
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
+        let bits = *self.channel_map.lock().unwrap_or_else(|p| p.into_inner());
         fanout_dest_mask(bits[(channel & 0x0f) as usize], channel)
     }
 
     fn lock_string(slot: &Mutex<String>) -> String {
-        slot.lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .clone()
+        slot.lock().unwrap_or_else(|p| p.into_inner()).clone()
     }
 
     fn store_string(slot: &Mutex<String>, value: String) {
@@ -523,7 +655,7 @@ fn wanted_input_names(filter: &str) -> Vec<String> {
 
 fn pick_output_name(filter: &str) -> Option<String> {
     let (_, outs) = list_ports();
-    pick_port_name(outs.iter().map(String::as_str), filter)
+    pick_thru_output_name(outs.iter().map(String::as_str), filter)
 }
 
 /// Watch MIDI inputs and connect when matching ports appear (or return).
@@ -611,6 +743,7 @@ fn try_connect(
         .find(|p| input.port_name(p).ok().as_deref() == Some(name))
         .cloned()
         .ok_or_else(|| MidiError::NoPort(name.to_string()))?;
+    let profile = profile_for_port_name(name);
     input
         .connect(
             &chosen,
@@ -619,7 +752,7 @@ fn try_connect(
                 if let Some(event) = MidiEvent::parse(bytes) {
                     let dest_mask = io.dest_mask(event.channel());
                     let mut guard = side.lock().unwrap_or_else(|p| p.into_inner());
-                    ingest(event, dest_mask, &hub, &map, |c| guard.send(c));
+                    ingest(event, dest_mask, &hub, &map, &profile, |c| guard.send(c));
                 }
             },
             (),
@@ -719,6 +852,73 @@ pub fn spawn_output(io: Arc<MidiIo>, mut side: MidiOutSide, running: Arc<AtomicB
     });
 }
 
+/// Note-on/off bytes for RGB / pad LEDs. Never send these to the DIN synth.
+pub fn pad_led_bytes(note: u8, velocity: u8) -> [u8; 3] {
+    if velocity == 0 {
+        [0x80, note, 0]
+    } else {
+        [0x90, note, velocity]
+    }
+}
+
+/// Elite-style LED ports are named External / Third on the same USB device.
+pub fn pick_feedback_port(outputs: &[String], profile: &ControllerProfile) -> Option<String> {
+    if profile.feedback_port_hints.is_empty() {
+        return None;
+    }
+    outputs
+        .iter()
+        .find(|name| {
+            let n = name.to_ascii_lowercase();
+            profile.matches_port(name)
+                && profile
+                    .feedback_port_hints
+                    .iter()
+                    .any(|hint| n.contains(&hint.to_ascii_lowercase()))
+        })
+        .cloned()
+}
+
+/// Open the controller's LED port and push phrase-pad note-on/off. Skips the
+/// DIN thru output so U2MIDI never sees pad lamps.
+pub fn spawn_feedback(io: Arc<MidiIo>, running: Arc<AtomicBool>) {
+    std::thread::spawn(move || {
+        let mut connection: Option<midir::MidiOutputConnection> = None;
+        let mut current = String::new();
+        while running.load(Ordering::Relaxed) {
+            let profile = profile_for_port_name(&io.input_connected());
+            let (_, outs) = list_ports();
+            let wanted = pick_feedback_port(&outs, &profile);
+            let still =
+                wanted.as_ref().map(|n| n == &current).unwrap_or(false) && connection.is_some();
+            if connection.is_some() && !still {
+                connection = None;
+                current.clear();
+            }
+            if connection.is_none() {
+                if let Some(name) = wanted {
+                    if let Ok(conn) = try_open_output(&name) {
+                        info!(port = %name, "midi: pad LED feedback open");
+                        current = name;
+                        connection = Some(conn);
+                    }
+                }
+            }
+            let pending = {
+                let mut q = io.led_queue.lock().unwrap_or_else(|p| p.into_inner());
+                std::mem::take(&mut *q)
+            };
+            if let Some(conn) = connection.as_mut() {
+                for (note, vel) in pending {
+                    let bytes = pad_led_bytes(note, vel);
+                    let _ = conn.send(&bytes);
+                }
+            }
+            std::thread::sleep(OUT_POLL);
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -749,9 +949,7 @@ mod tests {
                 note: 36,
                 velocity: 0,
             }),
-            Some(Command::StopRepeat {
-                owner: 0x1000 | 36
-            })
+            Some(Command::StopRepeat { owner: 0x1000 | 36 })
         );
     }
 
@@ -786,9 +984,7 @@ mod tests {
                 note: 36,
                 velocity: 100,
             }),
-            Some(Command::StopRepeat {
-                owner: 0x1000 | 36
-            })
+            Some(Command::StopRepeat { owner: 0x1000 | 36 })
         );
     }
 
@@ -903,6 +1099,278 @@ mod tests {
     }
 
     #[test]
+    fn key_knobs_follow_the_live_controller_profile() {
+        assert_eq!(
+            ControllerProfile::mpk_mini().knob_ccs,
+            [
+                CC_MORPH,
+                CC_TONE,
+                CC_ATTACK,
+                CC_RELEASE,
+                CC_VIB_DEPTH,
+                CC_VIB_RATE,
+                76,
+                CC_LEVEL
+            ]
+        );
+        let map = MidiMap::default();
+        let mut smk = ControllerProfile::smk_37_elite();
+        smk.knob_encoding = KnobEncoding::Absolute;
+        assert_eq!(
+            map.interpret_with(
+                &smk,
+                MidiEvent::ControlChange {
+                    channel: 0,
+                    controller: 48,
+                    value: 127,
+                }
+            ),
+            Some(Command::SetSynth {
+                param: SynthParam::Morph,
+                value: 1.0
+            })
+        );
+        assert!(
+            map.interpret_with(
+                &smk,
+                MidiEvent::ControlChange {
+                    channel: 0,
+                    controller: CC_MORPH,
+                    value: 127,
+                }
+            )
+            .is_none(),
+            "MPK CC 70 must not steal a controller that remapped knobs"
+        );
+        assert_eq!(
+            map.interpret(MidiEvent::ControlChange {
+                channel: 0,
+                controller: CC_MORPH,
+                value: 127,
+            }),
+            Some(Command::SetSynth {
+                param: SynthParam::Morph,
+                value: 1.0
+            }),
+            "MPK path stays on factory CCs"
+        );
+    }
+
+    #[test]
+    fn smk_transport_notes_do_not_wrap_into_the_kit() {
+        let map = MidiMap::default();
+        let smk = ControllerProfile::smk_37_elite();
+        assert!(map
+            .interpret_with(
+                &smk,
+                MidiEvent::NoteOn {
+                    channel: 9,
+                    note: 91,
+                    velocity: 100,
+                }
+            )
+            .is_none());
+        assert_eq!(
+            map.interpret_with(
+                &smk,
+                MidiEvent::NoteOn {
+                    channel: 9,
+                    note: 36,
+                    velocity: 100,
+                }
+            ),
+            Some(Command::NoteOn {
+                channel: 9,
+                note: 36,
+                velocity: 100
+            })
+        );
+        assert_eq!(
+            map.interpret(MidiEvent::NoteOn {
+                channel: 9,
+                note: 91,
+                velocity: 100,
+            }),
+            Some(Command::NoteOn {
+                channel: 9,
+                note: 91,
+                velocity: 100
+            }),
+            "MPK has no transport pad bank"
+        );
+    }
+
+    #[test]
+    fn pad_led_feedback_targets_external_not_din() {
+        let smk = ControllerProfile::smk_37_elite();
+        let outs = vec![
+            "U2MIDI PRO:U2MIDI PRO MIDI 1 20:0".into(),
+            "SMK-37 Elite-External:SMK-37 Elite-External MIDI 1 24:0".into(),
+            "SMK-37 Elite-Master:SMK-37 Elite-Master MIDI 1 20:0".into(),
+        ];
+        assert_eq!(
+            pick_feedback_port(&outs, &smk).as_deref(),
+            Some("SMK-37 Elite-External:SMK-37 Elite-External MIDI 1 24:0")
+        );
+        assert!(pick_feedback_port(&outs, &ControllerProfile::mpk_mini()).is_none());
+        assert_eq!(pad_led_bytes(36, 127), [0x90, 36, 127]);
+        assert_eq!(pad_led_bytes(36, 0), [0x80, 36, 0]);
+    }
+
+    #[test]
+    fn sustain_cc64_is_not_a_fader_on_the_elite() {
+        let map = MidiMap::default();
+        assert_eq!(
+            map.interpret_with(
+                &ControllerProfile::smk_37_elite(),
+                MidiEvent::ControlChange {
+                    channel: 0,
+                    controller: 64,
+                    value: 127,
+                }
+            ),
+            Some(Command::SetSynth {
+                param: SynthParam::Sustain,
+                value: 1.0
+            })
+        );
+        assert_eq!(
+            map.interpret(MidiEvent::ControlChange {
+                channel: 0,
+                controller: 64,
+                value: 0,
+            }),
+            Some(Command::SetSynth {
+                param: SynthParam::Sustain,
+                value: 0.0
+            })
+        );
+    }
+
+    #[test]
+    fn smk_encoder_bank2_drives_bus_fx() {
+        let map = MidiMap::default();
+        let mut smk = ControllerProfile::smk_37_elite();
+        smk.knob_encoding = KnobEncoding::Absolute;
+        match map.interpret_with(
+            &smk,
+            MidiEvent::ControlChange {
+                channel: 0,
+                controller: 56,
+                value: 127,
+            },
+        ) {
+            Some(Command::SetFx {
+                target: FxTarget::Bus,
+                param: FxParam::Drive,
+                value,
+            }) => assert!((value - 1.0).abs() < 1e-5),
+            other => panic!("{other:?}"),
+        }
+        assert!(
+            map.interpret_with(
+                &ControllerProfile::mpk_mini(),
+                MidiEvent::ControlChange {
+                    channel: 0,
+                    controller: 56,
+                    value: 127,
+                }
+            )
+            .is_none(),
+            "MPK has no encoder bank 2"
+        );
+    }
+
+    #[test]
+    fn smk_faders_drive_the_mix_buses() {
+        let map = MidiMap::default();
+        let smk = ControllerProfile::smk_37_elite();
+        assert_eq!(
+            map.interpret_with(
+                &smk,
+                MidiEvent::ControlChange {
+                    channel: 0,
+                    controller: 20,
+                    value: 127,
+                }
+            ),
+            Some(Command::SetSynth {
+                param: SynthParam::Level,
+                value: 1.0
+            })
+        );
+        assert_eq!(
+            map.interpret_with(
+                &smk,
+                MidiEvent::ControlChange {
+                    channel: 0,
+                    controller: 21,
+                    value: 64,
+                }
+            ),
+            Some(Command::SetSynth {
+                param: SynthParam::DrumLevel,
+                value: 64.0 / 127.0
+            })
+        );
+        match map.interpret_with(
+            &smk,
+            MidiEvent::ControlChange {
+                channel: 0,
+                controller: 23,
+                value: 64,
+            },
+        ) {
+            Some(Command::SetClipGain { slot, value }) => {
+                assert_eq!(slot, SEQ_CLIP_SLOT);
+                assert!((value - (64.0 / 127.0) * 2.0).abs() < 1e-5);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn relative_encoders_nudge_from_the_last_value() {
+        let map = MidiMap::default();
+        let smk = ControllerProfile::smk_37_elite();
+        assert_eq!(smk.knob_encoding, KnobEncoding::RelativeSigned);
+        let first = map
+            .interpret_with(
+                &smk,
+                MidiEvent::ControlChange {
+                    channel: 0,
+                    controller: 48,
+                    value: 1,
+                },
+            )
+            .unwrap();
+        match first {
+            Command::SetSynth {
+                param: SynthParam::Morph,
+                value,
+            } => assert!((value - 1.0 / 64.0).abs() < 1e-5),
+            other => panic!("{other:?}"),
+        }
+        let back = map
+            .interpret_with(
+                &smk,
+                MidiEvent::ControlChange {
+                    channel: 0,
+                    controller: 48,
+                    value: 127,
+                },
+            )
+            .unwrap();
+        match back {
+            Command::SetSynth {
+                param: SynthParam::Morph,
+                value,
+            } => assert!(value.abs() < 1e-5, "127 is −1 tick, got {value}"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
     fn key_knobs_move_synth_params() {
         let map = MidiMap::default();
         let command = map
@@ -919,6 +1387,28 @@ mod tests {
                 value: 1.0
             }
         );
+        assert_eq!(
+            map.interpret(MidiEvent::ControlChange {
+                channel: 0,
+                controller: CC_VIB_RATE,
+                value: 0,
+            }),
+            Some(Command::SetSynth {
+                param: SynthParam::VibratoRate,
+                value: 0.0
+            })
+        );
+        assert!(matches!(
+            map.interpret(MidiEvent::ControlChange {
+                channel: 0,
+                controller: CC_LEVEL,
+                value: 127,
+            }),
+            Some(Command::SetSynth {
+                param: SynthParam::Level,
+                ..
+            })
+        ));
     }
 
     #[test]
@@ -1005,7 +1495,9 @@ mod tests {
 
     #[test]
     fn skips_through_and_engine_loopback_names() {
-        assert!(is_virtual_port_name("Midi Through:Midi Through Port-0 14:0"));
+        assert!(is_virtual_port_name(
+            "Midi Through:Midi Through Port-0 14:0"
+        ));
         assert!(is_virtual_port_name("jambox-out:jambox-out 129:0"));
         assert!(!is_virtual_port_name("MPK mini 3"));
         assert!(!is_virtual_port_name("U2MIDI PRO:U2MIDI PRO MIDI 1 20:0"));

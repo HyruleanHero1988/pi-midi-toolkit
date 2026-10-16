@@ -343,6 +343,8 @@ pub struct NativeModel {
     pub midi_out_connected: String,
     pub midi_inputs: Vec<String>,
     pub midi_outputs: Vec<String>,
+    /// Map for the live keybed (MPK, SMK-37, …). Unknown ports stay MPK-compatible.
+    pub controller_profile: midi_core::ControllerProfile,
     pub last_midi_activity: String,
     /// Per-input destination bitmask (0 = identity).
     pub channel_map_bits: [u16; 16],
@@ -447,8 +449,10 @@ pub struct NativeModel {
     pub probe: bool,
     /// SET→PWR: draw the LOW PWR / THROTTLE status badge. Off by default.
     pub power_warn: bool,
-    /// SET→FULL VEL: rewrite keyboard note-ons to 127. On by default (Tk).
+    /// SET→FULL VEL: rewrite keyboard note-ons to 127. On by default for MPK.
     pub full_vel: bool,
+    /// Profile default last applied, so a user toggle survives a hotplug swap.
+    full_vel_profile_default: bool,
     /// DRUMS→LOCK: note-repeat keeps running after the pad is released.
     pub drum_repeat_lock: bool,
     repeat_held: [u8; DRUM_MODEL_COUNT],
@@ -597,6 +601,7 @@ impl NativeModel {
             midi_out_connected: String::new(),
             midi_inputs: Vec::new(),
             midi_outputs: Vec::new(),
+            controller_profile: midi_core::ControllerProfile::mpk_mini(),
             last_midi_activity: String::new(),
             channel_map_bits: [0; 16],
             map_out_edit: None,
@@ -678,6 +683,7 @@ impl NativeModel {
             probe: false,
             power_warn: false,
             full_vel: true,
+            full_vel_profile_default: true,
             drum_repeat_lock: false,
             repeat_held: [0; DRUM_MODEL_COUNT],
             repeat_latched: [false; DRUM_MODEL_COUNT],
@@ -1345,7 +1351,10 @@ impl NativeModel {
         if self.connected && !connected {
             self.probe_reconnects = self.probe_reconnects.saturating_add(1);
             if self.probe {
-                self.push_log(format!("probe engine link down ({})", self.probe_reconnects));
+                self.push_log(format!(
+                    "probe engine link down ({})",
+                    self.probe_reconnects
+                ));
             }
         } else if !self.connected && connected {
             outbox.full_vel(self.full_vel);
@@ -1722,10 +1731,7 @@ impl NativeModel {
             // Power-on failed; still treat as available so SCAN/CHECK can try Ethernet.
             self.wifi_usb_on = true;
         }
-        if !detail.is_empty()
-            && !detail.contains("dry-run")
-            && !detail.contains("appliance only")
-        {
+        if !detail.is_empty() && !detail.contains("dry-run") && !detail.contains("appliance only") {
             self.push_log(detail.clone());
         }
         if on {
@@ -1808,10 +1814,7 @@ impl NativeModel {
         }
         if self.update_confirming {
             self.update_confirming = false;
-            self.update_status = format!(
-                "{}\n\nConfirm cancelled.",
-                host::update_local_status()
-            );
+            self.update_status = format!("{}\n\nConfirm cancelled.", host::update_local_status());
             self.mark_dirty();
             return;
         }
@@ -2050,13 +2053,20 @@ impl NativeModel {
         self.arp.gate = s.arp_gate.clamp(1, 127);
         if !s.arp_steps.is_empty() {
             self.arp.len = (s.arp_steps.len() as u8).min(jambox_core::MAX_ARP_STEPS as u8);
-            for (i, interval) in s.arp_steps.iter().take(jambox_core::MAX_ARP_STEPS).enumerate() {
+            for (i, interval) in s
+                .arp_steps
+                .iter()
+                .take(jambox_core::MAX_ARP_STEPS)
+                .enumerate()
+            {
                 self.arp.steps[i] = (*interval).clamp(-24, 24);
             }
         }
         self.chords_hold = s.chords_hold;
         self.chords_key = s.chords_key.min(11);
-        self.chords_octave = s.chords_octave.clamp(chords::OCTAVE_MIN, chords::OCTAVE_MAX);
+        self.chords_octave = s
+            .chords_octave
+            .clamp(chords::OCTAVE_MIN, chords::OCTAVE_MAX);
         self.font_style = s.font_style;
         let (style, color) =
             crate::kaoss_viz::load_viz_from_session(&s.kaoss_viz_style, s.kaoss_mono_color);
@@ -2224,6 +2234,11 @@ impl NativeModel {
     pub fn on_midi_notice(&mut self, notice: &MidiNotice, outbox: &mut Outbox) {
         let kind = notice.kind.to_ascii_lowercase();
         let note = notice.note.unwrap_or(0);
+        if self.profile_for_notice(notice).is_transport_note(note)
+            && (kind.contains("note") || kind.contains("pressure"))
+        {
+            return;
+        }
         let vel = self.maybe_full_vel(notice.channel, notice.velocity.unwrap_or(0) as u8);
         if self.apply_punch_midi(notice, outbox) {
             return;
@@ -2262,6 +2277,9 @@ impl NativeModel {
             }
             self.push_log(format!("midi off ch{} n{}", notice.channel, note));
         } else if kind == "control_change" || kind == "cc" {
+            if self.apply_mix_cc(notice) {
+                return;
+            }
             self.last_midi_activity = format!(
                 "IN  ch{} cc{} v{}",
                 notice.channel + 1,
@@ -2272,13 +2290,52 @@ impl NativeModel {
     }
 
     pub fn apply_midi_ports(&mut self, ports: &MidiPortsReply) {
+        self.apply_midi_ports_with(ports, None);
+    }
+
+    pub fn apply_midi_ports_with(&mut self, ports: &MidiPortsReply, outbox: Option<&mut Outbox>) {
         if !ports.inputs.is_empty() || !ports.outputs.is_empty() {
             self.midi_inputs = ports.inputs.clone();
             self.midi_outputs = ports.outputs.clone();
         }
         self.midi_in_connected = ports.input_connected.clone();
         self.midi_out_connected = ports.output_connected.clone();
+        let next = self.live_controller_profile();
+        if next.id != self.controller_profile.id {
+            if self.full_vel == self.full_vel_profile_default {
+                self.full_vel = next.full_vel_default;
+                if let Some(out) = outbox {
+                    out.full_vel(self.full_vel);
+                }
+            }
+            self.full_vel_profile_default = next.full_vel_default;
+        }
+        self.controller_profile = next;
+        self.layout.pad_notes = self.controller_profile.phrase_notes;
         self.layout.show_on_screen_keys = !self.hardware_keybed_connected();
+    }
+
+    fn live_controller_profile(&self) -> midi_core::ControllerProfile {
+        let from_connected = midi_core::profile_for_port_name(&self.midi_in_connected);
+        if from_connected.id != "generic" {
+            return from_connected;
+        }
+        self.midi_inputs
+            .iter()
+            .map(|name| midi_core::profile_for_port_name(name))
+            .find(|p| p.id != "generic")
+            .unwrap_or(from_connected)
+    }
+
+    fn profile_for_notice(&self, notice: &MidiNotice) -> midi_core::ControllerProfile {
+        if let Some(id) = notice.controller.as_deref() {
+            midi_core::installed_profiles()
+                .into_iter()
+                .find(|p| p.id == id)
+                .unwrap_or_else(|| self.controller_profile.clone())
+        } else {
+            self.controller_profile.clone()
+        }
     }
 
     /// Hide on-screen piano keys when a known keybed is plugged in.
@@ -2345,7 +2402,12 @@ impl NativeModel {
         let Some(name) = self.midi_inputs.get(index).cloned() else {
             return;
         };
-        if midi_core::is_virtual_port_name(&name) && self.midi_inputs.iter().any(|n| !midi_core::is_virtual_port_name(n)) {
+        if midi_core::is_virtual_port_name(&name)
+            && self
+                .midi_inputs
+                .iter()
+                .any(|n| !midi_core::is_virtual_port_name(n))
+        {
             // Allow picking Through only when the user taps it explicitly.
         }
         self.midi_in_filter = name;
@@ -2575,8 +2637,7 @@ impl NativeModel {
             } else {
                 self.layout.hit_wifi_panel(px, py)
             }
-        } else if self.mode == UiMode::Synth
-            && (self.synth_pick_a.is_some() || self.synth_vib_open)
+        } else if self.mode == UiMode::Synth && (self.synth_pick_a.is_some() || self.synth_vib_open)
         {
             self.layout
                 .hit_synth_overlay(px, py, self.synth_vib_open, self.synth_pick_a.is_some())
@@ -3227,8 +3288,8 @@ impl NativeModel {
             }
             Hit::KaossFxDest(index) => {
                 self.tap_ui(slot, id, gesture, px, py);
-                self.kaoss_fx_target = session::KaossFxTarget::ALL
-                    [index as usize % session::KaossFxTarget::ALL.len()];
+                self.kaoss_fx_target =
+                    session::KaossFxTarget::ALL[index as usize % session::KaossFxTarget::ALL.len()];
                 self.status_line = format!("kaoss FX → {}", self.kaoss_fx_target.label());
                 self.mark_dirty();
             }
@@ -4284,13 +4345,7 @@ impl NativeModel {
     }
 
     /// End a contact, optionally applying a final lift position reported by the driver.
-    pub fn finger_up_at(
-        &mut self,
-        id: i32,
-        px: Option<i32>,
-        py: Option<i32>,
-        outbox: &mut Outbox,
-    ) {
+    pub fn finger_up_at(&mut self, id: i32, px: Option<i32>, py: Option<i32>, outbox: &mut Outbox) {
         let Some(slot) = self.fingers.iter().position(|f| f.active && f.id == id) else {
             return;
         };
@@ -4569,7 +4624,10 @@ impl NativeModel {
             return;
         };
         let mut pad = phrases::from_wire(events, length_ticks, self.seq.bpm, true);
-        pad.tone = self.seq.baked_tone.unwrap_or(self.synth_params[1].clamp(0.0, 1.0));
+        pad.tone = self
+            .seq
+            .baked_tone
+            .unwrap_or(self.synth_params[1].clamp(0.0, 1.0));
         self.apply_live_voice_snapshot(&mut pad);
         self.phrases[index] = pad;
         let dir = phrases::phrases_dir_from_env();
@@ -4633,13 +4691,15 @@ impl NativeModel {
         let length_ticks = phrases::seconds_to_ticks(length_secs, self.bpm);
         let wire: Vec<WireClipEvent> = trimmed
             .iter()
-            .map(|e| WireClipEvent::midi(
-                phrases::seconds_to_ticks(e.t, self.bpm),
-                e.on,
-                e.channel,
-                e.note,
-                e.velocity,
-            ))
+            .map(|e| {
+                WireClipEvent::midi(
+                    phrases::seconds_to_ticks(e.t, self.bpm),
+                    e.on,
+                    e.channel,
+                    e.note,
+                    e.velocity,
+                )
+            })
             .collect();
         let mut pad = phrases::from_wire(wire, length_ticks.max(1), self.bpm, false);
         pad.tone = self.synth_params[1].clamp(0.0, 1.0);
@@ -4979,13 +5039,18 @@ impl NativeModel {
     }
 
     const FX_PARAM_NAMES: [&'static str; 4] = ["drive", "delay_mix", "reverb_mix", "flanger_mix"];
-    const DRUM_MACRO_NAMES: [&'static str; 5] =
-        ["drum_tone", "drum_noise", "drum_pitch", "drum_decay", "drum_amp"];
+    const DRUM_MACRO_NAMES: [&'static str; 5] = [
+        "drum_tone",
+        "drum_noise",
+        "drum_pitch",
+        "drum_decay",
+        "drum_amp",
+    ];
     const DRUM_MACRO_LABELS: [&'static str; 5] = ["TONE", "SNAP", "PITCH", "DECAY", "LEVEL"];
 
     fn selected_kit_note(&self) -> u8 {
         let cell = phrases::PHRASE_GRID_CELLS[self.kit_selected.min(15)];
-        phrases::mpk_note_for_phrase_cell(cell)
+        self.controller_profile.note_for_phrase_cell(cell)
     }
 
     pub fn selected_drum_model(&self) -> DrumModel {
@@ -5053,7 +5118,10 @@ impl NativeModel {
         let Some(origin) = self.recording_origin() else {
             return;
         };
-        let Some(interval) = self.drum_repeat_for_note(note).interval_secs(self.record_bpm()) else {
+        let Some(interval) = self
+            .drum_repeat_for_note(note)
+            .interval_secs(self.record_bpm())
+        else {
             return;
         };
         if interval <= 0.0 {
@@ -5165,7 +5233,13 @@ impl NativeModel {
         true
     }
 
-    fn release_screen_drum(&mut self, note: u8, gesture: u32, repeating: bool, outbox: &mut Outbox) {
+    fn release_screen_drum(
+        &mut self,
+        note: u8,
+        gesture: u32,
+        repeating: bool,
+        outbox: &mut Outbox,
+    ) {
         let index = drum_model_for_note(note).index();
         if repeating && !(self.drum_repeat_lock && self.repeat_latched[index]) {
             outbox.repeat(
@@ -5482,9 +5556,7 @@ impl NativeModel {
     }
 
     pub fn punch_active(&self) -> bool {
-        self.punch_locked
-            || self.punch_grabbing
-            || self.punch_armed.iter().any(|on| *on)
+        self.punch_locked || self.punch_grabbing || self.punch_armed.iter().any(|on| *on)
     }
 
     fn cycle_punch_buffer_prio(&mut self, outbox: &mut Outbox) {
@@ -5508,7 +5580,9 @@ impl NativeModel {
         self.punch_rpt_mode = self.punch_rpt_mode.next();
         outbox.punch_rpt_mode(self.punch_rpt_mode.as_u8());
         self.status_line = match self.punch_rpt_mode {
-            jambox_core::PunchRptMode::Refresh => "RPT↻ — each hit loops what you just heard".into(),
+            jambox_core::PunchRptMode::Refresh => {
+                "RPT↻ — each hit loops what you just heard".into()
+            }
             jambox_core::PunchRptMode::Hold => "RPTH — keeps that loop until CLEAR".into(),
         };
         self.mark_dirty();
@@ -5552,29 +5626,54 @@ impl NativeModel {
         let kind = notice.kind.to_ascii_lowercase();
         // Knobs often share the keys channel; pads are channel 10. Only notes
         // are gated so keyboard pitches cannot arm punch.
+        let profile = self.profile_for_notice(notice);
         if kind == "control_change" || kind == "cc" {
-            let Some(index) = jambox_core::punch_index_for_knob_cc(notice.control.unwrap_or(255))
-            else {
+            let Some(index) = profile.punch_index_for_knob(notice.control.unwrap_or(255)) else {
                 return false;
             };
-            let unit = (notice.value.unwrap_or(0) as f32 / 127.0).clamp(0.0, 1.0);
+            let raw = notice.value.unwrap_or(0).min(127) as u8;
+            let unit =
+                midi_core::apply_knob_cc(profile.knob_encoding, self.punch_amount[index], raw);
             self.set_punch_amount_unit(index, unit, outbox);
             return true;
+        }
+        if kind == "channel_pressure" || kind == "aftertouch" {
+            let unit = (notice.value.unwrap_or(0) as f32 / 127.0).clamp(0.0, 1.0);
+            let mut any = false;
+            for index in 0..Layout::PUNCH_PAD_COUNT {
+                if self.punch_armed[index] {
+                    self.set_punch_amount_unit(index, unit, outbox);
+                    any = true;
+                }
+            }
+            return any;
         }
         if notice.channel != DRUM_CHANNEL || !self.punch_pads_fx {
             return false;
         }
         if kind == "note_on" || kind == "noteon" {
             if notice.velocity.unwrap_or(0) == 0 {
-                return jambox_core::punch_index_for_pad_note(notice.note.unwrap_or(255)).is_some();
+                return profile
+                    .punch_index_for_pad(notice.note.unwrap_or(255))
+                    .is_some();
             }
-            if let Some(index) = jambox_core::punch_index_for_pad_note(notice.note.unwrap_or(255)) {
+            if let Some(index) = profile.punch_index_for_pad(notice.note.unwrap_or(255)) {
                 self.toggle_punch_arm(index, outbox);
                 return true;
             }
         }
         if kind == "note_off" || kind == "noteoff" {
-            return jambox_core::punch_index_for_pad_note(notice.note.unwrap_or(255)).is_some();
+            return profile
+                .punch_index_for_pad(notice.note.unwrap_or(255))
+                .is_some();
+        }
+        if kind == "poly_pressure" || kind == "polypressure" || kind == "polyaftertouch" {
+            let Some(index) = profile.punch_index_for_pad(notice.note.unwrap_or(255)) else {
+                return false;
+            };
+            let unit = (notice.value.unwrap_or(0) as f32 / 127.0).clamp(0.0, 1.0);
+            self.set_punch_amount_unit(index, unit, outbox);
+            return true;
         }
         false
     }
@@ -5661,6 +5760,27 @@ impl NativeModel {
     fn apply_mix_bus(&mut self, index: usize, py: i32, outbox: &mut Outbox) {
         let track = self.layout.mix_bus_slider(index);
         let t = Self::mix_slider_value(track, py);
+        self.apply_mix_bus_unit(index, t, outbox);
+    }
+
+    fn apply_mix_cc(&mut self, notice: &MidiNotice) -> bool {
+        let profile = self.profile_for_notice(notice);
+        if !profile.faders_on_channel(notice.channel) {
+            return false;
+        }
+        let Some(index) = profile.fader_index(notice.control.unwrap_or(255)) else {
+            return false;
+        };
+        let t = (notice.value.unwrap_or(0) as f32 / 127.0).clamp(0.0, 1.0);
+        let mut out = Outbox::new();
+        self.apply_mix_bus_unit(index, t, &mut out);
+        // Engine already applied the CC; keep the MIX page in sync only.
+        let _ = out.take();
+        true
+    }
+
+    fn apply_mix_bus_unit(&mut self, index: usize, t: f32, outbox: &mut Outbox) {
+        let t = t.clamp(0.0, 1.0);
         match index {
             Layout::MIX_LIVE => {
                 self.synth_params[2] = t;
@@ -5948,10 +6068,7 @@ impl NativeModel {
         if live.is_empty() {
             return;
         }
-        let held: Vec<u8> = live
-            .iter()
-            .map(|&(x, _)| self.kaoss_note_at(x))
-            .collect();
+        let held: Vec<u8> = live.iter().map(|&(x, _)| self.kaoss_note_at(x)).collect();
         if let Some(current) = self.kaoss_usb_note {
             if held.contains(&current) {
                 return;
@@ -6306,13 +6423,8 @@ impl NativeModel {
         if !kaoss_ui::program(self.kaoss_program).note {
             return;
         }
-        self.seq.push_gesture(
-            phase,
-            (owner % 32) as u8,
-            x,
-            y,
-            self.kaoss_gesture_mode(),
-        );
+        self.seq
+            .push_gesture(phase, (owner % 32) as u8, x, y, self.kaoss_gesture_mode());
     }
 
     fn kaoss_touch_edge(
@@ -6364,7 +6476,11 @@ impl NativeModel {
             self.kaoss_root_midi(),
             self.kaoss_octaves,
         );
-        notes.iter().rposition(|&n| n != 0).map(|i| i + 1).unwrap_or(1)
+        notes
+            .iter()
+            .rposition(|&n| n != 0)
+            .map(|i| i + 1)
+            .unwrap_or(1)
     }
 
     fn kaoss_play_x(&mut self, gesture: u32, x: f32) -> f32 {
@@ -7377,9 +7493,7 @@ impl NativeModel {
     }
 
     fn chords_current_is_combo(&self) -> bool {
-        self.chords_current
-            .map(chords::is_combo)
-            .unwrap_or(false)
+        self.chords_current.map(chords::is_combo).unwrap_or(false)
     }
 
     fn chords_held_is_subset_of_current(&self) -> bool {
@@ -7449,8 +7563,7 @@ impl NativeModel {
             self.mark_dirty();
             return;
         }
-        let delta =
-            ((new_key as i16 - old_key as i16).rem_euclid(12)) as u8;
+        let delta = ((new_key as i16 - old_key as i16).rem_euclid(12)) as u8;
         self.chords_key = new_key;
         if let Some(spec) = self.chords_current {
             self.chords_current = Some(spec.transpose(delta));
@@ -7490,7 +7603,10 @@ impl NativeModel {
             return;
         }
         self.chords_octave = next;
-        self.status_line = format!("chords {}", Self::c_note_label(chords::block_base_for_octave(next)));
+        self.status_line = format!(
+            "chords {}",
+            Self::c_note_label(chords::block_base_for_octave(next))
+        );
         self.mark_dirty();
         if self.chords_block.iter().any(|n| n.is_some()) {
             if let Some(spec) = self.chords_current {
@@ -7767,7 +7883,12 @@ impl NativeModel {
         );
     }
 
-    fn arm_song_viz(&mut self, path: &std::path::Path, events: &[WireClipEvent], length_ticks: u32) {
+    fn arm_song_viz(
+        &mut self,
+        path: &std::path::Path,
+        events: &[WireClipEvent],
+        length_ticks: u32,
+    ) {
         self.song_viz_notes = song_viz::pair_notes(events, length_ticks);
         self.song_viz_length = length_ticks.max(1);
         self.song_viz_name = path
@@ -7913,20 +8034,11 @@ impl NativeModel {
                 let excit = self.cell_amp[row][col];
                 self.cells[row][col] = if rainbow {
                     crate::kaoss_viz::pad_led_rgb(
-                        col,
-                        row,
-                        t,
-                        fingers,
-                        excit,
-                        hold,
-                        gate_flash,
-                        hue_shift,
+                        col, row, t, fingers, excit, hold, gate_flash, hue_shift,
                     )
                 } else {
                     let (h, s) = solid.unwrap_or((0.93, 0.88));
-                    crate::kaoss_viz::pad_led_mono(
-                        col, row, t, excit, hold, gate_flash, h, s,
-                    )
+                    crate::kaoss_viz::pad_led_mono(col, row, t, excit, hold, gate_flash, h, s)
                 };
             }
         }
@@ -7990,8 +8102,8 @@ impl NativeModel {
         if self.kaoss_viz_style.is_glow() {
             let mut peak = 0.0_f32;
             for slot in 0..MAX_FINGERS {
-                let touching = self.fingers[slot].active
-                    && self.fingers[slot].surface == Surface::Kaoss;
+                let touching =
+                    self.fingers[slot].active && self.fingers[slot].surface == Surface::Kaoss;
                 let target = if touching { 1.0 } else { 0.0 };
                 let glow = &mut self.kaoss_glow[slot];
                 let was_idle = glow.amp < 0.05;
@@ -8149,7 +8261,10 @@ mod tests {
             } => Some(*gesture),
             _ => None,
         });
-        assert!(hold_gesture.is_some(), "LEAD press should start a touch: {down:?}");
+        assert!(
+            hold_gesture.is_some(),
+            "LEAD press should start a touch: {down:?}"
+        );
         model.finger_up(1, &mut out);
         let lift = out.take();
         assert!(
@@ -8262,7 +8377,9 @@ mod tests {
             })
             .collect();
         assert!(
-            touch_xs.iter().all(|&x| model.kaoss_note_at(x) == start_note),
+            touch_xs
+                .iter()
+                .all(|&x| model.kaoss_note_at(x) == start_note),
             "vertical flick must stay on {start_note}, touch x={touch_xs:?}"
         );
         assert!(
@@ -8541,7 +8658,10 @@ mod tests {
             model.kaoss_glow.iter().map(|g| g.amp).collect::<Vec<_>>()
         );
         let dx = (lit[0].1.xy.0 - lit[1].1.xy.0).abs();
-        assert!(dx > 0.4, "blooms should sit under different pad X positions");
+        assert!(
+            dx > 0.4,
+            "blooms should sit under different pad X positions"
+        );
 
         model.kaoss_viz_style = crate::kaoss_viz::KaossVizStyle::Cells;
         for _ in 0..10 {
@@ -9518,6 +9638,7 @@ mod tests {
                 velocity: Some(80),
                 control: None,
                 value: None,
+                controller: None,
             },
             &mut out,
         );
@@ -9536,6 +9657,7 @@ mod tests {
                 velocity: Some(0),
                 control: None,
                 value: None,
+                controller: None,
             },
             &mut out,
         );
@@ -9551,7 +9673,14 @@ mod tests {
     #[test]
     fn note_repeat_interval_matches_musical_division() {
         assert!((RepeatDivisionChoice::Eighth.interval_secs(120.0).unwrap() - 0.25).abs() < 1e-9);
-        assert!((RepeatDivisionChoice::Sixteenth.interval_secs(120.0).unwrap() - 0.125).abs() < 1e-9);
+        assert!(
+            (RepeatDivisionChoice::Sixteenth
+                .interval_secs(120.0)
+                .unwrap()
+                - 0.125)
+                .abs()
+                < 1e-9
+        );
         assert!((RepeatDivisionChoice::Quarter.interval_secs(120.0).unwrap() - 0.5).abs() < 1e-9);
         assert!(RepeatDivisionChoice::Off.interval_secs(120.0).is_none());
     }
@@ -9714,7 +9843,10 @@ mod tests {
         let mut out = Outbox::new();
         let key = model.layout.synth_keyboard_white_rect(0);
         model.finger_down(1, key.x + 4, key.y + key.h - 8, &mut out);
-        assert!(out.take().iter().any(|r| matches!(r, Request::NoteOn { .. })));
+        assert!(out
+            .take()
+            .iter()
+            .any(|r| matches!(r, Request::NoteOn { .. })));
         model.finger_up(1, &mut out);
         out.take();
 
@@ -9743,7 +9875,9 @@ mod tests {
         );
         model.finger_down(2, key.x + 4, key.y + key.h - 8, &mut out);
         assert!(
-            out.take().iter().all(|r| !matches!(r, Request::NoteOn { .. })),
+            out.take()
+                .iter()
+                .all(|r| !matches!(r, Request::NoteOn { .. })),
             "on-screen keys must stay silent while a keybed is connected"
         );
 
@@ -9757,8 +9891,48 @@ mod tests {
         assert!(model.layout.show_on_screen_keys);
         model.finger_down(3, key.x + 4, key.y + key.h - 8, &mut out);
         assert!(
-            out.take().iter().any(|r| matches!(r, Request::NoteOn { .. })),
+            out.take()
+                .iter()
+                .any(|r| matches!(r, Request::NoteOn { .. })),
             "keys should return when only a DIN interface is connected"
+        );
+    }
+
+    #[test]
+    fn connected_mpk_selects_the_mpk_controller_profile() {
+        let mut model = NativeModel::new();
+        model.apply_midi_ports(&MidiPortsReply {
+            inputs: vec!["MPK mini 3".into()],
+            outputs: vec!["U2MIDI PRO".into()],
+            input_connected: "MPK mini 3".into(),
+            ..MidiPortsReply::default()
+        });
+        assert_eq!(model.controller_profile.id, "mpk-mini");
+        assert_eq!(model.controller_profile.knob_ccs[0], 70);
+    }
+
+    #[test]
+    fn synth_keys_hide_when_smk_37_elite_is_connected() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Synth);
+        model.apply_midi_ports(&MidiPortsReply {
+            inputs: vec!["SMK-37 Elite-Master:SMK-37 Elite-Master MIDI 1 20:0".into()],
+            outputs: vec!["U2MIDI PRO".into()],
+            input_connected: "SMK-37 Elite-Master:SMK-37 Elite-Master MIDI 1 20:0".into(),
+            ..MidiPortsReply::default()
+        });
+        assert!(model.hardware_keybed_connected());
+        assert!(
+            !model.layout.show_on_screen_keys,
+            "SMK-37 Elite already has piano keys"
+        );
+        assert_eq!(model.controller_profile.id, "smk-37-elite");
+        assert_eq!(model.controller_profile.knob_ccs[0], 48);
+        assert_eq!(model.layout.pad_notes[0], 36);
+        assert_eq!(model.controller_profile.punch_index_for_pad(36), Some(0));
+        assert!(
+            !model.full_vel,
+            "Elite velocity is usable; FULL VEL defaults off"
         );
     }
 
@@ -9810,7 +9984,9 @@ mod tests {
         model.finger_move(1, e.x + 4, e.y + e.h - 8, &mut out);
         let glide = out.take();
         assert!(
-            glide.iter().any(|r| matches!(r, Request::NoteOff { note: 60, .. })),
+            glide
+                .iter()
+                .any(|r| matches!(r, Request::NoteOff { note: 60, .. })),
             "leaving C should note-off C: {glide:?}"
         );
         assert!(
@@ -10021,7 +10197,9 @@ mod tests {
             .collect();
         assert_eq!(model.chords_octave, 1);
         assert!(
-            shifted.iter().any(|&n| base_notes.iter().any(|&b| n == b + 12)),
+            shifted
+                .iter()
+                .any(|&n| base_notes.iter().any(|&b| n == b + 12)),
             "octave up should re-voice +12; base={base_notes:?} shifted={shifted:?}"
         );
     }
@@ -10095,9 +10273,7 @@ mod tests {
         let switch = out.take();
         assert_eq!(model.mode, UiMode::Kaoss);
         assert!(
-            switch
-                .iter()
-                .all(|r| !matches!(r, Request::NoteOff { .. })),
+            switch.iter().all(|r| !matches!(r, Request::NoteOff { .. })),
             "HOLD chord must keep sounding in KAOSS, got {switch:?}"
         );
         assert!(model.chords_block.iter().any(|n| n.is_some()));
@@ -10302,7 +10478,11 @@ mod tests {
         assert_eq!(model.chords_current.unwrap().name(), "G");
         let after = model.chords_current.unwrap().strum_strings_at(base);
         assert_ne!(before, after);
-        assert_eq!(after.first() % 12, 7, "lowest strum string should move to G");
+        assert_eq!(
+            after.first() % 12,
+            7,
+            "lowest strum string should move to G"
+        );
     }
 
     #[test]
@@ -10368,7 +10548,10 @@ mod tests {
         assert!(model.wifi_panel_open);
         assert!(model.wifi_usb_wanted());
         assert!(model.wifi_status.contains("Powering"));
-        assert!(model.wifi_job.is_none(), "scan waits until the dongle is up");
+        assert!(
+            model.wifi_job.is_none(),
+            "scan waits until the dongle is up"
+        );
 
         let close = model.layout.wifi_close();
         model.finger_down(2, close.x + 4, close.y + 4, &mut out);
@@ -10600,7 +10783,9 @@ mod tests {
         let pad = model.layout.punch_pad_cell(0);
         model.finger_down(1, pad.x + 8, pad.y + 8, &mut out);
         assert!(
-            out.take().iter().all(|r| !matches!(r, Request::PunchFx { .. })),
+            out.take()
+                .iter()
+                .all(|r| !matches!(r, Request::PunchFx { .. })),
             "down must not punch until armed"
         );
         model.finger_up(1, &mut out);
@@ -10686,6 +10871,7 @@ mod tests {
             velocity,
             control,
             value,
+            controller: None,
         }
     }
 
@@ -10700,6 +10886,50 @@ mod tests {
                 .iter()
                 .any(|r| matches!(r, Request::KnobMap { mode, .. } if mode == "punch")),
             "FX page should steal MPK knobs/pads for punch, got {batch:?}"
+        );
+    }
+
+    #[test]
+    fn pad_aftertouch_sets_punch_amount() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Fx);
+        let mut out = Outbox::new();
+        model.on_midi_notice(
+            &punch_midi("poly_pressure", Some(40), None, None, Some(64)),
+            &mut out,
+        );
+        assert!((model.punch_amount[0] - 64.0 / 127.0).abs() < 1e-5);
+        assert!(
+            out.take()
+                .iter()
+                .all(|r| !matches!(r, Request::PunchFx { .. })),
+            "aftertouch on a disarmed pad only stores amount"
+        );
+    }
+
+    #[test]
+    fn smk_fader_moves_the_mix_live_slider() {
+        let mut model = NativeModel::new();
+        model.controller_profile = midi_core::ControllerProfile::smk_37_elite();
+        let mut out = Outbox::new();
+        model.on_midi_notice(
+            &MidiNotice {
+                kind: "control_change".into(),
+                channel: 0,
+                note: None,
+                velocity: None,
+                control: Some(20),
+                value: Some(127),
+                controller: Some("smk-37-elite".into()),
+            },
+            &mut out,
+        );
+        assert!((model.synth_params[2] - 1.0).abs() < 1e-5);
+        assert!(
+            out.take()
+                .iter()
+                .all(|r| !matches!(r, Request::Synth { .. })),
+            "engine already applied the fader; UI must not double-send"
         );
     }
 
@@ -10783,10 +11013,9 @@ mod tests {
             jambox_core::PunchBufferPrio::Engage
         );
         assert!(
-            out.take().iter().any(|r| matches!(
-                r,
-                Request::PunchBufferPrio { mode: 4 }
-            )),
+            out.take()
+                .iter()
+                .any(|r| matches!(r, Request::PunchBufferPrio { mode: 4 })),
             "PRIO must send punch_buffer_prio"
         );
     }
@@ -10807,6 +11036,93 @@ mod tests {
                 .iter()
                 .all(|r| !matches!(r, Request::PunchFx { .. })),
             "disarmed knob must only store the amount"
+        );
+    }
+
+    #[test]
+    fn smk_relative_knob_nudges_punch_amount() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Fx);
+        model.controller_profile = midi_core::ControllerProfile::smk_37_elite();
+        model.punch_amount[0] = 0.5;
+        let mut out = Outbox::new();
+        model.on_midi_notice(
+            &MidiNotice {
+                kind: "control_change".into(),
+                channel: 0,
+                note: None,
+                velocity: None,
+                control: Some(48),
+                value: Some(1),
+                controller: Some("smk-37-elite".into()),
+            },
+            &mut out,
+        );
+        assert!(
+            (model.punch_amount[0] - (0.5 + 1.0 / 64.0)).abs() < 1e-5,
+            "clockwise tick should nudge, not jump; got {}",
+            model.punch_amount[0]
+        );
+        model.on_midi_notice(
+            &MidiNotice {
+                kind: "control_change".into(),
+                channel: 0,
+                note: None,
+                velocity: None,
+                control: Some(48),
+                value: Some(127),
+                controller: Some("smk-37-elite".into()),
+            },
+            &mut out,
+        );
+        assert!(
+            (model.punch_amount[0] - 0.5).abs() < 1e-5,
+            "counterclockwise tick should return to last; got {}",
+            model.punch_amount[0]
+        );
+        model.punch_amount[0] = 0.0;
+        model.on_midi_notice(
+            &MidiNotice {
+                kind: "control_change".into(),
+                channel: 0,
+                note: None,
+                velocity: None,
+                control: Some(48),
+                value: Some(127),
+                controller: Some("smk-37-elite".into()),
+            },
+            &mut out,
+        );
+        assert!(
+            model.punch_amount[0].abs() < 1e-5,
+            "a −1 tick from zero must stay parked, not jump to 1.0; got {}",
+            model.punch_amount[0]
+        );
+        assert!(
+            out.take()
+                .iter()
+                .all(|r| !matches!(r, Request::PunchFx { .. })),
+            "disarmed encoder must only store the amount"
+        );
+    }
+
+    #[test]
+    fn smk_pad_toggles_punch_arm_on_note_36() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Fx);
+        model.controller_profile = midi_core::ControllerProfile::smk_37_elite();
+        let mut out = Outbox::new();
+        model.on_midi_notice(
+            &punch_midi("note_on", Some(36), Some(100), None, None),
+            &mut out,
+        );
+        assert!(
+            model.punch_armed[0],
+            "Elite top-left pad is note 36, not the MPK row-swap"
+        );
+        assert!(
+            !model.punch_armed[4],
+            "MPK Bank A bottom-left must stay off"
         );
     }
 
@@ -10860,6 +11176,7 @@ mod tests {
                 velocity: Some(100),
                 control: None,
                 value: None,
+                controller: None,
             },
             &mut out,
         );
@@ -10878,6 +11195,7 @@ mod tests {
                 velocity: None,
                 control: Some(70),
                 value: Some(127),
+                controller: None,
             },
             &mut out,
         );
@@ -11139,7 +11457,10 @@ mod tests {
         let row = model.layout.wifi_row(0);
         model.finger_down(2, row.x + 4, row.y + 4, &mut out);
         model.finger_up(2, &mut out);
-        assert!(model.wifi_kb_open, "secured net should open password keyboard");
+        assert!(
+            model.wifi_kb_open,
+            "secured net should open password keyboard"
+        );
         assert_eq!(model.wifi_kb_ssid, "TestNet");
     }
 
@@ -11378,6 +11699,41 @@ mod tests {
     }
 
     #[test]
+    fn swapping_to_smk_turns_full_vel_off_unless_the_user_set_it() {
+        let mut model = NativeModel::new();
+        assert!(model.full_vel);
+        let mut out = Outbox::new();
+        model.apply_midi_ports_with(
+            &MidiPortsReply {
+                inputs: vec!["SMK-37 Elite".into()],
+                input_connected: "SMK-37 Elite".into(),
+                ..MidiPortsReply::default()
+            },
+            Some(&mut out),
+        );
+        assert!(!model.full_vel);
+        assert!(out
+            .take()
+            .iter()
+            .any(|r| matches!(r, Request::FullVel { on: false })));
+
+        model.full_vel = true;
+        model.full_vel_profile_default = false; // user overrode Elite default
+        model.apply_midi_ports_with(
+            &MidiPortsReply {
+                inputs: vec!["MPK mini 3".into()],
+                input_connected: "MPK mini 3".into(),
+                ..MidiPortsReply::default()
+            },
+            Some(&mut out),
+        );
+        assert!(
+            model.full_vel,
+            "a user FULL VEL on the Elite must survive a swap to MPK"
+        );
+    }
+
+    #[test]
     fn settings_full_vel_toggles_and_defaults_on() {
         let mut model = NativeModel::new();
         assert!(model.full_vel);
@@ -11413,6 +11769,7 @@ mod tests {
                 velocity: Some(40),
                 control: None,
                 value: None,
+                controller: None,
             },
             &mut out,
         );
@@ -11429,6 +11786,7 @@ mod tests {
                 velocity: Some(40),
                 control: None,
                 value: None,
+                controller: None,
             },
             &mut out,
         );
@@ -11446,6 +11804,7 @@ mod tests {
                 velocity: Some(40),
                 control: None,
                 value: None,
+                controller: None,
             },
             &mut out,
         );
@@ -11575,7 +11934,10 @@ mod tests {
         let viz = model.layout.song_viz;
         model.finger_down(1, viz.x + 8, viz.y + 8, &mut out);
         model.finger_up(1, &mut out);
-        assert!(model.song_viz_open, "VIZ should open the piano-roll overlay");
+        assert!(
+            model.song_viz_open,
+            "VIZ should open the piano-roll overlay"
+        );
         assert_eq!(model.song_viz_notes().len(), 2);
         assert!(model.can_nav_back());
         model.nav_back(&mut out);
@@ -11835,13 +12197,9 @@ mod tests {
         assert_eq!(model.mode, UiMode::Arp);
         let batch = out.take();
         assert!(
-            batch.iter().any(|r| matches!(
-                r,
-                Request::SetArp {
-                    enabled: true,
-                    ..
-                }
-            )),
+            batch
+                .iter()
+                .any(|r| matches!(r, Request::SetArp { enabled: true, .. })),
             "entering ARP should arm the engine: {batch:?}"
         );
 
@@ -11858,11 +12216,13 @@ mod tests {
         let len = model.arp.len;
         model.finger_down(4, empty.x + 4, empty.y + 4, &mut out);
         model.finger_up(4, &mut out);
-        assert_eq!(model.arp.len, len, "far empty slots must not grow the pattern");
+        assert_eq!(
+            model.arp.len, len,
+            "far empty slots must not grow the pattern"
+        );
         let batch = out.take();
-        assert!(batch.iter().any(|r| matches!(
-            r,
-            Request::SetArp { latch: true, .. }
-        )));
+        assert!(batch
+            .iter()
+            .any(|r| matches!(r, Request::SetArp { latch: true, .. })));
     }
 }
