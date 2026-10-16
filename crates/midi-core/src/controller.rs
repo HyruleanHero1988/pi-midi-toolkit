@@ -160,7 +160,7 @@ impl ControllerProfile {
             fader_channel: None,
             punch_pad_notes: [36, 37, 38, 39, 40, 41, 42, 43],
             phrase_notes: sequential_phrase_notes(),
-            transport_notes: Vec::new(),
+            transport_notes: vec![76, 80, 81, 82, 83, 84, 85, 86, 87, 91, 92, 93, 94, 95],
             feedback_port_hints: vec!["external".into(), "third".into()],
             skip_audio: true,
         }

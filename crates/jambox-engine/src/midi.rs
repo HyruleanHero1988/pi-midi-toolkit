@@ -257,6 +257,9 @@ impl MidiMap {
                 note,
                 velocity,
             } => {
+                if profile.is_transport_note(note) {
+                    return None;
+                }
                 if self.mode.load(Ordering::Relaxed) == MODE_PUNCH
                     && self.pads_to_fx()
                     && profile.punch_index_for_pad(note).is_some()
@@ -275,6 +278,9 @@ impl MidiMap {
                 })
             }
             MidiEvent::NoteOff { channel, note, .. } => {
+                if profile.is_transport_note(note) {
+                    return None;
+                }
                 if self.mode.load(Ordering::Relaxed) == MODE_PUNCH
                     && self.pads_to_fx()
                     && profile.punch_index_for_pad(note).is_some()
@@ -1157,6 +1163,52 @@ mod tests {
         );
     }
 
+    #[test]
+    fn smk_transport_notes_do_not_wrap_into_the_kit() {
+        let map = MidiMap::default();
+        let smk = ControllerProfile::smk_37_elite();
+        assert!(
+            map.interpret_with(
+                &smk,
+                MidiEvent::NoteOn {
+                    channel: 9,
+                    note: 91,
+                    velocity: 100,
+                }
+            )
+            .is_none()
+        );
+        assert_eq!(
+            map.interpret_with(
+                &smk,
+                MidiEvent::NoteOn {
+                    channel: 9,
+                    note: 36,
+                    velocity: 100,
+                }
+            ),
+            Some(Command::NoteOn {
+                channel: 9,
+                note: 36,
+                velocity: 100
+            })
+        );
+        assert_eq!(
+            map.interpret(MidiEvent::NoteOn {
+                channel: 9,
+                note: 91,
+                velocity: 100,
+            }),
+            Some(Command::NoteOn {
+                channel: 9,
+                note: 91,
+                velocity: 100
+            }),
+            "MPK has no transport pad bank"
+        );
+    }
+
+    #[test]
     #[test]
     fn pad_led_feedback_targets_external_not_din() {
         let smk = ControllerProfile::smk_37_elite();

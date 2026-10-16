@@ -21,7 +21,7 @@
   "fader_channel": null,
   "punch_pad_notes": [36, 37, 38, 39, 40, 41, 42, 43],
   "phrase_notes": [36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51],
-  "transport_notes": [],
+  "transport_notes": [76, 80, 81, 82, 83, 84, 85, 86, 87, 91, 92, 93, 94, 95],
   "feedback_port_hints": ["external", "third"],
   "skip_audio": true
 }

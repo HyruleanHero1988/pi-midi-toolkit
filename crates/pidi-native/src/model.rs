@@ -2234,6 +2234,11 @@ impl NativeModel {
     pub fn on_midi_notice(&mut self, notice: &MidiNotice, outbox: &mut Outbox) {
         let kind = notice.kind.to_ascii_lowercase();
         let note = notice.note.unwrap_or(0);
+        if self.profile_for_notice(notice).is_transport_note(note)
+            && (kind.contains("note") || kind.contains("pressure"))
+        {
+            return;
+        }
         let vel = self.maybe_full_vel(notice.channel, notice.velocity.unwrap_or(0) as u8);
         if self.apply_punch_midi(notice, outbox) {
             return;
