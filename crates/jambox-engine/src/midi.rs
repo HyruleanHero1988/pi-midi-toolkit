@@ -345,6 +345,16 @@ impl MidiMap {
                 value: unit,
             });
         }
+        if controller == 64
+            && profile.fader_index(64).is_none()
+            && profile.knob_index(64).is_none()
+            && profile.knob_bank2_index(64).is_none()
+        {
+            return Some(Command::SetSynth {
+                param: SynthParam::Sustain,
+                value: if value >= 64 { 1.0 } else { 0.0 },
+            });
+        }
         if profile.faders_on_channel(channel) {
             if let Some(index) = profile.fader_index(controller) {
                 let unit = (value as f32 / 127.0).clamp(0.0, 1.0);
@@ -1056,6 +1066,37 @@ mod tests {
         );
     }
 
+    #[test]
+    fn sustain_cc64_is_not_a_fader_on_the_elite() {
+        let map = MidiMap::default();
+        assert_eq!(
+            map.interpret_with(
+                &ControllerProfile::smk_37_elite(),
+                MidiEvent::ControlChange {
+                    channel: 0,
+                    controller: 64,
+                    value: 127,
+                }
+            ),
+            Some(Command::SetSynth {
+                param: SynthParam::Sustain,
+                value: 1.0
+            })
+        );
+        assert_eq!(
+            map.interpret(MidiEvent::ControlChange {
+                channel: 0,
+                controller: 64,
+                value: 0,
+            }),
+            Some(Command::SetSynth {
+                param: SynthParam::Sustain,
+                value: 0.0
+            })
+        );
+    }
+
+    #[test]
     #[test]
     fn smk_encoder_bank2_drives_bus_fx() {
         let map = MidiMap::default();

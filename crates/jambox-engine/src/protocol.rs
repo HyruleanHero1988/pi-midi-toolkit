@@ -601,6 +601,7 @@ fn parse_synth_param(name: &str) -> Option<SynthParam> {
         "drum_amp" => SynthParam::DrumAmp,
         "drum_level" => SynthParam::DrumLevel,
         "input_level" => SynthParam::InputLevel,
+        "sustain" => SynthParam::Sustain,
         "fm_enable" => SynthParam::FmEnable,
         "fm_recipe" => SynthParam::FmRecipe,
         "fm_op" => SynthParam::FmOp,

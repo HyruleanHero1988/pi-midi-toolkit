@@ -306,6 +306,7 @@ struct FmVoice {
     /// Wheel semitones captured at note-off so the tail does not spring home.
     bend_semis: f32,
     release_age: f32,
+    pedal: bool,
 }
 
 impl FmVoice {
@@ -327,6 +328,7 @@ impl FmVoice {
             age: 0,
             bend_semis: 0.0,
             release_age: 0.0,
+            pedal: false,
         }
     }
 }
@@ -338,6 +340,7 @@ pub struct FmSynth {
     recipe: usize,
     selected: usize,
     patch: FmPatch,
+    sustain: bool,
 }
 
 impl Default for FmSynth {
@@ -360,6 +363,7 @@ impl FmSynth {
             recipe: 0,
             selected: 3,
             patch: fm_recipe_patch(0),
+            sustain: false,
         }
     }
 
@@ -461,6 +465,7 @@ impl FmSynth {
             v.age = self.serial;
             v.bend_semis = 0.0;
             v.release_age = 0.0;
+            v.pedal = false;
             return;
         }
 
@@ -482,6 +487,7 @@ impl FmSynth {
             age: self.serial,
             bend_semis: 0.0,
             release_age: 0.0,
+            pedal: false,
         };
     }
 
@@ -489,6 +495,10 @@ impl FmSynth {
         if let Some(slot) = self.find_playing(channel, note, false) {
             let v = &mut self.voices[slot];
             v.bend_semis = bend_semis.clamp(-24.0, 24.0);
+            if self.sustain {
+                v.pedal = true;
+                return;
+            }
             v.releasing = true;
             v.target = 0.0;
             v.release_age = 0.0;
@@ -506,8 +516,28 @@ impl FmSynth {
     fn release_note(&mut self, channel: u8, note: u8, recorded: bool) {
         if let Some(slot) = self.find_playing(channel, note, recorded) {
             let v = &mut self.voices[slot];
+            if self.sustain && !recorded {
+                v.pedal = true;
+                return;
+            }
+            v.pedal = false;
             v.releasing = true;
             v.target = 0.0;
+        }
+    }
+
+    pub fn set_sustain(&mut self, on: bool) {
+        self.sustain = on;
+        if on {
+            return;
+        }
+        for v in self.voices.iter_mut() {
+            if v.active && v.pedal {
+                v.pedal = false;
+                v.releasing = true;
+                v.target = 0.0;
+                v.release_age = 0.0;
+            }
         }
     }
 
