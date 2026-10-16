@@ -154,7 +154,7 @@ impl ControllerProfile {
             full_vel_default: true,
             knob_encoding: KnobEncoding::RelativeSigned,
             knob_ccs: [48, 49, 50, 51, 52, 53, 54, 55],
-            knob_bank2_ccs: [0; 8],
+            knob_bank2_ccs: [56, 57, 58, 59, 60, 61, 62, 63],
             knob_channel: None,
             fader_ccs: [20, 21, 22, 23, 24, 25, 26, 27],
             fader_channel: None,

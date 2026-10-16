@@ -354,6 +354,10 @@ impl MidiMap {
         if !profile.knobs_on_channel(channel) {
             return None;
         }
+        if let Some(index) = profile.knob_bank2_index(controller) {
+            let unit = self.cc_unit(8 + index, profile.knob_encoding, value);
+            return bank2_fx_command(index, unit);
+        }
         let knob = profile.knob_index(controller)?;
         let unit = self.cc_unit(knob, profile.knob_encoding, value);
         let mode = self.mode.load(Ordering::Relaxed);
@@ -432,6 +436,25 @@ impl MidiMap {
         };
         Some(Command::SetSynth { param, value: unit })
     }
+}
+
+fn bank2_fx_command(index: usize, unit: f32) -> Option<Command> {
+    let param = match index {
+        0 => FxParam::Drive,
+        1 => FxParam::DelayTime,
+        2 => FxParam::DelayFb,
+        3 => FxParam::DelayMix,
+        4 => FxParam::ReverbSize,
+        5 => FxParam::ReverbMix,
+        6 => FxParam::FlangerMix,
+        7 => FxParam::FlangerRate,
+        _ => return None,
+    };
+    Some(Command::SetFx {
+        target: FxTarget::Bus,
+        param,
+        value: unit,
+    })
 }
 
 fn mix_fader_command(index: usize, unit: f32) -> Option<Command> {
@@ -1033,6 +1056,41 @@ mod tests {
         );
     }
 
+    #[test]
+    fn smk_encoder_bank2_drives_bus_fx() {
+        let map = MidiMap::default();
+        let mut smk = ControllerProfile::smk_37_elite();
+        smk.knob_encoding = KnobEncoding::Absolute;
+        match map.interpret_with(
+            &smk,
+            MidiEvent::ControlChange {
+                channel: 0,
+                controller: 56,
+                value: 127,
+            },
+        ) {
+            Some(Command::SetFx {
+                target: FxTarget::Bus,
+                param: FxParam::Drive,
+                value,
+            }) => assert!((value - 1.0).abs() < 1e-5),
+            other => panic!("{other:?}"),
+        }
+        assert!(
+            map.interpret_with(
+                &ControllerProfile::mpk_mini(),
+                MidiEvent::ControlChange {
+                    channel: 0,
+                    controller: 56,
+                    value: 127,
+                }
+            )
+            .is_none(),
+            "MPK has no encoder bank 2"
+        );
+    }
+
+    #[test]
     #[test]
     fn smk_faders_drive_the_mix_buses() {
         let map = MidiMap::default();
