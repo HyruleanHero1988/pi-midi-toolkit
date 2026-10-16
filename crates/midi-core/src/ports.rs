@@ -38,14 +38,25 @@ pub fn port_looks_like_keybed(name: &str) -> bool {
     KEYBED_HINTS.iter().any(|hint| n.contains(hint))
 }
 
+/// USB MIDI or composite USB audio that belongs to a keyboard, not the DIN
+/// synth or the Pi headphone jack. Auto-pick skips these unless the user
+/// filter names them.
+pub fn port_looks_like_controller_io(name: &str) -> bool {
+    if name.is_empty() || is_virtual_port_name(name) {
+        return false;
+    }
+    let profile = crate::profile_for_port_name(name);
+    if profile.skip_audio || (profile.keybed && profile.id != "generic") {
+        return true;
+    }
+    port_looks_like_keybed(name)
+}
+
 /// Drop the ALSA `client:port` suffix and prefer the name after the first colon.
 pub fn short_port_label(name: &str) -> &str {
     let trimmed = match name.rsplit_once(' ') {
         Some((left, rest))
-            if rest.contains(':')
-                && rest
-                    .bytes()
-                    .all(|b| b.is_ascii_digit() || b == b':') =>
+            if rest.contains(':') && rest.bytes().all(|b| b.is_ascii_digit() || b == b':') =>
         {
             left
         }
@@ -80,17 +91,31 @@ pub fn matching_port_names<'a>(
 }
 
 /// First matching name. Empty filter → first non-virtual hardware port.
-pub fn pick_port_name<'a>(names: impl IntoIterator<Item = &'a str>, filter: &str) -> Option<String> {
+pub fn pick_port_name<'a>(
+    names: impl IntoIterator<Item = &'a str>,
+    filter: &str,
+) -> Option<String> {
     matching_port_names(names, filter).into_iter().next()
+}
+
+/// MIDI *thru / DIN* output. Empty filter skips keybeds so an SMK or MPK
+/// cannot steal the U2MIDI port just because it enumerated first.
+pub fn pick_thru_output_name<'a>(
+    names: impl IntoIterator<Item = &'a str>,
+    filter: &str,
+) -> Option<String> {
+    if !filter.trim().is_empty() {
+        return pick_port_name(names, filter);
+    }
+    matching_port_names(names, "")
+        .into_iter()
+        .find(|n| !port_looks_like_controller_io(n))
 }
 
 /// Cycle Auto → each hardware port → Auto. Virtual ports are skipped unless
 /// they are the only options.
 pub fn cycle_port_filter(current: &str, names: &[String]) -> String {
-    let hardware: Vec<&String> = names
-        .iter()
-        .filter(|n| !is_virtual_port_name(n))
-        .collect();
+    let hardware: Vec<&String> = names.iter().filter(|n| !is_virtual_port_name(n)).collect();
     let list: Vec<&String> = if hardware.is_empty() {
         names.iter().collect()
     } else {
@@ -172,17 +197,43 @@ mod tests {
         assert!(port_looks_like_keybed("MPK mini 3"));
         assert!(port_looks_like_keybed("Keystation Mini 32"));
         assert!(!port_looks_like_keybed("U2MIDI PRO:U2MIDI PRO MIDI 1 20:0"));
-        assert!(!port_looks_like_keybed("Midi Through:Midi Through Port-0 14:0"));
+        assert!(!port_looks_like_keybed(
+            "Midi Through:Midi Through Port-0 14:0"
+        ));
         assert!(!port_looks_like_keybed(""));
     }
 
     #[test]
     fn keybed_names_match_smk_37_family() {
         assert!(port_looks_like_keybed("SMK-37 Elite"));
-        assert!(port_looks_like_keybed("SMK-37 Elite-Master:SMK-37 Elite-Master MIDI 1 20:0"));
+        assert!(port_looks_like_keybed(
+            "SMK-37 Elite-Master:SMK-37 Elite-Master MIDI 1 20:0"
+        ));
         assert!(port_looks_like_keybed("M-VAVE SMK-37 Pro"));
         assert!(port_looks_like_keybed("Starrykey 37 Play"));
         assert!(port_looks_like_keybed("MKE-P37"));
         assert!(!port_looks_like_keybed("U2MIDI PRO:U2MIDI PRO MIDI 1 20:0"));
+    }
+
+    #[test]
+    fn auto_midi_out_skips_keybeds_for_the_din_interface() {
+        let names = [
+            "SMK-37 Elite-Master:SMK-37 Elite-Master MIDI 1 20:0",
+            "MPK mini 3",
+            "U2MIDI PRO:U2MIDI PRO MIDI 1 20:0",
+        ];
+        assert_eq!(
+            pick_thru_output_name(names, "").as_deref(),
+            Some("U2MIDI PRO:U2MIDI PRO MIDI 1 20:0")
+        );
+        assert_eq!(
+            pick_thru_output_name(names, "SMK").as_deref(),
+            Some("SMK-37 Elite-Master:SMK-37 Elite-Master MIDI 1 20:0"),
+            "an explicit OUT filter can still target the controller"
+        );
+        assert!(port_looks_like_controller_io("SMK-37 Elite USB Audio"));
+        assert!(!port_looks_like_controller_io(
+            "U2MIDI PRO:U2MIDI PRO MIDI 1 20:0"
+        ));
     }
 }

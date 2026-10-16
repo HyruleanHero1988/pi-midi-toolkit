@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use midi_core::{
-    fanout_dest_mask, is_virtual_port_name, matching_port_names, pick_port_name,
+    fanout_dest_mask, is_virtual_port_name, matching_port_names, pick_thru_output_name,
     profile_for_port_name, ControllerProfile, MidiEvent,
 };
 use midir::{MidiInput, MidiInputConnection, MidiOutput, MidiOutputConnection};
@@ -535,7 +535,7 @@ fn wanted_input_names(filter: &str) -> Vec<String> {
 
 fn pick_output_name(filter: &str) -> Option<String> {
     let (_, outs) = list_ports();
-    pick_port_name(outs.iter().map(String::as_str), filter)
+    pick_thru_output_name(outs.iter().map(String::as_str), filter)
 }
 
 /// Watch MIDI inputs and connect when matching ports appear (or return).

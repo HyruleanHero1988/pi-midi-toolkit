@@ -169,6 +169,11 @@ pub fn is_analog_output(name: &str) -> bool {
     n.contains("headphone") || n.contains("bcm2835") || n.contains("analog")
 }
 
+fn filter_names_controller(filter: &str) -> bool {
+    let filter = filter.trim();
+    !filter.is_empty() && midi_core::port_looks_like_controller_io(filter)
+}
+
 /// Higher is better. HDMI names are not ranked here — callers skip them first.
 pub fn output_rank(name: &str, filter: &str) -> i32 {
     let n = name.to_ascii_lowercase();
@@ -192,6 +197,9 @@ pub fn select_output_name<'a>(names: &[&'a str], filter: &str) -> Option<&'a str
             if hdmi.is_none() {
                 hdmi = Some(*name);
             }
+            continue;
+        }
+        if midi_core::port_looks_like_controller_io(name) && !filter_names_controller(filter) {
             continue;
         }
         let rank = output_rank(name, filter);
@@ -429,9 +437,7 @@ fn restore_mixer() {
         // why sound stays dead until SET → AUDIO after a cable swap.
         for card in 0..4 {
             let card = card.to_string();
-            let info = Command::new("amixer")
-                .args(["-c", &card, "info"])
-                .output();
+            let info = Command::new("amixer").args(["-c", &card, "info"]).output();
             let info = info
                 .ok()
                 .filter(|o| o.status.success())
@@ -443,10 +449,7 @@ fn restore_mixer() {
             if info.contains("bcm2835") || info.contains("headphone") {
                 // Force analog. Auto-route stays on HDMI when the Klipsch aux
                 // load does not trip the Pi jack-detect pin.
-                quiet(
-                    Command::new("amixer")
-                        .args(["-q", "-c", &card, "cset", "numid=3", "1"]),
-                );
+                quiet(Command::new("amixer").args(["-q", "-c", &card, "cset", "numid=3", "1"]));
             }
             for ctrl in ["Headphone", "Headphones", "PCM", "Master", "Speaker"] {
                 quiet(Command::new("amixer").args(["-q", "-c", &card, "sset", ctrl, "unmute"]));
@@ -798,6 +801,21 @@ mod tests {
     fn analog_preferred_over_usb_when_filter_empty() {
         let names = ["USB Audio Device", "bcm2835 Headphones"];
         assert_eq!(select_output_name(&names, ""), Some("bcm2835 Headphones"));
+    }
+
+    #[test]
+    fn smk_usb_audio_does_not_steal_headphones() {
+        let names = ["SMK-37 Elite USB Audio", "bcm2835 Headphones", "vc4-hdmi"];
+        assert_eq!(select_output_name(&names, ""), Some("bcm2835 Headphones"));
+        assert_eq!(
+            select_output_name(&names, "headphone"),
+            Some("bcm2835 Headphones")
+        );
+        assert_eq!(
+            select_output_name(&names, "smk"),
+            Some("SMK-37 Elite USB Audio"),
+            "SET→AUDIO can still pick the Elite card"
+        );
     }
 
     #[test]

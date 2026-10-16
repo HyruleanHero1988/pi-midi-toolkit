@@ -19,7 +19,7 @@ pub use controller::{
 pub use event::{Channel, MidiEvent, Note, Velocity};
 pub use ports::{
     cycle_port_filter, is_virtual_port_name, matching_port_names, pick_port_name,
-    port_looks_like_keybed, short_port_label,
+    pick_thru_output_name, port_looks_like_controller_io, port_looks_like_keybed, short_port_label,
 };
 pub use preset::{
     fanout_dest_mask, fanout_is_identity, format_fanout_targets, toggle_fanout_bit, CcMapEntry,
