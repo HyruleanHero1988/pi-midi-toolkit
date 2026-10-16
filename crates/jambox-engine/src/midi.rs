@@ -10,15 +10,16 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use midi_core::{
-    fanout_dest_mask, is_virtual_port_name, matching_port_names, pick_port_name, MidiEvent,
+    fanout_dest_mask, is_virtual_port_name, matching_port_names, pick_port_name,
+    profile_for_port_name, ControllerProfile, MidiEvent,
 };
 use midir::{MidiInput, MidiInputConnection, MidiOutput, MidiOutputConnection};
 use tracing::{info, warn};
 
 use crate::bus::{MidiInSide, MidiOutSide};
 use jambox_core::{
-    drum_model_for_note, punch_index_for_knob_cc, punch_index_for_pad_note, Command, FxParam,
-    FxTarget, RepeatDivision, SynthParam, DRUM_CHANNEL, DRUM_MODEL_COUNT,
+    drum_model_for_note, Command, FxParam, FxTarget, RepeatDivision, SynthParam, DRUM_CHANNEL,
+    DRUM_MODEL_COUNT,
 };
 
 /// Repeat-lane owners for hardware pads (`0x1000 | note`).
@@ -239,8 +240,14 @@ impl MidiMap {
         }
     }
 
-    /// One MIDI event → zero or more audio-thread commands.
+    /// One MIDI event → zero or more audio-thread commands (MPK factory map).
     pub fn interpret(&self, event: MidiEvent) -> Option<Command> {
+        self.interpret_with(&ControllerProfile::mpk_mini(), event)
+    }
+
+    /// One MIDI event through a live controller map. Unknown devices use
+    /// [`ControllerProfile::generic`] (MPK-compatible knobs/pads).
+    pub fn interpret_with(&self, profile: &ControllerProfile, event: MidiEvent) -> Option<Command> {
         match event {
             MidiEvent::NoteOn {
                 channel,
@@ -249,7 +256,7 @@ impl MidiMap {
             } => {
                 if self.mode.load(Ordering::Relaxed) == MODE_PUNCH
                     && self.pads_to_fx()
-                    && punch_index_for_pad_note(note).is_some()
+                    && profile.punch_index_for_pad(note).is_some()
                 {
                     return None;
                 }
@@ -267,7 +274,7 @@ impl MidiMap {
             MidiEvent::NoteOff { channel, note, .. } => {
                 if self.mode.load(Ordering::Relaxed) == MODE_PUNCH
                     && self.pads_to_fx()
-                    && punch_index_for_pad_note(note).is_some()
+                    && profile.punch_index_for_pad(note).is_some()
                 {
                     return None;
                 }
@@ -285,13 +292,21 @@ impl MidiMap {
                 })
             }
             MidiEvent::ControlChange {
-                controller, value, ..
-            } => self.interpret_cc(controller, value),
+                channel,
+                controller,
+                value,
+            } => self.interpret_cc(profile, channel, controller, value),
             _ => None,
         }
     }
 
-    fn interpret_cc(&self, controller: u8, value: u8) -> Option<Command> {
+    fn interpret_cc(
+        &self,
+        profile: &ControllerProfile,
+        channel: u8,
+        controller: u8,
+        value: u8,
+    ) -> Option<Command> {
         let unit = (value as f32 / 127.0).clamp(0.0, 1.0);
         if controller == CC_MOD {
             // Wheel scales existing depth; it must not overwrite Knob 5.
@@ -300,20 +315,24 @@ impl MidiMap {
                 value: unit,
             });
         }
+        if !profile.knobs_on_channel(channel) {
+            return None;
+        }
+        let knob = profile.knob_index(controller)?;
         let mode = self.mode.load(Ordering::Relaxed);
-        if mode == MODE_PUNCH && punch_index_for_knob_cc(controller).is_some() {
+        if mode == MODE_PUNCH && profile.punch_index_for_knob(controller).is_some() {
             // Amounts / arming live in the kiosk so a disarmed slide stays dry.
             return None;
         }
         if mode == MODE_FX {
-            let param = match controller {
-                CC_MORPH => FxParam::Drive,
-                CC_TONE => FxParam::DelayTime,
-                CC_ATTACK => FxParam::DelayFb,
-                CC_RELEASE => FxParam::DelayMix,
-                CC_VIB_DEPTH => FxParam::ReverbSize,
-                CC_VIB_RATE => FxParam::ReverbMix,
-                CC_LEVEL => {
+            let param = match knob {
+                0 => FxParam::Drive,
+                1 => FxParam::DelayTime,
+                2 => FxParam::DelayFb,
+                3 => FxParam::DelayMix,
+                4 => FxParam::ReverbSize,
+                5 => FxParam::ReverbMix,
+                7 => {
                     return Some(Command::SetSynth {
                         param: SynthParam::Level,
                         value: unit.powf(1.15),
@@ -328,12 +347,12 @@ impl MidiMap {
             });
         }
         if mode == MODE_DRUMS {
-            let param = match controller {
-                CC_MORPH => SynthParam::DrumPitch,
-                CC_TONE => SynthParam::DrumTone,
-                CC_ATTACK => SynthParam::DrumDecay,
-                CC_RELEASE => SynthParam::DrumNoise,
-                CC_LEVEL => {
+            let param = match knob {
+                0 => SynthParam::DrumPitch,
+                1 => SynthParam::DrumTone,
+                2 => SynthParam::DrumDecay,
+                3 => SynthParam::DrumNoise,
+                7 => {
                     return Some(Command::SetSynth {
                         param: SynthParam::DrumLevel,
                         value: unit.powf(1.15),
@@ -344,12 +363,12 @@ impl MidiMap {
             return Some(Command::SetSynth { param, value: unit });
         }
         if mode == MODE_FM {
-            let param = match controller {
-                CC_MORPH => SynthParam::FmBright,
-                CC_TONE => SynthParam::FmClang,
-                CC_ATTACK => SynthParam::FmHit,
-                CC_RELEASE => SynthParam::FmTail,
-                CC_LEVEL => {
+            let param = match knob {
+                0 => SynthParam::FmBright,
+                1 => SynthParam::FmClang,
+                2 => SynthParam::FmHit,
+                3 => SynthParam::FmTail,
+                7 => {
                     return Some(Command::SetSynth {
                         param: SynthParam::Level,
                         value: unit.powf(1.15),
@@ -359,14 +378,14 @@ impl MidiMap {
             };
             return Some(Command::SetSynth { param, value: unit });
         }
-        let param = match controller {
-            CC_MORPH => SynthParam::Morph,
-            CC_TONE => SynthParam::Tone,
-            CC_ATTACK => SynthParam::Attack,
-            CC_RELEASE => SynthParam::Release,
-            CC_VIB_DEPTH => SynthParam::VibratoDepth,
-            CC_VIB_RATE => SynthParam::VibratoRate,
-            CC_LEVEL => {
+        let param = match knob {
+            0 => SynthParam::Morph,
+            1 => SynthParam::Tone,
+            2 => SynthParam::Attack,
+            3 => SynthParam::Release,
+            4 => SynthParam::VibratoDepth,
+            5 => SynthParam::VibratoRate,
+            7 => {
                 return Some(Command::SetSynth {
                     param: SynthParam::Level,
                     value: unit.powf(1.15),
@@ -386,6 +405,7 @@ pub fn ingest(
     dest_mask: u16,
     hub: &crate::ipc::ClientHub,
     map: &MidiMap,
+    profile: &ControllerProfile,
     mut send: impl FnMut(Command) -> bool,
 ) {
     let event = map.apply_velocity(event);
@@ -395,8 +415,8 @@ pub fn ingest(
             continue;
         }
         let mapped = event.with_channel(dest);
-        hub.broadcast_midi(mapped);
-        if let Some(command) = map.interpret(mapped) {
+        hub.broadcast_midi(mapped, Some(profile.id.as_str()));
+        if let Some(command) = map.interpret_with(profile, mapped) {
             let _ = send(command);
         }
     }
@@ -445,24 +465,16 @@ impl MidiIo {
     }
 
     pub fn set_channel_map(&self, bits: [u16; 16]) {
-        *self
-            .channel_map
-            .lock()
-            .unwrap_or_else(|p| p.into_inner()) = bits;
+        *self.channel_map.lock().unwrap_or_else(|p| p.into_inner()) = bits;
     }
 
     pub fn dest_mask(&self, channel: u8) -> u16 {
-        let bits = *self
-            .channel_map
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
+        let bits = *self.channel_map.lock().unwrap_or_else(|p| p.into_inner());
         fanout_dest_mask(bits[(channel & 0x0f) as usize], channel)
     }
 
     fn lock_string(slot: &Mutex<String>) -> String {
-        slot.lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .clone()
+        slot.lock().unwrap_or_else(|p| p.into_inner()).clone()
     }
 
     fn store_string(slot: &Mutex<String>, value: String) {
@@ -611,6 +623,7 @@ fn try_connect(
         .find(|p| input.port_name(p).ok().as_deref() == Some(name))
         .cloned()
         .ok_or_else(|| MidiError::NoPort(name.to_string()))?;
+    let profile = profile_for_port_name(name);
     input
         .connect(
             &chosen,
@@ -619,7 +632,7 @@ fn try_connect(
                 if let Some(event) = MidiEvent::parse(bytes) {
                     let dest_mask = io.dest_mask(event.channel());
                     let mut guard = side.lock().unwrap_or_else(|p| p.into_inner());
-                    ingest(event, dest_mask, &hub, &map, |c| guard.send(c));
+                    ingest(event, dest_mask, &hub, &map, &profile, |c| guard.send(c));
                 }
             },
             (),
@@ -749,9 +762,7 @@ mod tests {
                 note: 36,
                 velocity: 0,
             }),
-            Some(Command::StopRepeat {
-                owner: 0x1000 | 36
-            })
+            Some(Command::StopRepeat { owner: 0x1000 | 36 })
         );
     }
 
@@ -786,9 +797,7 @@ mod tests {
                 note: 36,
                 velocity: 100,
             }),
-            Some(Command::StopRepeat {
-                owner: 0x1000 | 36
-            })
+            Some(Command::StopRepeat { owner: 0x1000 | 36 })
         );
     }
 
@@ -903,6 +912,52 @@ mod tests {
     }
 
     #[test]
+    fn key_knobs_follow_the_live_controller_profile() {
+        let map = MidiMap::default();
+        let mut smk = ControllerProfile::generic();
+        smk.id = "test-knobs".into();
+        smk.knob_ccs = [48, 49, 50, 51, 52, 53, 54, 55];
+        assert_eq!(
+            map.interpret_with(
+                &smk,
+                MidiEvent::ControlChange {
+                    channel: 0,
+                    controller: 48,
+                    value: 127,
+                }
+            ),
+            Some(Command::SetSynth {
+                param: SynthParam::Morph,
+                value: 1.0
+            })
+        );
+        assert!(
+            map.interpret_with(
+                &smk,
+                MidiEvent::ControlChange {
+                    channel: 0,
+                    controller: CC_MORPH,
+                    value: 127,
+                }
+            )
+            .is_none(),
+            "MPK CC 70 must not steal a controller that remapped knobs"
+        );
+        assert_eq!(
+            map.interpret(MidiEvent::ControlChange {
+                channel: 0,
+                controller: CC_MORPH,
+                value: 127,
+            }),
+            Some(Command::SetSynth {
+                param: SynthParam::Morph,
+                value: 1.0
+            }),
+            "MPK path stays on factory CCs"
+        );
+    }
+
+    #[test]
     fn key_knobs_move_synth_params() {
         let map = MidiMap::default();
         let command = map
@@ -919,6 +974,28 @@ mod tests {
                 value: 1.0
             }
         );
+        assert_eq!(
+            map.interpret(MidiEvent::ControlChange {
+                channel: 0,
+                controller: CC_VIB_RATE,
+                value: 0,
+            }),
+            Some(Command::SetSynth {
+                param: SynthParam::VibratoRate,
+                value: 0.0
+            })
+        );
+        assert!(matches!(
+            map.interpret(MidiEvent::ControlChange {
+                channel: 0,
+                controller: CC_LEVEL,
+                value: 127,
+            }),
+            Some(Command::SetSynth {
+                param: SynthParam::Level,
+                ..
+            })
+        ));
     }
 
     #[test]
@@ -1005,7 +1082,9 @@ mod tests {
 
     #[test]
     fn skips_through_and_engine_loopback_names() {
-        assert!(is_virtual_port_name("Midi Through:Midi Through Port-0 14:0"));
+        assert!(is_virtual_port_name(
+            "Midi Through:Midi Through Port-0 14:0"
+        ));
         assert!(is_virtual_port_name("jambox-out:jambox-out 129:0"));
         assert!(!is_virtual_port_name("MPK mini 3"));
         assert!(!is_virtual_port_name("U2MIDI PRO:U2MIDI PRO MIDI 1 20:0"));

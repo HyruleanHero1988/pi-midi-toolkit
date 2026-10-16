@@ -18,9 +18,7 @@ use crate::audio::AudioHealth;
 use crate::bus::{ClipUpdate, ControlSide, MidiInSide};
 use crate::midi::{ingest, MidiIo, MidiMap};
 use crate::protocol::{decode, Decoded, MidiNotice, Request, Response, StatusReply};
-use jambox_protocol::{
-    HelloReply, RepeatPhase, TouchPhase, NATIVE_FEATURES, PROTOCOL_VERSION,
-};
+use jambox_protocol::{HelloReply, RepeatPhase, TouchPhase, NATIVE_FEATURES, PROTOCOL_VERSION};
 use midi_core::MidiEvent;
 use std::sync::mpsc::{self, Sender};
 
@@ -44,8 +42,8 @@ impl ClientHub {
         (tx, rx)
     }
 
-    pub fn broadcast_midi(&self, event: MidiEvent) {
-        let notice = MidiNotice::from_event(event);
+    pub fn broadcast_midi(&self, event: MidiEvent, controller: Option<&str>) {
+        let notice = MidiNotice::from_event(event).with_controller(controller);
         let line = match serde_json::to_string(&Response::Midi(notice)) {
             Ok(s) => s,
             Err(_) => return,
@@ -316,7 +314,14 @@ pub fn handle_line(
         }
         Ok(Decoded::MidiIn(event)) => {
             let mut side = midi_in.lock().unwrap_or_else(|p| p.into_inner());
-            ingest(event, 0, hub, map, |c| side.send(c));
+            ingest(
+                event,
+                0,
+                hub,
+                map,
+                &midi_core::ControllerProfile::generic(),
+                |c| side.send(c),
+            );
             Response::Ok
         }
         Ok(Decoded::Command(command)) => {
@@ -554,18 +559,9 @@ pub fn serve(
                     break;
                 }
                 match stream {
-                    Ok(stream) => {
-                        spawn_client(
-                            stream,
-                            &shared,
-                            &hub,
-                            &map,
-                            &midi_in,
-                            &midi_io,
-                            &health,
-                            &running,
-                        )
-                    }
+                    Ok(stream) => spawn_client(
+                        stream, &shared, &hub, &map, &midi_in, &midi_io, &health, &running,
+                    ),
                     Err(err) => warn!(%err, "control: accept failed"),
                 }
             }
@@ -585,18 +581,9 @@ pub fn serve(
                     break;
                 }
                 match stream {
-                    Ok(stream) => {
-                        spawn_client(
-                            stream,
-                            &shared,
-                            &hub,
-                            &map,
-                            &midi_in,
-                            &midi_io,
-                            &health,
-                            &running,
-                        )
-                    }
+                    Ok(stream) => spawn_client(
+                        stream, &shared, &hub, &map, &midi_in, &midi_io, &health, &running,
+                    ),
                     Err(err) => warn!(%err, "control: accept failed"),
                 }
             }
@@ -732,7 +719,13 @@ mod tests {
         let midi_in = Mutex::new(midi_in);
         let mut cache = StatusCache::default();
         let mut session = ClientSession::new();
-        let response = call("{not json", &mut control, &mut cache, &midi_in, &mut session);
+        let response = call(
+            "{not json",
+            &mut control,
+            &mut cache,
+            &midi_in,
+            &mut session,
+        );
         assert!(matches!(response, Response::Error { .. }));
     }
 
