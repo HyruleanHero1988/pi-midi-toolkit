@@ -2269,6 +2269,9 @@ impl NativeModel {
             }
             self.push_log(format!("midi off ch{} n{}", notice.channel, note));
         } else if kind == "control_change" || kind == "cc" {
+            if self.apply_mix_cc(notice) {
+                return;
+            }
             self.last_midi_activity = format!(
                 "IN  ch{} cc{} v{}",
                 notice.channel + 1,
@@ -5713,6 +5716,27 @@ impl NativeModel {
     fn apply_mix_bus(&mut self, index: usize, py: i32, outbox: &mut Outbox) {
         let track = self.layout.mix_bus_slider(index);
         let t = Self::mix_slider_value(track, py);
+        self.apply_mix_bus_unit(index, t, outbox);
+    }
+
+    fn apply_mix_cc(&mut self, notice: &MidiNotice) -> bool {
+        let profile = self.profile_for_notice(notice);
+        if !profile.faders_on_channel(notice.channel) {
+            return false;
+        }
+        let Some(index) = profile.fader_index(notice.control.unwrap_or(255)) else {
+            return false;
+        };
+        let t = (notice.value.unwrap_or(0) as f32 / 127.0).clamp(0.0, 1.0);
+        let mut out = Outbox::new();
+        self.apply_mix_bus_unit(index, t, &mut out);
+        // Engine already applied the CC; keep the MIX page in sync only.
+        let _ = out.take();
+        true
+    }
+
+    fn apply_mix_bus_unit(&mut self, index: usize, t: f32, outbox: &mut Outbox) {
+        let t = t.clamp(0.0, 1.0);
         match index {
             Layout::MIX_LIVE => {
                 self.synth_params[2] = t;
@@ -10812,6 +10836,32 @@ mod tests {
                 .iter()
                 .any(|r| matches!(r, Request::KnobMap { mode, .. } if mode == "punch")),
             "FX page should steal MPK knobs/pads for punch, got {batch:?}"
+        );
+    }
+
+    #[test]
+    fn smk_fader_moves_the_mix_live_slider() {
+        let mut model = NativeModel::new();
+        model.controller_profile = midi_core::ControllerProfile::smk_37_elite();
+        let mut out = Outbox::new();
+        model.on_midi_notice(
+            &MidiNotice {
+                kind: "control_change".into(),
+                channel: 0,
+                note: None,
+                velocity: None,
+                control: Some(20),
+                value: Some(127),
+                controller: Some("smk-37-elite".into()),
+            },
+            &mut out,
+        );
+        assert!((model.synth_params[2] - 1.0).abs() < 1e-5);
+        assert!(
+            out.take()
+                .iter()
+                .all(|r| !matches!(r, Request::Synth { .. })),
+            "engine already applied the fader; UI must not double-send"
         );
     }
 

@@ -151,7 +151,7 @@ impl ControllerProfile {
             knob_ccs: [48, 49, 50, 51, 52, 53, 54, 55],
             knob_bank2_ccs: [0; 8],
             knob_channel: None,
-            fader_ccs: [0; 8],
+            fader_ccs: [20, 21, 22, 23, 24, 25, 26, 27],
             fader_channel: None,
             punch_pad_notes: mpk_punch_pad_notes(),
             phrase_notes: mpk_phrase_notes(),

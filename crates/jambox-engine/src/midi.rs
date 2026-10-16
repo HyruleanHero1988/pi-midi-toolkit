@@ -19,7 +19,7 @@ use tracing::{info, warn};
 use crate::bus::{MidiInSide, MidiOutSide};
 use jambox_core::{
     drum_model_for_note, Command, FxParam, FxTarget, RepeatDivision, SynthParam, DRUM_CHANNEL,
-    DRUM_MODEL_COUNT,
+    DRUM_MODEL_COUNT, SEQ_CLIP_SLOT, SEQ_DRUM_MIX_SLOT, SEQ_KAOSS_MIX_SLOT,
 };
 
 /// Repeat-lane owners for hardware pads (`0x1000 | note`).
@@ -345,6 +345,12 @@ impl MidiMap {
                 value: unit,
             });
         }
+        if profile.faders_on_channel(channel) {
+            if let Some(index) = profile.fader_index(controller) {
+                let unit = (value as f32 / 127.0).clamp(0.0, 1.0);
+                return mix_fader_command(index, unit);
+            }
+        }
         if !profile.knobs_on_channel(channel) {
             return None;
         }
@@ -425,6 +431,36 @@ impl MidiMap {
             _ => return None,
         };
         Some(Command::SetSynth { param, value: unit })
+    }
+}
+
+fn mix_fader_command(index: usize, unit: f32) -> Option<Command> {
+    match index {
+        0 => Some(Command::SetSynth {
+            param: SynthParam::Level,
+            value: unit,
+        }),
+        1 => Some(Command::SetSynth {
+            param: SynthParam::DrumLevel,
+            value: unit,
+        }),
+        2 => Some(Command::SetClipGain {
+            slot: SEQ_DRUM_MIX_SLOT,
+            value: (unit * 2.0).clamp(0.0, 2.0),
+        }),
+        3 => Some(Command::SetClipGain {
+            slot: SEQ_CLIP_SLOT,
+            value: (unit * 2.0).clamp(0.0, 2.0),
+        }),
+        4 => Some(Command::SetClipGain {
+            slot: SEQ_KAOSS_MIX_SLOT,
+            value: (unit * 2.0).clamp(0.0, 2.0),
+        }),
+        5 => Some(Command::SetSynth {
+            param: SynthParam::InputLevel,
+            value: unit,
+        }),
+        _ => None,
     }
 }
 
@@ -997,6 +1033,55 @@ mod tests {
         );
     }
 
+    #[test]
+    fn smk_faders_drive_the_mix_buses() {
+        let map = MidiMap::default();
+        let smk = ControllerProfile::smk_37_elite();
+        assert_eq!(
+            map.interpret_with(
+                &smk,
+                MidiEvent::ControlChange {
+                    channel: 0,
+                    controller: 20,
+                    value: 127,
+                }
+            ),
+            Some(Command::SetSynth {
+                param: SynthParam::Level,
+                value: 1.0
+            })
+        );
+        assert_eq!(
+            map.interpret_with(
+                &smk,
+                MidiEvent::ControlChange {
+                    channel: 0,
+                    controller: 21,
+                    value: 64,
+                }
+            ),
+            Some(Command::SetSynth {
+                param: SynthParam::DrumLevel,
+                value: 64.0 / 127.0
+            })
+        );
+        match map.interpret_with(
+            &smk,
+            MidiEvent::ControlChange {
+                channel: 0,
+                controller: 23,
+                value: 64,
+            },
+        ) {
+            Some(Command::SetClipGain { slot, value }) => {
+                assert_eq!(slot, SEQ_CLIP_SLOT);
+                assert!((value - (64.0 / 127.0) * 2.0).abs() < 1e-5);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
     #[test]
     fn relative_encoders_nudge_from_the_last_value() {
         let map = MidiMap::default();
