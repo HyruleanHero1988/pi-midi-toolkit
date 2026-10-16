@@ -147,7 +147,7 @@ impl ControllerProfile {
             ],
             keybed: true,
             full_vel_default: true,
-            knob_encoding: KnobEncoding::Absolute,
+            knob_encoding: KnobEncoding::RelativeSigned,
             knob_ccs: [48, 49, 50, 51, 52, 53, 54, 55],
             knob_bank2_ccs: [0; 8],
             knob_channel: None,

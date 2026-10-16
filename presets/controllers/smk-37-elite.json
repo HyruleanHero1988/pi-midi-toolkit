@@ -13,7 +13,7 @@
   ],
   "keybed": true,
   "full_vel_default": true,
-  "knob_encoding": "absolute",
+  "knob_encoding": "relative_signed",
   "knob_ccs": [48, 49, 50, 51, 52, 53, 54, 55],
   "knob_bank2_ccs": [0, 0, 0, 0, 0, 0, 0, 0],
   "knob_channel": null,

@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use midi_core::{
     fanout_dest_mask, is_virtual_port_name, matching_port_names, pick_thru_output_name,
-    profile_for_port_name, ControllerProfile, MidiEvent,
+    profile_for_port_name, ControllerProfile, KnobEncoding, MidiEvent,
 };
 use midir::{MidiInput, MidiInputConnection, MidiOutput, MidiOutputConnection};
 use tracing::{info, warn};
@@ -76,6 +76,8 @@ pub struct MidiMap {
     repeat_latch: AtomicBool,
     hw_latched: [AtomicBool; DRUM_MODEL_COUNT],
     hw_note: [AtomicU8; DRUM_MODEL_COUNT],
+    /// Last absolute 0..=10000 for relative encoders (knobs 0..7, bank2 8..15).
+    cc_last: [AtomicU16; 16],
 }
 
 impl Default for MidiMap {
@@ -90,6 +92,7 @@ impl Default for MidiMap {
             repeat_latch: AtomicBool::new(false),
             hw_latched: std::array::from_fn(|_| AtomicBool::new(false)),
             hw_note: std::array::from_fn(|_| AtomicU8::new(0)),
+            cc_last: std::array::from_fn(|_| AtomicU16::new(0)),
         }
     }
 }
@@ -300,6 +303,33 @@ impl MidiMap {
         }
     }
 
+    fn cc_unit(&self, slot: usize, encoding: KnobEncoding, value: u8) -> f32 {
+        match encoding {
+            KnobEncoding::Absolute => {
+                let unit = (value as f32 / 127.0).clamp(0.0, 1.0);
+                if slot < self.cc_last.len() {
+                    self.cc_last[slot]
+                        .store((unit * 10_000.0).round() as u16, Ordering::Relaxed);
+                }
+                unit
+            }
+            KnobEncoding::RelativeSigned => {
+                let delta = relative_cc_delta(value);
+                let last = if slot < self.cc_last.len() {
+                    self.cc_last[slot].load(Ordering::Relaxed) as f32 / 10_000.0
+                } else {
+                    0.0
+                };
+                let unit = (last + delta as f32 / 64.0).clamp(0.0, 1.0);
+                if slot < self.cc_last.len() {
+                    self.cc_last[slot]
+                        .store((unit * 10_000.0).round() as u16, Ordering::Relaxed);
+                }
+                unit
+            }
+        }
+    }
+
     fn interpret_cc(
         &self,
         profile: &ControllerProfile,
@@ -307,8 +337,8 @@ impl MidiMap {
         controller: u8,
         value: u8,
     ) -> Option<Command> {
-        let unit = (value as f32 / 127.0).clamp(0.0, 1.0);
         if controller == CC_MOD {
+            let unit = (value as f32 / 127.0).clamp(0.0, 1.0);
             // Wheel scales existing depth; it must not overwrite Knob 5.
             return Some(Command::SetSynth {
                 param: SynthParam::VibratoMod,
@@ -319,6 +349,7 @@ impl MidiMap {
             return None;
         }
         let knob = profile.knob_index(controller)?;
+        let unit = self.cc_unit(knob, profile.knob_encoding, value);
         let mode = self.mode.load(Ordering::Relaxed);
         if mode == MODE_PUNCH && profile.punch_index_for_knob(controller).is_some() {
             // Amounts / arming live in the kiosk so a disarmed slide stays dry.
@@ -394,6 +425,16 @@ impl MidiMap {
             _ => return None,
         };
         Some(Command::SetSynth { param, value: unit })
+    }
+}
+
+fn relative_cc_delta(value: u8) -> i8 {
+    if value == 0 || value == 64 {
+        0
+    } else if value < 64 {
+        value as i8
+    } else {
+        (value as i16 - 128) as i8
     }
 }
 
@@ -914,7 +955,8 @@ mod tests {
     #[test]
     fn key_knobs_follow_the_live_controller_profile() {
         let map = MidiMap::default();
-        let smk = ControllerProfile::smk_37_elite();
+        let mut smk = ControllerProfile::smk_37_elite();
+        smk.knob_encoding = KnobEncoding::Absolute;
         assert_eq!(
             map.interpret_with(
                 &smk,
@@ -953,6 +995,47 @@ mod tests {
             }),
             "MPK path stays on factory CCs"
         );
+    }
+
+    #[test]
+    fn relative_encoders_nudge_from_the_last_value() {
+        let map = MidiMap::default();
+        let smk = ControllerProfile::smk_37_elite();
+        assert_eq!(smk.knob_encoding, KnobEncoding::RelativeSigned);
+        let first = map
+            .interpret_with(
+                &smk,
+                MidiEvent::ControlChange {
+                    channel: 0,
+                    controller: 48,
+                    value: 1,
+                },
+            )
+            .unwrap();
+        match first {
+            Command::SetSynth {
+                param: SynthParam::Morph,
+                value,
+            } => assert!((value - 1.0 / 64.0).abs() < 1e-5),
+            other => panic!("{other:?}"),
+        }
+        let back = map
+            .interpret_with(
+                &smk,
+                MidiEvent::ControlChange {
+                    channel: 0,
+                    controller: 48,
+                    value: 127,
+                },
+            )
+            .unwrap();
+        match back {
+            Command::SetSynth {
+                param: SynthParam::Morph,
+                value,
+            } => assert!(value.abs() < 1e-5, "127 is −1 tick, got {value}"),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]
