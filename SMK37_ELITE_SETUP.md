@@ -110,9 +110,10 @@ cp presets/controllers/smk-37-elite.json ~/.local/share/pidi/controllers/
 sudo systemctl restart jambox-engine pidi-native
 ```
 
-`PIDI_CONTROLLERS_DIR` overrides that path. `PIDI_REPO_ROOT/presets/controllers`
-is loaded first so a git pull refreshes factory maps; the user copy still
-wins.
+`PIDI_CONTROLLERS_DIR` overrides that path. Factory maps load from
+`PIDI_REPO_ROOT/presets/controllers` when that env is set, otherwise from
+`presets/controllers` under the process working directory (the engine unit
+already `WorkingDirectory=`s the git tree). The user copy still wins.
 
 ## 5. Swap with the MPK mini
 

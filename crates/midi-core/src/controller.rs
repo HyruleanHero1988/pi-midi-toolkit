@@ -301,11 +301,20 @@ pub fn apply_overlay_dir(dir: &Path) {
 
 /// Factory presets, then user `controllers/` so a learn-pass JSON wins.
 pub fn apply_default_overlay_dirs() {
-    if let Ok(repo) = std::env::var("PIDI_REPO_ROOT") {
-        let trimmed = repo.trim();
-        if !trimmed.is_empty() {
-            apply_overlay_dir(&Path::new(trimmed).join("presets/controllers"));
-        }
+    let factory = std::env::var("PIDI_REPO_ROOT")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .map(|r| Path::new(&r).join("presets/controllers"))
+        .or_else(|| {
+            // jambox-engine.service sets WorkingDirectory to the git tree but
+            // does not export PIDI_REPO_ROOT.
+            std::env::current_dir()
+                .ok()
+                .map(|cwd| cwd.join("presets/controllers"))
+        });
+    if let Some(dir) = factory {
+        apply_overlay_dir(&dir);
     }
     let user = std::env::var("PIDI_CONTROLLERS_DIR")
         .ok()
