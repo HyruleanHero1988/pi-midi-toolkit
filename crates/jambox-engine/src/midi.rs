@@ -561,6 +561,8 @@ pub struct MidiIo {
     in_connected: Mutex<String>,
     out_connected: Mutex<String>,
     channel_map: Mutex<[u16; 16]>,
+    /// Pad LED note/velocity pairs for the controller's External/Third port.
+    led_queue: Mutex<Vec<(u8, u8)>>,
 }
 
 impl MidiIo {
@@ -571,7 +573,33 @@ impl MidiIo {
             in_connected: Mutex::new(String::new()),
             out_connected: Mutex::new(String::new()),
             channel_map: Mutex::new([0; 16]),
+            led_queue: Mutex::new(Vec::new()),
         }
+    }
+
+    pub fn queue_clip_led(&self, command: &Command) {
+        match *command {
+            Command::LaunchClip { slot, .. } if slot < 16 => self.queue_pad_led(slot, true),
+            Command::StopClip { slot, .. } if slot < 16 => self.queue_pad_led(slot, false),
+            Command::StopAllClips => {
+                for slot in 0..16u8 {
+                    self.queue_pad_led(slot, false);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn queue_pad_led(&self, slot: u8, on: bool) {
+        let profile = profile_for_port_name(&self.input_connected());
+        if profile.feedback_port_hints.is_empty() {
+            return;
+        }
+        let note = profile.note_for_phrase_cell(slot as usize);
+        self.led_queue
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push((note, if on { 127 } else { 0 }));
     }
 
     pub fn set_channel_map(&self, bits: [u16; 16]) {
@@ -842,6 +870,69 @@ pub fn spawn_output(io: Arc<MidiIo>, mut side: MidiOutSide, running: Arc<AtomicB
     });
 }
 
+/// Note-on/off bytes for RGB / pad LEDs. Never send these to the DIN synth.
+pub fn pad_led_bytes(note: u8, velocity: u8) -> [u8; 3] {
+    if velocity == 0 {
+        [0x80, note, 0]
+    } else {
+        [0x90, note, velocity]
+    }
+}
+
+/// Elite-style LED ports are named External / Third on the same USB device.
+pub fn pick_feedback_port(outputs: &[String], profile: &ControllerProfile) -> Option<String> {
+    if profile.feedback_port_hints.is_empty() {
+        return None;
+    }
+    outputs.iter().find(|name| {
+        let n = name.to_ascii_lowercase();
+        profile.matches_port(name)
+            && profile
+                .feedback_port_hints
+                .iter()
+                .any(|hint| n.contains(&hint.to_ascii_lowercase()))
+    }).cloned()
+}
+
+/// Open the controller's LED port and push phrase-pad note-on/off. Skips the
+/// DIN thru output so U2MIDI never sees pad lamps.
+pub fn spawn_feedback(io: Arc<MidiIo>, running: Arc<AtomicBool>) {
+    std::thread::spawn(move || {
+        let mut connection: Option<midir::MidiOutputConnection> = None;
+        let mut current = String::new();
+        while running.load(Ordering::Relaxed) {
+            let profile = profile_for_port_name(&io.input_connected());
+            let (_, outs) = list_ports();
+            let wanted = pick_feedback_port(&outs, &profile);
+            let still = wanted.as_ref().map(|n| n == &current).unwrap_or(false) && connection.is_some();
+            if connection.is_some() && !still {
+                connection = None;
+                current.clear();
+            }
+            if connection.is_none() {
+                if let Some(name) = wanted {
+                    if let Ok(conn) = try_open_output(&name) {
+                        info!(port = %name, "midi: pad LED feedback open");
+                        current = name;
+                        connection = Some(conn);
+                    }
+                }
+            }
+            let pending = {
+                let mut q = io.led_queue.lock().unwrap_or_else(|p| p.into_inner());
+                std::mem::take(&mut *q)
+            };
+            if let Some(conn) = connection.as_mut() {
+                for (note, vel) in pending {
+                    let bytes = pad_led_bytes(note, vel);
+                    let _ = conn.send(&bytes);
+                }
+            }
+            std::thread::sleep(OUT_POLL);
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1067,6 +1158,23 @@ mod tests {
     }
 
     #[test]
+    fn pad_led_feedback_targets_external_not_din() {
+        let smk = ControllerProfile::smk_37_elite();
+        let outs = vec![
+            "U2MIDI PRO:U2MIDI PRO MIDI 1 20:0".into(),
+            "SMK-37 Elite-External:SMK-37 Elite-External MIDI 1 24:0".into(),
+            "SMK-37 Elite-Master:SMK-37 Elite-Master MIDI 1 20:0".into(),
+        ];
+        assert_eq!(
+            pick_feedback_port(&outs, &smk).as_deref(),
+            Some("SMK-37 Elite-External:SMK-37 Elite-External MIDI 1 24:0")
+        );
+        assert!(pick_feedback_port(&outs, &ControllerProfile::mpk_mini()).is_none());
+        assert_eq!(pad_led_bytes(36, 127), [0x90, 36, 127]);
+        assert_eq!(pad_led_bytes(36, 0), [0x80, 36, 0]);
+    }
+
+    #[test]
     fn sustain_cc64_is_not_a_fader_on_the_elite() {
         let map = MidiMap::default();
         assert_eq!(
@@ -1096,7 +1204,6 @@ mod tests {
         );
     }
 
-    #[test]
     #[test]
     fn smk_encoder_bank2_drives_bus_fx() {
         let map = MidiMap::default();
@@ -1131,7 +1238,6 @@ mod tests {
         );
     }
 
-    #[test]
     #[test]
     fn smk_faders_drive_the_mix_buses() {
         let map = MidiMap::default();
@@ -1180,7 +1286,6 @@ mod tests {
         }
     }
 
-    #[test]
     #[test]
     fn relative_encoders_nudge_from_the_last_value() {
         let map = MidiMap::default();

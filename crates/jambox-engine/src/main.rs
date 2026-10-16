@@ -227,6 +227,7 @@ fn run(
         running.clone(),
     );
     midi::spawn_output(Arc::clone(&midi_io), midi_out_side, running.clone());
+    midi::spawn_feedback(Arc::clone(&midi_io), running.clone());
 
     let endpoint = if tcp {
         ipc::Endpoint::Tcp(control)

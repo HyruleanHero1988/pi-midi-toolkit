@@ -325,6 +325,7 @@ pub fn handle_line(
             Response::Ok
         }
         Ok(Decoded::Command(command)) => {
+            midi_io.queue_clip_led(&command);
             if send_or_drop(control, cache, command) {
                 Response::Ok
             } else {
