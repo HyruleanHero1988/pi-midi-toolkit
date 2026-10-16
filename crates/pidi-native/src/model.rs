@@ -9763,6 +9763,23 @@ mod tests {
     }
 
     #[test]
+    fn synth_keys_hide_when_smk_37_elite_is_connected() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Synth);
+        model.apply_midi_ports(&MidiPortsReply {
+            inputs: vec!["SMK-37 Elite-Master:SMK-37 Elite-Master MIDI 1 20:0".into()],
+            outputs: vec!["U2MIDI PRO".into()],
+            input_connected: "SMK-37 Elite-Master:SMK-37 Elite-Master MIDI 1 20:0".into(),
+            ..MidiPortsReply::default()
+        });
+        assert!(model.hardware_keybed_connected());
+        assert!(
+            !model.layout.show_on_screen_keys,
+            "SMK-37 Elite already has piano keys"
+        );
+    }
+
+    #[test]
     fn synth_octave_shifts_keyboard_notes() {
         let mut model = NativeModel::new();
         model.set_mode(UiMode::Synth);

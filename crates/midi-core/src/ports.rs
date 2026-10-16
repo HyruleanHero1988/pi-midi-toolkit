@@ -18,6 +18,15 @@ const KEYBED_HINTS: &[&str] = &[
     "launchkey",
     "keystep",
     "seaboard",
+    "smk",
+    "m-vave",
+    "m vave",
+    "mvave",
+    "vave",
+    "elite",
+    "starrykey",
+    "mke-p37",
+    "mke_p37",
 ];
 
 /// True when this ALSA/`midir` name looks like a hardware keybed.
@@ -165,5 +174,15 @@ mod tests {
         assert!(!port_looks_like_keybed("U2MIDI PRO:U2MIDI PRO MIDI 1 20:0"));
         assert!(!port_looks_like_keybed("Midi Through:Midi Through Port-0 14:0"));
         assert!(!port_looks_like_keybed(""));
+    }
+
+    #[test]
+    fn keybed_names_match_smk_37_family() {
+        assert!(port_looks_like_keybed("SMK-37 Elite"));
+        assert!(port_looks_like_keybed("SMK-37 Elite-Master:SMK-37 Elite-Master MIDI 1 20:0"));
+        assert!(port_looks_like_keybed("M-VAVE SMK-37 Pro"));
+        assert!(port_looks_like_keybed("Starrykey 37 Play"));
+        assert!(port_looks_like_keybed("MKE-P37"));
+        assert!(!port_looks_like_keybed("U2MIDI PRO:U2MIDI PRO MIDI 1 20:0"));
     }
 }
