@@ -8,7 +8,7 @@ low-latency MIDI thru/remap to a hardware synth. **Not** related to play-my-synt
 - **Kiosk UI (active):** [`crates/pidi-native`](crates/pidi-native) — SDL/KMSDRM + GLES2 over `jambox-engine`. See [NATIVE_KIOSK.md](NATIVE_KIOSK.md) and the [native screen reference](docs/index.html).
 - **Shared Pi assets:** [`apps/pidi`](apps/pidi) — wavetables, power/HW scripts (not a UI). SET→UPDATE runs in-process in `pidi-native` (`ota.rs`).
 - **Thru engine:** Rust `midi-engine` — channel/CC/velocity remap via CLI + JSON presets (Map mode in the native kiosk)
-- **Target hardware:** Pi 2 + any class-compliant USB MIDI keyboard or USB-MIDI-DIN interface (MPK mini, U2MIDI PRO, …)
+- **Target hardware:** Pi 2 + any class-compliant USB MIDI keyboard or USB-MIDI-DIN interface (MPK mini, M-VAVE SMK-37 Elite, U2MIDI PRO, …). Controllers are named profiles — swap boxes whenever you want. Elite arrival checklist: [SMK37_ELITE_SETUP.md](SMK37_ELITE_SETUP.md).
 
 ## Crates
 
