@@ -1,0 +1,14 @@
+{
+  "id": "mpk-mini",
+  "name_hints": ["mpk"],
+  "keybed": true,
+  "full_vel_default": true,
+  "knob_encoding": "absolute",
+  "knob_ccs": [70, 71, 72, 73, 74, 75, 76, 77],
+  "knob_bank2_ccs": [0, 0, 0, 0, 0, 0, 0, 0],
+  "punch_pad_notes": [40, 41, 42, 43, 36, 37, 38, 39],
+  "phrase_notes": [40, 41, 42, 43, 36, 37, 38, 39, 48, 49, 50, 51, 44, 45, 46, 47],
+  "transport_notes": [],
+  "feedback_port_hints": [],
+  "skip_audio": false
+}

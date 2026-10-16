@@ -2303,7 +2303,7 @@ impl NativeModel {
 
     fn profile_for_notice(&self, notice: &MidiNotice) -> midi_core::ControllerProfile {
         if let Some(id) = notice.controller.as_deref() {
-            midi_core::builtin_profiles()
+            midi_core::installed_profiles()
                 .into_iter()
                 .find(|p| p.id == id)
                 .unwrap_or_else(|| self.controller_profile.clone())
@@ -9858,6 +9858,8 @@ mod tests {
             !model.layout.show_on_screen_keys,
             "SMK-37 Elite already has piano keys"
         );
+        assert_eq!(model.controller_profile.id, "smk-37-elite");
+        assert_eq!(model.controller_profile.knob_ccs[0], 48);
     }
 
     #[test]

@@ -914,9 +914,7 @@ mod tests {
     #[test]
     fn key_knobs_follow_the_live_controller_profile() {
         let map = MidiMap::default();
-        let mut smk = ControllerProfile::generic();
-        smk.id = "test-knobs".into();
-        smk.knob_ccs = [48, 49, 50, 51, 52, 53, 54, 55];
+        let smk = ControllerProfile::smk_37_elite();
         assert_eq!(
             map.interpret_with(
                 &smk,

@@ -3,7 +3,10 @@
 //!
 //! Lookup is by ALSA/`midir` port name. Unknown devices fall back to the
 //! MPK mini factory map (the original desk controller) so existing presets
-//! keep working. A later overlay JSON can replace a builtin by `id`.
+//! keep working. Overlay JSON in `controllers/` can replace a builtin by `id`.
+
+use std::path::Path;
+use std::sync::{Mutex, OnceLock};
 
 use serde::{Deserialize, Serialize};
 
@@ -122,6 +125,42 @@ impl ControllerProfile {
         }
     }
 
+    /// M-VAVE SMK-37 Elite (and Pro / Starrykey / MKE-P37 siblings).
+    ///
+    /// Knob CCs match the common MidiSuite / DAW maps (48–55). Pad notes start
+    /// as MPK-compatible so a MidiSuite MPC remap still works; later commits
+    /// switch the native 4×4 grid. Edit `controllers/smk-37-elite.json` after
+    /// a learn pass if this unit's factory map differs.
+    pub fn smk_37_elite() -> Self {
+        Self {
+            id: "smk-37-elite".into(),
+            name_hints: vec![
+                "smk-37".into(),
+                "smk37".into(),
+                "smk".into(),
+                "m-vave".into(),
+                "m vave".into(),
+                "mvave".into(),
+                "starrykey".into(),
+                "mke-p37".into(),
+                "mke_p37".into(),
+            ],
+            keybed: true,
+            full_vel_default: true,
+            knob_encoding: KnobEncoding::Absolute,
+            knob_ccs: [48, 49, 50, 51, 52, 53, 54, 55],
+            knob_bank2_ccs: [0; 8],
+            knob_channel: None,
+            fader_ccs: [0; 8],
+            fader_channel: None,
+            punch_pad_notes: mpk_punch_pad_notes(),
+            phrase_notes: mpk_phrase_notes(),
+            transport_notes: Vec::new(),
+            feedback_port_hints: vec!["external".into(), "third".into()],
+            skip_audio: true,
+        }
+    }
+
     pub fn matches_port(&self, name: &str) -> bool {
         if name.is_empty() {
             return false;
@@ -185,15 +224,87 @@ impl ControllerProfile {
     }
 }
 
-/// Built-in maps. More specific (SMK, MPK, …) are matched before generic.
+/// Built-in maps. Named maps are matched before generic.
 pub fn builtin_profiles() -> Vec<ControllerProfile> {
-    vec![ControllerProfile::mpk_mini(), ControllerProfile::generic()]
+    vec![
+        ControllerProfile::smk_37_elite(),
+        ControllerProfile::mpk_mini(),
+        ControllerProfile::generic(),
+    ]
+}
+
+fn registry() -> &'static Mutex<Vec<ControllerProfile>> {
+    static REG: OnceLock<Mutex<Vec<ControllerProfile>>> = OnceLock::new();
+    REG.get_or_init(|| Mutex::new(builtin_profiles()))
+}
+
+/// Live maps (builtins plus any overlay JSON already applied).
+pub fn installed_profiles() -> Vec<ControllerProfile> {
+    registry().lock().unwrap_or_else(|p| p.into_inner()).clone()
 }
 
 /// Pick a profile for this ALSA/`midir` name. Unrecognised ports use generic
 /// (MPK-compatible knobs/pads) so a new class-compliant keyboard still plays.
 pub fn profile_for_port_name(name: &str) -> ControllerProfile {
-    profile_for_port_name_in(name, &builtin_profiles())
+    let profiles = installed_profiles();
+    profile_for_port_name_in(name, &profiles)
+}
+
+/// Load `*.json` overlays from `dir` (single object or array per file).
+pub fn apply_overlay_dir(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut profiles = installed_profiles();
+    let mut files: Vec<_> = entries.filter_map(|e| e.ok()).collect();
+    files.sort_by_key(|e| e.file_name());
+    for entry in files {
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        if let Err(err) = merge_profile_json(&mut profiles, &text) {
+            eprintln!("controller overlay {}: {err}", path.display());
+        }
+    }
+    *registry().lock().unwrap_or_else(|p| p.into_inner()) = profiles;
+}
+
+/// Factory presets, then user `controllers/` so a learn-pass JSON wins.
+pub fn apply_default_overlay_dirs() {
+    if let Ok(repo) = std::env::var("PIDI_REPO_ROOT") {
+        let trimmed = repo.trim();
+        if !trimmed.is_empty() {
+            apply_overlay_dir(&Path::new(trimmed).join("presets/controllers"));
+        }
+    }
+    let user = std::env::var("PIDI_CONTROLLERS_DIR")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var("PIDI_DATA_ROOT")
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+                .map(|r| Path::new(&r).join("controllers"))
+        })
+        .or_else(|| {
+            std::env::var("XDG_DATA_HOME")
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+                .map(|x| Path::new(&x).join("pidi/controllers"))
+        })
+        .or_else(|| {
+            std::env::var("HOME")
+                .ok()
+                .map(|h| Path::new(&h).join(".local/share/pidi/controllers"))
+        });
+    if let Some(dir) = user {
+        apply_overlay_dir(&dir);
+    }
 }
 
 pub fn profile_for_port_name_in(name: &str, profiles: &[ControllerProfile]) -> ControllerProfile {
@@ -255,10 +366,23 @@ mod tests {
 
     #[test]
     fn port_name_selects_mpk_not_generic() {
+        reset_installed_profiles();
         let p = profile_for_port_name("MPK mini 3");
         assert_eq!(p.id, "mpk-mini");
         let din = profile_for_port_name("U2MIDI PRO:U2MIDI PRO MIDI 1 20:0");
         assert_eq!(din.id, "generic");
+    }
+
+    #[test]
+    fn port_name_selects_smk_elite_not_mpk() {
+        reset_installed_profiles();
+        let p = profile_for_port_name("SMK-37 Elite-Master:SMK-37 Elite-Master MIDI 1 20:0");
+        assert_eq!(p.id, "smk-37-elite");
+        assert_eq!(p.knob_ccs[0], 48);
+        assert!(p.skip_audio);
+        let mpk = profile_for_port_name("MPK mini 3");
+        assert_eq!(mpk.id, "mpk-mini");
+        assert_eq!(mpk.knob_ccs[0], 70);
     }
 
     #[test]
@@ -272,4 +396,18 @@ mod tests {
         let p = profile_for_port_name_in("MPK mini 3", &profiles);
         assert_eq!(p.knob_ccs[0], 10);
     }
+
+    #[test]
+    fn smk_profile_round_trips_through_json() {
+        let p = ControllerProfile::smk_37_elite();
+        let text = serde_json::to_string_pretty(&p).unwrap();
+        let back: ControllerProfile = serde_json::from_str(&text).unwrap();
+        assert_eq!(p, back);
+        assert_eq!(p.knob_ccs, [48, 49, 50, 51, 52, 53, 54, 55]);
+    }
+}
+
+#[cfg(test)]
+pub fn reset_installed_profiles() {
+    *registry().lock().unwrap_or_else(|p| p.into_inner()) = builtin_profiles();
 }

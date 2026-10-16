@@ -68,13 +68,13 @@ fn main() {
     if !cli.phrases.is_empty() {
         std::env::set_var("PIDI_PHRASES_DIR", &cli.phrases);
     }
+    midi_core::apply_default_overlay_dirs();
     let mut model = NativeModel::new();
     let mut frame = Frame::new();
     let mut client = NativeClient::new(cli.control.clone(), cli.tcp);
     let mut presenter = Presenter::open(&cli);
     let sdl_touch = presenter.is_sdl() && matches!(cli.touch.as_str(), "auto" | "sdl");
-    let mut input = if matches!(cli.touch.as_str(), "evdev")
-        || (cli.touch == "auto" && !sdl_touch)
+    let mut input = if matches!(cli.touch.as_str(), "evdev") || (cli.touch == "auto" && !sdl_touch)
     {
         Input::open(&cli.evdev)
     } else {
@@ -118,9 +118,7 @@ fn main() {
             match event {
                 TouchEvent::Down { id, x, y } => model.finger_down(id, x, y, &mut client.outbox),
                 TouchEvent::Move { id, x, y } => model.finger_move(id, x, y, &mut client.outbox),
-                TouchEvent::Up { id, x, y } => {
-                    model.finger_up_at(id, x, y, &mut client.outbox)
-                }
+                TouchEvent::Up { id, x, y } => model.finger_up_at(id, x, y, &mut client.outbox),
             }
         }
 
@@ -642,9 +640,7 @@ mod linux_evdev {
                 let ev = unsafe { ptr_read(&chunk) };
                 match ev.type_ {
                     EV_ABS => match ev.code {
-                        ABS_MT_SLOT => {
-                            self.current = (ev.value as usize).min(self.slots.len() - 1)
-                        }
+                        ABS_MT_SLOT => self.current = (ev.value as usize).min(self.slots.len() - 1),
                         ABS_MT_TRACKING_ID => {
                             self.slots[self.current].tracking = ev.value;
                             self.slots[self.current].dirty = true;

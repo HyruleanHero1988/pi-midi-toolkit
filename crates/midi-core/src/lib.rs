@@ -11,7 +11,8 @@ mod process;
 mod stuck;
 
 pub use controller::{
-    builtin_profiles, merge_profile_json, mpk_knob_ccs, mpk_note_for_phrase_cell, mpk_phrase_notes,
+    apply_default_overlay_dirs, apply_overlay_dir, builtin_profiles, installed_profiles,
+    merge_profile_json, mpk_knob_ccs, mpk_note_for_phrase_cell, mpk_phrase_notes,
     mpk_punch_pad_notes, profile_for_port_name, profile_for_port_name_in, ControllerProfile,
     KnobEncoding,
 };
