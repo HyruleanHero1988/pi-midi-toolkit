@@ -5612,6 +5612,17 @@ impl NativeModel {
             self.set_punch_amount_unit(index, unit, outbox);
             return true;
         }
+        if kind == "channel_pressure" || kind == "aftertouch" {
+            let unit = (notice.value.unwrap_or(0) as f32 / 127.0).clamp(0.0, 1.0);
+            let mut any = false;
+            for index in 0..Layout::PUNCH_PAD_COUNT {
+                if self.punch_armed[index] {
+                    self.set_punch_amount_unit(index, unit, outbox);
+                    any = true;
+                }
+            }
+            return any;
+        }
         if notice.channel != DRUM_CHANNEL || !self.punch_pads_fx {
             return false;
         }
@@ -5630,6 +5641,14 @@ impl NativeModel {
             return profile
                 .punch_index_for_pad(notice.note.unwrap_or(255))
                 .is_some();
+        }
+        if kind == "poly_pressure" || kind == "polypressure" || kind == "polyaftertouch" {
+            let Some(index) = profile.punch_index_for_pad(notice.note.unwrap_or(255)) else {
+                return false;
+            };
+            let unit = (notice.value.unwrap_or(0) as f32 / 127.0).clamp(0.0, 1.0);
+            self.set_punch_amount_unit(index, unit, outbox);
+            return true;
         }
         false
     }
@@ -10836,6 +10855,24 @@ mod tests {
                 .iter()
                 .any(|r| matches!(r, Request::KnobMap { mode, .. } if mode == "punch")),
             "FX page should steal MPK knobs/pads for punch, got {batch:?}"
+        );
+    }
+
+    #[test]
+    fn pad_aftertouch_sets_punch_amount() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Fx);
+        let mut out = Outbox::new();
+        model.on_midi_notice(
+            &punch_midi("poly_pressure", Some(40), None, None, Some(64)),
+            &mut out,
+        );
+        assert!((model.punch_amount[0] - 64.0 / 127.0).abs() < 1e-5);
+        assert!(
+            out.take()
+                .iter()
+                .all(|r| !matches!(r, Request::PunchFx { .. })),
+            "aftertouch on a disarmed pad only stores amount"
         );
     }
 
