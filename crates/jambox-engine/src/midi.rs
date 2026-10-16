@@ -310,30 +310,16 @@ impl MidiMap {
     }
 
     fn cc_unit(&self, slot: usize, encoding: KnobEncoding, value: u8) -> f32 {
-        match encoding {
-            KnobEncoding::Absolute => {
-                let unit = (value as f32 / 127.0).clamp(0.0, 1.0);
-                if slot < self.cc_last.len() {
-                    self.cc_last[slot]
-                        .store((unit * 10_000.0).round() as u16, Ordering::Relaxed);
-                }
-                unit
-            }
-            KnobEncoding::RelativeSigned => {
-                let delta = relative_cc_delta(value);
-                let last = if slot < self.cc_last.len() {
-                    self.cc_last[slot].load(Ordering::Relaxed) as f32 / 10_000.0
-                } else {
-                    0.0
-                };
-                let unit = (last + delta as f32 / 64.0).clamp(0.0, 1.0);
-                if slot < self.cc_last.len() {
-                    self.cc_last[slot]
-                        .store((unit * 10_000.0).round() as u16, Ordering::Relaxed);
-                }
-                unit
-            }
+        let last = if slot < self.cc_last.len() {
+            self.cc_last[slot].load(Ordering::Relaxed) as f32 / 10_000.0
+        } else {
+            0.0
+        };
+        let unit = midi_core::apply_knob_cc(encoding, last, value);
+        if slot < self.cc_last.len() {
+            self.cc_last[slot].store((unit * 10_000.0).round() as u16, Ordering::Relaxed);
         }
+        unit
     }
 
     fn interpret_cc(
@@ -500,16 +486,6 @@ fn mix_fader_command(index: usize, unit: f32) -> Option<Command> {
             value: unit,
         }),
         _ => None,
-    }
-}
-
-fn relative_cc_delta(value: u8) -> i8 {
-    if value == 0 || value == 64 {
-        0
-    } else if value < 64 {
-        value as i8
-    } else {
-        (value as i16 - 128) as i8
     }
 }
 
@@ -890,14 +866,17 @@ pub fn pick_feedback_port(outputs: &[String], profile: &ControllerProfile) -> Op
     if profile.feedback_port_hints.is_empty() {
         return None;
     }
-    outputs.iter().find(|name| {
-        let n = name.to_ascii_lowercase();
-        profile.matches_port(name)
-            && profile
-                .feedback_port_hints
-                .iter()
-                .any(|hint| n.contains(&hint.to_ascii_lowercase()))
-    }).cloned()
+    outputs
+        .iter()
+        .find(|name| {
+            let n = name.to_ascii_lowercase();
+            profile.matches_port(name)
+                && profile
+                    .feedback_port_hints
+                    .iter()
+                    .any(|hint| n.contains(&hint.to_ascii_lowercase()))
+        })
+        .cloned()
 }
 
 /// Open the controller's LED port and push phrase-pad note-on/off. Skips the
@@ -910,7 +889,8 @@ pub fn spawn_feedback(io: Arc<MidiIo>, running: Arc<AtomicBool>) {
             let profile = profile_for_port_name(&io.input_connected());
             let (_, outs) = list_ports();
             let wanted = pick_feedback_port(&outs, &profile);
-            let still = wanted.as_ref().map(|n| n == &current).unwrap_or(false) && connection.is_some();
+            let still =
+                wanted.as_ref().map(|n| n == &current).unwrap_or(false) && connection.is_some();
             if connection.is_some() && !still {
                 connection = None;
                 current.clear();
@@ -1120,6 +1100,19 @@ mod tests {
 
     #[test]
     fn key_knobs_follow_the_live_controller_profile() {
+        assert_eq!(
+            ControllerProfile::mpk_mini().knob_ccs,
+            [
+                CC_MORPH,
+                CC_TONE,
+                CC_ATTACK,
+                CC_RELEASE,
+                CC_VIB_DEPTH,
+                CC_VIB_RATE,
+                76,
+                CC_LEVEL
+            ]
+        );
         let map = MidiMap::default();
         let mut smk = ControllerProfile::smk_37_elite();
         smk.knob_encoding = KnobEncoding::Absolute;
@@ -1167,8 +1160,8 @@ mod tests {
     fn smk_transport_notes_do_not_wrap_into_the_kit() {
         let map = MidiMap::default();
         let smk = ControllerProfile::smk_37_elite();
-        assert!(
-            map.interpret_with(
+        assert!(map
+            .interpret_with(
                 &smk,
                 MidiEvent::NoteOn {
                     channel: 9,
@@ -1176,8 +1169,7 @@ mod tests {
                     velocity: 100,
                 }
             )
-            .is_none()
-        );
+            .is_none());
         assert_eq!(
             map.interpret_with(
                 &smk,
@@ -1208,7 +1200,6 @@ mod tests {
         );
     }
 
-    #[test]
     #[test]
     fn pad_led_feedback_targets_external_not_din() {
         let smk = ControllerProfile::smk_37_elite();

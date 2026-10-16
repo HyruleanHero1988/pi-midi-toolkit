@@ -5631,7 +5631,9 @@ impl NativeModel {
             let Some(index) = profile.punch_index_for_knob(notice.control.unwrap_or(255)) else {
                 return false;
             };
-            let unit = (notice.value.unwrap_or(0) as f32 / 127.0).clamp(0.0, 1.0);
+            let raw = notice.value.unwrap_or(0).min(127) as u8;
+            let unit =
+                midi_core::apply_knob_cc(profile.knob_encoding, self.punch_amount[index], raw);
             self.set_punch_amount_unit(index, unit, outbox);
             return true;
         }
@@ -9928,7 +9930,10 @@ mod tests {
         assert_eq!(model.controller_profile.knob_ccs[0], 48);
         assert_eq!(model.layout.pad_notes[0], 36);
         assert_eq!(model.controller_profile.punch_index_for_pad(36), Some(0));
-        assert!(!model.full_vel, "Elite velocity is usable; FULL VEL defaults off");
+        assert!(
+            !model.full_vel,
+            "Elite velocity is usable; FULL VEL defaults off"
+        );
     }
 
     #[test]
@@ -11035,6 +11040,93 @@ mod tests {
     }
 
     #[test]
+    fn smk_relative_knob_nudges_punch_amount() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Fx);
+        model.controller_profile = midi_core::ControllerProfile::smk_37_elite();
+        model.punch_amount[0] = 0.5;
+        let mut out = Outbox::new();
+        model.on_midi_notice(
+            &MidiNotice {
+                kind: "control_change".into(),
+                channel: 0,
+                note: None,
+                velocity: None,
+                control: Some(48),
+                value: Some(1),
+                controller: Some("smk-37-elite".into()),
+            },
+            &mut out,
+        );
+        assert!(
+            (model.punch_amount[0] - (0.5 + 1.0 / 64.0)).abs() < 1e-5,
+            "clockwise tick should nudge, not jump; got {}",
+            model.punch_amount[0]
+        );
+        model.on_midi_notice(
+            &MidiNotice {
+                kind: "control_change".into(),
+                channel: 0,
+                note: None,
+                velocity: None,
+                control: Some(48),
+                value: Some(127),
+                controller: Some("smk-37-elite".into()),
+            },
+            &mut out,
+        );
+        assert!(
+            (model.punch_amount[0] - 0.5).abs() < 1e-5,
+            "counterclockwise tick should return to last; got {}",
+            model.punch_amount[0]
+        );
+        model.punch_amount[0] = 0.0;
+        model.on_midi_notice(
+            &MidiNotice {
+                kind: "control_change".into(),
+                channel: 0,
+                note: None,
+                velocity: None,
+                control: Some(48),
+                value: Some(127),
+                controller: Some("smk-37-elite".into()),
+            },
+            &mut out,
+        );
+        assert!(
+            model.punch_amount[0].abs() < 1e-5,
+            "a −1 tick from zero must stay parked, not jump to 1.0; got {}",
+            model.punch_amount[0]
+        );
+        assert!(
+            out.take()
+                .iter()
+                .all(|r| !matches!(r, Request::PunchFx { .. })),
+            "disarmed encoder must only store the amount"
+        );
+    }
+
+    #[test]
+    fn smk_pad_toggles_punch_arm_on_note_36() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Fx);
+        model.controller_profile = midi_core::ControllerProfile::smk_37_elite();
+        let mut out = Outbox::new();
+        model.on_midi_notice(
+            &punch_midi("note_on", Some(36), Some(100), None, None),
+            &mut out,
+        );
+        assert!(
+            model.punch_armed[0],
+            "Elite top-left pad is note 36, not the MPK row-swap"
+        );
+        assert!(
+            !model.punch_armed[4],
+            "MPK Bank A bottom-left must stay off"
+        );
+    }
+
+    #[test]
     fn mpk_pad_toggles_punch_arm() {
         let mut model = NativeModel::new();
         model.set_mode(UiMode::Fx);
@@ -11620,7 +11712,10 @@ mod tests {
             Some(&mut out),
         );
         assert!(!model.full_vel);
-        assert!(out.take().iter().any(|r| matches!(r, Request::FullVel { on: false })));
+        assert!(out
+            .take()
+            .iter()
+            .any(|r| matches!(r, Request::FullVel { on: false })));
 
         model.full_vel = true;
         model.full_vel_profile_default = false; // user overrode Elite default

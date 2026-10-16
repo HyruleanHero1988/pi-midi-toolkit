@@ -17,7 +17,7 @@ the factory CC map disagrees with the overlay.
 | --- | --- | --- |
 | On-screen piano | Hidden when plugged in | Hidden when plugged in |
 | Keys | Notes + pitch/mod wheels | Notes + pitch/mod wheels |
-| Knobs 1–8 | CC 70–77 absolute pots | CC 48–55 **relative** encoders |
+| Knobs 1–8 | CC 70–77 absolute pots (FX page: punch depth) | CC 48–55 **relative** encoders (FX page: punch depth nudges) |
 | Knobs 9–16 | — | CC 56–63 → bus FX |
 | Faders | — | CC 20–25 → MIX LIVE / KIT / SEQ DRM / KEY / KSS / MIC |
 | Pads 1–8 | Bank A row-swapped (40–43 / 36–39) punch + kit | Sequential 36–43 punch + kit |
@@ -90,8 +90,8 @@ Write down what the unit actually sends. Compare to
 | Key C3 | note on ch 1 | note 60, velocity 1–127 | leave FULL VEL off unless it is stuck at 127 |
 | Pitch wheel | bend | pitch_bend | already handled |
 | Mod wheel | CC 1 | vibrato amount | already handled |
-| Encoder 1 clockwise one tick | CC 48 = 1 | Morph +1/64 | if it jumps 0–127, set `knob_encoding` to `absolute` |
-| Encoder 1 counterclockwise | CC 48 = 127 | Morph −1/64 | same |
+| Encoder 1 clockwise one tick | CC 48 = 1 | Morph +1/64 (FX page: punch depth +1/64) | if it jumps 0–127, set `knob_encoding` to `absolute` |
+| Encoder 1 counterclockwise | CC 48 = 127 | Morph −1/64 (FX page: punch depth −1/64) | same |
 | Encoder bank 2, knob 1 | CC 56 | bus Drive | edit `knob_bank2_ccs` |
 | Fader 1 | CC 20 | MIX LIVE | edit `fader_ccs` |
 | Pad 1 (top-left) | ch 10 note 36 | kit kick / punch RPT | edit `phrase_notes` / `punch_pad_notes` |

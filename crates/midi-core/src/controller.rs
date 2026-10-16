@@ -21,6 +21,27 @@ pub enum KnobEncoding {
     RelativeSigned,
 }
 
+/// Signed tick count for [`KnobEncoding::RelativeSigned`] (0 and 64 are rest).
+pub fn relative_cc_delta(value: u8) -> i8 {
+    if value == 0 || value == 64 {
+        0
+    } else if value < 64 {
+        value as i8
+    } else {
+        (value as i16 - 128) as i8
+    }
+}
+
+/// Fold a CC tick into a 0..=1 last value. Relative ticks are ±N/64.
+pub fn apply_knob_cc(encoding: KnobEncoding, last: f32, value: u8) -> f32 {
+    match encoding {
+        KnobEncoding::Absolute => (value as f32 / 127.0).clamp(0.0, 1.0),
+        KnobEncoding::RelativeSigned => {
+            (last + relative_cc_delta(value) as f32 / 64.0).clamp(0.0, 1.0)
+        }
+    }
+}
+
 /// One physical MIDI controller’s factory (or commissioned) map.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ControllerProfile {
@@ -415,6 +436,22 @@ mod tests {
             ControllerProfile::mpk_mini().punch_index_for_pad(36),
             Some(4),
             "MPK Bank A bottom-left stays SEND"
+        );
+    }
+
+    #[test]
+    fn relative_signed_cc_nudges_from_last() {
+        assert_eq!(relative_cc_delta(1), 1);
+        assert_eq!(relative_cc_delta(2), 2);
+        assert_eq!(relative_cc_delta(127), -1);
+        assert_eq!(relative_cc_delta(64), 0);
+        assert_eq!(relative_cc_delta(0), 0);
+        let nudged = apply_knob_cc(KnobEncoding::RelativeSigned, 0.5, 1);
+        assert!((nudged - (0.5 + 1.0 / 64.0)).abs() < 1e-6);
+        assert!((apply_knob_cc(KnobEncoding::Absolute, 0.5, 127) - 1.0).abs() < 1e-6);
+        assert!(
+            apply_knob_cc(KnobEncoding::RelativeSigned, 0.0, 127).abs() < 1e-6,
+            "a −1 tick from zero must not jump to 1.0"
         );
     }
 }
