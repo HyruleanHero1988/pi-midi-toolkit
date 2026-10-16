@@ -449,8 +449,10 @@ pub struct NativeModel {
     pub probe: bool,
     /// SET→PWR: draw the LOW PWR / THROTTLE status badge. Off by default.
     pub power_warn: bool,
-    /// SET→FULL VEL: rewrite keyboard note-ons to 127. On by default (Tk).
+    /// SET→FULL VEL: rewrite keyboard note-ons to 127. On by default for MPK.
     pub full_vel: bool,
+    /// Profile default last applied, so a user toggle survives a hotplug swap.
+    full_vel_profile_default: bool,
     /// DRUMS→LOCK: note-repeat keeps running after the pad is released.
     pub drum_repeat_lock: bool,
     repeat_held: [u8; DRUM_MODEL_COUNT],
@@ -681,6 +683,7 @@ impl NativeModel {
             probe: false,
             power_warn: false,
             full_vel: true,
+            full_vel_profile_default: true,
             drum_repeat_lock: false,
             repeat_held: [0; DRUM_MODEL_COUNT],
             repeat_latched: [false; DRUM_MODEL_COUNT],
@@ -2282,13 +2285,27 @@ impl NativeModel {
     }
 
     pub fn apply_midi_ports(&mut self, ports: &MidiPortsReply) {
+        self.apply_midi_ports_with(ports, None);
+    }
+
+    pub fn apply_midi_ports_with(&mut self, ports: &MidiPortsReply, outbox: Option<&mut Outbox>) {
         if !ports.inputs.is_empty() || !ports.outputs.is_empty() {
             self.midi_inputs = ports.inputs.clone();
             self.midi_outputs = ports.outputs.clone();
         }
         self.midi_in_connected = ports.input_connected.clone();
         self.midi_out_connected = ports.output_connected.clone();
-        self.controller_profile = self.live_controller_profile();
+        let next = self.live_controller_profile();
+        if next.id != self.controller_profile.id {
+            if self.full_vel == self.full_vel_profile_default {
+                self.full_vel = next.full_vel_default;
+                if let Some(out) = outbox {
+                    out.full_vel(self.full_vel);
+                }
+            }
+            self.full_vel_profile_default = next.full_vel_default;
+        }
+        self.controller_profile = next;
         self.layout.pad_notes = self.controller_profile.phrase_notes;
         self.layout.show_on_screen_keys = !self.hardware_keybed_connected();
     }
@@ -9906,6 +9923,7 @@ mod tests {
         assert_eq!(model.controller_profile.knob_ccs[0], 48);
         assert_eq!(model.layout.pad_notes[0], 36);
         assert_eq!(model.controller_profile.punch_index_for_pad(36), Some(0));
+        assert!(!model.full_vel, "Elite velocity is usable; FULL VEL defaults off");
     }
 
     #[test]
@@ -11581,6 +11599,38 @@ mod tests {
         model.finger_up(2, &mut out);
         assert!(!model.power_warn);
         assert!(model.status_line.contains("off"));
+    }
+
+    #[test]
+    fn swapping_to_smk_turns_full_vel_off_unless_the_user_set_it() {
+        let mut model = NativeModel::new();
+        assert!(model.full_vel);
+        let mut out = Outbox::new();
+        model.apply_midi_ports_with(
+            &MidiPortsReply {
+                inputs: vec!["SMK-37 Elite".into()],
+                input_connected: "SMK-37 Elite".into(),
+                ..MidiPortsReply::default()
+            },
+            Some(&mut out),
+        );
+        assert!(!model.full_vel);
+        assert!(out.take().iter().any(|r| matches!(r, Request::FullVel { on: false })));
+
+        model.full_vel = true;
+        model.full_vel_profile_default = false; // user overrode Elite default
+        model.apply_midi_ports_with(
+            &MidiPortsReply {
+                inputs: vec!["MPK mini 3".into()],
+                input_connected: "MPK mini 3".into(),
+                ..MidiPortsReply::default()
+            },
+            Some(&mut out),
+        );
+        assert!(
+            model.full_vel,
+            "a user FULL VEL on the Elite must survive a swap to MPK"
+        );
     }
 
     #[test]

@@ -135,7 +135,7 @@ fn main() {
         }
         model.note_engine_link(client.connected, &mut client.outbox);
         model.status = client.last_status;
-        model.apply_midi_ports(&client.last_midi_ports);
+        model.apply_midi_ports_with(&client.last_midi_ports, Some(&mut client.outbox));
         model.tick(dt, &mut client.outbox);
         model.maybe_autosave();
         if model.take_reexec() {

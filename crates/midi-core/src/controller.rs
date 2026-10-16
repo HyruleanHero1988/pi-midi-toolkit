@@ -151,7 +151,7 @@ impl ControllerProfile {
                 "mke_p37".into(),
             ],
             keybed: true,
-            full_vel_default: true,
+            full_vel_default: false,
             knob_encoding: KnobEncoding::RelativeSigned,
             knob_ccs: [48, 49, 50, 51, 52, 53, 54, 55],
             knob_bank2_ccs: [56, 57, 58, 59, 60, 61, 62, 63],
