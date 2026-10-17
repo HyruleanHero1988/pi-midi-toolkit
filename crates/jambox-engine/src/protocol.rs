@@ -235,8 +235,8 @@ pub enum Request {
         len: u8,
     },
     /// `wave` also returns left, right, and sub traces. `sub_hz` updates the
-    /// crossover when it is above zero (sub low-pass, left/right high-pass);
-    /// zero leaves the current cutoff.
+    /// sub low-pass when it is above zero; zero leaves the current cutoff.
+    /// Left and right are the actual mix channels.
     Scope {
         #[serde(default)]
         wave: bool,
@@ -628,6 +628,7 @@ fn parse_synth_param(name: &str) -> Option<SynthParam> {
         "drum_amp" => SynthParam::DrumAmp,
         "drum_level" => SynthParam::DrumLevel,
         "input_level" => SynthParam::InputLevel,
+        "sweep" => SynthParam::Sweep,
         "sustain" => SynthParam::Sustain,
         "fm_enable" => SynthParam::FmEnable,
         "fm_recipe" => SynthParam::FmRecipe,

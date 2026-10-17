@@ -51,6 +51,18 @@ impl MixSource {
     }
 }
 
+/// Left/right sweep gains. `0` = hard left, `0.5` = center (unity both), `1` = hard right.
+///
+/// Center stays 0 dB on each side so existing dual-mono output level is unchanged.
+pub fn sweep_gains(sweep: f32) -> (f32, f32) {
+    let t = sweep.clamp(0.0, 1.0);
+    if t <= 0.5 {
+        (1.0, t * 2.0)
+    } else {
+        ((1.0 - t) * 2.0, 1.0)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -74,5 +86,17 @@ mod tests {
         assert_eq!(MixSource::seq_family(16, 0), MixSource::clip(16));
         assert_eq!(MixSource::seq_kaoss(16), MixSource::clip(18));
         assert_eq!(MixSource::seq_family(3, crate::DRUM_CHANNEL), MixSource::clip(3));
+    }
+
+    #[test]
+    fn sweep_gains_are_unity_at_center_and_mute_the_far_side() {
+        let (l, r) = sweep_gains(0.5);
+        assert!((l - 1.0).abs() < 1e-6 && (r - 1.0).abs() < 1e-6);
+        let (l, r) = sweep_gains(0.0);
+        assert!((l - 1.0).abs() < 1e-6 && r.abs() < 1e-6);
+        let (l, r) = sweep_gains(1.0);
+        assert!(l.abs() < 1e-6 && (r - 1.0).abs() < 1e-6);
+        let (l, r) = sweep_gains(0.25);
+        assert!((l - 1.0).abs() < 1e-6 && (r - 0.5).abs() < 1e-6);
     }
 }

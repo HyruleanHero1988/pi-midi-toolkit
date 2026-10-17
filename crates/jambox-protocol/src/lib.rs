@@ -22,6 +22,7 @@ pub const NATIVE_FEATURES: &[&str] = &[
     "midi_ports",
     "channel_map",
     "arp",
+    "stereo",
 ];
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -296,8 +297,8 @@ pub enum Request {
     },
     /// Latest master-mix oscilloscope frame. One in flight; the engine does not queue these.
     /// `wave` also returns left, right, and sub traces. `sub_hz` updates the
-    /// crossover when it is above zero (sub low-pass, left/right high-pass);
-    /// zero leaves the current cutoff.
+    /// sub low-pass when it is above zero; zero leaves the current cutoff.
+    /// Left and right are the actual mix channels.
     Scope {
         #[serde(default)]
         wave: bool,
@@ -433,11 +434,11 @@ pub struct ScopeReply {
     /// Highest sample in each column.
     #[serde(default)]
     pub max: Vec<i16>,
-    /// Recent left-channel samples, oldest first. Length is [`WAVE_VIZ_POINTS`]
+    /// Recent left-mix samples, oldest first. Length is [`WAVE_VIZ_POINTS`]
     /// when the request asked for the wave view; otherwise empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub left: Vec<i16>,
-    /// Recent right-channel samples, oldest first.
+    /// Recent right-mix samples, oldest first.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub right: Vec<i16>,
     /// Recent sub samples: the bus summed, then low-passed. Oldest first.

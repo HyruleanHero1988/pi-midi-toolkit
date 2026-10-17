@@ -94,7 +94,8 @@ struct RenderState {
     midi_out: MidiOutSink,
     mono: Vec<f32>,
     /// Mic / line samples for this output block (drained from [`CaptureRing`]).
-    input: Vec<f32>,
+    input_l: Vec<f32>,
+    input_r: Vec<f32>,
     capture: Arc<CaptureRing>,
     scope: Arc<ScopeTap>,
     touch_scratch: [LatestTouch; MAX_TOUCH_VOICES + 3],
@@ -137,7 +138,8 @@ impl RenderState {
             scheduled: Vec::with_capacity(MAX_BLOCK_COMMANDS),
             midi_out: MidiOutSink::new(),
             mono: vec![0.0; SCRATCH_FRAMES],
-            input: vec![0.0; SCRATCH_FRAMES],
+            input_l: vec![0.0; SCRATCH_FRAMES],
+            input_r: vec![0.0; SCRATCH_FRAMES],
             capture,
             scope,
             touch_scratch: [LatestTouch {
@@ -713,16 +715,28 @@ fn callback_body<S: Copy>(
     }
     if state.engine.input_bypass() {
         let gain = state.engine.input_level();
-        let block = &mut state.mono[..frames];
-        state.capture.pull_resampled(block, sample_rate);
-        for sample in block.iter_mut() {
-            *sample = (*sample * gain).clamp(-1.0, 1.0);
+        let input_l = &mut state.input_l[..frames];
+        let input_r = &mut state.input_r[..frames];
+        state.capture.pull_resampled(input_l, input_r, sample_rate);
+        for i in 0..frames {
+            input_l[i] = (input_l[i] * gain).clamp(-1.0, 1.0);
+            input_r[i] = (input_r[i] * gain).clamp(-1.0, 1.0);
         }
-        state.scope.push_block(block);
+        state.scope.push_channels(input_l, input_r);
         for (i, frame_out) in data.chunks_mut(channels).enumerate() {
-            let sample = to_sample(block_sample(&state.mono, i));
-            for slot in frame_out.iter_mut() {
-                *slot = sample;
+            let l = block_sample(input_l, i);
+            let r = block_sample(input_r, i);
+            match frame_out.len() {
+                0 => {}
+                1 => frame_out[0] = to_sample(0.5 * (l + r)),
+                _ => {
+                    frame_out[0] = to_sample(l);
+                    frame_out[1] = to_sample(r);
+                    let mid = to_sample(0.5 * (l + r));
+                    for slot in frame_out.iter_mut().skip(2) {
+                        *slot = mid;
+                    }
+                }
             }
         }
         let micros = started.elapsed().as_micros().min(u128::from(u32::MAX)) as u32;
@@ -746,9 +760,10 @@ fn callback_body<S: Copy>(
     state.engine.sync_touches(&state.touch_scratch[..n_touch]);
 
     // Drain mic / line into the engine before render so punch-in hears it.
-    let input = &mut state.input[..frames];
-    state.capture.pull_resampled(input, sample_rate);
-    state.engine.set_input_block(input);
+    let input_l = &mut state.input_l[..frames];
+    let input_r = &mut state.input_r[..frames];
+    state.capture.pull_resampled(input_l, input_r, sample_rate);
+    state.engine.set_input_stereo(input_l, input_r);
 
     let mut offset = 0usize;
     while offset < frames {
@@ -762,12 +777,22 @@ fn callback_body<S: Copy>(
         offset += n;
     }
 
-    state.scope.push_block(&state.mono[..frames]);
-
+    let (left, right) = state.engine.last_stereo();
+    state.scope.push_channels(left, right);
     for (i, frame_out) in data.chunks_mut(channels).enumerate() {
-        let sample = to_sample(block_sample(&state.mono, i));
-        for slot in frame_out.iter_mut() {
-            *slot = sample;
+        let l = block_sample(left, i);
+        let r = block_sample(right, i);
+        match frame_out.len() {
+            0 => {}
+            1 => frame_out[0] = to_sample(0.5 * (l + r)),
+            _ => {
+                frame_out[0] = to_sample(l);
+                frame_out[1] = to_sample(r);
+                let mid = to_sample(0.5 * (l + r));
+                for slot in frame_out.iter_mut().skip(2) {
+                    *slot = mid;
+                }
+            }
         }
     }
 

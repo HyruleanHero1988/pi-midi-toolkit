@@ -1551,6 +1551,13 @@ fn draw_kaoss_axes(scene: &mut Scene, pad: crate::layout::Rect, model: &NativeMo
             "pressure" => "Y PRESS",
             "glide" => "Y GLIDE",
             "mod" => "Y MOD",
+            "sweep" => {
+                if prog.x_param == Some("sweep") {
+                    ""
+                } else {
+                    "Y L/R"
+                }
+            }
             _ => "Y",
         };
         let x_label = if prog.note {
@@ -1566,10 +1573,13 @@ fn draw_kaoss_axes(scene: &mut Scene, pad: crate::layout::Rect, model: &NativeMo
                 Some("flanger_rate") | Some("vibrato_rate") => "X RATE",
                 Some("reso") => "X RESO",
                 Some("pan") => "X PAN",
+                Some("sweep") => "X L/R",
                 _ => "X",
             }
         };
-        scene.text_scaled(pad.x + 6, pad.y + pad.h / 2 - 20, y_label, 0xd3869b, 2);
+        if !y_label.is_empty() {
+            scene.text_scaled(pad.x + 6, pad.y + pad.h / 2 - 20, y_label, 0xd3869b, 2);
+        }
         // Bottom edge of the pad (Tk parity). Footer chrome starts below the pad gap.
         let x_label_y = if bend {
             pad.y + pad.h / 2 - 10
