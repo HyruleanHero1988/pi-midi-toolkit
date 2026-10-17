@@ -1558,6 +1558,7 @@ fn draw_kaoss_axes(scene: &mut Scene, pad: crate::layout::Rect, model: &NativeMo
                     "Y L/R"
                 }
             }
+            "width" => "Y WIDTH",
             _ => "Y",
         };
         let x_label = if prog.note {
@@ -2257,7 +2258,7 @@ fn draw_synth(scene: &mut Scene, model: &NativeModel) {
     }
 
     const LABELS: [&str; Layout::SYNTH_SLIDER_COUNT] = [
-        "MORPH", "TONE", "LEVEL", "ATTACK", "RELEASE", "DRIFT", "FLANGE", "RATE",
+        "MORPH", "TONE", "LEVEL", "ATTACK", "RELEASE", "DRIFT", "FLANGE", "RATE", "WIDTH",
     ];
 
     let a = waves::short_label(model.wave_label(model.morph_a));
@@ -2323,8 +2324,10 @@ fn draw_synth(scene: &mut Scene, model: &NativeModel) {
             model.release_drift
         } else if index == 6 {
             model.fx_voice[3]
-        } else {
+        } else if index == 7 {
             model.fx_flanger_rate
+        } else {
+            model.synth_width
         };
         let fill = if index == 5 {
             let mid = track.x + track.w / 2;
@@ -2361,6 +2364,8 @@ fn draw_synth(scene: &mut Scene, model: &NativeModel) {
                 0x83a598
             } else if index == 6 || index == 7 {
                 0xd79921
+            } else if index == 8 {
+                0x458588
             } else {
                 0x689d6a
             },

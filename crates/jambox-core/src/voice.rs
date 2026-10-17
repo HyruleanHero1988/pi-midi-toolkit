@@ -92,6 +92,10 @@ pub struct VoiceContext {
     pub tone_lfo_rate_hz: f32,
     /// Phase at the start of this span; every live voice walks the same LFO.
     pub tone_lfo_phase: f64,
+    /// 0 = dual-mono. 1 = wavetable A/B split plus keyboard pan.
+    pub stereo_width: f32,
+    /// Live morph 0..1. Widens A/B stereo at 0.5; ignored when A and B are the same table.
+    pub morph: f32,
 }
 
 /// Fixed-size voice allocator and renderer.
@@ -418,6 +422,165 @@ impl VoicePool {
     ) -> bool {
         let mut unused = [0.0f32; 0];
         self.render_group_split(group, table, out, &mut unused, ctx)
+    }
+
+    /// Live voices in `group` → stereo `out_l` / `out_r`.
+    pub fn render_live_stereo(
+        &mut self,
+        group: usize,
+        mid: &[f32; TABLE_SIZE],
+        table_a: &[f32; TABLE_SIZE],
+        table_b: &[f32; TABLE_SIZE],
+        out_l: &mut [f32],
+        out_r: &mut [f32],
+        ctx: VoiceContext,
+    ) -> bool {
+        self.render_stereo(
+            |v| v.active && v.group == group && !v.recorded,
+            mid,
+            table_a,
+            table_b,
+            out_l,
+            out_r,
+            ctx,
+        )
+    }
+
+    /// Recorded clip voices → stereo `out_l` / `out_r`.
+    pub fn render_clip_stereo(
+        &mut self,
+        slot: usize,
+        mid: &[f32; TABLE_SIZE],
+        table_a: &[f32; TABLE_SIZE],
+        table_b: &[f32; TABLE_SIZE],
+        out_l: &mut [f32],
+        out_r: &mut [f32],
+        ctx: VoiceContext,
+    ) -> bool {
+        let want = MixSource::clip(slot);
+        self.render_stereo(
+            |v| v.active && v.recorded && v.mix == want,
+            mid,
+            table_a,
+            table_b,
+            out_l,
+            out_r,
+            ctx,
+        )
+    }
+
+    fn render_stereo(
+        &mut self,
+        matches: impl Fn(&Voice) -> bool,
+        mid: &[f32; TABLE_SIZE],
+        table_a: &[f32; TABLE_SIZE],
+        table_b: &[f32; TABLE_SIZE],
+        dest_l: &mut [f32],
+        dest_r: &mut [f32],
+        ctx: VoiceContext,
+    ) -> bool {
+        let mut audible = false;
+        let attack_step = linear_env_step(ctx.attack_sec, ctx.sample_rate);
+        let release_step = linear_env_step(ctx.release_sec, ctx.sample_rate);
+        let n = dest_l.len().min(dest_r.len());
+        if n == 0 {
+            return false;
+        }
+        let split = ctx.stereo_width > 1e-4 && !std::ptr::eq(table_a, table_b);
+
+        for v in self.voices.iter_mut() {
+            if !matches(v) {
+                continue;
+            }
+            audible = true;
+            v.bend_semis =
+                crate::kaoss::slew_bend(v.bend_semis, v.bend_target_semis, ctx.bend_slew_dt);
+            let (mut phase_inc, inc_step, release_age) = phase_inc_span(
+                v.note,
+                v.bend_semis,
+                v.releasing,
+                v.recorded,
+                v.release_age,
+                v.release_drift_semis,
+                &ctx,
+                n,
+            );
+            v.release_age = release_age;
+            let use_lfo = !v.recorded && ctx.tone_lfo_amount > 0.01;
+            let static_tone = if v.recorded {
+                v.tone
+            } else {
+                ctx.live_tone
+            };
+            let filter_tone = !use_lfo && static_tone < 0.985;
+            let mut tone_lp = v.tone_lp;
+            let mut tone_bp = v.tone_bp;
+            let mut lfo_phase = ctx.tone_lfo_phase;
+            let lfo_inc = std::f64::consts::TAU * ctx.tone_lfo_rate_hz.max(0.01) as f64
+                / ctx.sample_rate.max(8000.0) as f64;
+            let g = v.mix.gain(ctx.live_gain, &ctx.clip_gains);
+            let (gl, gr) = crate::mix::width_gains(v.note, ctx.stereo_width);
+
+            for i in 0..n {
+                if v.target_amp > v.amp {
+                    v.amp = (v.amp + attack_step * v.target_amp.max(0.05)).min(v.target_amp);
+                } else {
+                    let ref_amp = if v.releasing {
+                        v.amp.max(1e-4)
+                    } else {
+                        v.amp.max(0.05)
+                    };
+                    v.amp = (v.amp - release_step * ref_amp).max(v.target_amp);
+                }
+
+                let i0 = v.phase as usize & TABLE_MASK;
+                let i1 = (i0 + 1) & TABLE_MASK;
+                let frac = (v.phase - v.phase.floor()) as f32;
+                let mut s = mid[i0] * (1.0 - frac) + mid[i1] * frac;
+                if use_lfo {
+                    lfo_phase += lfo_inc;
+                    if lfo_phase > std::f64::consts::TAU {
+                        lfo_phase %= std::f64::consts::TAU;
+                    }
+                    let lfo = 0.5 + 0.5 * lfo_phase.sin() as f32;
+                    let tone = (ctx.live_tone * (1.0 - ctx.tone_lfo_amount)
+                        + lfo * ctx.tone_lfo_amount)
+                        .clamp(0.0, 1.0);
+                    s = tone_svf_sample(s, tone, &mut tone_lp, &mut tone_bp, ctx.sample_rate);
+                } else if filter_tone {
+                    s = tone_svf_sample(
+                        s,
+                        static_tone,
+                        &mut tone_lp,
+                        &mut tone_bp,
+                        ctx.sample_rate,
+                    );
+                }
+                let side = if split {
+                    let sa = table_a[i0] * (1.0 - frac) + table_a[i1] * frac;
+                    let sb = table_b[i0] * (1.0 - frac) + table_b[i1] * frac;
+                    crate::mix::morph_side(sa, sb, ctx.morph, ctx.stereo_width)
+                } else {
+                    0.0
+                };
+                let amp = v.amp * g;
+                dest_l[i] += (s + side) * amp * gl;
+                dest_r[i] += (s - side) * amp * gr;
+
+                v.phase += phase_inc;
+                phase_inc += inc_step;
+                if v.phase >= TABLE_SIZE as f64 {
+                    v.phase -= TABLE_SIZE as f64;
+                }
+            }
+            v.tone_lp = tone_lp;
+            v.tone_bp = tone_bp;
+
+            if v.releasing && v.amp < 0.0005 {
+                *v = Voice::silent();
+            }
+        }
+        audible
     }
 
     /// Live voices → `live`; clip / SEQ / song voices → `recorded`.
@@ -781,6 +944,8 @@ mod tests {
             tone_lfo_amount: 0.0,
             tone_lfo_rate_hz: 5.0,
             tone_lfo_phase: 0.0,
+            stereo_width: 0.0,
+            morph: 0.0,
         }
     }
 

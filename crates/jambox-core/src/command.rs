@@ -72,6 +72,8 @@ pub enum SynthParam {
     InputLevel,
     /// 0..1 left/right sweep (0 = hard left, 0.5 = center, 1 = hard right).
     Sweep,
+    /// 0..1 wavetable stereo width. 0 = dual-mono, 1 = A/B split + keyboard pan.
+    Width,
     /// Sustain pedal (CC64). ≥0.5 holds live keys after note-off.
     Sustain,
     /// 0 = wavetable melody, 1 = four-operator FM playground.

@@ -629,6 +629,7 @@ fn parse_synth_param(name: &str) -> Option<SynthParam> {
         "drum_level" => SynthParam::DrumLevel,
         "input_level" => SynthParam::InputLevel,
         "sweep" => SynthParam::Sweep,
+        "width" => SynthParam::Width,
         "sustain" => SynthParam::Sustain,
         "fm_enable" => SynthParam::FmEnable,
         "fm_recipe" => SynthParam::FmRecipe,

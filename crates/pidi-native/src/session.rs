@@ -183,6 +183,9 @@ pub struct SessionState {
     /// SYNTH DRIFT. 0.5 = no pitch glide on release. Missing → center.
     #[serde(default = "default_release_drift")]
     pub release_drift: f32,
+    /// Wavetable stereo width. Missing in old sessions → 0.6 (audible A/B image).
+    #[serde(default = "default_synth_width")]
+    pub synth_width: f32,
     pub morph_a: u16,
     pub morph_b: u16,
     /// On-screen synth keyboard octave relative to C4 (−3..+3).
@@ -383,6 +386,10 @@ fn default_release_drift() -> f32 {
     0.5
 }
 
+fn default_synth_width() -> f32 {
+    0.6
+}
+
 fn default_vibrato_depth() -> f32 {
     0.5
 }
@@ -419,6 +426,7 @@ impl Default for SessionState {
             attack: 0.05,
             release: 0.3,
             release_drift: default_release_drift(),
+            synth_width: default_synth_width(),
             morph_a: 0,
             morph_b: 1,
             synth_octave: 0,

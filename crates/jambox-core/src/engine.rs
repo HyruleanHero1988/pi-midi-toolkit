@@ -241,8 +241,10 @@ pub struct JamboxEngine {
     clip_baked: [bool; MAX_CLIPS],
 
     key_bus: Vec<f32>,
+    key_bus_r: Vec<f32>,
     drum_bus: Vec<f32>,
     group_buf: Vec<f32>,
+    group_buf_r: Vec<f32>,
     /// Live capture mixed onto the master before punch-in / bus FX.
     input_l: Vec<f32>,
     input_r: Vec<f32>,
@@ -262,6 +264,8 @@ pub struct JamboxEngine {
     input_level: f32,
     /// 0 = hard left, 0.5 = center, 1 = hard right. Kaoss SWEEP / pan.
     sweep: f32,
+    /// 0 = dual-mono keys, 1 = wavetable A/B split plus keyboard pan.
+    stereo_width: f32,
     /// When set, the output callback copies capture and does not render.
     input_bypass: bool,
     clip_gain: [f32; MAX_CLIPS],
@@ -296,6 +300,7 @@ fn flush_fx_tails(
     extra_skip: Option<usize>,
     scratch: &mut [f32],
     dest: &mut [f32],
+    mut dest_r: Option<&mut [f32]>,
     n: usize,
 ) {
     for (i, fx) in units.iter_mut().enumerate() {
@@ -309,7 +314,41 @@ fn flush_fx_tails(
         fx.process(&mut scratch[..n]);
         for j in 0..n {
             dest[j] += scratch[j];
+            if let Some(right) = dest_r.as_mut() {
+                right[j] += scratch[j];
+            }
         }
+    }
+}
+
+/// Run a mono insert on the mid, restore the stereo side, and mix onto the key bus.
+fn mix_group_fx(
+    fx: Option<&mut FxUnit>,
+    group_l: &mut [f32],
+    group_r: &mut [f32],
+    key_l: &mut [f32],
+    key_r: &mut [f32],
+    n: usize,
+) {
+    if let Some(fx) = fx {
+        if !fx.params().is_bypassed() {
+            for i in 0..n {
+                let mid = 0.5 * (group_l[i] + group_r[i]);
+                let side = 0.5 * (group_l[i] - group_r[i]);
+                group_l[i] = mid;
+                group_r[i] = side;
+            }
+            fx.process(&mut group_l[..n]);
+            for i in 0..n {
+                key_l[i] += group_l[i] + group_r[i];
+                key_r[i] += group_l[i] - group_r[i];
+            }
+            return;
+        }
+    }
+    for i in 0..n {
+        key_l[i] += group_l[i];
+        key_r[i] += group_r[i];
     }
 }
 
@@ -345,8 +384,10 @@ impl JamboxEngine {
             clip_table: [[0.0; TABLE_SIZE]; MAX_CLIPS],
             clip_baked: [false; MAX_CLIPS],
             key_bus: vec![0.0; MAX_BLOCK],
+            key_bus_r: vec![0.0; MAX_BLOCK],
             drum_bus: vec![0.0; MAX_BLOCK],
             group_buf: vec![0.0; MAX_BLOCK],
+            group_buf_r: vec![0.0; MAX_BLOCK],
             input_l: vec![0.0; MAX_BLOCK],
             input_r: vec![0.0; MAX_BLOCK],
             stereo_l: vec![0.0; MAX_BLOCK],
@@ -386,6 +427,7 @@ impl JamboxEngine {
             drum_level: 1.0,
             input_level: 0.0,
             sweep: 0.5,
+            stereo_width: 0.6,
             input_bypass: false,
             clip_gain: [1.0; MAX_CLIPS],
             attack_sec: 0.012,
@@ -799,8 +841,10 @@ impl JamboxEngine {
             clip_table,
             clip_baked,
             key_bus,
+            key_bus_r,
             drum_bus,
             group_buf,
+            group_buf_r,
             input_l,
             input_r,
             stereo_l,
@@ -811,6 +855,7 @@ impl JamboxEngine {
             drum_level,
             input_level,
             sweep,
+            stereo_width,
             clip_gain,
             attack_sec,
             release_sec,
@@ -830,6 +875,7 @@ impl JamboxEngine {
 
         let sr = transport.sample_rate() as f32;
         key_bus[..n].iter_mut().for_each(|s| *s = 0.0);
+        key_bus_r[..n].iter_mut().for_each(|s| *s = 0.0);
         drum_bus[..n].iter_mut().for_each(|s| *s = 0.0);
 
         // Wheel or screen — whichever asks for more, matching Python `max(_mod, _vib_always)`.
@@ -862,6 +908,8 @@ impl JamboxEngine {
             tone_lfo_amount: *tone_lfo_amount,
             tone_lfo_rate_hz: *tone_lfo_rate_hz,
             tone_lfo_phase: *tone_lfo_phase,
+            stereo_width: *stereo_width,
+            morph: bank.morph_pair().2,
         };
         if *tone_lfo_amount > 0.01 {
             *tone_lfo_phase +=
@@ -876,18 +924,33 @@ impl JamboxEngine {
         // Live keys: one FX insert per wavetable group.
         let mut groups = [0usize; MAX_VOICES];
         let group_count = voices.active_groups(&mut groups);
+        let (morph_a, morph_b, _) = bank.morph_pair();
         for &group in groups.iter().take(group_count) {
             group_buf[..n].iter_mut().for_each(|s| *s = 0.0);
+            group_buf_r[..n].iter_mut().for_each(|s| *s = 0.0);
             let table = bank.table_for_live_group(group);
-            voices.render_group(group, table, &mut group_buf[..n], ctx);
-            if let Some(fx) = voice_fx.get_mut(group) {
-                if !fx.params().is_bypassed() {
-                    fx.process(&mut group_buf[..n]);
-                }
-            }
-            for i in 0..n {
-                key_bus[i] += group_buf[i];
-            }
+            let (table_a, table_b) = if group == morph_a || group == morph_b {
+                (bank.table(morph_a), bank.table(morph_b))
+            } else {
+                (table, table)
+            };
+            voices.render_live_stereo(
+                group,
+                table,
+                table_a,
+                table_b,
+                &mut group_buf[..n],
+                &mut group_buf_r[..n],
+                ctx,
+            );
+            mix_group_fx(
+                voice_fx.get_mut(group),
+                &mut group_buf[..n],
+                &mut group_buf_r[..n],
+                key_bus,
+                key_bus_r,
+                n,
+            );
         }
 
         // Recorded pads / SEQ: baked table + insert when locked, else live morph.
@@ -898,17 +961,31 @@ impl JamboxEngine {
         let mut unlocked_voice_fx = None;
         for &slot in slots.iter().take(slot_count) {
             group_buf[..n].iter_mut().for_each(|s| *s = 0.0);
+            group_buf_r[..n].iter_mut().for_each(|s| *s = 0.0);
             let locked = clip_baked[slot]
                 && sequencer
                     .slot(slot)
                     .map(|s| s.voice().locked)
                     .unwrap_or(false);
-            let table = if locked {
-                &clip_table[slot]
+            let (table, table_a, table_b) = if locked {
+                let t = &clip_table[slot];
+                (t, t, t)
             } else {
-                bank.morph_table()
+                (
+                    bank.morph_table(),
+                    bank.table(morph_a),
+                    bank.table(morph_b),
+                )
             };
-            voices.render_clip_slot(slot, table, &mut group_buf[..n], ctx);
+            voices.render_clip_stereo(
+                slot,
+                table,
+                table_a,
+                table_b,
+                &mut group_buf[..n],
+                &mut group_buf_r[..n],
+                ctx,
+            );
             let fx = if locked {
                 used_clip_fx[used_clip_fx_n] = slot;
                 used_clip_fx_n += 1;
@@ -917,14 +994,7 @@ impl JamboxEngine {
                 unlocked_voice_fx = Some(bank.nearer_index());
                 voice_fx.get_mut(bank.nearer_index())
             };
-            if let Some(fx) = fx {
-                if !fx.params().is_bypassed() {
-                    fx.process(&mut group_buf[..n]);
-                }
-            }
-            for i in 0..n {
-                key_bus[i] += group_buf[i];
-            }
+            mix_group_fx(fx, &mut group_buf[..n], &mut group_buf_r[..n], key_bus, key_bus_r, n);
         }
         flush_fx_tails(
             voice_fx,
@@ -933,6 +1003,7 @@ impl JamboxEngine {
             unlocked_voice_fx,
             group_buf,
             key_bus,
+            Some(key_bus_r),
             n,
         );
         flush_fx_tails(
@@ -942,6 +1013,7 @@ impl JamboxEngine {
             None,
             group_buf,
             key_bus,
+            Some(key_bus_r),
             n,
         );
 
@@ -950,6 +1022,7 @@ impl JamboxEngine {
             fm.render_split(&mut group_buf[..n], &mut [], ctx);
             for i in 0..n {
                 key_bus[i] += group_buf[i];
+                key_bus_r[i] += group_buf[i];
             }
         }
 
@@ -971,7 +1044,16 @@ impl JamboxEngine {
                 drum_bus[i] += group_buf[i];
             }
         }
-        flush_fx_tails(drum_fx, &models, model_count, None, group_buf, drum_bus, n);
+        flush_fx_tails(
+            drum_fx,
+            &models,
+            model_count,
+            None,
+            group_buf,
+            drum_bus,
+            None,
+            n,
+        );
         if !drum_group_fx.params().is_bypassed() {
             drum_group_fx.process(&mut drum_bus[..n]);
         }
@@ -996,17 +1078,18 @@ impl JamboxEngine {
         let mic_idle = punch[PunchSource::Mic as usize].is_idle();
         for i in 0..n {
             let idx = off + i;
-            let kd = key_bus[i] + drum_bus[i];
+            let kd_l = key_bus[i] + drum_bus[i];
+            let kd_r = key_bus_r[i] + drum_bus[i];
             let (ml, mr) = if mic_idle && idx < stereo_l.len() {
                 (stereo_l[idx], stereo_r[idx])
             } else {
                 (group_buf[i], group_buf[i])
             };
             if idx < stereo_l.len() {
-                stereo_l[idx] = kd + ml;
-                stereo_r[idx] = kd + mr;
+                stereo_l[idx] = kd_l + ml;
+                stereo_r[idx] = kd_r + mr;
             }
-            out[i] = kd + group_buf[i];
+            out[i] = 0.5 * (kd_l + kd_r) + group_buf[i];
         }
         // Punch first (freeze / RPT / TAPE / filters), then the bus insert so
         // delay / reverb / flange and SEND wet the loop instead of being
@@ -1714,6 +1797,7 @@ impl JamboxEngine {
             SynthParam::DrumLevel => self.drum_level = unit,
             SynthParam::InputLevel => self.input_level = unit,
             SynthParam::Sweep => self.sweep = unit,
+            SynthParam::Width => self.stereo_width = unit,
             SynthParam::Sustain => {
                 let on = unit >= 0.5;
                 self.voices.set_sustain(on);
@@ -2207,6 +2291,70 @@ mod tests {
             "right must stay quiet when only left is fed, got peak {}",
             peak(r)
         );
+    }
+
+    #[test]
+    fn width_zero_keeps_keys_dual_mono() {
+        let mut e = engine();
+        let mut out = vec![0.0f32; 512];
+        let mut midi = MidiOutSink::new();
+        e.render(
+            &mut out,
+            &[
+                ScheduledCommand::now(Command::SetMorphPair { a: 0, b: 2 }),
+                ScheduledCommand::now(Command::SetSynth {
+                    param: SynthParam::Morph,
+                    value: 0.5,
+                }),
+                ScheduledCommand::now(Command::SetSynth {
+                    param: SynthParam::Width,
+                    value: 0.0,
+                }),
+                ScheduledCommand::now(Command::NoteOn {
+                    channel: 0,
+                    note: 60,
+                    velocity: 120,
+                }),
+            ],
+            &mut midi,
+        );
+        let (l, r) = e.last_stereo();
+        let n = l.len().min(r.len());
+        let err: f32 = (0..n).map(|i| (l[i] - r[i]).abs()).fold(0.0, f32::max);
+        assert!(peak(l) > 0.01, "keys must speak");
+        assert!(err < 1e-4, "width 0 must stay dual-mono, peak diff {err}");
+    }
+
+    #[test]
+    fn morph_width_separates_left_and_right() {
+        let mut e = engine();
+        let mut out = vec![0.0f32; 512];
+        let mut midi = MidiOutSink::new();
+        e.render(
+            &mut out,
+            &[
+                ScheduledCommand::now(Command::SetMorphPair { a: 0, b: 2 }),
+                ScheduledCommand::now(Command::SetSynth {
+                    param: SynthParam::Morph,
+                    value: 0.5,
+                }),
+                ScheduledCommand::now(Command::SetSynth {
+                    param: SynthParam::Width,
+                    value: 1.0,
+                }),
+                ScheduledCommand::now(Command::NoteOn {
+                    channel: 0,
+                    note: 60,
+                    velocity: 120,
+                }),
+            ],
+            &mut midi,
+        );
+        let (l, r) = e.last_stereo();
+        let n = l.len().min(r.len());
+        let err: f32 = (0..n).map(|i| (l[i] - r[i]).abs()).fold(0.0, f32::max);
+        assert!(peak(l) > 0.01 && peak(r) > 0.01, "both sides must speak");
+        assert!(err > 0.02, "A/B morph should image L vs R, peak diff {err}");
     }
 
     #[test]
