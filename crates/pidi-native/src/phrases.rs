@@ -30,6 +30,8 @@ pub struct PhrasePad {
     pub fx_delay_mix: f32,
     pub fx_reverb_mix: f32,
     pub fx_flanger_mix: f32,
+    /// DRIFT slider captured with the take. `None` follows the live slider.
+    pub release_drift: Option<f32>,
 }
 
 impl Default for PhrasePad {
@@ -52,6 +54,7 @@ impl Default for PhrasePad {
             fx_delay_mix: 0.0,
             fx_reverb_mix: 0.0,
             fx_flanger_mix: 0.0,
+            release_drift: None,
         }
     }
 }
@@ -88,6 +91,9 @@ pub struct PhraseFile {
     fx_reverb_mix: f32,
     #[serde(default)]
     fx_flanger_mix: f32,
+    /// DRIFT slider captured with the take. Absent follows the live slider.
+    #[serde(default)]
+    release_drift: Option<f32>,
     #[serde(default)]
     events: Vec<FileEvent>,
 }
@@ -160,11 +166,7 @@ pub fn pad_from_file(file: &PhraseFile, bpm: f32) -> PhrasePad {
     let length_secs = if file.length > 0.0 {
         file.length
     } else {
-        file.events
-            .iter()
-            .map(|e| e.t)
-            .fold(0.0_f64, f64::max)
-            + 0.05
+        file.events.iter().map(|e| e.t).fold(0.0_f64, f64::max) + 0.05
     };
     let length_ticks = seconds_to_ticks(length_secs, bpm);
     let empty = events.is_empty() || length_ticks == 0;
@@ -186,6 +188,7 @@ pub fn pad_from_file(file: &PhraseFile, bpm: f32) -> PhrasePad {
         fx_delay_mix: file.fx_delay_mix.clamp(0.0, 1.0),
         fx_reverb_mix: file.fx_reverb_mix.clamp(0.0, 1.0),
         fx_flanger_mix: file.fx_flanger_mix.clamp(0.0, 1.0),
+        release_drift: file.release_drift.map(|v| v.clamp(0.0, 1.0)),
     }
 }
 
@@ -231,6 +234,7 @@ pub fn file_from_pad(pad: &PhrasePad, bpm: f32) -> PhraseFile {
         fx_delay_mix: pad.fx_delay_mix.clamp(0.0, 1.0),
         fx_reverb_mix: pad.fx_reverb_mix.clamp(0.0, 1.0),
         fx_flanger_mix: pad.fx_flanger_mix.clamp(0.0, 1.0),
+        release_drift: pad.release_drift.map(|v| v.clamp(0.0, 1.0)),
         events,
     }
 }
@@ -328,8 +332,7 @@ pub fn scale_velocity(vel: u8, gain: f32) -> u8 {
     if vel == 0 {
         return 0;
     }
-    ((f32::from(vel) * gain.clamp(0.1, 2.0)).round() as u32)
-        .clamp(1, 127) as u8
+    ((f32::from(vel) * gain.clamp(0.1, 2.0)).round() as u32).clamp(1, 127) as u8
 }
 
 pub fn pad_label(cell: usize) -> String {
@@ -342,19 +345,20 @@ pub fn pad_label(cell: usize) -> String {
 pub const PHRASE_PAD_BASE: u8 = 36;
 
 /// Screen 4×4 order (top→bottom): A1–A4, A5–A8, B1–B4, B5–B8.
+/// Snare (phrase cell 5, note 37) and rimshot (phrase cell 13, note 45)
+/// trade screen slots. Every other pad stays put.
 pub const PHRASE_GRID_CELLS: [usize; 16] = [
-    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
+    0, 1, 2, 3, 4, 13, 6, 7, 8, 9, 10, 11, 12, 5, 14, 15,
 ];
-
-fn mpk_row_swap(within_bank: usize) -> usize {
-    (within_bank + 4) & 7
-}
 
 /// Phrase cell 0..15 → factory MPK note (row-swapped to match the screen).
 pub fn mpk_note_for_phrase_cell(cell: usize) -> u8 {
-    let c = cell & 0x0F;
-    let bank = c & !7;
-    PHRASE_PAD_BASE + bank as u8 + mpk_row_swap(c & 7) as u8
+    midi_core::mpk_note_for_phrase_cell(cell)
+}
+
+/// Phrase cell 0..15 for the live controller (MPK row-swap, SMK 4×4, …).
+pub fn note_for_phrase_cell(profile: &midi_core::ControllerProfile, cell: usize) -> u8 {
+    profile.note_for_phrase_cell(cell)
 }
 
 #[cfg(test)]
@@ -510,6 +514,37 @@ mod tests {
     }
 
     #[test]
+    fn pad_drift_round_trips_and_old_files_follow_live() {
+        let dir = std::env::temp_dir().join(format!("pidi-phrase-drift-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let mut pad = from_wire(
+            vec![WireClipEvent {
+                tick: 0,
+                on: true,
+                channel: 0,
+                note: 60,
+                velocity: 100,
+                ..Default::default()
+            }],
+            1920,
+            120.0,
+            true,
+        );
+        assert!(pad.release_drift.is_none());
+        pad.release_drift = Some(0.8);
+        assert!(save_pad(&dir, 0, &pad, 120.0));
+        let loaded = load_pad(&pad_path(&dir, 0), 120.0).unwrap();
+        assert!((loaded.release_drift.unwrap() - 0.8).abs() < 1e-6);
+        let old: PhraseFile = serde_json::from_str(
+            r#"{"version":4,"length":1.0,"events":[{"t":0.0,"on":true,"channel":0,"note":60,"velocity":100}]}"#,
+        )
+        .unwrap();
+        assert!(pad_from_file(&old, 120.0).release_drift.is_none());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn snapshot_bank_keeps_empty_slots() {
         let mut pads = std::array::from_fn(|_| PhrasePad::default());
         pads[2] = from_wire(
@@ -575,7 +610,10 @@ mod tests {
         let restored = bank_from_snapshot(&snap, 120.0);
         assert!(restored[4].empty);
         assert!(persist_bank(&dir, &restored, 120.0));
-        assert!(!pad_path(&dir, 4).is_file(), "unpopulated preset slots must wipe live pads");
+        assert!(
+            !pad_path(&dir, 4).is_file(),
+            "unpopulated preset slots must wipe live pads"
+        );
         assert!(pad_path(&dir, 0).is_file());
         let _ = fs::remove_dir_all(&dir);
     }

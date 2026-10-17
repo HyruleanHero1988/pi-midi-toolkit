@@ -13,6 +13,7 @@ pub enum ScrollKind {
     SongList,
     Log,
     Home,
+    FmPatches,
 }
 
 /// Fixed-row grid inside a viewport (voice grids, kaoss program picker, …).

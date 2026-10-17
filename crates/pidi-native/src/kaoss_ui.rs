@@ -248,12 +248,13 @@ pub const KAOSS_PROGRAMS: &[KaossProgram] = &[
         curated: true,
     },
     // FX twins appended so existing session program indices stay stable.
+    // X = vibrato rate (1–9 Hz); Y = depth. No pad note.
     KaossProgram {
         id: "vib_fx",
         label: "VIB FX",
         note: false,
         y_param: "vib",
-        x_param: None,
+        x_param: Some("vibrato_rate"),
         curated: true,
     },
     KaossProgram {
@@ -296,8 +297,58 @@ pub const KAOSS_PROGRAMS: &[KaossProgram] = &[
         x_param: None,
         curated: false,
     },
-    // X = left/right pan. Y is the same param so the program is sweep-only;
-    // apply uses X (the pad's left-right axis).
+    // MIDI gestures for a sound that is already playing. Appended so older
+    // session program indices stay put.
+    KaossProgram {
+        id: "expr",
+        label: "EXPR",
+        note: false,
+        y_param: "expr",
+        x_param: None,
+        curated: true,
+    },
+    KaossProgram {
+        id: "bright",
+        label: "BRIGHT",
+        note: false,
+        y_param: "bright",
+        x_param: Some("reso"),
+        curated: true,
+    },
+    KaossProgram {
+        id: "press",
+        label: "PRESS",
+        note: false,
+        y_param: "pressure",
+        x_param: None,
+        curated: true,
+    },
+    KaossProgram {
+        id: "glide",
+        label: "GLIDE",
+        note: false,
+        y_param: "glide",
+        x_param: None,
+        curated: true,
+    },
+    KaossProgram {
+        id: "pan",
+        label: "PAN",
+        note: false,
+        y_param: "pan_y",
+        x_param: Some("pan"),
+        curated: true,
+    },
+    KaossProgram {
+        id: "mod",
+        label: "MOD",
+        note: false,
+        y_param: "mod",
+        x_param: None,
+        curated: true,
+    },
+    // Local stereo pan. Appended after the MIDI gestures so those indices stay put.
+    // X = left/right. Y is the same param so the program is sweep-only; apply uses X.
     KaossProgram {
         id: "sweep",
         label: "SWEEP",
@@ -307,6 +358,37 @@ pub const KAOSS_PROGRAMS: &[KaossProgram] = &[
         curated: true,
     },
 ];
+
+/// Channel-wide MIDI a Kaoss FX program writes while a note is already sounding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KaossMidiGesture {
+    /// CC 11. Rest is full (127) so a lift does not leave the note quiet.
+    Expression,
+    /// CC 74 brightness, CC 71 resonance. Stays where you leave it.
+    Brightness,
+    /// Channel pressure. Rest is 0.
+    Pressure,
+    /// CC 65 on while touching, CC 5 time from Y. Off on lift.
+    Glide,
+    /// CC 10 from X. Center of the pad is center pan.
+    Pan,
+    /// CC 1. The wheel itself, not a pitch LFO. Stays where you leave it.
+    ModWheel,
+}
+
+impl KaossProgram {
+    pub fn midi_gesture(self) -> Option<KaossMidiGesture> {
+        match self.id {
+            "expr" => Some(KaossMidiGesture::Expression),
+            "bright" => Some(KaossMidiGesture::Brightness),
+            "press" => Some(KaossMidiGesture::Pressure),
+            "glide" => Some(KaossMidiGesture::Glide),
+            "pan" => Some(KaossMidiGesture::Pan),
+            "mod" => Some(KaossMidiGesture::ModWheel),
+            _ => None,
+        }
+    }
+}
 
 /// Full-pad Y travel maps to ± this many semitones (center Y = 0).
 pub const PITCH_BEND_RANGE_SEMIS: f32 = jambox_core::PITCH_BEND_RANGE_SEMIS;
@@ -342,10 +424,15 @@ pub fn y_to_pitch_bend_semis(y: f32) -> f32 {
     jambox_core::y_to_bend_semis(y)
 }
 
+/// MIDI 14-bit pitch wheel (8192 = center) for a bend in semitones.
+pub fn semis_to_pitch_bend_midi(semis: f32) -> u16 {
+    let t = (semis / PITCH_BEND_RANGE_SEMIS).clamp(-1.0, 1.0);
+    (8192.0 + t * 8192.0).round().clamp(0.0, 16383.0) as u16
+}
+
 /// MIDI 14-bit pitch wheel (8192 = center) for a pad-Y bend.
 pub fn y_to_pitch_bend_midi(y: f32) -> u16 {
-    let t = (y_to_pitch_bend_semis(y) / PITCH_BEND_RANGE_SEMIS).clamp(-1.0, 1.0);
-    (8192.0 + t * 8192.0).round().clamp(0.0, 16383.0) as u16
+    semis_to_pitch_bend_midi(y_to_pitch_bend_semis(y))
 }
 
 /// Gate set: off / 1/4 / 1/8 / 1/16 / trip (1/4 fills the gap vs drum divisions).

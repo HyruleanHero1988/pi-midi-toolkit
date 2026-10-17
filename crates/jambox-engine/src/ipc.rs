@@ -18,9 +18,8 @@ use crate::audio::AudioHealth;
 use crate::bus::{ClipUpdate, ControlSide, MidiInSide};
 use crate::midi::{ingest, MidiIo, MidiMap};
 use crate::protocol::{decode, Decoded, MidiNotice, Request, Response, StatusReply};
-use jambox_protocol::{
-    HelloReply, RepeatPhase, TouchPhase, NATIVE_FEATURES, PROTOCOL_VERSION,
-};
+use crate::scope::ScopeTap;
+use jambox_protocol::{HelloReply, RepeatPhase, TouchPhase, NATIVE_FEATURES, PROTOCOL_VERSION};
 use midi_core::MidiEvent;
 use std::sync::mpsc::{self, Sender};
 
@@ -44,8 +43,8 @@ impl ClientHub {
         (tx, rx)
     }
 
-    pub fn broadcast_midi(&self, event: MidiEvent) {
-        let notice = MidiNotice::from_event(event);
+    pub fn broadcast_midi(&self, event: MidiEvent, controller: Option<&str>) {
+        let notice = MidiNotice::from_event(event).with_controller(controller);
         let line = match serde_json::to_string(&Response::Midi(notice)) {
             Ok(s) => s,
             Err(_) => return,
@@ -103,10 +102,8 @@ impl StatusCache {
             arp_latched: s.arp_latched,
             arp_root: s.arp_root,
             arp_step: s.arp_step,
-            wave_l: s.wave_l,
-            wave_r: s.wave_r,
-            in_l: s.in_l,
-            in_r: s.in_r,
+            arp_len: s.arp_len,
+            arp_steps: s.arp_steps,
         }
     }
 }
@@ -172,6 +169,7 @@ fn serve_client<R: BufRead>(
     midi_in: &Mutex<MidiInSide>,
     midi_io: &MidiIo,
     health: &AudioHealth,
+    scope: &ScopeTap,
 ) {
     let mut session = ClientSession::new();
     for line in reader.lines() {
@@ -205,6 +203,7 @@ fn serve_client<R: BufRead>(
                 midi_in,
                 midi_io,
                 health,
+                scope,
                 &mut session,
             )
         };
@@ -270,6 +269,7 @@ pub fn handle_line(
     midi_in: &Mutex<MidiInSide>,
     midi_io: &MidiIo,
     health: &AudioHealth,
+    scope: &ScopeTap,
     session: &mut ClientSession,
 ) -> Response {
     control.collect_garbage();
@@ -310,6 +310,12 @@ pub fn handle_line(
             })
         }
         Ok(Decoded::StatusRequest) => Response::Status(cache.reply(control.latest.overwrites())),
+        Ok(Decoded::Scope { wave, sub_hz }) => {
+            if sub_hz > 0.0 {
+                scope.set_sub_hz(sub_hz);
+            }
+            Response::Scope(scope.frame_with_wave(wave))
+        }
         Ok(Decoded::KnobMap {
             mode,
             fx_kind,
@@ -320,10 +326,18 @@ pub fn handle_line(
         }
         Ok(Decoded::MidiIn(event)) => {
             let mut side = midi_in.lock().unwrap_or_else(|p| p.into_inner());
-            ingest(event, 0, hub, map, |c| side.send(c));
+            ingest(
+                event,
+                0,
+                hub,
+                map,
+                &midi_core::ControllerProfile::generic(),
+                |c| side.send(c),
+            );
             Response::Ok
         }
         Ok(Decoded::Command(command)) => {
+            midi_io.queue_clip_led(&command);
             if send_or_drop(control, cache, command) {
                 Response::Ok
             } else {
@@ -536,6 +550,7 @@ pub fn serve(
     midi_in: Arc<Mutex<MidiInSide>>,
     midi_io: Arc<MidiIo>,
     health: Arc<AudioHealth>,
+    scope: Arc<ScopeTap>,
     running: Arc<AtomicBool>,
 ) {
     let shared: Shared = Arc::new(Mutex::new((control, StatusCache::default())));
@@ -558,18 +573,9 @@ pub fn serve(
                     break;
                 }
                 match stream {
-                    Ok(stream) => {
-                        spawn_client(
-                            stream,
-                            &shared,
-                            &hub,
-                            &map,
-                            &midi_in,
-                            &midi_io,
-                            &health,
-                            &running,
-                        )
-                    }
+                    Ok(stream) => spawn_client(
+                        stream, &shared, &hub, &map, &midi_in, &midi_io, &health, &scope, &running,
+                    ),
                     Err(err) => warn!(%err, "control: accept failed"),
                 }
             }
@@ -589,18 +595,9 @@ pub fn serve(
                     break;
                 }
                 match stream {
-                    Ok(stream) => {
-                        spawn_client(
-                            stream,
-                            &shared,
-                            &hub,
-                            &map,
-                            &midi_in,
-                            &midi_io,
-                            &health,
-                            &running,
-                        )
-                    }
+                    Ok(stream) => spawn_client(
+                        stream, &shared, &hub, &map, &midi_in, &midi_io, &health, &scope, &running,
+                    ),
                     Err(err) => warn!(%err, "control: accept failed"),
                 }
             }
@@ -640,6 +637,7 @@ fn spawn_client<S: ClientStream>(
     midi_in: &Arc<Mutex<MidiInSide>>,
     midi_io: &Arc<MidiIo>,
     health: &Arc<AudioHealth>,
+    scope: &Arc<ScopeTap>,
     running: &Arc<AtomicBool>,
 ) {
     let reader = match stream.duplicate() {
@@ -658,6 +656,7 @@ fn spawn_client<S: ClientStream>(
     let midi_in = Arc::clone(midi_in);
     let midi_io = Arc::clone(midi_io);
     let health = Arc::clone(health);
+    let scope = Arc::clone(scope);
     std::thread::spawn(move || {
         serve_client(
             BufReader::new(reader),
@@ -669,6 +668,7 @@ fn spawn_client<S: ClientStream>(
             &midi_in,
             &midi_io,
             &health,
+            &scope,
         );
     });
     std::thread::spawn(move || {
@@ -702,6 +702,7 @@ mod tests {
             midi_in,
             &MidiIo::default(),
             &AudioHealth::new(),
+            &ScopeTap::new(),
             session,
         )
     }
@@ -720,12 +721,14 @@ mod tests {
             &mut session,
         );
         assert!(matches!(response, Response::Ok));
+        // JSON note-ons share the MIDI ingest path, so FULL VEL (on by default)
+        // rewrites 100 → 127 before the command hits the ring.
         assert_eq!(
             audio.midi_commands.pop().unwrap(),
             Command::NoteOn {
                 channel: 0,
                 note: 60,
-                velocity: 100
+                velocity: 127
             }
         );
     }
@@ -736,7 +739,13 @@ mod tests {
         let midi_in = Mutex::new(midi_in);
         let mut cache = StatusCache::default();
         let mut session = ClientSession::new();
-        let response = call("{not json", &mut control, &mut cache, &midi_in, &mut session);
+        let response = call(
+            "{not json",
+            &mut control,
+            &mut cache,
+            &midi_in,
+            &mut session,
+        );
         assert!(matches!(response, Response::Error { .. }));
     }
 
@@ -927,6 +936,7 @@ mod tests {
             &midi_in,
             &MidiIo::default(),
             &health,
+            &ScopeTap::new(),
             &mut session,
         );
         assert!(matches!(response, Response::Ok));
@@ -949,6 +959,7 @@ mod tests {
             &midi_in,
             &io,
             &AudioHealth::new(),
+            &ScopeTap::new(),
             &mut session,
         );
         match response {

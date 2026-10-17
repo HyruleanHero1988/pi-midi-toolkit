@@ -31,9 +31,6 @@ use crate::DRUM_CHANNEL;
 
 /// Max MIDI events the engine emits per block (clip playback → USB out).
 pub const MAX_MIDI_OUT: usize = 128;
-/// Downsampled L/R points published for the on-screen scope.
-/// 32 keeps [`EngineStatus`] `Default`/`Copy` on the crate's serde/array impls.
-pub const WAVE_VIZ_POINTS: usize = 32;
 /// Largest audio block the engine preallocates for.
 ///
 /// bcm2835 Headphones with cpal `BufferSize::Default` often callbacks at the
@@ -213,12 +210,10 @@ pub struct EngineStatus {
     pub arp_latched: bool,
     pub arp_root: u8,
     pub arp_step: u8,
-    /// Stereo mix, downsampled for the CRT scope.
-    pub wave_l: [f32; WAVE_VIZ_POINTS],
-    pub wave_r: [f32; WAVE_VIZ_POINTS],
-    /// Incoming capture (pre-fader), so the scope can show a muted mic.
-    pub in_l: [f32; WAVE_VIZ_POINTS],
-    pub in_r: [f32; WAVE_VIZ_POINTS],
+    /// How many authored intervals the arp is playing.
+    pub arp_len: u8,
+    /// Intervals from the root, in press order. Unused slots stay 0.
+    pub arp_steps: [i8; crate::arp::MAX_ARP_STEPS],
 }
 
 pub struct JamboxEngine {
@@ -267,6 +262,8 @@ pub struct JamboxEngine {
     input_level: f32,
     /// 0 = hard left, 0.5 = center, 1 = hard right. Kaoss SWEEP / pan.
     sweep: f32,
+    /// When set, the output callback copies capture and does not render.
+    input_bypass: bool,
     clip_gain: [f32; MAX_CLIPS],
     attack_sec: f32,
     release_sec: f32,
@@ -288,21 +285,6 @@ pub struct JamboxEngine {
     /// Last arp pitch the engine actually sounded — released before the next step.
     arp_live: Option<(u8, u8)>,
     status: EngineStatus,
-}
-
-fn downsample_wave(src: &[f32], dst: &mut [f32]) {
-    let n = dst.len();
-    let frames = src.len();
-    if n == 0 {
-        return;
-    }
-    if frames == 0 {
-        dst.fill(0.0);
-        return;
-    }
-    for (i, slot) in dst.iter_mut().enumerate() {
-        *slot = src[i * frames / n];
-    }
 }
 
 /// Keep wet insert tanks moving after the last voice in a group goes idle,
@@ -404,6 +386,7 @@ impl JamboxEngine {
             drum_level: 1.0,
             input_level: 0.0,
             sweep: 0.5,
+            input_bypass: false,
             clip_gain: [1.0; MAX_CLIPS],
             attack_sec: 0.012,
             release_sec: 0.030,
@@ -765,14 +748,6 @@ impl JamboxEngine {
             .iter()
             .chain(self.stereo_r[..frames].iter())
             .fold(0.0f32, |m, v| m.max(v.abs()));
-        let mut wave_l = [0.0f32; WAVE_VIZ_POINTS];
-        let mut wave_r = [0.0f32; WAVE_VIZ_POINTS];
-        let mut in_l = [0.0f32; WAVE_VIZ_POINTS];
-        let mut in_r = [0.0f32; WAVE_VIZ_POINTS];
-        downsample_wave(&self.stereo_l[..frames], &mut wave_l);
-        downsample_wave(&self.stereo_r[..frames], &mut wave_r);
-        downsample_wave(&self.input_l[..frames], &mut in_l);
-        downsample_wave(&self.input_r[..frames], &mut in_r);
         self.status = EngineStatus {
             position: self.transport.position(),
             bpm: self.transport.bpm() as f32,
@@ -785,10 +760,13 @@ impl JamboxEngine {
             arp_latched: self.arp.latched(),
             arp_root: self.arp.root(),
             arp_step: self.arp.cursor(),
-            wave_l,
-            wave_r,
-            in_l,
-            in_r,
+            arp_len: self.arp.step_len(),
+            arp_steps: {
+                let mut steps = [0i8; crate::arp::MAX_ARP_STEPS];
+                let live = self.arp.steps();
+                steps[..live.len()].copy_from_slice(live);
+                steps
+            },
         };
     }
 
@@ -1140,8 +1118,20 @@ impl JamboxEngine {
                 } else {
                     // Clips stay on the wavetable path so FM mode cannot rewrite a take.
                     let group = self.bank.nearer_index();
-                    self.voices
-                        .note_on_recorded(channel, note, velocity, group, tone, mix);
+                    let drift_semis = self
+                        .sequencer
+                        .slot(slot as usize)
+                        .and_then(|s| s.playback_drift())
+                        .map(crate::voice::release_drift_semis);
+                    self.voices.note_on_recorded(
+                        channel,
+                        note,
+                        velocity,
+                        group,
+                        tone,
+                        mix,
+                        drift_semis,
+                    );
                 }
             }
             Command::ClipNoteOff { channel, note } => {
@@ -1214,6 +1204,14 @@ impl JamboxEngine {
                 for rack in &mut self.punch {
                     rack.set_buffer_prio(mode);
                 }
+            }
+            Command::SetPunchHistory { enabled } => {
+                for rack in &mut self.punch {
+                    rack.set_history(enabled);
+                }
+            }
+            Command::SetInputBypass { enabled } => {
+                self.input_bypass = enabled;
             }
             Command::SetPunchRptMode { mode } => {
                 let mode = crate::PunchRptMode::from_u8(mode);
@@ -1632,6 +1630,19 @@ impl JamboxEngine {
         self.set_input_stereo(mono, mono);
     }
 
+    pub fn input_bypass(&self) -> bool {
+        self.input_bypass
+    }
+
+    /// Apply control commands without rendering a block. The dry-input path
+    /// uses this so bypass can be turned off without waiting for a render.
+    pub fn apply_scheduled(&mut self, commands: &[ScheduledCommand], midi_out: &mut MidiOutSink) {
+        let absolute = self.transport.position();
+        for cmd in commands.iter().take(MAX_BLOCK_COMMANDS) {
+            self.apply(cmd.command, absolute, cmd.frame, midi_out);
+        }
+    }
+
     pub fn input_level(&self) -> f32 {
         self.input_level
     }
@@ -1703,6 +1714,11 @@ impl JamboxEngine {
             SynthParam::DrumLevel => self.drum_level = unit,
             SynthParam::InputLevel => self.input_level = unit,
             SynthParam::Sweep => self.sweep = unit,
+            SynthParam::Sustain => {
+                let on = unit >= 0.5;
+                self.voices.set_sustain(on);
+                self.fm.set_sustain(on);
+            }
             SynthParam::FmEnable => {
                 let enable = value > 0.5;
                 if enable != self.fm_enabled {
@@ -1910,6 +1926,42 @@ mod tests {
     }
 
     #[test]
+    fn sustain_holds_a_live_note_until_the_pedal_lifts() {
+        let mut e = engine();
+        apply_now(
+            &mut e,
+            Command::NoteOn {
+                channel: 0,
+                note: 60,
+                velocity: 120,
+            },
+        );
+        apply_now(
+            &mut e,
+            Command::SetSynth {
+                param: SynthParam::Sustain,
+                value: 1.0,
+            },
+        );
+        apply_now(
+            &mut e,
+            Command::NoteOff {
+                channel: 0,
+                note: 60,
+            },
+        );
+        assert_eq!(e.voices.held_count(), 1, "pedal must keep the key gated");
+        apply_now(
+            &mut e,
+            Command::SetSynth {
+                param: SynthParam::Sustain,
+                value: 0.0,
+            },
+        );
+        assert_eq!(e.voices.held_count(), 0, "lifting CC64 must start release");
+    }
+
+    #[test]
     fn a_note_makes_sound() {
         let mut e = engine();
         let mut out = vec![0.0f32; 512];
@@ -2069,6 +2121,27 @@ mod tests {
     }
 
     #[test]
+    fn input_bypass_flag_follows_the_command() {
+        let mut e = engine();
+        let mut out = vec![0.0f32; 32];
+        let mut midi = MidiOutSink::new();
+        assert!(!e.input_bypass());
+        e.render(
+            &mut out,
+            &[ScheduledCommand::now(Command::SetInputBypass { enabled: true })],
+            &mut midi,
+        );
+        assert!(e.input_bypass());
+        e.apply_scheduled(
+            &[ScheduledCommand::now(Command::SetInputBypass {
+                enabled: false,
+            })],
+            &mut midi,
+        );
+        assert!(!e.input_bypass());
+    }
+
+    #[test]
     fn live_input_mixes_onto_master_before_punch() {
         let mut e = engine();
         let mut out = vec![0.0f32; 128];
@@ -2134,11 +2207,6 @@ mod tests {
             "right must stay quiet when only left is fed, got peak {}",
             peak(r)
         );
-        assert!(
-            e.status().in_l.iter().any(|s| *s > 0.2),
-            "scope must publish the incoming left channel"
-        );
-        assert!(e.status().in_r.iter().all(|s| s.abs() < 1e-4));
     }
 
     #[test]
@@ -2752,6 +2820,54 @@ mod tests {
             diff > 0.5,
             "always-on vibrato should detune vs gated-off, diff={diff}"
         );
+    }
+
+    #[test]
+    fn mod_wheel_wobbles_wavetable_and_fm() {
+        fn wobble(fm: bool) -> f32 {
+            let mut dry = engine();
+            let mut wet = engine();
+            for e in [&mut dry, &mut wet] {
+                if fm {
+                    apply_now(
+                        e,
+                        Command::SetSynth {
+                            param: SynthParam::FmEnable,
+                            value: 1.0,
+                        },
+                    );
+                }
+                apply_now(
+                    e,
+                    Command::NoteOn {
+                        channel: 0,
+                        note: 69,
+                        velocity: 120,
+                    },
+                );
+            }
+            apply_now(
+                &mut wet,
+                Command::SetSynth {
+                    param: SynthParam::VibratoMod,
+                    value: 1.0,
+                },
+            );
+            let mut dry_buf = vec![0.0f32; 8192];
+            let mut wet_buf = vec![0.0f32; 8192];
+            let mut midi = MidiOutSink::new();
+            dry.render(&mut dry_buf, &[], &mut midi);
+            wet.render(&mut wet_buf, &[], &mut midi);
+            dry_buf
+                .iter()
+                .zip(wet_buf.iter())
+                .map(|(a, b)| (a - b).abs())
+                .sum()
+        }
+        let wave = wobble(false);
+        let fm = wobble(true);
+        assert!(wave > 1.0, "mod wheel should wobble a wavetable note, diff={wave}");
+        assert!(fm > 1.0, "mod wheel should wobble an FM note, diff={fm}");
     }
 
     #[test]
@@ -3402,6 +3518,87 @@ mod tests {
             "live voice FX must not rewrite a locked pad insert"
         );
         assert!(e.voice_fx[0].params().delay_mix < 0.01);
+    }
+
+    #[test]
+    fn pad_keeps_baked_drift_when_the_live_slider_is_centered() {
+        let mut e = engine();
+        apply_now(
+            &mut e,
+            Command::SetSynth {
+                param: SynthParam::Release,
+                value: 1.0,
+            },
+        );
+        apply_now(
+            &mut e,
+            Command::SetSynth {
+                param: SynthParam::ReleaseDrift,
+                value: 0.5,
+            },
+        );
+        let clip = Clip::new(
+            vec![
+                ClipEvent {
+                    tick: 0,
+                    kind: ClipEventKind::NoteOn {
+                        channel: 0,
+                        note: 57,
+                        velocity: 120,
+                    },
+                },
+                ClipEvent {
+                    tick: 192,
+                    kind: ClipEventKind::NoteOff {
+                        channel: 0,
+                        note: 57,
+                    },
+                },
+            ],
+            PPQ * 4,
+        );
+        let voice = ClipVoice {
+            locked: true,
+            release_drift: Some(1.0),
+            ..ClipVoice::default()
+        };
+        let _ = e.apply_clip_update(
+            0,
+            Some(Box::new(clip)),
+            Some(LaunchMode::Loop),
+            None,
+            Some(voice),
+        );
+        apply_now(
+            &mut e,
+            Command::LaunchClip {
+                slot: 0,
+                quantize: Quantize::Off,
+            },
+        );
+        let mut midi = MidiOutSink::new();
+        let mut block = vec![0.0f32; 1024];
+        for _ in 0..5 {
+            e.render(&mut block, &[], &mut midi);
+        }
+        let mut early = vec![0.0f32; 1024];
+        e.render(&mut early, &[], &mut midi);
+        let mut late = vec![0.0f32; 1024];
+        for _ in 0..20 {
+            e.render(&mut late, &[], &mut midi);
+        }
+        let z0 = zero_crossings(&early).max(1);
+        let z1 = zero_crossings(&late);
+        assert!(
+            z1 > z0 + z0 / 3,
+            "saved pad drift should rise while the live slider is centered, crossings {z0} → {z1}"
+        );
+    }
+
+    fn zero_crossings(buf: &[f32]) -> usize {
+        buf.windows(2)
+            .filter(|w| w[0] <= 0.0 && w[1] > 0.0)
+            .count()
     }
 
     #[test]

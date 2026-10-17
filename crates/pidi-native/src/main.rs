@@ -57,6 +57,19 @@ struct Cli {
     windowed: bool,
 }
 
+fn copy_wave(src: &[i16], dst: &mut [i16]) {
+    let n = src.len().min(dst.len());
+    dst[..n].copy_from_slice(&src[..n]);
+    dst[n..].fill(0);
+}
+
+fn copy_scope(src: &[i16], dst: &mut [i16]) {
+    dst.fill(0);
+    for (slot, sample) in dst.iter_mut().zip(src.iter()) {
+        *slot = *sample;
+    }
+}
+
 fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -68,13 +81,13 @@ fn main() {
     if !cli.phrases.is_empty() {
         std::env::set_var("PIDI_PHRASES_DIR", &cli.phrases);
     }
+    midi_core::apply_default_overlay_dirs();
     let mut model = NativeModel::new();
     let mut frame = Frame::new();
     let mut client = NativeClient::new(cli.control.clone(), cli.tcp);
     let mut presenter = Presenter::open(&cli);
     let sdl_touch = presenter.is_sdl() && matches!(cli.touch.as_str(), "auto" | "sdl");
-    let mut input = if matches!(cli.touch.as_str(), "evdev")
-        || (cli.touch == "auto" && !sdl_touch)
+    let mut input = if matches!(cli.touch.as_str(), "evdev") || (cli.touch == "auto" && !sdl_touch)
     {
         Input::open(&cli.evdev)
     } else {
@@ -118,9 +131,7 @@ fn main() {
             match event {
                 TouchEvent::Down { id, x, y } => model.finger_down(id, x, y, &mut client.outbox),
                 TouchEvent::Move { id, x, y } => model.finger_move(id, x, y, &mut client.outbox),
-                TouchEvent::Up { id, x, y } => {
-                    model.finger_up_at(id, x, y, &mut client.outbox)
-                }
+                TouchEvent::Up { id, x, y } => model.finger_up_at(id, x, y, &mut client.outbox),
             }
         }
 
@@ -131,13 +142,37 @@ fn main() {
             }
             status_tick = Instant::now();
         }
+        if client.scope_waiting && client.scope_sent.elapsed() > Duration::from_millis(100) {
+            client.scope_waiting = false;
+        }
+        if client.connected && !client.scope_waiting {
+            let wave = model.mode == pidi_native::mode::UiMode::Wave;
+            // The wave picture is three full traces. 30 Hz is enough to look
+            // live and leaves the audio callback its period.
+            let due = !wave || client.scope_sent.elapsed() > Duration::from_millis(33);
+            if due {
+                let sub_hz = if wave { model.wave_sub_hz } else { 0.0 };
+                client.outbox.scope(wave, sub_hz);
+                client.scope_waiting = true;
+                client.scope_sent = Instant::now();
+            }
+        }
         client.flush();
+        if !client.connected {
+            client.scope_waiting = false;
+        }
         for notice in client.midi_inbox.drain(..) {
             model.on_midi_notice(&notice, &mut client.outbox);
         }
         model.note_engine_link(client.connected, &mut client.outbox);
         model.status = client.last_status;
-        model.apply_midi_ports(&client.last_midi_ports);
+        copy_scope(&client.last_scope.min, &mut model.scope_min);
+        copy_scope(&client.last_scope.max, &mut model.scope_max);
+        copy_wave(&client.last_scope.left, &mut model.wave_left);
+        copy_wave(&client.last_scope.right, &mut model.wave_right);
+        copy_wave(&client.last_scope.sub, &mut model.wave_sub);
+        model.sync_arp_pattern_from_status();
+        model.apply_midi_ports_with(&client.last_midi_ports, Some(&mut client.outbox));
         model.tick(dt, &mut client.outbox);
         model.maybe_autosave();
         if model.take_reexec() {
@@ -642,9 +677,7 @@ mod linux_evdev {
                 let ev = unsafe { ptr_read(&chunk) };
                 match ev.type_ {
                     EV_ABS => match ev.code {
-                        ABS_MT_SLOT => {
-                            self.current = (ev.value as usize).min(self.slots.len() - 1)
-                        }
+                        ABS_MT_SLOT => self.current = (ev.value as usize).min(self.slots.len() - 1),
                         ABS_MT_TRACKING_ID => {
                             self.slots[self.current].tracking = ev.value;
                             self.slots[self.current].dirty = true;

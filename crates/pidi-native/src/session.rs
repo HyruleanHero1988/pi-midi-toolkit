@@ -197,6 +197,9 @@ pub struct SessionState {
     pub kaoss_program: usize,
     pub kaoss_gate: usize,
     pub kaoss_hold: bool,
+    /// When true, Kaoss FX stays at the lift position. When false, it springs back.
+    #[serde(default)]
+    pub kaoss_fx_hold: bool,
     pub fx_bus: [f32; 3],
     /// Per-voice flanger wet (SYNTH FLANGE / FX→VOICE).
     #[serde(default)]
@@ -222,6 +225,12 @@ pub struct SessionState {
     /// Bank A pads arm punch FX. Missing → on (previous FX-page behavior).
     #[serde(default = "default_full_velocity")]
     pub punch_pads_fx: bool,
+    /// Idle punch-history rings. Missing → on, so GRAB still has a pre-roll.
+    #[serde(default = "default_punch_history")]
+    pub punch_history: bool,
+    /// Dry capture passthrough. Missing → off, so punch-in stays the mix path.
+    #[serde(default)]
+    pub input_bypass: bool,
     #[serde(default)]
     pub kaoss_show_all: bool,
     #[serde(default)]
@@ -304,6 +313,38 @@ pub struct SessionState {
     /// Note-repeat latch: tap instead of hold. Missing in old sessions → hold.
     #[serde(default)]
     pub drum_repeat_lock: bool,
+    /// Touch-drawn FM graph the user saved. Missing in old sessions → none.
+    /// Kept so an older file still loads; new saves live in `fm_patches`.
+    #[serde(default)]
+    pub fm_user: Option<FmUserPatch>,
+    /// Named FM patches. Missing in old sessions → empty (then `fm_user` is imported).
+    #[serde(default)]
+    pub fm_patches: Vec<FmNamedPatch>,
+    /// Left, right, and sub wave layout. Missing → the first test layout.
+    #[serde(default = "crate::wave_viz::default_signals")]
+    pub wave_signals: [crate::wave_viz::WaveSignal; 3],
+    /// Sub low-pass cutoff in Hz. Missing → 80.
+    #[serde(default = "crate::wave_viz::default_sub_hz")]
+    pub wave_sub_hz: f32,
+}
+
+/// A named draw-mode patch. The operator data is the same shape as `FmUserPatch`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FmNamedPatch {
+    pub name: String,
+    #[serde(flatten)]
+    pub patch: FmUserPatch,
+}
+
+/// Saved draw-mode FM graph. Plain arrays so old sessions still load.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct FmUserPatch {
+    pub ratio: [f32; 4],
+    pub audio: [f32; 4],
+    pub fold: [f32; 4],
+    pub env: [f32; 4],
+    pub sustain: [f32; 4],
+    pub matrix: [[f32; 4]; 4],
 }
 
 fn default_drum_level() -> f32 {
@@ -358,6 +399,10 @@ fn default_full_velocity() -> bool {
     true
 }
 
+fn default_punch_history() -> bool {
+    true
+}
+
 impl Default for SessionState {
     fn default() -> Self {
         Self {
@@ -384,6 +429,7 @@ impl Default for SessionState {
             kaoss_program: 0,
             kaoss_gate: 0,
             kaoss_hold: false,
+            kaoss_fx_hold: false,
             fx_bus: [0.0, 0.0, 0.0],
             fx_flanger: 0.0,
             fx_flanger_rate: default_fx_flanger_rate(),
@@ -393,6 +439,8 @@ impl Default for SessionState {
             punch_rpt_mode: 0,
             punch_grid_mode: 0,
             punch_pads_fx: true,
+            punch_history: default_punch_history(),
+            input_bypass: false,
             kaoss_show_all: false,
             kaoss_channel: 0,
             vibrato_always: 0.0,
@@ -427,6 +475,10 @@ impl Default for SessionState {
             wifi_usb_hold: false,
             full_velocity: default_full_velocity(),
             drum_repeat_lock: false,
+            fm_user: None,
+            fm_patches: Vec::new(),
+            wave_signals: crate::wave_viz::default_signals(),
+            wave_sub_hz: crate::wave_viz::default_sub_hz(),
         }
     }
 }

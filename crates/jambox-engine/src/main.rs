@@ -12,6 +12,7 @@ mod mailbox;
 mod midi;
 mod protocol;
 mod rt;
+mod scope;
 mod waves;
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -164,6 +165,7 @@ fn run(
     user_waves: String,
     buffer_frames: u32,
 ) {
+    midi_core::apply_default_overlay_dirs();
     let running = Arc::new(AtomicBool::new(true));
     {
         let running = running.clone();
@@ -182,6 +184,7 @@ fn run(
     }
 
     let (control_side, midi_in_side, midi_out_side, audio_side) = bus::channel();
+    let scope = scope::ScopeTap::new();
     let hub = Arc::new(ipc::ClientHub::default());
     let midi_map = Arc::new(midi::MidiMap::default());
     let midi_in_bus = Arc::new(std::sync::Mutex::new(midi_in_side));
@@ -193,12 +196,14 @@ fn run(
 
     if null_audio {
         let running = running.clone();
+        let scope = Arc::clone(&scope);
         std::thread::spawn(move || {
             headless::run(
                 48_000,
                 buffer_frames.max(64) as usize,
                 audio_side,
                 bank,
+                scope,
                 running,
             );
         });
@@ -212,14 +217,10 @@ fn run(
             buffer_frames,
             Arc::clone(&audio_health),
             Arc::clone(&capture),
+            Arc::clone(&scope),
             running.clone(),
         );
-        capture::spawn_input(
-            input,
-            capture,
-            Arc::clone(&audio_health),
-            running.clone(),
-        );
+        capture::spawn_input(input, capture, Arc::clone(&audio_health), running.clone());
     }
 
     let midi_io = Arc::new(midi::MidiIo::new(midi_in, midi_out));
@@ -231,6 +232,7 @@ fn run(
         running.clone(),
     );
     midi::spawn_output(Arc::clone(&midi_io), midi_out_side, running.clone());
+    midi::spawn_feedback(Arc::clone(&midi_io), running.clone());
 
     let endpoint = if tcp {
         ipc::Endpoint::Tcp(control)
@@ -256,6 +258,7 @@ fn run(
             midi_in_bus,
             midi_io,
             ipc_health,
+            scope,
             ipc_running,
         );
     });

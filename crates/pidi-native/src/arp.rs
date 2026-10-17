@@ -17,6 +17,11 @@ pub struct ArpUi {
     pub len: u8,
     pub selected: usize,
     pub out: OutMode,
+    /// Last pattern the engine reported. A repeat of this poll is stale and
+    /// must not wipe a step edit or a chord loaded from the session.
+    pub(crate) echoed_steps: [i8; MAX_ARP_STEPS],
+    pub(crate) echoed_len: u8,
+    pub(crate) echoed: bool,
 }
 
 impl Default for ArpUi {
@@ -41,6 +46,9 @@ impl ArpUi {
             len: 3,
             selected: 0,
             out: OutMode::Both,
+            echoed_steps: [0; MAX_ARP_STEPS],
+            echoed_len: 0,
+            echoed: false,
         }
     }
 
@@ -166,8 +174,8 @@ mod tests {
             "KEY+".into(),
             "HOLD".into(),
             "LATCH".into(),
-            "PLAY A ROOT  C4".into(),
-            "LATCHED  C4  NEXT KEY".into(),
+            "HOLD A CHORD  C4".into(),
+            "LATCHED  C4  PLAY TO MOVE".into(),
         ];
         for label in &labels {
             for ch in label.chars() {

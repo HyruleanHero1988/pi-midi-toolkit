@@ -63,6 +63,12 @@ pub enum Request {
     PunchBufferPrio {
         mode: u8,
     },
+    PunchHistory {
+        enabled: bool,
+    },
+    InputBypass {
+        enabled: bool,
+    },
     PunchRptMode {
         mode: u8,
     },
@@ -228,6 +234,15 @@ pub enum Request {
     SetArpLen {
         len: u8,
     },
+    /// `wave` also returns left, right, and sub traces. `sub_hz` updates the
+    /// crossover when it is above zero (sub low-pass, left/right high-pass);
+    /// zero leaves the current cutoff.
+    Scope {
+        #[serde(default)]
+        wave: bool,
+        #[serde(default)]
+        sub_hz: f32,
+    },
 }
 
 const fn default_velocity() -> u8 {
@@ -346,6 +361,7 @@ pub enum Response {
     /// Unsolicited: a MIDI event the engine heard (notes already went to DSP).
     Midi(MidiNotice),
     MidiPorts(jambox_protocol::MidiPortsReply),
+    Scope(jambox_protocol::ScopeReply),
 }
 
 /// UI-facing MIDI echo. DSP already applied the mapped command.
@@ -361,9 +377,16 @@ pub struct MidiNotice {
     pub control: Option<u8>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub value: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub controller: Option<String>,
 }
 
 impl MidiNotice {
+    pub fn with_controller(mut self, id: Option<&str>) -> Self {
+        self.controller = id.filter(|s| !s.is_empty()).map(|s| s.to_string());
+        self
+    }
+
     pub fn from_event(event: midi_core::MidiEvent) -> Self {
         use midi_core::MidiEvent::*;
         match event {
@@ -378,6 +401,7 @@ impl MidiNotice {
                 velocity: Some(velocity as u16),
                 control: None,
                 value: None,
+                controller: None,
             },
             NoteOff {
                 channel,
@@ -390,6 +414,7 @@ impl MidiNotice {
                 velocity: Some(velocity as u16),
                 control: None,
                 value: None,
+                controller: None,
             },
             ControlChange {
                 channel,
@@ -402,6 +427,7 @@ impl MidiNotice {
                 velocity: None,
                 control: Some(controller),
                 value: Some(value as u16),
+                controller: None,
             },
             PitchBend { channel, value } => Self {
                 kind: "pitch_bend".into(),
@@ -410,6 +436,7 @@ impl MidiNotice {
                 velocity: None,
                 control: None,
                 value: Some(value),
+                controller: None,
             },
             PolyPressure {
                 channel,
@@ -422,6 +449,7 @@ impl MidiNotice {
                 velocity: None,
                 control: None,
                 value: Some(pressure as u16),
+                controller: None,
             },
             ChannelPressure { channel, pressure } => Self {
                 kind: "channel_pressure".into(),
@@ -430,6 +458,7 @@ impl MidiNotice {
                 velocity: None,
                 control: None,
                 value: Some(pressure as u16),
+                controller: None,
             },
             ProgramChange { channel, program } => Self {
                 kind: "program_change".into(),
@@ -438,6 +467,7 @@ impl MidiNotice {
                 velocity: None,
                 control: None,
                 value: Some(program as u16),
+                controller: None,
             },
         }
     }
@@ -469,13 +499,9 @@ pub struct StatusReply {
     #[serde(default)]
     pub arp_step: u8,
     #[serde(default)]
-    pub wave_l: [f32; jambox_protocol::WAVE_VIZ_POINTS],
+    pub arp_len: u8,
     #[serde(default)]
-    pub wave_r: [f32; jambox_protocol::WAVE_VIZ_POINTS],
-    #[serde(default)]
-    pub in_l: [f32; jambox_protocol::WAVE_VIZ_POINTS],
-    #[serde(default)]
-    pub in_r: [f32; jambox_protocol::WAVE_VIZ_POINTS],
+    pub arp_steps: [i8; 16],
 }
 
 /// What the control thread decides to do with a request.
@@ -497,6 +523,12 @@ pub enum Decoded {
     },
     /// Answer without touching audio.
     StatusRequest,
+    /// Master-mix scope. Read from the lock-free tap; audio is not touched.
+    /// `wave` also snapshots left, right, and the low-passed sub.
+    Scope {
+        wave: bool,
+        sub_hz: f32,
+    },
     /// Same path as USB MIDI in (notes, CC, bend).
     MidiIn(midi_core::MidiEvent),
     /// UI mode buttons: keys / drums / fx.
@@ -570,6 +602,7 @@ fn clip_voice_from_wire(voice: jambox_protocol::WireClipVoice) -> jambox_core::C
         delay_mix: voice.delay_mix,
         reverb_mix: voice.reverb_mix,
         flanger_mix: voice.flanger_mix,
+        release_drift: voice.release_drift.map(|v| v.clamp(0.0, 1.0)),
     }
 }
 
@@ -596,6 +629,7 @@ fn parse_synth_param(name: &str) -> Option<SynthParam> {
         "drum_level" => SynthParam::DrumLevel,
         "input_level" => SynthParam::InputLevel,
         "sweep" => SynthParam::Sweep,
+        "sustain" => SynthParam::Sustain,
         "fm_enable" => SynthParam::FmEnable,
         "fm_recipe" => SynthParam::FmRecipe,
         "fm_op" => SynthParam::FmOp,
@@ -761,9 +795,9 @@ pub fn decode(request: Request) -> Result<Decoded, String> {
         Request::PunchGrab { source, active } => {
             Decoded::Command(Command::SetPunchGrab { source, active })
         }
-        Request::PunchBufferPrio { mode } => {
-            Decoded::Command(Command::SetPunchBufferPrio { mode })
-        }
+        Request::PunchBufferPrio { mode } => Decoded::Command(Command::SetPunchBufferPrio { mode }),
+        Request::PunchHistory { enabled } => Decoded::Command(Command::SetPunchHistory { enabled }),
+        Request::InputBypass { enabled } => Decoded::Command(Command::SetInputBypass { enabled }),
         Request::PunchRptMode { mode } => Decoded::Command(Command::SetPunchRptMode { mode }),
         Request::PunchGrid { mode } => Decoded::Command(Command::SetPunchGrid { mode }),
         Request::PunchPads { armed } => Decoded::PunchPads { armed },
@@ -815,6 +849,7 @@ pub fn decode(request: Request) -> Result<Decoded, String> {
         Request::StopAllClips => Decoded::Command(Command::StopAllClips),
         Request::ClipGain { slot, value } => Decoded::Command(Command::SetClipGain { slot, value }),
         Request::Status => Decoded::StatusRequest,
+        Request::Scope { wave, sub_hz } => Decoded::Scope { wave, sub_hz },
         Request::KaossScale {
             scale_index,
             key,
@@ -1114,14 +1149,6 @@ mod tests {
     }
 
     #[test]
-    fn wave_viz_width_matches_core() {
-        assert_eq!(
-            jambox_core::WAVE_VIZ_POINTS,
-            jambox_protocol::WAVE_VIZ_POINTS
-        );
-    }
-
-    #[test]
     fn status_reply_serializes_for_the_ui() {
         let json = serde_json::to_string(&Response::Status(StatusReply {
             bpm: 120.0,
@@ -1213,7 +1240,9 @@ mod tests {
 
     #[test]
     fn drum_repeat_decodes() {
-        let d = decode_line(r#"{"cmd":"drum_repeat","slots":[1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"latch":true}"#);
+        let d = decode_line(
+            r#"{"cmd":"drum_repeat","slots":[1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"latch":true}"#,
+        );
         match d {
             Decoded::DrumRepeat { slots, latch } => {
                 assert_eq!(slots[0], 1);

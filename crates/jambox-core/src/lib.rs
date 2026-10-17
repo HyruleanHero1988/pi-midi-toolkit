@@ -53,7 +53,7 @@ pub use drums::{
 };
 pub use engine::{
     tone_lfo_hz_from_unit, EngineStatus, JamboxEngine, MidiOutSink, MAX_MIDI_OUT, MAX_RENDER_BLOCK,
-    TONE_LFO_HZ_MAX, TONE_LFO_HZ_MIN, WAVE_VIZ_POINTS,
+    TONE_LFO_HZ_MAX, TONE_LFO_HZ_MIN,
 };
 pub use fm::{
     clang_index, clang_label, clang_ratio, fm_recipe, fm_recipe_patch, pack_fm_link,

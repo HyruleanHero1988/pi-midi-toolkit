@@ -9,6 +9,10 @@
 use serde::{Deserialize, Serialize};
 
 pub const PROTOCOL_VERSION: u16 = 1;
+/// Columns in one live master-mix scope frame (min/max pair per column).
+pub const SCOPE_COLUMNS: usize = 192;
+/// Points in one three-signal wave frame (left, right, and low-passed sub).
+pub const WAVE_VIZ_POINTS: usize = 256;
 pub const NATIVE_FEATURES: &[&str] = &[
     "touch_sessions",
     "disconnect_release",
@@ -20,9 +24,6 @@ pub const NATIVE_FEATURES: &[&str] = &[
     "arp",
     "stereo",
 ];
-
-/// Downsampled L/R points on [`StatusReply`] for the on-screen scope.
-pub const WAVE_VIZ_POINTS: usize = 32;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -104,6 +105,14 @@ pub enum Request {
     },
     PunchBufferPrio {
         mode: u8,
+    },
+    /// Idle punch-history ring. Armed buffer FX still records.
+    PunchHistory {
+        enabled: bool,
+    },
+    /// Copy capture to the headphones with no synth, punch, or bus FX.
+    InputBypass {
+        enabled: bool,
     },
     PunchRptMode {
         mode: u8,
@@ -286,6 +295,16 @@ pub enum Request {
     SetArpLen {
         len: u8,
     },
+    /// Latest master-mix oscilloscope frame. One in flight; the engine does not queue these.
+    /// `wave` also returns left, right, and sub traces. `sub_hz` updates the
+    /// crossover when it is above zero (sub low-pass, left/right high-pass);
+    /// zero leaves the current cutoff.
+    Scope {
+        #[serde(default)]
+        wave: bool,
+        #[serde(default)]
+        sub_hz: f32,
+    },
 }
 
 const fn default_velocity() -> u8 {
@@ -387,6 +406,9 @@ pub struct WireClipVoice {
     pub reverb_mix: f32,
     #[serde(default)]
     pub flanger_mix: f32,
+    /// DRIFT slider captured with the take. Absent follows the live slider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_drift: Option<f32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -398,6 +420,30 @@ pub enum Response {
     Status(StatusReply),
     Midi(MidiNotice),
     MidiPorts(MidiPortsReply),
+    Scope(ScopeReply),
+}
+
+/// One triggered view of the master mix. Each column is the min and max sample
+/// that landed in that pixel, so a peak between pixels is not dropped.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct ScopeReply {
+    pub rate: u32,
+    /// Lowest sample in each column, −32767..32767. Length is [`SCOPE_COLUMNS`].
+    #[serde(default)]
+    pub min: Vec<i16>,
+    /// Highest sample in each column.
+    #[serde(default)]
+    pub max: Vec<i16>,
+    /// Recent left-channel samples, oldest first. Length is [`WAVE_VIZ_POINTS`]
+    /// when the request asked for the wave view; otherwise empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub left: Vec<i16>,
+    /// Recent right-channel samples, oldest first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub right: Vec<i16>,
+    /// Recent sub samples: the bus summed, then low-passed. Oldest first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sub: Vec<i16>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
@@ -433,6 +479,9 @@ pub struct MidiNotice {
     pub control: Option<u8>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub value: Option<u16>,
+    /// Live controller profile id (`mpk-mini`, `smk-37-elite`, …).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub controller: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
@@ -459,18 +508,12 @@ pub struct StatusReply {
     pub arp_root: u8,
     #[serde(default)]
     pub arp_step: u8,
-    /// Stereo mix snapshot (L).
+    /// Authored interval count. 0 means the engine has not reported a pattern yet.
     #[serde(default)]
-    pub wave_l: [f32; WAVE_VIZ_POINTS],
-    /// Stereo mix snapshot (R).
+    pub arp_len: u8,
+    /// Intervals from the root, press order. Only the first `arp_len` entries count.
     #[serde(default)]
-    pub wave_r: [f32; WAVE_VIZ_POINTS],
-    /// Incoming capture snapshot (L), pre-fader.
-    #[serde(default)]
-    pub in_l: [f32; WAVE_VIZ_POINTS],
-    /// Incoming capture snapshot (R), pre-fader.
-    #[serde(default)]
-    pub in_r: [f32; WAVE_VIZ_POINTS],
+    pub arp_steps: [i8; 16],
 }
 
 #[cfg(test)]
@@ -619,5 +662,4 @@ mod tests {
             }
         ));
     }
-
 }

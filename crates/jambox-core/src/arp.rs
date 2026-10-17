@@ -1,7 +1,8 @@
-//! Key-relative arpeggiator: authored intervals, MPK-style walk orders, latch.
+//! Key-relative arpeggiator: held notes are the pattern, MPK-style walk orders, latch.
 //!
-//! The audio thread owns this. Incoming notes are the root (and latch retarget),
-//! never a block chord. Pattern steps are relative semitones from that root.
+//! While notes are held, each new key joins the pattern in press order,
+//! measured from the lowest note. Lifting the hand does not rewrite that
+//! shape: latch keeps it playing, and a later key only moves the root.
 
 use crate::transport::{Transport, PPQ};
 
@@ -379,6 +380,14 @@ impl Arpeggiator {
         self.rebuild_pool();
     }
 
+    pub fn step_len(&self) -> u8 {
+        self.step_len
+    }
+
+    pub fn steps(&self) -> &[i8] {
+        &self.steps[..self.step_len as usize]
+    }
+
     pub fn note_on(&mut self, note: u8, velocity: u8, channel: u8, at_frame: u64) -> bool {
         if !self.enabled {
             return false;
@@ -388,8 +397,11 @@ impl Arpeggiator {
         self.channel = channel & 0x0f;
         self.remember_held(note, velocity);
         let first = !self.running;
-        self.set_root(note, velocity);
-        self.latched = self.latch_armed;
+        if self.latched {
+            self.set_root(note, velocity);
+        } else {
+            self.capture_held();
+        }
         if first {
             self.start(at_frame);
             return true;
@@ -422,10 +434,41 @@ impl Arpeggiator {
             return None;
         }
         self.forget_held(note & 0x7f);
-        if self.held_len == 0 && !self.latch_armed {
-            self.stop()
+        // A hand lift arrives as one note-off per key. Rewriting the pattern
+        // on each of those would leave only the last finger. The shape stays
+        // as it was while the notes were held; an empty hand either latches
+        // that shape or stops.
+        if self.held_len == 0 {
+            if self.latch_armed && self.running {
+                self.latched = true;
+                None
+            } else {
+                self.stop()
+            }
         } else {
             None
+        }
+    }
+
+    /// Held notes, in press order, become intervals from the lowest note.
+    fn capture_held(&mut self) {
+        let n = self.held_len as usize;
+        if n == 0 {
+            return;
+        }
+        let mut lowest = self.held[0].note;
+        for key in self.held.iter().take(n) {
+            lowest = lowest.min(key.note);
+        }
+        self.root = lowest;
+        self.step_len = self.held_len;
+        for i in 0..n {
+            let interval = i16::from(self.held[i].note) - i16::from(lowest);
+            self.steps[i] = interval.clamp(-96, 96) as i8;
+        }
+        self.rebuild_pool();
+        if self.pool_len > 0 {
+            self.cursor %= self.pool_len;
         }
     }
 
@@ -564,8 +607,6 @@ impl Arpeggiator {
         if (self.held_len as usize) < MAX_ARP_HELD {
             self.held[self.held_len as usize] = HeldKey { note, velocity };
             self.held_len += 1;
-        } else {
-            self.held[MAX_ARP_HELD - 1] = HeldKey { note, velocity };
         }
     }
 
@@ -779,24 +820,56 @@ mod tests {
     }
 
     #[test]
-    fn latched_root_retarget_keeps_the_shape() {
+    fn held_chord_is_the_pattern_and_latch_keeps_it() {
         let mut arp = Arpeggiator::new();
         arp.set_enabled(true);
         arp.set_latch(true);
         arp.set_order(ArpOrder::Order);
         arp.set_octaves(0);
         arp.note_on(60, 100, 0, 0);
-        assert_eq!(arp.advance_and_peek(), 60);
-        assert_eq!(arp.advance_and_peek(), 64);
+        arp.note_on(64, 100, 0, 10);
+        arp.note_on(67, 100, 0, 20);
+        assert_eq!(arp.steps(), &[0, 4, 7]);
+        assert_eq!(arp.root(), 60);
         arp.note_off(60);
+        arp.note_off(64);
+        arp.note_off(67);
         assert!(arp.running());
         assert!(arp.latched());
         arp.note_on(62, 110, 0, 100);
         assert_eq!(arp.root(), 62);
+        assert_eq!(arp.steps(), &[0, 4, 7], "a key after latch moves the root");
         arp.reset_walk();
         assert_eq!(arp.advance_and_peek(), 62);
         assert_eq!(arp.advance_and_peek(), 66);
         assert_eq!(arp.advance_and_peek(), 69);
+    }
+
+    #[test]
+    fn press_order_is_ord_even_when_it_is_not_low_to_high() {
+        let mut arp = Arpeggiator::new();
+        arp.set_enabled(true);
+        arp.set_latch(true);
+        arp.set_order(ArpOrder::Order);
+        arp.set_octaves(0);
+        arp.note_on(67, 100, 0, 0);
+        arp.note_on(60, 100, 0, 10);
+        arp.note_on(64, 100, 0, 20);
+        assert_eq!(arp.root(), 60);
+        assert_eq!(arp.steps(), &[7, 0, 4]);
+        arp.reset_walk();
+        assert_eq!(arp.advance_and_peek(), 67);
+        assert_eq!(arp.advance_and_peek(), 60);
+        assert_eq!(arp.advance_and_peek(), 64);
+        arp.note_off(67);
+        arp.note_off(60);
+        arp.note_off(64);
+        assert!(arp.latched());
+        arp.note_on(62, 110, 0, 100);
+        arp.reset_walk();
+        assert_eq!(arp.advance_and_peek(), 69);
+        assert_eq!(arp.advance_and_peek(), 62);
+        assert_eq!(arp.advance_and_peek(), 66);
     }
 
     #[test]

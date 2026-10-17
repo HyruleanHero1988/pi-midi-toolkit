@@ -2,7 +2,7 @@
 //!
 //! Output and input are separate cpal streams so a USB mic can feed the Pi
 //! headphone jack. The input callback only writes a lock-free stereo ring; the
-//! output callback FIFO-drains it (with a small latency cushion) into
+//! output callback FIFO-drains it (keeping one output block queued) into
 //! [`jambox_core::JamboxEngine`] before punch-in.
 
 use std::cell::UnsafeCell;
@@ -21,13 +21,14 @@ const WATCH_POLL: Duration = Duration::from_millis(200);
 const BACKOFF_START: Duration = Duration::from_millis(500);
 const BACKOFF_MAX: Duration = Duration::from_secs(8);
 
-/// ~250 ms at 48 kHz. Jitter cushion — pull is FIFO with a small target
-/// latency; only catch-up-skips when fill exceeds the high-water mark.
-const RING_CAP: usize = 12_288;
-/// Keep about this much capture queued (smooth, still feels live).
-const TARGET_LAT_MS: u32 = 25;
-/// Only jump the read pointer when backlog exceeds this.
-const HIGH_LAT_MS: u32 = 70;
+/// ~340 ms at 48 kHz. Has to hold a full headphone period plus cushion.
+const RING_CAP: usize = 16_384;
+/// Input kept after the samples this output block will consume.
+/// The headphone period is 4096 frames (~93 ms). A cushion shorter than that
+/// made every block skip, then hold the tail — a flat stretch on the wave.
+const CUSHION_MS: u32 = 80;
+/// Extra fill allowed above the cushion before the read pointer jumps ahead.
+const CATCHUP_MS: u32 = 80;
 /// Q0.32 fractional read position between input samples.
 const FRAC_ONE: u64 = 1u64 << 32;
 
@@ -134,9 +135,11 @@ impl CaptureRing {
 
     /// Output callback: FIFO drain with linear rate conversion.
     ///
-    /// Stays continuous across blocks (fractional phase). Only skips ahead when
-    /// fill exceeds [`HIGH_LAT_MS`], and then only down to [`TARGET_LAT_MS`] —
-    /// not every block. Short underruns hold the last sample instead of silence.
+    /// Stays continuous across blocks (fractional phase). The queue target is
+    /// one output block plus [`CUSHION_MS`], so a 48 kHz mic can fill a 44.1 kHz
+    /// headphone period without holding the last sample. The read pointer jumps
+    /// only when fill is another [`CATCHUP_MS`] above that. A real underrun
+    /// still holds the last sample.
     pub fn pull_resampled(&self, left: &mut [f32], right: &mut [f32], out_sr: u32) -> usize {
         let n = left.len().min(right.len());
         if n == 0 {
@@ -164,9 +167,7 @@ impl CaptureRing {
     ) -> usize {
         let mut r = self.read.load(Ordering::Relaxed);
         let mut available = w.wrapping_sub(r);
-        let high = ((u64::from(in_sr) * u64::from(HIGH_LAT_MS)) / 1000) as usize;
-        let target = ((u64::from(in_sr) * u64::from(TARGET_LAT_MS)) / 1000) as usize;
-        let target = target.max(32).min(high.saturating_sub(1).max(32));
+        let (target, high) = Self::queue_marks(in_sr, out_sr, left.len());
 
         if available > high {
             let skip = available - target;
@@ -222,6 +223,19 @@ impl CaptureRing {
         produced
     }
 
+    /// `(target, high)` in input samples. `target` is this output block plus
+    /// the cushion. `high` is where a late queue is skipped back to `target`.
+    fn queue_marks(in_sr: u32, out_sr: u32, out_frames: usize) -> (usize, usize) {
+        let need = ((u64::from(out_frames as u32) * u64::from(in_sr)) / u64::from(out_sr.max(1)))
+            as usize
+            + 4;
+        let cushion = ((u64::from(in_sr) * u64::from(CUSHION_MS)) / 1000) as usize;
+        let catchup = ((u64::from(in_sr) * u64::from(CATCHUP_MS)) / 1000) as usize;
+        let target = need + cushion.max(32);
+        let high = target + catchup.max(32);
+        (target, high)
+    }
+
     #[allow(dead_code)]
     pub fn available(&self) -> usize {
         let w = self.write.load(Ordering::Acquire);
@@ -236,6 +250,25 @@ impl Default for CaptureRing {
     }
 }
 
+/// HDMI / loopback / keyboard composite USB audio — skip unless the filter
+/// explicitly names that controller.
+pub fn skip_capture_name(name: &str, filter: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    if lower.contains("hdmi")
+        || lower.contains("monitor")
+        || lower.contains("pulse")
+        || lower.contains("jack")
+        || lower.contains("pipewire")
+    {
+        return true;
+    }
+    let filter = filter.trim();
+    if midi_core::port_looks_like_controller_io(name) {
+        return filter.is_empty() || !midi_core::port_looks_like_controller_io(filter);
+    }
+    false
+}
+
 /// Pick a capture device. Prefers a name substring; skips HDMI / soft plugins
 /// when possible; favors USB PnP / `hw:CARD=` mics over Pulse/Jack ghosts.
 pub fn pick_input(name_filter: &str) -> Result<Device, AudioError> {
@@ -247,12 +280,7 @@ pub fn pick_input(name_filter: &str) -> Result<Device, AudioError> {
         for device in devices {
             let name = device.name().unwrap_or_default();
             let lower = name.to_ascii_lowercase();
-            if lower.contains("hdmi")
-                || lower.contains("monitor")
-                || lower.contains("pulse")
-                || lower.contains("jack")
-                || lower.contains("pipewire")
-            {
+            if skip_capture_name(&name, &filter) {
                 continue;
             }
             if !filter.is_empty() && lower.contains(&filter) {
@@ -491,9 +519,7 @@ fn build_input_stream(
             device.build_input_stream(
                 config,
                 move |data: &[u16], _| {
-                    ring.push_interleaved(data, channels, |s| {
-                        (s as f32 / 65535.0) * 2.0 - 1.0
-                    });
+                    ring.push_interleaved(data, channels, |s| (s as f32 / 65535.0) * 2.0 - 1.0);
                 },
                 err_fn,
                 None,
@@ -609,18 +635,42 @@ mod tests {
     fn catch_up_only_when_above_high_water() {
         let ring = CaptureRing::new();
         ring.set_sample_rate(48_000);
-        // ~100 ms at 48 kHz — above HIGH_LAT_MS (70), so catch-up to ~25 ms.
-        let n = 4_800;
+        let (target, high) = CaptureRing::queue_marks(48_000, 48_000, 64);
+        let n = high + 500;
         let src: Vec<f32> = (0..n).map(|i| i as f32).collect();
         ring.push_interleaved(&src, 1, |s| s);
         let (dst, _, _) = pull(&ring, 64, 48_000);
-        // After catch-up, head should be near (n - target), not 0 and not n-64.
-        let target = (48_000 * TARGET_LAT_MS / 1000) as usize;
         let expected_head = n - target;
         assert!(
             (dst[0] - expected_head as f32).abs() < 2.0,
             "catch-up should land near target latency, got {} want ~{expected_head}",
             dst[0]
+        );
+    }
+
+    #[test]
+    fn headphone_block_stays_moving_when_a_period_is_queued() {
+        let ring = CaptureRing::new();
+        ring.set_sample_rate(48_000);
+        let out_frames = 4096;
+        let (target, _) = CaptureRing::queue_marks(48_000, 44_100, out_frames);
+        let src: Vec<f32> = (0..target).map(|i| ((i % 50) as f32) / 49.0).collect();
+        ring.push_interleaved(&src, 1, |s| s);
+        let (dst, _, got) = pull(&ring, out_frames, 44_100);
+        assert_eq!(got, out_frames);
+        let mut run = 1usize;
+        let mut flat = 1usize;
+        for pair in dst.windows(2) {
+            if (pair[1] - pair[0]).abs() < 1e-6 {
+                run += 1;
+                flat = flat.max(run);
+            } else {
+                run = 1;
+            }
+        }
+        assert!(
+            flat < 16,
+            "a held tail would draw a flat wave, longest run {flat}"
         );
     }
 
@@ -635,10 +685,10 @@ mod tests {
         // Extra sample must not displace older frames (drop newest).
         ring.push_interleaved(&[9_999.0f32], 1, |s| s);
         assert_eq!(ring.available(), max_fill);
-        // Full ring is above high-water, so pull catch-ups to target latency —
+        // Full ring is above high-water, so pull catch-ups to the cushion —
         // still reading the kept (older) timeline, never the dropped 9999.
-        let target = (48_000 * TARGET_LAT_MS / 1000) as usize;
-        let (dst, _, _) = pull(&ring, target.min(512), 48_000);
+        let (target, _) = CaptureRing::queue_marks(48_000, 48_000, 256);
+        let (dst, _, _) = pull(&ring, 256, 48_000);
         let expected_head = max_fill - target;
         assert!(
             (dst[0] - expected_head as f32).abs() < 2.0,
@@ -649,5 +699,14 @@ mod tests {
             dst.iter().all(|&s| (s - 9_999.0).abs() > 1.0),
             "dropped newest must not appear in output"
         );
+    }
+
+    #[test]
+    fn smk_usb_audio_is_not_the_default_mic() {
+        assert!(skip_capture_name("SMK-37 Elite USB Audio", ""));
+        assert!(skip_capture_name("SMK-37 Elite USB Audio", "usb"));
+        assert!(!skip_capture_name("SMK-37 Elite USB Audio", "smk"));
+        assert!(!skip_capture_name("USB PnP Sound Device", ""));
+        assert!(skip_capture_name("pulse", ""));
     }
 }

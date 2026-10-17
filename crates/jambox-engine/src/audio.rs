@@ -25,6 +25,7 @@ use tracing::{info, warn};
 
 use crate::bus::{AudioSide, StatusPacket};
 use crate::capture::CaptureRing;
+use crate::scope::ScopeTap;
 
 /// Conservative first explicit period; architecture primary target is 512.
 pub const PREFERRED_BLOCK: u32 = 512;
@@ -96,6 +97,7 @@ struct RenderState {
     input_l: Vec<f32>,
     input_r: Vec<f32>,
     capture: Arc<CaptureRing>,
+    scope: Arc<ScopeTap>,
     touch_scratch: [LatestTouch; MAX_TOUCH_VOICES + 3],
     peak_micros: u32,
     xruns: u64,
@@ -125,9 +127,11 @@ impl RenderState {
         sample_rate: u32,
         channels: u16,
         capture: Arc<CaptureRing>,
+        scope: Arc<ScopeTap>,
     ) -> Self {
         let mut engine = JamboxEngine::with_bank(sample_rate as f64, bank);
         engine.sync_fx_slots();
+        scope.set_rate(sample_rate);
         Self {
             audio,
             engine,
@@ -137,6 +141,7 @@ impl RenderState {
             input_l: vec![0.0; SCRATCH_FRAMES],
             input_r: vec![0.0; SCRATCH_FRAMES],
             capture,
+            scope,
             touch_scratch: [LatestTouch {
                 owner: 0,
                 x: 0.0,
@@ -155,6 +160,7 @@ impl RenderState {
         self.engine.set_sample_rate(sample_rate as f64);
         self.sample_rate = sample_rate;
         self.channels = channels;
+        self.scope.set_rate(sample_rate);
     }
 }
 
@@ -169,6 +175,11 @@ pub fn is_hdmi_output(name: &str) -> bool {
 pub fn is_analog_output(name: &str) -> bool {
     let n = name.to_ascii_lowercase();
     n.contains("headphone") || n.contains("bcm2835") || n.contains("analog")
+}
+
+fn filter_names_controller(filter: &str) -> bool {
+    let filter = filter.trim();
+    !filter.is_empty() && midi_core::port_looks_like_controller_io(filter)
 }
 
 /// Higher is better. HDMI names are not ranked here — callers skip them first.
@@ -194,6 +205,9 @@ pub fn select_output_name<'a>(names: &[&'a str], filter: &str) -> Option<&'a str
             if hdmi.is_none() {
                 hdmi = Some(*name);
             }
+            continue;
+        }
+        if midi_core::port_looks_like_controller_io(name) && !filter_names_controller(filter) {
             continue;
         }
         let rank = output_rank(name, filter);
@@ -268,6 +282,7 @@ pub fn spawn_output(
     preferred_frames: u32,
     health: Arc<AudioHealth>,
     capture: Arc<CaptureRing>,
+    scope: Arc<ScopeTap>,
     running: Arc<AtomicBool>,
 ) {
     let _ = std::thread::Builder::new()
@@ -280,6 +295,7 @@ pub fn spawn_output(
                 preferred_frames,
                 health,
                 capture,
+                scope,
                 running,
             )
         });
@@ -292,6 +308,7 @@ fn supervisor(
     preferred_frames: u32,
     health: Arc<AudioHealth>,
     capture: Arc<CaptureRing>,
+    scope: Arc<ScopeTap>,
     running: Arc<AtomicBool>,
 ) {
     let mut pending_audio = Some(audio);
@@ -345,6 +362,7 @@ fn supervisor(
                     sample_rate,
                     channels,
                     Arc::clone(&capture),
+                    Arc::clone(&scope),
                 )));
                 state.as_mut().expect("state just inserted")
             }
@@ -386,8 +404,17 @@ fn watch_stream(running: &AtomicBool, health: &AudioHealth) {
             break;
         }
         if health.error.load(Ordering::Relaxed) {
-            warn!("audio: output error — reopening stream");
-            break;
+            let last = health.last_callback_ms.load(Ordering::Relaxed);
+            let age = now_ms().saturating_sub(last);
+            // A POLLERR while the callback is still running is a glitch (another
+            // ALSA open, a late xrun). Reopening scans every plugin and is the
+            // silence you hear. Only reopen once the callback has actually stopped.
+            if last != 0 && age < 500 {
+                health.error.store(false, Ordering::Relaxed);
+            } else {
+                warn!("audio: output stalled — reopening stream");
+                break;
+            }
         }
         // Jack-detect often mutes the analog path after the stream is already
         // open. Re-apply the mixer for the first few seconds only.
@@ -431,9 +458,7 @@ fn restore_mixer() {
         // why sound stays dead until SET → AUDIO after a cable swap.
         for card in 0..4 {
             let card = card.to_string();
-            let info = Command::new("amixer")
-                .args(["-c", &card, "info"])
-                .output();
+            let info = Command::new("amixer").args(["-c", &card, "info"]).output();
             let info = info
                 .ok()
                 .filter(|o| o.status.success())
@@ -445,10 +470,7 @@ fn restore_mixer() {
             if info.contains("bcm2835") || info.contains("headphone") {
                 // Force analog. Auto-route stays on HDMI when the Klipsch aux
                 // load does not trip the Pi jack-detect pin.
-                quiet(
-                    Command::new("amixer")
-                        .args(["-q", "-c", &card, "cset", "numid=3", "1"]),
-                );
+                quiet(Command::new("amixer").args(["-q", "-c", &card, "cset", "numid=3", "1"]));
             }
             for ctrl in ["Headphone", "Headphones", "PCM", "Master", "Speaker"] {
                 quiet(Command::new("amixer").args(["-q", "-c", &card, "sset", ctrl, "unmute"]));
@@ -678,6 +700,62 @@ fn callback_body<S: Copy>(
     }
 
     drain(state);
+    // Dry passthrough owns this callback. A second ALSA playback stream
+    // reopens every plugin and POLLERRs the headphone device, so the capture
+    // ring is copied here and the synth / punch / bus FX render is skipped.
+    if state.engine.input_bypass() {
+        state
+            .engine
+            .apply_scheduled(&state.scheduled, &mut state.midi_out);
+        for (_frame, event) in state.midi_out.as_slice() {
+            let _ = state.audio.midi_out.push(*event);
+        }
+        state.midi_out.clear();
+        state.scheduled.clear();
+    }
+    if state.engine.input_bypass() {
+        let gain = state.engine.input_level();
+        let input_l = &mut state.input_l[..frames];
+        let input_r = &mut state.input_r[..frames];
+        state.capture.pull_resampled(input_l, input_r, sample_rate);
+        for i in 0..frames {
+            input_l[i] = (input_l[i] * gain).clamp(-1.0, 1.0);
+            input_r[i] = (input_r[i] * gain).clamp(-1.0, 1.0);
+        }
+        state.scope.push_channels(input_l, input_r);
+        for (i, frame_out) in data.chunks_mut(channels).enumerate() {
+            let l = block_sample(input_l, i);
+            let r = block_sample(input_r, i);
+            match frame_out.len() {
+                0 => {}
+                1 => frame_out[0] = to_sample(0.5 * (l + r)),
+                _ => {
+                    frame_out[0] = to_sample(l);
+                    frame_out[1] = to_sample(r);
+                    let mid = to_sample(0.5 * (l + r));
+                    for slot in frame_out.iter_mut().skip(2) {
+                        *slot = mid;
+                    }
+                }
+            }
+        }
+        let micros = started.elapsed().as_micros().min(u128::from(u32::MAX)) as u32;
+        state.peak_micros = state.peak_micros.max(micros);
+        let period_micros =
+            (frames as u64).saturating_mul(1_000_000) / u64::from(sample_rate.max(1));
+        if u64::from(micros) > period_micros && period_micros > 0 {
+            state.xruns = state.xruns.saturating_add(1);
+        }
+        publish_status(
+            &mut state.audio,
+            &state.engine,
+            frames as u32,
+            micros,
+            state.peak_micros,
+            state.xruns,
+        );
+        return;
+    }
     let n_touch = state.audio.latest.snapshot(&mut state.touch_scratch);
     state.engine.sync_touches(&state.touch_scratch[..n_touch]);
 
@@ -700,6 +778,7 @@ fn callback_body<S: Copy>(
     }
 
     let (left, right) = state.engine.last_stereo();
+    state.scope.push_channels(left, right);
     for (i, frame_out) in data.chunks_mut(channels).enumerate() {
         let l = block_sample(left, i);
         let r = block_sample(right, i);
@@ -812,6 +891,21 @@ mod tests {
     fn analog_preferred_over_usb_when_filter_empty() {
         let names = ["USB Audio Device", "bcm2835 Headphones"];
         assert_eq!(select_output_name(&names, ""), Some("bcm2835 Headphones"));
+    }
+
+    #[test]
+    fn smk_usb_audio_does_not_steal_headphones() {
+        let names = ["SMK-37 Elite USB Audio", "bcm2835 Headphones", "vc4-hdmi"];
+        assert_eq!(select_output_name(&names, ""), Some("bcm2835 Headphones"));
+        assert_eq!(
+            select_output_name(&names, "headphone"),
+            Some("bcm2835 Headphones")
+        );
+        assert_eq!(
+            select_output_name(&names, "smk"),
+            Some("SMK-37 Elite USB Audio"),
+            "SET→AUDIO can still pick the Elite card"
+        );
     }
 
     #[test]
