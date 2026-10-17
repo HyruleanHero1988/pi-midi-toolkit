@@ -18,15 +18,18 @@ use jambox_core::{
 use tracing::info;
 
 use crate::bus::{AudioSide, StatusPacket};
+use crate::scope::ScopeTap;
 
 pub fn run(
     sample_rate: u32,
     block: usize,
-    mut audio: AudioSide,
+    mut     audio: AudioSide,
     bank: WaveBank,
+    scope: Arc<ScopeTap>,
     running: Arc<AtomicBool>,
 ) {
     let mut engine = JamboxEngine::with_bank(sample_rate as f64, bank);
+    scope.set_rate(sample_rate);
     engine.sync_fx_slots();
     let mut midi_out = MidiOutSink::new();
     let mut scheduled: Vec<ScheduledCommand> = Vec::with_capacity(MAX_BLOCK_COMMANDS);
@@ -79,6 +82,7 @@ pub fn run(
         engine.sync_touches(&touch_scratch[..n_touch]);
 
         engine.render(&mut buf, &scheduled, &mut midi_out);
+        scope.push_block(&buf);
         for (_frame, event) in midi_out.as_slice() {
             let _ = audio.midi_out.push(*event);
         }

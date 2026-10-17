@@ -387,6 +387,8 @@ pub struct PunchRack {
     slice_phase: f32,
     crush_hold: f32,
     crush_left: u32,
+    /// Idle history. Off skips the ring until a buffer effect, LOCK, or GRAB needs it.
+    history: bool,
 }
 
 impl PunchRack {
@@ -432,7 +434,12 @@ impl PunchRack {
             slice_phase: 0.0,
             crush_hold: 0.0,
             crush_left: 0,
+            history: true,
         }
+    }
+
+    pub fn set_history(&mut self, on: bool) {
+        self.history = on;
     }
 
     pub fn buffer_prio(&self) -> PunchBufferPrio {
@@ -770,7 +777,12 @@ impl PunchRack {
 
         let locked = self.locked && self.lock_len >= 32;
         let lock_n = self.lock_len;
+        // The 4-second ring is one store per sample, but it runs on keys, drums,
+        // and mic even when no pad is armed. HIST off skips that idle pass.
+        // TAPE / RPT / DROP / LOCK / GRAB still record while they are on.
+        let record = self.history || tape_want || rpt_want || drop_want || self.locked || self.grabbing;
 
+        if record {
         for s in buf.iter_mut() {
             let idx = self.write;
             self.ring[idx] = *s;
@@ -862,6 +874,7 @@ impl PunchRack {
                 }
             }
             *s = wet;
+        }
         }
 
         let lpf = self.amount[PUNCH_LPF as usize];
@@ -1247,6 +1260,23 @@ mod tests {
         let mut quiet = [0.2f32; 64];
         p.process(&mut quiet, 120.0);
         assert!(quiet.iter().all(|v| (*v - 0.2).abs() < 1e-6));
+    }
+
+    #[test]
+    fn history_off_leaves_the_idle_ring_empty() {
+        let mut p = PunchRack::new(48_000.0);
+        p.set_history(false);
+        let mut loud = vec![0.9f32; 4000];
+        p.process(&mut loud, 120.0);
+        assert!(loud.iter().all(|v| (*v - 0.9).abs() < 1e-5));
+        p.set_locked(true);
+        let mut out = vec![0.0f32; 512];
+        p.process(&mut out, 120.0);
+        let peak = out.iter().fold(0.0f32, |a, b| a.max(b.abs()));
+        assert!(
+            peak < 0.05,
+            "HIST off still kept a pre-roll, peak={peak}"
+        );
     }
 
     #[test]

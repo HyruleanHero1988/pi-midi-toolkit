@@ -18,11 +18,12 @@ pub enum UiMode {
     Map,
     Ports,
     Log,
+    Wave,
     Settings,
 }
 
 impl UiMode {
-    pub const ALL: [UiMode; 17] = [
+    pub const ALL: [UiMode; 18] = [
         UiMode::Home,
         UiMode::Synth,
         UiMode::Fm,
@@ -39,6 +40,7 @@ impl UiMode {
         UiMode::Map,
         UiMode::Ports,
         UiMode::Log,
+        UiMode::Wave,
         UiMode::Settings,
     ];
 
@@ -60,6 +62,7 @@ impl UiMode {
             Self::Map => "MAP",
             Self::Ports => "PORT",
             Self::Log => "LOG",
+            Self::Wave => "WAV",
             Self::Settings => "SET",
         }
     }
@@ -82,6 +85,7 @@ impl UiMode {
             Self::Map => "MAP",
             Self::Ports => "PORTS",
             Self::Log => "LOG",
+            Self::Wave => "WAVE",
             Self::Settings => "SETTINGS",
         }
     }
@@ -101,7 +105,7 @@ mod tests {
 
     #[test]
     fn all_modes_round_trip() {
-        assert_eq!(UiMode::ALL.len(), 17);
+        assert_eq!(UiMode::ALL.len(), 18);
         for (i, mode) in UiMode::ALL.iter().enumerate() {
             assert_eq!(UiMode::from_index(i), Some(*mode));
             assert_eq!(mode.index(), i);

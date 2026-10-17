@@ -3,7 +3,7 @@
 use glow::{HasContext, NativeBuffer, NativeProgram, NativeTexture, NativeUniformLocation};
 
 use crate::font::{self, FontStyle};
-use crate::scene::{ColorQuad, GlyphQuad, Scene};
+use crate::scene::{ColorQuad, GlyphQuad, Scene, Stroke};
 
 const SCREEN_W: f32 = 800.0;
 const SCREEN_H: f32 = 480.0;
@@ -170,7 +170,7 @@ impl Renderer {
         }
     }
 
-    /// Draw the scene with two `glDrawArrays` calls (color quads, then glyphs).
+    /// Draw in submission order so a later fill covers earlier text.
     pub unsafe fn draw(&mut self, gl: &glow::Context, scene: &Scene) {
         let [cr, cg, cb, _] = unpack_rgb(scene.clear);
         gl.viewport(0, 0, 800, 480);
@@ -179,61 +179,105 @@ impl Renderer {
         gl.clear_color(cr, cg, cb, 1.0);
         gl.clear(glow::COLOR_BUFFER_BIT);
 
-        let mut color_verts = Vec::with_capacity(scene.color.len() * 6 * 6);
-        for q in &scene.color {
-            push_color_quad(&mut color_verts, q);
+        // Fills and strokes both go through the flat-color program, so they
+        // share one batch; a wave stroke is a triangle mesh, not GL lines
+        // (GLES 2 `glLineWidth` > 1 is unreliable on the Pi).
+        enum Batch<'a> {
+            Color(&'a ColorQuad),
+            Stroke(&'a Stroke),
+            Glyph(&'a GlyphQuad),
         }
-        gl.use_program(Some(self.color_prog));
-        gl.uniform_2_f32(Some(&self.color_screen), SCREEN_W, SCREEN_H);
-        gl.bind_buffer(glow::ARRAY_BUFFER, Some(self.color_vbo));
-        upload_f32(gl, &color_verts);
-        let color_stride = 6 * 4;
-        gl.enable_vertex_attrib_array(self.color_pos);
-        gl.vertex_attrib_pointer_f32(self.color_pos, 2, glow::FLOAT, false, color_stride, 0);
-        gl.enable_vertex_attrib_array(self.color_col);
-        gl.vertex_attrib_pointer_f32(self.color_col, 4, glow::FLOAT, false, color_stride, 8);
-        gl.draw_arrays(glow::TRIANGLES, 0, (color_verts.len() / 6) as i32);
-        gl.disable_vertex_attrib_array(self.color_pos);
-        gl.disable_vertex_attrib_array(self.color_col);
+        let mut items = Vec::new();
+        scene.paint(|op| match op {
+            crate::scene::PaintOp::Fill(quad) => items.push(Batch::Color(quad)),
+            crate::scene::PaintOp::Stroke(stroke) => items.push(Batch::Stroke(stroke)),
+            crate::scene::PaintOp::Glyph(glyph) => items.push(Batch::Glyph(glyph)),
+        });
 
-        let mut tex_verts = Vec::with_capacity(scene.glyphs.len() * 6 * 8);
-        for q in &scene.glyphs {
-            push_glyph_quad(&mut tex_verts, q);
+        let mut i = 0;
+        while i < items.len() {
+            match items[i] {
+                Batch::Color(_) | Batch::Stroke(_) => {
+                    let mut verts = Vec::new();
+                    while i < items.len() {
+                        match items[i] {
+                            Batch::Color(quad) => push_color_quad(&mut verts, quad),
+                            Batch::Stroke(stroke) => push_stroke(&mut verts, stroke),
+                            Batch::Glyph(_) => break,
+                        }
+                        i += 1;
+                    }
+                    gl.use_program(Some(self.color_prog));
+                    gl.uniform_2_f32(Some(&self.color_screen), SCREEN_W, SCREEN_H);
+                    gl.bind_buffer(glow::ARRAY_BUFFER, Some(self.color_vbo));
+                    upload_f32(gl, &verts);
+                    let color_stride = 6 * 4;
+                    gl.enable_vertex_attrib_array(self.color_pos);
+                    gl.vertex_attrib_pointer_f32(
+                        self.color_pos,
+                        2,
+                        glow::FLOAT,
+                        false,
+                        color_stride,
+                        0,
+                    );
+                    gl.enable_vertex_attrib_array(self.color_col);
+                    gl.vertex_attrib_pointer_f32(
+                        self.color_col,
+                        4,
+                        glow::FLOAT,
+                        false,
+                        color_stride,
+                        8,
+                    );
+                    gl.draw_arrays(glow::TRIANGLES, 0, (verts.len() / 6) as i32);
+                    gl.disable_vertex_attrib_array(self.color_pos);
+                    gl.disable_vertex_attrib_array(self.color_col);
+                }
+                Batch::Glyph(_) => {
+                    let mut verts = Vec::new();
+                    while i < items.len() {
+                        let Batch::Glyph(quad) = items[i] else { break };
+                        push_glyph_quad(&mut verts, quad);
+                        i += 1;
+                    }
+                    gl.enable(glow::BLEND);
+                    gl.blend_func(glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA);
+                    gl.use_program(Some(self.tex_prog));
+                    gl.uniform_2_f32(Some(&self.tex_screen), SCREEN_W, SCREEN_H);
+                    gl.uniform_1_i32(Some(&self.tex_sampler), 0);
+                    gl.active_texture(glow::TEXTURE0);
+                    let style = scene.font_style.resolved();
+                    let (atlas, linear) = match style {
+                        FontStyle::Smooth => (self.atlas_smooth, true),
+                        FontStyle::Retro => (self.atlas_retro, false),
+                    };
+                    gl.bind_texture(glow::TEXTURE_2D, Some(atlas));
+                    let filter = if linear {
+                        glow::LINEAR as i32
+                    } else {
+                        glow::NEAREST as i32
+                    };
+                    gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, filter);
+                    gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, filter);
+                    gl.bind_buffer(glow::ARRAY_BUFFER, Some(self.tex_vbo));
+                    upload_f32(gl, &verts);
+                    let tex_stride = 8 * 4;
+                    gl.enable_vertex_attrib_array(self.tex_pos);
+                    gl.vertex_attrib_pointer_f32(self.tex_pos, 2, glow::FLOAT, false, tex_stride, 0);
+                    gl.enable_vertex_attrib_array(self.tex_uv);
+                    gl.vertex_attrib_pointer_f32(self.tex_uv, 2, glow::FLOAT, false, tex_stride, 8);
+                    gl.enable_vertex_attrib_array(self.tex_col);
+                    gl.vertex_attrib_pointer_f32(self.tex_col, 4, glow::FLOAT, false, tex_stride, 16);
+                    gl.draw_arrays(glow::TRIANGLES, 0, (verts.len() / 8) as i32);
+                    gl.disable_vertex_attrib_array(self.tex_pos);
+                    gl.disable_vertex_attrib_array(self.tex_uv);
+                    gl.disable_vertex_attrib_array(self.tex_col);
+                    gl.bind_texture(glow::TEXTURE_2D, None);
+                    gl.disable(glow::BLEND);
+                }
+            }
         }
-        gl.enable(glow::BLEND);
-        gl.blend_func(glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA);
-        gl.use_program(Some(self.tex_prog));
-        gl.uniform_2_f32(Some(&self.tex_screen), SCREEN_W, SCREEN_H);
-        gl.uniform_1_i32(Some(&self.tex_sampler), 0);
-        gl.active_texture(glow::TEXTURE0);
-        let style = scene.font_style.resolved();
-        let (atlas, linear) = match style {
-            FontStyle::Smooth => (self.atlas_smooth, true),
-            FontStyle::Retro => (self.atlas_retro, false),
-        };
-        gl.bind_texture(glow::TEXTURE_2D, Some(atlas));
-        let filter = if linear {
-            glow::LINEAR as i32
-        } else {
-            glow::NEAREST as i32
-        };
-        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, filter);
-        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, filter);
-        gl.bind_buffer(glow::ARRAY_BUFFER, Some(self.tex_vbo));
-        upload_f32(gl, &tex_verts);
-        let tex_stride = 8 * 4;
-        gl.enable_vertex_attrib_array(self.tex_pos);
-        gl.vertex_attrib_pointer_f32(self.tex_pos, 2, glow::FLOAT, false, tex_stride, 0);
-        gl.enable_vertex_attrib_array(self.tex_uv);
-        gl.vertex_attrib_pointer_f32(self.tex_uv, 2, glow::FLOAT, false, tex_stride, 8);
-        gl.enable_vertex_attrib_array(self.tex_col);
-        gl.vertex_attrib_pointer_f32(self.tex_col, 4, glow::FLOAT, false, tex_stride, 16);
-        gl.draw_arrays(glow::TRIANGLES, 0, (tex_verts.len() / 8) as i32);
-        gl.disable_vertex_attrib_array(self.tex_pos);
-        gl.disable_vertex_attrib_array(self.tex_uv);
-        gl.disable_vertex_attrib_array(self.tex_col);
-        gl.bind_texture(glow::TEXTURE_2D, None);
-        gl.disable(glow::BLEND);
         gl.use_program(None);
     }
 }
@@ -313,6 +357,16 @@ fn push_color_quad(out: &mut Vec<f32>, q: &ColorQuad) {
         x0, y0, r, g, b, a, x1, y0, r, g, b, a, x1, y1, r, g, b, a, x0, y0, r, g, b, a, x1, y1, r,
         g, b, a, x0, y1, r, g, b, a,
     ]);
+}
+
+/// One stroke = one triangle mesh in the color vertex format (x, y, r, g, b, a).
+fn push_stroke(out: &mut Vec<f32>, stroke: &Stroke) {
+    let [r, g, b, a] = unpack_rgb(stroke.color);
+    let mesh = stroke.mesh();
+    out.reserve(mesh.len() * 6);
+    for [x, y] in mesh {
+        out.extend_from_slice(&[x, y, r, g, b, a]);
+    }
 }
 
 fn push_glyph_quad(out: &mut Vec<f32>, q: &GlyphQuad) {

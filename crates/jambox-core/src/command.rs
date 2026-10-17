@@ -174,6 +174,15 @@ pub enum Command {
     SetPunchBufferPrio {
         mode: u8,
     },
+    /// When false, idle punch racks skip the history ring. Armed buffer FX,
+    /// LOCK, and GRAB still record.
+    SetPunchHistory {
+        enabled: bool,
+    },
+    /// Dry capture on the headphone output. The audio callback skips render.
+    SetInputBypass {
+        enabled: bool,
+    },
     /// RPT refresh vs hold. See [`crate::PunchRptMode`].
     SetPunchRptMode {
         mode: u8,

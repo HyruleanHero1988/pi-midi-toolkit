@@ -25,6 +25,7 @@ use tracing::{info, warn};
 
 use crate::bus::{AudioSide, StatusPacket};
 use crate::capture::CaptureRing;
+use crate::scope::ScopeTap;
 
 /// Conservative first explicit period; architecture primary target is 512.
 pub const PREFERRED_BLOCK: u32 = 512;
@@ -95,6 +96,7 @@ struct RenderState {
     /// Mic / line samples for this output block (drained from [`CaptureRing`]).
     input: Vec<f32>,
     capture: Arc<CaptureRing>,
+    scope: Arc<ScopeTap>,
     touch_scratch: [LatestTouch; MAX_TOUCH_VOICES + 3],
     peak_micros: u32,
     xruns: u64,
@@ -124,9 +126,11 @@ impl RenderState {
         sample_rate: u32,
         channels: u16,
         capture: Arc<CaptureRing>,
+        scope: Arc<ScopeTap>,
     ) -> Self {
         let mut engine = JamboxEngine::with_bank(sample_rate as f64, bank);
         engine.sync_fx_slots();
+        scope.set_rate(sample_rate);
         Self {
             audio,
             engine,
@@ -135,6 +139,7 @@ impl RenderState {
             mono: vec![0.0; SCRATCH_FRAMES],
             input: vec![0.0; SCRATCH_FRAMES],
             capture,
+            scope,
             touch_scratch: [LatestTouch {
                 owner: 0,
                 x: 0.0,
@@ -153,6 +158,7 @@ impl RenderState {
         self.engine.set_sample_rate(sample_rate as f64);
         self.sample_rate = sample_rate;
         self.channels = channels;
+        self.scope.set_rate(sample_rate);
     }
 }
 
@@ -274,6 +280,7 @@ pub fn spawn_output(
     preferred_frames: u32,
     health: Arc<AudioHealth>,
     capture: Arc<CaptureRing>,
+    scope: Arc<ScopeTap>,
     running: Arc<AtomicBool>,
 ) {
     let _ = std::thread::Builder::new()
@@ -286,6 +293,7 @@ pub fn spawn_output(
                 preferred_frames,
                 health,
                 capture,
+                scope,
                 running,
             )
         });
@@ -298,6 +306,7 @@ fn supervisor(
     preferred_frames: u32,
     health: Arc<AudioHealth>,
     capture: Arc<CaptureRing>,
+    scope: Arc<ScopeTap>,
     running: Arc<AtomicBool>,
 ) {
     let mut pending_audio = Some(audio);
@@ -351,6 +360,7 @@ fn supervisor(
                     sample_rate,
                     channels,
                     Arc::clone(&capture),
+                    Arc::clone(&scope),
                 )));
                 state.as_mut().expect("state just inserted")
             }
@@ -392,8 +402,17 @@ fn watch_stream(running: &AtomicBool, health: &AudioHealth) {
             break;
         }
         if health.error.load(Ordering::Relaxed) {
-            warn!("audio: output error — reopening stream");
-            break;
+            let last = health.last_callback_ms.load(Ordering::Relaxed);
+            let age = now_ms().saturating_sub(last);
+            // A POLLERR while the callback is still running is a glitch (another
+            // ALSA open, a late xrun). Reopening scans every plugin and is the
+            // silence you hear. Only reopen once the callback has actually stopped.
+            if last != 0 && age < 500 {
+                health.error.store(false, Ordering::Relaxed);
+            } else {
+                warn!("audio: output stalled — reopening stream");
+                break;
+            }
         }
         // Jack-detect often mutes the analog path after the stream is already
         // open. Re-apply the mixer for the first few seconds only.
@@ -679,6 +698,50 @@ fn callback_body<S: Copy>(
     }
 
     drain(state);
+    // Dry passthrough owns this callback. A second ALSA playback stream
+    // reopens every plugin and POLLERRs the headphone device, so the capture
+    // ring is copied here and the synth / punch / bus FX render is skipped.
+    if state.engine.input_bypass() {
+        state
+            .engine
+            .apply_scheduled(&state.scheduled, &mut state.midi_out);
+        for (_frame, event) in state.midi_out.as_slice() {
+            let _ = state.audio.midi_out.push(*event);
+        }
+        state.midi_out.clear();
+        state.scheduled.clear();
+    }
+    if state.engine.input_bypass() {
+        let gain = state.engine.input_level();
+        let block = &mut state.mono[..frames];
+        state.capture.pull_resampled(block, sample_rate);
+        for sample in block.iter_mut() {
+            *sample = (*sample * gain).clamp(-1.0, 1.0);
+        }
+        state.scope.push_block(block);
+        for (i, frame_out) in data.chunks_mut(channels).enumerate() {
+            let sample = to_sample(block_sample(&state.mono, i));
+            for slot in frame_out.iter_mut() {
+                *slot = sample;
+            }
+        }
+        let micros = started.elapsed().as_micros().min(u128::from(u32::MAX)) as u32;
+        state.peak_micros = state.peak_micros.max(micros);
+        let period_micros =
+            (frames as u64).saturating_mul(1_000_000) / u64::from(sample_rate.max(1));
+        if u64::from(micros) > period_micros && period_micros > 0 {
+            state.xruns = state.xruns.saturating_add(1);
+        }
+        publish_status(
+            &mut state.audio,
+            &state.engine,
+            frames as u32,
+            micros,
+            state.peak_micros,
+            state.xruns,
+        );
+        return;
+    }
     let n_touch = state.audio.latest.snapshot(&mut state.touch_scratch);
     state.engine.sync_touches(&state.touch_scratch[..n_touch]);
 
@@ -698,6 +761,8 @@ fn callback_body<S: Copy>(
         }
         offset += n;
     }
+
+    state.scope.push_block(&state.mono[..frames]);
 
     for (i, frame_out) in data.chunks_mut(channels).enumerate() {
         let sample = to_sample(block_sample(&state.mono, i));

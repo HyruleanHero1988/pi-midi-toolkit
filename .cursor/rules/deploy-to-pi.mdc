@@ -1,0 +1,33 @@
+---
+description: After finishing requested work, automatically deploy to the lab Pi
+alwaysApply: true
+---
+
+# Always deploy when the work is done
+
+When the user asks you to do something and you finish it, deploy to the lab Pi in the same turn. Do not wait to be asked. "Please deploy" is not a separate step.
+
+Skip deploy only when the work cannot affect the device: a question, a commit/PR-only request, or docs/comments with no runtime change.
+
+1. Cross-build only the packages you changed:
+   `.\deploy\build-pi-bins.ps1 -Packages "pidi-native"`
+   (add `jambox-engine` / `midi-engine` if those crates changed)
+2. Then upload and restart the kiosk:
+   `python deploy_master.py`
+
+The Pi runs the prebuilt armv7 bins in `dist/armv7`. A Windows debug test is not enough. Build must go through Ubuntu-22.04 WSL (glibc 2.35) so Bookworm can start the binary.
+
+Do not commit or push unless asked. Deploy is separate from git.
+
+# Talking to the Pi (SSH diagnostics)
+
+Do **not** invent one-off `tmp_*.py` SSH scripts. Use the shared helper:
+
+`python deploy/pi_talk.py <command>`
+
+Common commands: `status`, `audio`, `logs -n 80`, `restart`,
+`run -- <remote shell>`, `sudo <remote>`, `put` / `get`,
+`bash <local.sh>`, `py <local.py>`.
+
+Credentials: `apps/pidi/.pi-credentials` (same as deploy). Prefer `run` /
+`bash` / `py` over embedding long remote heredocs in PowerShell.

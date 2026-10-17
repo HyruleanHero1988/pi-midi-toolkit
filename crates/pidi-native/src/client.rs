@@ -3,11 +3,11 @@
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use jambox_protocol::{
-    MidiNotice, MidiPortsReply, RepeatDivision, RepeatPhase, Request, Response, StatusReply,
-    TouchPhase, WireClipEvent, WireClipVoice, PROTOCOL_VERSION,
+    MidiNotice, MidiPortsReply, RepeatDivision, RepeatPhase, Request, Response, ScopeReply,
+    StatusReply, TouchPhase, WireClipEvent, WireClipVoice, PROTOCOL_VERSION,
 };
 use tracing::{info, warn};
 
@@ -267,15 +267,25 @@ impl Outbox {
     }
 
     pub fn punch_lock(&mut self, source: u8, locked: bool) {
-        self.reliable.push_back(Request::PunchLock { source, locked });
+        self.reliable
+            .push_back(Request::PunchLock { source, locked });
     }
 
     pub fn punch_grab(&mut self, source: u8, active: bool) {
-        self.reliable.push_back(Request::PunchGrab { source, active });
+        self.reliable
+            .push_back(Request::PunchGrab { source, active });
     }
 
     pub fn punch_buffer_prio(&mut self, mode: u8) {
         self.reliable.push_back(Request::PunchBufferPrio { mode });
+    }
+
+    pub fn punch_history(&mut self, enabled: bool) {
+        self.reliable.push_back(Request::PunchHistory { enabled });
+    }
+
+    pub fn input_bypass(&mut self, enabled: bool) {
+        self.reliable.push_back(Request::InputBypass { enabled });
     }
 
     pub fn punch_rpt_mode(&mut self, mode: u8) {
@@ -308,9 +318,26 @@ impl Outbox {
         control: Option<u8>,
         value: Option<u16>,
     ) {
+        let channel = channel & 0x0f;
+        if kind == "pitch_bend" {
+            for req in self.reliable.iter_mut().rev() {
+                if let Request::MidiEmit {
+                    kind: queued,
+                    channel: queued_ch,
+                    value: queued_value,
+                    ..
+                } = req
+                {
+                    if queued == "pitch_bend" && *queued_ch == channel {
+                        *queued_value = value;
+                        return;
+                    }
+                }
+            }
+        }
         self.reliable.push_back(Request::MidiEmit {
             kind: kind.to_string(),
-            channel: channel & 0x0f,
+            channel,
             note,
             velocity,
             control,
@@ -345,7 +372,8 @@ impl Outbox {
     }
 
     pub fn set_arp_step(&mut self, index: u8, interval: i8) {
-        self.reliable.push_back(Request::SetArpStep { index, interval });
+        self.reliable
+            .push_back(Request::SetArpStep { index, interval });
     }
 
     pub fn set_arp_len(&mut self, len: u8) {
@@ -356,12 +384,17 @@ impl Outbox {
         self.reliable.push_back(Request::Status);
     }
 
+    pub fn scope(&mut self, wave: bool, sub_hz: f32) {
+        self.reliable.push_back(Request::Scope { wave, sub_hz });
+    }
+
     pub fn midi_ports(&mut self) {
         self.reliable.push_back(Request::MidiPorts);
     }
 
     pub fn midi_select(&mut self, input: Option<String>, output: Option<String>) {
-        self.reliable.push_back(Request::MidiSelect { input, output });
+        self.reliable
+            .push_back(Request::MidiSelect { input, output });
     }
 
     pub fn channel_map(&mut self, bits: [u16; 16]) {
@@ -373,7 +406,8 @@ impl Outbox {
     }
 
     pub fn drum_repeat_map(&mut self, slots: [u8; 16], latch: bool) {
-        self.reliable.push_back(Request::DrumRepeat { slots, latch });
+        self.reliable
+            .push_back(Request::DrumRepeat { slots, latch });
     }
 
     pub fn hello(&mut self) {
@@ -414,6 +448,10 @@ pub struct NativeClient {
     reader: Option<BufReader<Stream>>,
     pub outbox: Outbox,
     pub last_status: StatusReply,
+    pub last_scope: ScopeReply,
+    /// True while a scope request is on the wire. A late reply still updates the picture.
+    pub scope_waiting: bool,
+    pub scope_sent: Instant,
     pub last_midi_ports: MidiPortsReply,
     pub midi_inbox: Vec<MidiNotice>,
     pub connected: bool,
@@ -428,6 +466,9 @@ impl NativeClient {
             reader: None,
             outbox: Outbox::new(),
             last_status: StatusReply::default(),
+            last_scope: ScopeReply::default(),
+            scope_waiting: false,
+            scope_sent: Instant::now(),
             last_midi_ports: MidiPortsReply::default(),
             midi_inbox: Vec::new(),
             connected: false,
@@ -521,6 +562,10 @@ impl NativeClient {
                     if let Ok(response) = serde_json::from_str::<Response>(line.trim()) {
                         match response {
                             Response::Status(status) => self.last_status = status,
+                            Response::Scope(scope) => {
+                                self.last_scope = scope;
+                                self.scope_waiting = false;
+                            }
                             Response::Midi(notice) => self.midi_inbox.push(notice),
                             Response::MidiPorts(ports) => self.last_midi_ports = ports,
                             _ => {}
