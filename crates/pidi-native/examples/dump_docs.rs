@@ -29,6 +29,15 @@ fn isolate_session() {
     let _ = std::fs::create_dir_all("/tmp/pidi-docs-songs");
 }
 
+fn fill_demo_stereo(model: &mut NativeModel) {
+    let n = model.wave_left.len();
+    for i in 0..n {
+        let t = i as f32 / n as f32;
+        model.wave_left[i] = ((t * std::f32::consts::TAU).sin() * 0.7 * 32767.0) as i16;
+        model.wave_right[i] = ((t * std::f32::consts::TAU + 1.2).sin() * 0.55 * 32767.0) as i16;
+    }
+}
+
 fn dump(model: &NativeModel, dir: &Path, name: &str) {
     let mut frame = Frame::new();
     render::draw(&mut frame, model);
@@ -95,6 +104,7 @@ fn main() {
     {
         let (mut model, mut ob) = fresh();
         model.set_mode(UiMode::Synth);
+        fill_demo_stereo(&mut model);
         tick_n(&mut model, &mut ob, 2);
         dump(&model, &out, "01-synth");
     }
@@ -308,6 +318,7 @@ fn main() {
     {
         let (mut model, mut ob) = fresh();
         model.set_mode(UiMode::Synth);
+        fill_demo_stereo(&mut model);
         let vib = model.layout.synth_vib;
         tap(&mut model, 1, vib, &mut ob);
         tick_n(&mut model, &mut ob, 2);

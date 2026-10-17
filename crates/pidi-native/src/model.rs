@@ -206,8 +206,8 @@ pub struct NativeModel {
     /// Master-mix scope. Each column is the min and max sample in that pixel.
     pub scope_min: [i16; jambox_protocol::SCOPE_COLUMNS],
     pub scope_max: [i16; jambox_protocol::SCOPE_COLUMNS],
-    /// Synth and FM scope squares. True draws the master mix; false draws the
-    /// calculated oscillator cycle.
+    /// Synth and FM scope squares. True draws live left/right mix traces;
+    /// false draws the calculated oscillator cycle.
     pub scope_live: bool,
     /// Left, right, and sub wave layout.
     pub wave_signals: [crate::wave_viz::WaveSignal; 3],

@@ -2399,7 +2399,7 @@ fn draw_synth_scope(scene: &mut Scene, model: &NativeModel) {
     let rect = model.layout.synth_scope_rect();
     if model.scope_live {
         paint_scope_grid(scene, rect);
-        draw_live_scope(scene, rect, model, 0xb8bb26);
+        draw_live_stereo_scope(scene, rect, model, 0xb8bb26);
         return;
     }
     let table = model
@@ -2422,6 +2422,52 @@ fn paint_scope_grid(scene: &mut Scene, rect: Rect) {
 /// sample in that column, so this is a fill, not a subsampled polyline.
 fn draw_live_scope(scene: &mut Scene, rect: Rect, model: &NativeModel, color: u32) {
     draw_span_scope(scene, rect, &model.scope_min, &model.scope_max, color);
+}
+
+const SCOPE_LEFT: u32 = 0x458588;
+const SCOPE_RIGHT: u32 = 0xfe8019;
+
+/// LIVE synth/FM square: actual left and right mix as two traces. Falls back
+/// to the triggered min/max fill when those buffers are still empty.
+fn draw_live_stereo_scope(scene: &mut Scene, rect: Rect, model: &NativeModel, fallback: u32) {
+    if draw_dual_wave_traces(scene, rect, &model.wave_left, &model.wave_right) {
+        scene.text_scaled(rect.x + 6, rect.y + rect.h - 14, "L/R", 0x83a598, 1);
+        return;
+    }
+    draw_span_scope(scene, rect, &model.scope_min, &model.scope_max, fallback);
+}
+
+fn draw_dual_wave_traces(scene: &mut Scene, rect: Rect, left: &[i16], right: &[i16]) -> bool {
+    if !wave_energy(left) && !wave_energy(right) {
+        return false;
+    }
+    scene.stroke(&scope_polyline(rect, left), SCOPE_LEFT, 2.0);
+    scene.stroke(&scope_polyline(rect, right), SCOPE_RIGHT, 2.0);
+    true
+}
+
+fn wave_energy(samples: &[i16]) -> bool {
+    samples.iter().any(|s| s.unsigned_abs() > 32)
+}
+
+fn scope_polyline(rect: Rect, samples: &[i16]) -> Vec<(f32, f32)> {
+    if samples.is_empty() {
+        return Vec::new();
+    }
+    let pad = 2.0;
+    let inner_w = (rect.w as f32 - pad * 2.0).max(1.0);
+    let mid = rect.y as f32 + rect.h as f32 * 0.5;
+    let amp = (rect.h as f32 * 0.42).max(4.0);
+    let last = samples.len().saturating_sub(1).max(1) as f32;
+    samples
+        .iter()
+        .enumerate()
+        .map(|(i, sample)| {
+            let x = rect.x as f32 + pad + i as f32 * inner_w / last;
+            let y = mid - (*sample as f32 / 32767.0) * amp;
+            (x, y)
+        })
+        .collect()
 }
 
 /// One calculated cycle, binned the same way as the live trace.
@@ -2713,7 +2759,7 @@ fn draw_fm_scope(scene: &mut Scene, model: &NativeModel) {
     let rect = model.layout.fm_scope();
     if model.scope_live {
         paint_scope_grid(scene, rect);
-        draw_live_scope(scene, rect, model, 0x8ec07c);
+        draw_live_stereo_scope(scene, rect, model, 0x8ec07c);
     } else {
         let mut cycle = [0.0f32; 256];
         jambox_core::FmSynth::preview_cycle(model.fm_patch(), &mut cycle);
@@ -4749,6 +4795,51 @@ mod tests {
             quiet.color.len(),
             "wave samples must not change the number of color quads"
         );
+    }
+
+    #[test]
+    fn synth_live_scope_draws_left_and_right_traces() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Synth);
+        model.scope_live = true;
+        for (i, s) in model.wave_left.iter_mut().enumerate() {
+            *s = ((i % 7) as i16 - 3) * 4000;
+        }
+        for (i, s) in model.wave_right.iter_mut().enumerate() {
+            *s = ((i % 5) as i16 - 2) * 6000;
+        }
+        let scene = build(&model);
+        let left = scene
+            .strokes
+            .iter()
+            .find(|s| s.color == SCOPE_LEFT)
+            .expect("left trace");
+        let right = scene
+            .strokes
+            .iter()
+            .find(|s| s.color == SCOPE_RIGHT)
+            .expect("right trace");
+        assert!(left.points.len() >= jambox_protocol::WAVE_VIZ_POINTS);
+        assert!(right.points.len() >= jambox_protocol::WAVE_VIZ_POINTS);
+        assert_ne!(left.points, right.points, "L and R collapsed into one path");
+        let ys_differ = left
+            .points
+            .iter()
+            .zip(right.points.iter())
+            .any(|(l, r)| (l.1 - r.1).abs() > 1.0);
+        assert!(ys_differ, "L and R traces occupy the same line");
+    }
+
+    #[test]
+    fn fm_live_scope_draws_left_and_right_traces() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Fm);
+        model.scope_live = true;
+        model.wave_left[8] = 12_000;
+        model.wave_right[8] = -12_000;
+        let scene = build(&model);
+        assert!(scene.strokes.iter().any(|s| s.color == SCOPE_LEFT));
+        assert!(scene.strokes.iter().any(|s| s.color == SCOPE_RIGHT));
     }
 
     #[test]

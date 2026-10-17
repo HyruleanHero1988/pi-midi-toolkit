@@ -12,6 +12,15 @@ use pidi_native::mode::UiMode;
 use pidi_native::model::NativeModel;
 use pidi_native::render::{self, Frame};
 
+fn fill_demo_stereo(model: &mut NativeModel) {
+    let n = model.wave_left.len();
+    for i in 0..n {
+        let t = i as f32 / n as f32;
+        model.wave_left[i] = ((t * std::f32::consts::TAU).sin() * 0.7 * 32767.0) as i16;
+        model.wave_right[i] = ((t * std::f32::consts::TAU + 1.2).sin() * 0.55 * 32767.0) as i16;
+    }
+}
+
 fn dump(model: &NativeModel, path: PathBuf) {
     let mut frame = Frame::new();
     render::draw(&mut frame, model);
@@ -58,6 +67,9 @@ fn main() {
         let mut model = NativeModel::new();
         let mut ob = Outbox::new();
         model.set_mode(mode);
+        if matches!(mode, UiMode::Synth | UiMode::Fm) {
+            fill_demo_stereo(&mut model);
+        }
         model.tick(1.0 / 60.0, &mut ob);
         dump(&model, out.join(format!("{name}.ppm")));
     }
@@ -82,6 +94,9 @@ fn main() {
         model.font_style = FontStyle::Smooth;
         let mut ob = Outbox::new();
         model.set_mode(mode);
+        if mode == UiMode::Synth {
+            fill_demo_stereo(&mut model);
+        }
         model.tick(1.0 / 60.0, &mut ob);
         dump(&model, out.join(format!("{name}_smooth.ppm")));
     }
@@ -100,6 +115,7 @@ fn main() {
         let mut model = NativeModel::new();
         let mut ob = Outbox::new();
         model.set_mode(UiMode::Synth);
+        fill_demo_stereo(&mut model);
         let b = model.layout.synth_vib;
         model.finger_down(1, b.x + 4, b.y + 4, &mut ob);
         model.finger_up(1, &mut ob);
@@ -120,6 +136,7 @@ fn main() {
         let mut model = NativeModel::new();
         let mut ob = Outbox::new();
         model.set_mode(UiMode::Fm);
+        fill_demo_stereo(&mut model);
         model.tick(1.0 / 60.0, &mut ob);
         load_fm_patch(&mut model, &mut ob, 7);
         model.tick(1.0 / 60.0, &mut ob);
@@ -129,6 +146,7 @@ fn main() {
             let mut rec = NativeModel::new();
             let mut ob2 = Outbox::new();
             rec.set_mode(UiMode::Fm);
+            fill_demo_stereo(&mut rec);
             rec.tick(1.0 / 60.0, &mut ob2);
             load_fm_patch(&mut rec, &mut ob2, index);
             rec.tick(1.0 / 60.0, &mut ob2);
@@ -244,13 +262,7 @@ fn main() {
         let mut model = NativeModel::new();
         let mut ob = Outbox::new();
         model.set_mode(UiMode::Wave);
-        let n = model.wave_left.len();
-        for i in 0..n {
-            let t = i as f32 / n as f32;
-            model.wave_left[i] = ((t * std::f32::consts::TAU).sin() * 0.7 * 32767.0) as i16;
-            model.wave_right[i] =
-                ((t * std::f32::consts::TAU + 1.2).sin() * 0.55 * 32767.0) as i16;
-        }
+        fill_demo_stereo(&mut model);
         model.tick(1.0 / 60.0, &mut ob);
         dump(&model, out.join("wave_stereo.ppm"));
     }

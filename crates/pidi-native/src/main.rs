@@ -146,12 +146,21 @@ fn main() {
             client.scope_waiting = false;
         }
         if client.connected && !client.scope_waiting {
-            let wave = model.mode == pidi_native::mode::UiMode::Wave;
-            // The wave picture is three full traces. 30 Hz is enough to look
-            // live and leaves the audio callback its period.
+            let wave = matches!(
+                model.mode,
+                pidi_native::mode::UiMode::Wave
+                    | pidi_native::mode::UiMode::Synth
+                    | pidi_native::mode::UiMode::Fm
+            );
+            // Stereo traces are 256 points each. 30 Hz is enough to look live
+            // and leaves the audio callback its period.
             let due = !wave || client.scope_sent.elapsed() > Duration::from_millis(33);
             if due {
-                let sub_hz = if wave { model.wave_sub_hz } else { 0.0 };
+                let sub_hz = if model.mode == pidi_native::mode::UiMode::Wave {
+                    model.wave_sub_hz
+                } else {
+                    0.0
+                };
                 client.outbox.scope(wave, sub_hz);
                 client.scope_waiting = true;
                 client.scope_sent = Instant::now();
