@@ -1,7 +1,7 @@
 //! Live audio capture → master bus.
 //!
 //! Output and input are separate cpal streams so a USB mic can feed the Pi
-//! headphone jack. The input callback only writes a lock-free mono ring; the
+//! headphone jack. The input callback only writes a lock-free stereo ring; the
 //! output callback FIFO-drains it (with a small latency cushion) into
 //! [`jambox_core::JamboxEngine`] before punch-in.
 
@@ -31,7 +31,8 @@ const HIGH_LAT_MS: u32 = 70;
 /// Q0.32 fractional read position between input samples.
 const FRAC_ONE: u64 = 1u64 << 32;
 
-/// Single-producer / single-consumer mono ring. Capacity is power-of-two.
+/// Single-producer / single-consumer stereo ring (interleaved L/R). Capacity
+/// is power-of-two **frames**.
 pub struct CaptureRing {
     buf: Box<[UnsafeCell<f32>]>,
     mask: usize,
@@ -41,8 +42,9 @@ pub struct CaptureRing {
     sample_rate: AtomicU32,
     /// Fractional input position for continuous rate conversion (Q0.32).
     read_frac: AtomicU64,
-    /// Last output sample (bit pattern) — held across short underruns.
-    hold_bits: AtomicU32,
+    /// Last output samples (bit patterns) — held across short underruns.
+    hold_l: AtomicU32,
+    hold_r: AtomicU32,
 }
 
 // SAFETY: one writer thread, one reader thread; indices are atomic; slots are
@@ -53,8 +55,8 @@ unsafe impl Send for CaptureRing {}
 impl CaptureRing {
     pub fn new() -> Self {
         let cap = RING_CAP.next_power_of_two();
-        let mut slots = Vec::with_capacity(cap);
-        for _ in 0..cap {
+        let mut slots = Vec::with_capacity(cap * 2);
+        for _ in 0..cap * 2 {
             slots.push(UnsafeCell::new(0.0));
         }
         Self {
@@ -64,7 +66,8 @@ impl CaptureRing {
             read: AtomicUsize::new(0),
             sample_rate: AtomicU32::new(0),
             read_frac: AtomicU64::new(0),
-            hold_bits: AtomicU32::new(0.0f32.to_bits()),
+            hold_l: AtomicU32::new(0.0f32.to_bits()),
+            hold_r: AtomicU32::new(0.0f32.to_bits()),
         }
     }
 
@@ -81,10 +84,16 @@ impl CaptureRing {
         self.read
             .store(self.write.load(Ordering::Acquire), Ordering::Release);
         self.read_frac.store(0, Ordering::Release);
-        self.hold_bits.store(0.0f32.to_bits(), Ordering::Relaxed);
+        self.hold_l.store(0.0f32.to_bits(), Ordering::Relaxed);
+        self.hold_r.store(0.0f32.to_bits(), Ordering::Relaxed);
     }
 
-    /// Input callback: push interleaved samples as mono (avg of channels).
+    fn frame_cap(&self) -> usize {
+        self.mask + 1
+    }
+
+    /// Input callback: push interleaved samples as stereo (L/R).
+    /// Mono sources are duplicated. Extra channels beyond 2 are ignored.
     /// If the ring is full, newest frames are dropped so the reader keeps a
     /// continuous stream (producer never races the read index).
     pub fn push_interleaved<S>(&self, data: &[S], channels: usize, to_f32: impl Fn(S) -> f32)
@@ -98,7 +107,7 @@ impl CaptureRing {
         }
         let mut w = self.write.load(Ordering::Relaxed);
         let r = self.read.load(Ordering::Acquire);
-        let max_fill = self.buf.len().saturating_sub(1);
+        let max_fill = self.frame_cap().saturating_sub(1);
         for i in 0..frames {
             let filled = w.wrapping_sub(r);
             if filled >= max_fill {
@@ -106,14 +115,17 @@ impl CaptureRing {
                 continue;
             }
             let base = i * channels;
-            let mut sum = 0.0f32;
-            for c in 0..channels {
-                sum += to_f32(data[base + c]);
-            }
-            let mono = sum / channels as f32;
-            // SAFETY: writer owns slot `w`; reader has not claimed it yet.
+            let left = to_f32(data[base]);
+            let right = if channels > 1 {
+                to_f32(data[base + 1])
+            } else {
+                left
+            };
+            let slot = (w & self.mask) * 2;
+            // SAFETY: writer owns frame `w`; reader has not claimed it yet.
             unsafe {
-                *self.buf[w & self.mask].get() = mono;
+                *self.buf[slot].get() = left;
+                *self.buf[slot + 1].get() = right;
             }
             w = w.wrapping_add(1);
         }
@@ -125,22 +137,27 @@ impl CaptureRing {
     /// Stays continuous across blocks (fractional phase). Only skips ahead when
     /// fill exceeds [`HIGH_LAT_MS`], and then only down to [`TARGET_LAT_MS`] —
     /// not every block. Short underruns hold the last sample instead of silence.
-    pub fn pull_resampled(&self, dst: &mut [f32], out_sr: u32) -> usize {
-        if dst.is_empty() {
+    pub fn pull_resampled(&self, left: &mut [f32], right: &mut [f32], out_sr: u32) -> usize {
+        let n = left.len().min(right.len());
+        if n == 0 {
             return 0;
         }
+        let left = &mut left[..n];
+        let right = &mut right[..n];
         let in_sr = self.sample_rate.load(Ordering::Relaxed);
         if in_sr == 0 || out_sr == 0 {
-            dst.fill(0.0);
+            left.fill(0.0);
+            right.fill(0.0);
             return 0;
         }
         let w = self.write.load(Ordering::Acquire);
-        self.pull_resampled_inner(dst, in_sr, out_sr, w)
+        self.pull_resampled_inner(left, right, in_sr, out_sr, w)
     }
 
     fn pull_resampled_inner(
         &self,
-        dst: &mut [f32],
+        left: &mut [f32],
+        right: &mut [f32],
         in_sr: u32,
         out_sr: u32,
         w: usize,
@@ -164,25 +181,32 @@ impl CaptureRing {
         } else {
             ((u128::from(in_sr) << 32) / u128::from(out_sr.max(1))) as u64
         };
-        let mut hold = f32::from_bits(self.hold_bits.load(Ordering::Relaxed));
+        let mut hold_l = f32::from_bits(self.hold_l.load(Ordering::Relaxed));
+        let mut hold_r = f32::from_bits(self.hold_r.load(Ordering::Relaxed));
         let mut produced = 0usize;
         let mut whole_consumed = 0usize;
 
-        for slot in dst.iter_mut() {
+        for (dst_l, dst_r) in left.iter_mut().zip(right.iter_mut()) {
             if whole_consumed >= available {
-                *slot = hold;
+                *dst_l = hold_l;
+                *dst_r = hold_r;
                 continue;
             }
             let frac_f = (frac as f32) * (1.0 / FRAC_ONE as f32);
-            let s0 = unsafe { *self.buf[r.wrapping_add(whole_consumed) & self.mask].get() };
-            let s1 = if whole_consumed + 1 < available {
-                unsafe { *self.buf[r.wrapping_add(whole_consumed + 1) & self.mask].get() }
+            let i0 = (r.wrapping_add(whole_consumed) & self.mask) * 2;
+            let (l0, r0) = unsafe { (*self.buf[i0].get(), *self.buf[i0 + 1].get()) };
+            let (l1, r1) = if whole_consumed + 1 < available {
+                let i1 = (r.wrapping_add(whole_consumed + 1) & self.mask) * 2;
+                unsafe { (*self.buf[i1].get(), *self.buf[i1 + 1].get()) }
             } else {
-                s0
+                (l0, r0)
             };
-            let sample = s0 + (s1 - s0) * frac_f;
-            *slot = sample;
-            hold = sample;
+            let sample_l = l0 + (l1 - l0) * frac_f;
+            let sample_r = r0 + (r1 - r0) * frac_f;
+            *dst_l = sample_l;
+            *dst_r = sample_r;
+            hold_l = sample_l;
+            hold_r = sample_r;
             produced += 1;
 
             let next = u128::from(frac) + u128::from(step);
@@ -193,7 +217,8 @@ impl CaptureRing {
         let advance = whole_consumed.min(available);
         self.read.store(r.wrapping_add(advance), Ordering::Release);
         self.read_frac.store(frac, Ordering::Release);
-        self.hold_bits.store(hold.to_bits(), Ordering::Relaxed);
+        self.hold_l.store(hold_l.to_bits(), Ordering::Relaxed);
+        self.hold_r.store(hold_r.to_bits(), Ordering::Relaxed);
         produced
     }
 
@@ -487,37 +512,47 @@ fn build_input_stream(
 mod tests {
     use super::*;
 
+    fn pull(ring: &CaptureRing, n: usize, sr: u32) -> (Vec<f32>, Vec<f32>, usize) {
+        let mut l = vec![0.0f32; n];
+        let mut r = vec![0.0f32; n];
+        let got = ring.pull_resampled(&mut l, &mut r, sr);
+        (l, r, got)
+    }
+
     #[test]
     fn ring_round_trips_mono() {
         let ring = CaptureRing::new();
         ring.set_sample_rate(48_000);
         let src: Vec<f32> = (0..64).map(|i| i as f32 / 64.0).collect();
         ring.push_interleaved(&src, 1, |s| s);
-        let mut dst = [0.0f32; 64];
-        assert_eq!(ring.pull_resampled(&mut dst, 48_000), 64);
+        let (l, r, got) = pull(&ring, 64, 48_000);
+        assert_eq!(got, 64);
         for i in 0..64 {
-            assert!((dst[i] - src[i]).abs() < 1e-6);
+            assert!((l[i] - src[i]).abs() < 1e-6);
+            assert!((r[i] - src[i]).abs() < 1e-6, "mono capture duplicates to both sides");
         }
     }
 
     #[test]
-    fn stereo_input_averages_to_mono() {
+    fn stereo_input_keeps_left_and_right() {
         let ring = CaptureRing::new();
         ring.set_sample_rate(44_100);
         let interleaved = [0.0f32, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0];
         ring.push_interleaved(&interleaved, 2, |s| s);
-        let mut dst = [0.0f32; 4];
-        assert_eq!(ring.pull_resampled(&mut dst, 44_100), 4);
-        assert!(dst.iter().all(|s| (*s - 0.5).abs() < 1e-6));
+        let (l, r, got) = pull(&ring, 4, 44_100);
+        assert_eq!(got, 4);
+        assert!(l.iter().all(|s| s.abs() < 1e-6), "left stayed 0");
+        assert!(r.iter().all(|s| (*s - 1.0).abs() < 1e-6), "right stayed 1");
     }
 
     #[test]
     fn underrun_holds_silence_when_empty() {
         let ring = CaptureRing::new();
         ring.set_sample_rate(48_000);
-        let mut dst = [1.0f32; 16];
-        assert_eq!(ring.pull_resampled(&mut dst, 48_000), 0);
-        assert!(dst.iter().all(|s| *s == 0.0));
+        let mut l = [1.0f32; 16];
+        let mut r = [1.0f32; 16];
+        assert_eq!(ring.pull_resampled(&mut l, &mut r, 48_000), 0);
+        assert!(l.iter().all(|s| *s == 0.0) && r.iter().all(|s| *s == 0.0));
     }
 
     #[test]
@@ -528,8 +563,8 @@ mod tests {
         // land between adjacent input samples.
         let src: Vec<f32> = (0..960).map(|i| i as f32 / 960.0).collect();
         ring.push_interleaved(&src, 1, |s| s);
-        let mut dst = [0.0f32; 882];
-        assert_eq!(ring.pull_resampled(&mut dst, 44_100), 882);
+        let (dst, _, got) = pull(&ring, 882, 44_100);
+        assert_eq!(got, 882);
         assert!(dst[0] >= 0.0);
         assert!(dst[881] <= 1.0);
         // No huge jumps between adjacent output frames.
@@ -552,8 +587,8 @@ mod tests {
             src.push(i as f32);
         }
         ring.push_interleaved(&src, 1, |s| s);
-        let mut dst = [0.0f32; 64];
-        assert_eq!(ring.pull_resampled(&mut dst, 48_000), 64);
+        let (dst, _, got) = pull(&ring, 64, 48_000);
+        assert_eq!(got, 64);
         for i in 0..64 {
             assert!(
                 (dst[i] - i as f32).abs() < 1e-6,
@@ -563,7 +598,8 @@ mod tests {
             );
         }
         // Next block continues where the first left off.
-        assert_eq!(ring.pull_resampled(&mut dst, 48_000), 64);
+        let (dst, _, got) = pull(&ring, 64, 48_000);
+        assert_eq!(got, 64);
         for i in 0..64 {
             assert!((dst[i] - (64 + i) as f32).abs() < 1e-6);
         }
@@ -577,8 +613,7 @@ mod tests {
         let n = 4_800;
         let src: Vec<f32> = (0..n).map(|i| i as f32).collect();
         ring.push_interleaved(&src, 1, |s| s);
-        let mut dst = [0.0f32; 64];
-        ring.pull_resampled(&mut dst, 48_000);
+        let (dst, _, _) = pull(&ring, 64, 48_000);
         // After catch-up, head should be near (n - target), not 0 and not n-64.
         let target = (48_000 * TARGET_LAT_MS / 1000) as usize;
         let expected_head = n - target;
@@ -603,8 +638,7 @@ mod tests {
         // Full ring is above high-water, so pull catch-ups to target latency —
         // still reading the kept (older) timeline, never the dropped 9999.
         let target = (48_000 * TARGET_LAT_MS / 1000) as usize;
-        let mut dst = vec![0.0f32; target.min(512)];
-        ring.pull_resampled(&mut dst, 48_000);
+        let (dst, _, _) = pull(&ring, target.min(512), 48_000);
         let expected_head = max_fill - target;
         assert!(
             (dst[0] - expected_head as f32).abs() < 2.0,

@@ -1247,6 +1247,13 @@ fn draw_kaoss_axes(scene: &mut Scene, pad: crate::layout::Rect, model: &NativeMo
             "delay_time" => "Y DLY T",
             "pitch_bend" => "Y BEND",
             "flanger_mix" => "Y FLANGE",
+            "sweep" => {
+                if prog.x_param == Some("sweep") {
+                    ""
+                } else {
+                    "Y L/R"
+                }
+            }
             _ => "Y",
         };
         let x_label = if prog.note {
@@ -1260,10 +1267,13 @@ fn draw_kaoss_axes(scene: &mut Scene, pad: crate::layout::Rect, model: &NativeMo
                 Some("delay_mix") => "X ECHO",
                 Some("reverb_size") => "X SIZE",
                 Some("flanger_rate") => "X RATE",
+                Some("sweep") => "X L/R",
                 _ => "X",
             }
         };
-        scene.text_scaled(pad.x + 6, pad.y + pad.h / 2 - 20, y_label, 0xd3869b, 2);
+        if !y_label.is_empty() {
+            scene.text_scaled(pad.x + 6, pad.y + pad.h / 2 - 20, y_label, 0xd3869b, 2);
+        }
         // Bottom edge of the pad (Tk parity). Footer chrome starts below the pad gap.
         let x_label_y = if bend {
             pad.y + pad.h / 2 - 10
@@ -2086,22 +2096,68 @@ fn draw_synth_scope(scene: &mut Scene, model: &NativeModel) {
         let y = rect.y + (rect.h * i) / 4;
         scene.fill(rect.x as f32, y as f32, rect.w as f32, 1.0, 0x2a2a18);
     }
-    let Some(bank) = model.wave_bank.as_ref() else {
-        scene.text(rect.x + 24, rect.y + rect.h / 2 - 4, "NO WAVE", 0x504945);
-        return;
-    };
-    let table = bank.morph_table();
     let n = (rect.w / 2).max(48) as usize;
     let mid_y = rect.y as f32 + rect.h as f32 * 0.5;
     let amp = (rect.h as f32 * 0.42).max(4.0);
+    if let Some(bank) = model.wave_bank.as_ref() {
+        let table = bank.morph_table();
+        let mut prev_x = rect.x as f32 + 2.0;
+        let mut prev_y = mid_y;
+        for i in 0..n {
+            let sample_i = (i * jambox_core::TABLE_SIZE) / n.max(1);
+            let s = table[sample_i.min(jambox_core::TABLE_SIZE - 1)];
+            let x = rect.x as f32 + 2.0 + (i as f32) * ((rect.w - 4) as f32) / n as f32;
+            let y = mid_y - s * amp;
+            stroke_scope_seg(scene, prev_x, prev_y, x, y, 0x3d3d14);
+            prev_x = x;
+            prev_y = y;
+        }
+    }
+    let in_hot = wave_energy(&model.status.in_l) || wave_energy(&model.status.in_r);
+    let mix_hot = wave_energy(&model.status.wave_l) || wave_energy(&model.status.wave_r);
+    let (left, right, tag) = if in_hot {
+        (&model.status.in_l[..], &model.status.in_r[..], "IN L/R")
+    } else if mix_hot {
+        (
+            &model.status.wave_l[..],
+            &model.status.wave_r[..],
+            "OUT L/R",
+        )
+    } else {
+        return;
+    };
+    scene.text_scaled(rect.x + 6, rect.y + rect.h - 14, tag, 0x83a598, 1);
+    stroke_wave(scene, rect, left, 0x458588, n, mid_y, amp);
+    stroke_wave(scene, rect, right, 0xfe8019, n, mid_y, amp);
+}
+
+fn wave_energy(samples: &[f32]) -> bool {
+    samples.iter().any(|s| s.abs() > 1e-3)
+}
+
+fn stroke_wave(
+    scene: &mut Scene,
+    rect: crate::layout::Rect,
+    samples: &[f32],
+    color: u32,
+    n: usize,
+    mid_y: f32,
+    amp: f32,
+) {
+    if samples.is_empty() {
+        return;
+    }
+    let n = n.max(2);
     let mut prev_x = rect.x as f32 + 2.0;
     let mut prev_y = mid_y;
     for i in 0..n {
-        let sample_i = (i * jambox_core::TABLE_SIZE) / n.max(1);
-        let s = table[sample_i.min(jambox_core::TABLE_SIZE - 1)];
+        let sample_i = i * samples.len() / n.max(1);
+        let s = samples[sample_i.min(samples.len() - 1)];
         let x = rect.x as f32 + 2.0 + (i as f32) * ((rect.w - 4) as f32) / n as f32;
         let y = mid_y - s * amp;
-        stroke_scope_seg(scene, prev_x, prev_y, x, y, 0xb8bb26);
+        if i > 0 {
+            stroke_scope_seg(scene, prev_x, prev_y, x, y, color);
+        }
         prev_x = x;
         prev_y = y;
     }

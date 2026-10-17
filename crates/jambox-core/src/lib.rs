@@ -37,7 +37,7 @@ pub use clip::{
     Clip, ClipEvent, ClipEventKind, ClipSlot, ClipVoice, LaunchMode, Sequencer, MAX_CLIPS,
     SEQ_CLIP_SLOT, SEQ_DRUM_MIX_SLOT, SEQ_KAOSS_MIX_SLOT,
 };
-pub use mix::MixSource;
+pub use mix::{sweep_gains, MixSource};
 pub use command::{
     Command, EmitMode, FxParam, FxTarget, ScheduledCommand, SynthParam, MAX_BLOCK_COMMANDS,
 };
@@ -53,7 +53,7 @@ pub use drums::{
 };
 pub use engine::{
     tone_lfo_hz_from_unit, EngineStatus, JamboxEngine, MidiOutSink, MAX_MIDI_OUT, MAX_RENDER_BLOCK,
-    TONE_LFO_HZ_MAX, TONE_LFO_HZ_MIN,
+    TONE_LFO_HZ_MAX, TONE_LFO_HZ_MIN, WAVE_VIZ_POINTS,
 };
 pub use fm::{
     clang_index, clang_label, clang_ratio, fm_recipe, fm_recipe_patch, pack_fm_link,

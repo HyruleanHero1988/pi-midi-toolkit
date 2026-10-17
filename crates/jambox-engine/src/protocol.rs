@@ -468,6 +468,14 @@ pub struct StatusReply {
     pub arp_root: u8,
     #[serde(default)]
     pub arp_step: u8,
+    #[serde(default)]
+    pub wave_l: [f32; jambox_protocol::WAVE_VIZ_POINTS],
+    #[serde(default)]
+    pub wave_r: [f32; jambox_protocol::WAVE_VIZ_POINTS],
+    #[serde(default)]
+    pub in_l: [f32; jambox_protocol::WAVE_VIZ_POINTS],
+    #[serde(default)]
+    pub in_r: [f32; jambox_protocol::WAVE_VIZ_POINTS],
 }
 
 /// What the control thread decides to do with a request.
@@ -587,6 +595,7 @@ fn parse_synth_param(name: &str) -> Option<SynthParam> {
         "drum_amp" => SynthParam::DrumAmp,
         "drum_level" => SynthParam::DrumLevel,
         "input_level" => SynthParam::InputLevel,
+        "sweep" => SynthParam::Sweep,
         "fm_enable" => SynthParam::FmEnable,
         "fm_recipe" => SynthParam::FmRecipe,
         "fm_op" => SynthParam::FmOp,
@@ -1102,6 +1111,14 @@ mod tests {
         assert_eq!(parse_quantize(None), Quantize::Off);
         assert_eq!(parse_quantize(Some("bar")), Quantize::Bar);
         assert_eq!(parse_quantize(Some("beat")), Quantize::Beat);
+    }
+
+    #[test]
+    fn wave_viz_width_matches_core() {
+        assert_eq!(
+            jambox_core::WAVE_VIZ_POINTS,
+            jambox_protocol::WAVE_VIZ_POINTS
+        );
     }
 
     #[test]

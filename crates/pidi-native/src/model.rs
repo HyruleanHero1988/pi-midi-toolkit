@@ -47,6 +47,8 @@ pub const KAOSS_FULL_EXIT_EDGE_PX: i32 = 24;
 const KAOSS_CC_X: u8 = 12;
 const KAOSS_CC_Y: u8 = 13;
 const KAOSS_CC_TOUCH: u8 = 92;
+/// Standard MIDI pan (0 = left, 64 = center, 127 = right).
+const KAOSS_CC_PAN: u8 = 10;
 /// KIT sliders: tone / snap(noise) / pitch / decay / level.
 const DEFAULT_DRUM_MACROS: [f32; 5] = [0.60, 0.45, 0.50, 0.55, 0.50];
 const KIT_WAVE_POINTS: usize = 160;
@@ -332,6 +334,8 @@ pub struct NativeModel {
     pub drum_level: f32,
     /// USB mic / line trim (FX MIC / MIX MIC). Default 0 = muted.
     pub input_level: f32,
+    /// Left/right sweep (0 = L, 0.5 = center, 1 = R). Kaoss SWEEP.
+    pub sweep: f32,
     /// SEQ / songs key trim (MIX KEY). Phrase pads use `phrases[i].gain`.
     pub seq_level: f32,
     pub seq_drum_level: f32,
@@ -587,6 +591,7 @@ impl NativeModel {
             fx_settings_open: false,
             drum_level: 1.0,
             input_level: 0.0,
+            sweep: 0.5,
             seq_level: 1.0,
             seq_drum_level: 1.0,
             seq_kaoss_level: 1.0,
@@ -2097,6 +2102,7 @@ impl NativeModel {
         outbox.synth("level", self.synth_params[2]);
         outbox.synth("drum_level", self.drum_level);
         outbox.synth("input_level", self.input_level);
+        outbox.synth("sweep", self.sweep);
         outbox.punch_buffer_prio(self.punch_buffer_prio.as_u8());
         outbox.punch_rpt_mode(self.punch_rpt_mode.as_u8());
         outbox.punch_grid(self.punch_grid_mode.as_u8());
@@ -5830,6 +5836,9 @@ impl NativeModel {
                 if prev.y_param == "tone_lfo" && p.y_param != "tone_lfo" {
                     self.reset_kaoss_tone_lfo(outbox);
                 }
+                if prev.uses_sweep() && !p.uses_sweep() {
+                    self.reset_kaoss_sweep(outbox);
+                }
                 // HOLD drone survives program changes — reassert XY so FILTER/FLANGE
                 // immediately ride the latched lead without requiring a fresh press.
                 if self.kaoss_hold
@@ -5917,6 +5926,9 @@ impl NativeModel {
                 }
                 if prog.y_param == "tone_lfo" {
                     self.reset_kaoss_tone_lfo(outbox);
+                }
+                if prog.uses_sweep() {
+                    self.reset_kaoss_sweep(outbox);
                 }
             }
             self.status_line = "HOLD off".into();
@@ -6124,6 +6136,9 @@ impl NativeModel {
             }
             if !self.kaoss_hold && prog.y_param == "tone_lfo" {
                 self.reset_kaoss_tone_lfo(outbox);
+            }
+            if !self.kaoss_hold && prog.uses_sweep() {
+                self.reset_kaoss_sweep(outbox);
             }
         }
     }
@@ -6576,7 +6591,9 @@ impl NativeModel {
         // Engine touch path only handles pitch; Y (and FX X) are driven here so
         // LEAD/MORPH/VIB/BEND each own their axis without fighting a hardwired tone map.
         if prog.note {
-            if prog.y_param == "tone" {
+            if prog.y_param == "sweep" {
+                self.apply_kaoss_sweep(y, outbox);
+            } else if prog.y_param == "tone" {
                 outbox.synth("tone", y);
                 self.synth_params[1] = y;
                 self.mark_dirty();
@@ -6602,9 +6619,18 @@ impl NativeModel {
             }
         } else {
             if let Some(xp) = prog.x_param {
-                self.apply_named_param(xp, x, outbox);
+                if xp == "sweep" {
+                    self.apply_kaoss_sweep(x, outbox);
+                } else {
+                    self.apply_named_param(xp, x, outbox);
+                }
             }
-            if prog.y_param == "vib" {
+            if prog.y_param == "sweep" {
+                // Same param on both axes: pad X is left/right, so skip Y.
+                if prog.x_param != Some("sweep") {
+                    self.apply_kaoss_sweep(y, outbox);
+                }
+            } else if prog.y_param == "vib" {
                 let y = kaoss_ui::apply_zero_deadzone(y, kaoss_ui::ZERO_REST_DEADZONE);
                 self.vibrato_depth = (y * 2.0).clamp(0.0, 2.0);
                 self.vibrato_always = if y > 0.0 { 1.0 } else { 0.0 };
@@ -6688,6 +6714,20 @@ impl NativeModel {
 
     fn reset_kaoss_tone_lfo(&mut self, outbox: &mut Outbox) {
         outbox.synth("tone_lfo_amount", 0.0);
+    }
+
+    fn apply_kaoss_sweep(&mut self, value: f32, outbox: &mut Outbox) {
+        let shaped = kaoss_ui::apply_center_deadzone(value, kaoss_ui::SWEEP_CENTER_DEADZONE);
+        self.sweep = shaped;
+        outbox.synth("sweep", shaped);
+        self.kaoss_emit_cc(KAOSS_CC_PAN, Self::midi_cc01(shaped), outbox);
+        self.mark_dirty();
+    }
+
+    fn reset_kaoss_sweep(&mut self, outbox: &mut Outbox) {
+        self.sweep = 0.5;
+        outbox.synth("sweep", 0.5);
+        self.kaoss_emit_cc(KAOSS_CC_PAN, 64, outbox);
     }
 
     fn synth_param_index(name: &str) -> Option<usize> {
@@ -7215,6 +7255,7 @@ impl NativeModel {
         self.release_drift = 0.5;
         self.drum_level = 1.0;
         self.input_level = 0.0;
+        self.sweep = 0.5;
         self.vibrato_always = 0.0;
         self.vibrato_depth = 0.5;
         self.vibrato_rate = 5.0;
@@ -7226,6 +7267,7 @@ impl NativeModel {
         outbox.synth("level", self.synth_params[2]);
         outbox.synth("drum_level", self.drum_level);
         outbox.synth("input_level", self.input_level);
+        outbox.synth("sweep", self.sweep);
         outbox.synth("attack", self.synth_params[3]);
         outbox.synth("release", self.synth_params[4]);
         outbox.synth("release_drift", self.release_drift);
@@ -8482,6 +8524,54 @@ mod tests {
         assert!(
             !batch.iter().any(|r| matches!(r, Request::Touch { .. })),
             "BEND FX must not start a local pad note: {batch:?}"
+        );
+    }
+
+    #[test]
+    fn kaoss_sweep_program_pans_from_pad_x() {
+        let mut model = model_on_kaoss();
+        model.kaoss_program = kaoss_ui::KAOSS_PROGRAMS
+            .iter()
+            .position(|p| p.id == "sweep")
+            .expect("sweep program");
+        assert!(kaoss_ui::program(model.kaoss_program).uses_sweep());
+        let mut out = Outbox::new();
+        let k = model.layout.kaoss;
+        // Far left of the pad → hard left.
+        model.finger_down(1, k.x + 4, k.y + k.h / 2, &mut out);
+        let batch = out.take();
+        assert!(
+            batch.iter().any(|r| matches!(
+                r,
+                Request::Synth { param, value, .. }
+                    if param == "sweep" && *value < 0.05
+            )),
+            "left edge should sweep hard left: {batch:?}"
+        );
+        assert!(
+            !batch.iter().any(|r| matches!(r, Request::Touch { .. })),
+            "SWEEP must not start a local pad note: {batch:?}"
+        );
+        // Far right → hard right.
+        model.finger_move(1, k.x + k.w - 4, k.y + k.h / 2, &mut out);
+        let batch = out.take();
+        assert!(
+            batch.iter().any(|r| matches!(
+                r,
+                Request::Synth { param, value, .. }
+                    if param == "sweep" && *value > 0.95
+            )),
+            "right edge should sweep hard right: {batch:?}"
+        );
+        model.finger_up(1, &mut out);
+        let batch = out.take();
+        assert!(
+            batch.iter().any(|r| matches!(
+                r,
+                Request::Synth { param, value, .. }
+                    if param == "sweep" && (*value - 0.5).abs() < 1e-4
+            )),
+            "lift should return sweep to center: {batch:?}"
         );
     }
 

@@ -31,6 +31,9 @@ use crate::DRUM_CHANNEL;
 
 /// Max MIDI events the engine emits per block (clip playback → USB out).
 pub const MAX_MIDI_OUT: usize = 128;
+/// Downsampled L/R points published for the on-screen scope.
+/// 32 keeps [`EngineStatus`] `Default`/`Copy` on the crate's serde/array impls.
+pub const WAVE_VIZ_POINTS: usize = 32;
 /// Largest audio block the engine preallocates for.
 ///
 /// bcm2835 Headphones with cpal `BufferSize::Default` often callbacks at the
@@ -210,6 +213,12 @@ pub struct EngineStatus {
     pub arp_latched: bool,
     pub arp_root: u8,
     pub arp_step: u8,
+    /// Stereo mix, downsampled for the CRT scope.
+    pub wave_l: [f32; WAVE_VIZ_POINTS],
+    pub wave_r: [f32; WAVE_VIZ_POINTS],
+    /// Incoming capture (pre-fader), so the scope can show a muted mic.
+    pub in_l: [f32; WAVE_VIZ_POINTS],
+    pub in_r: [f32; WAVE_VIZ_POINTS],
 }
 
 pub struct JamboxEngine {
@@ -240,7 +249,12 @@ pub struct JamboxEngine {
     drum_bus: Vec<f32>,
     group_buf: Vec<f32>,
     /// Live capture mixed onto the master before punch-in / bus FX.
-    input_bus: Vec<f32>,
+    input_l: Vec<f32>,
+    input_r: Vec<f32>,
+    stereo_l: Vec<f32>,
+    stereo_r: Vec<f32>,
+    stereo_frames: usize,
+    span_off: usize,
     seq_scratch: Vec<SeqEvent>,
     repeat_scratch: [RepeatEvent; MAX_REPEAT_EVENTS_PER_BLOCK],
     arp_scratch: [ArpEvent; MAX_ARP_EVENTS_PER_BLOCK],
@@ -251,6 +265,8 @@ pub struct JamboxEngine {
     drum_level: f32,
     /// Mic / line gain. Starts at 0 so a hot USB mic cannot feedback until armed.
     input_level: f32,
+    /// 0 = hard left, 0.5 = center, 1 = hard right. Kaoss SWEEP / pan.
+    sweep: f32,
     clip_gain: [f32; MAX_CLIPS],
     attack_sec: f32,
     release_sec: f32,
@@ -272,6 +288,21 @@ pub struct JamboxEngine {
     /// Last arp pitch the engine actually sounded — released before the next step.
     arp_live: Option<(u8, u8)>,
     status: EngineStatus,
+}
+
+fn downsample_wave(src: &[f32], dst: &mut [f32]) {
+    let n = dst.len();
+    let frames = src.len();
+    if n == 0 {
+        return;
+    }
+    if frames == 0 {
+        dst.fill(0.0);
+        return;
+    }
+    for (i, slot) in dst.iter_mut().enumerate() {
+        *slot = src[i * frames / n];
+    }
 }
 
 /// Keep wet insert tanks moving after the last voice in a group goes idle,
@@ -334,7 +365,12 @@ impl JamboxEngine {
             key_bus: vec![0.0; MAX_BLOCK],
             drum_bus: vec![0.0; MAX_BLOCK],
             group_buf: vec![0.0; MAX_BLOCK],
-            input_bus: vec![0.0; MAX_BLOCK],
+            input_l: vec![0.0; MAX_BLOCK],
+            input_r: vec![0.0; MAX_BLOCK],
+            stereo_l: vec![0.0; MAX_BLOCK],
+            stereo_r: vec![0.0; MAX_BLOCK],
+            stereo_frames: 0,
+            span_off: 0,
             seq_scratch: vec![
                 SeqEvent {
                     frame: 0,
@@ -367,6 +403,7 @@ impl JamboxEngine {
             level: 1.0,
             drum_level: 1.0,
             input_level: 0.0,
+            sweep: 0.5,
             clip_gain: [1.0; MAX_CLIPS],
             attack_sec: 0.012,
             release_sec: 0.030,
@@ -562,6 +599,8 @@ impl JamboxEngine {
         let frames = out.len().min(MAX_BLOCK);
         let out = &mut out[..frames];
         out.iter_mut().for_each(|s| *s = 0.0);
+        self.stereo_l[..frames].fill(0.0);
+        self.stereo_r[..frames].fill(0.0);
         midi_out.clear();
         if frames == 0 {
             return;
@@ -698,6 +737,7 @@ impl JamboxEngine {
                 .unwrap_or(frames);
 
             if boundary > cursor {
+                self.span_off = cursor;
                 self.render_span(&mut out[cursor..boundary]);
                 cursor = boundary;
             }
@@ -712,14 +752,27 @@ impl JamboxEngine {
             }
 
             if next >= self.timeline.len() && cursor < frames {
+                self.span_off = cursor;
                 self.render_span(&mut out[cursor..frames]);
                 cursor = frames;
             }
         }
 
         self.transport.advance(frames as u64);
+        self.stereo_frames = frames;
 
-        let peak = out.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+        let peak = self.stereo_l[..frames]
+            .iter()
+            .chain(self.stereo_r[..frames].iter())
+            .fold(0.0f32, |m, v| m.max(v.abs()));
+        let mut wave_l = [0.0f32; WAVE_VIZ_POINTS];
+        let mut wave_r = [0.0f32; WAVE_VIZ_POINTS];
+        let mut in_l = [0.0f32; WAVE_VIZ_POINTS];
+        let mut in_r = [0.0f32; WAVE_VIZ_POINTS];
+        downsample_wave(&self.stereo_l[..frames], &mut wave_l);
+        downsample_wave(&self.stereo_r[..frames], &mut wave_r);
+        downsample_wave(&self.input_l[..frames], &mut in_l);
+        downsample_wave(&self.input_r[..frames], &mut in_r);
         self.status = EngineStatus {
             position: self.transport.position(),
             bpm: self.transport.bpm() as f32,
@@ -732,7 +785,17 @@ impl JamboxEngine {
             arp_latched: self.arp.latched(),
             arp_root: self.arp.root(),
             arp_step: self.arp.cursor(),
+            wave_l,
+            wave_r,
+            in_l,
+            in_r,
         };
+    }
+
+    /// Stereo mix written by the last [`Self::render`] (same length as `out`).
+    pub fn last_stereo(&self) -> (&[f32], &[f32]) {
+        let n = self.stereo_frames.min(self.stereo_l.len());
+        (&self.stereo_l[..n], &self.stereo_r[..n])
     }
 
     /// Render one span with the current parameter set. No events happen inside.
@@ -760,11 +823,16 @@ impl JamboxEngine {
             key_bus,
             drum_bus,
             group_buf,
-            input_bus,
+            input_l,
+            input_r,
+            stereo_l,
+            stereo_r,
+            span_off,
             tone,
             level,
             drum_level,
             input_level,
+            sweep,
             clip_gain,
             attack_sec,
             release_sec,
@@ -935,16 +1003,37 @@ impl JamboxEngine {
         punch[PunchSource::Keys as usize].process(&mut key_bus[..n], bpm);
         punch[PunchSource::Drums as usize].process(&mut drum_bus[..n], bpm);
         let input_gain = *input_level;
+        let off = *span_off;
         for i in 0..n {
-            group_buf[i] = input_bus[i] * input_gain;
+            let idx = off + i;
+            let il = input_l.get(idx).copied().unwrap_or(0.0) * input_gain;
+            let ir = input_r.get(idx).copied().unwrap_or(0.0) * input_gain;
+            group_buf[i] = 0.5 * (il + ir);
+            if idx < stereo_l.len() {
+                stereo_l[idx] = il;
+                stereo_r[idx] = ir;
+            }
         }
         punch[PunchSource::Mic as usize].process(&mut group_buf[..n], bpm);
+        let mic_idle = punch[PunchSource::Mic as usize].is_idle();
         for i in 0..n {
-            out[i] = key_bus[i] + drum_bus[i] + group_buf[i];
+            let idx = off + i;
+            let kd = key_bus[i] + drum_bus[i];
+            let (ml, mr) = if mic_idle && idx < stereo_l.len() {
+                (stereo_l[idx], stereo_r[idx])
+            } else {
+                (group_buf[i], group_buf[i])
+            };
+            if idx < stereo_l.len() {
+                stereo_l[idx] = kd + ml;
+                stereo_r[idx] = kd + mr;
+            }
+            out[i] = kd + group_buf[i];
         }
         // Punch first (freeze / RPT / TAPE / filters), then the bus insert so
         // delay / reverb / flange and SEND wet the loop instead of being
-        // overwritten when GRAB is locked.
+        // overwritten when GRAB is locked. Bus FX runs on mid; side is restored
+        // so a dry stereo capture keeps its image.
         let send = punch
             .iter()
             .map(|rack| rack.send_amount())
@@ -960,15 +1049,32 @@ impl JamboxEngine {
         } else {
             None
         };
+        for i in 0..n {
+            let idx = off + i;
+            group_buf[i] = 0.5
+                * (stereo_l.get(idx).copied().unwrap_or(0.0)
+                    + stereo_r.get(idx).copied().unwrap_or(0.0));
+        }
         if !bus_fx.params().is_bypassed() {
-            bus_fx.process(out);
+            bus_fx.process(&mut group_buf[..n]);
         }
         if let Some(saved) = saved_bus {
             bus_fx.set_params(saved);
         }
 
-        for s in out.iter_mut() {
-            *s = (*s * OUTPUT_MAKEUP).tanh() * 0.97;
+        let (gain_l, gain_r) = crate::mix::sweep_gains(*sweep);
+        for i in 0..n {
+            let idx = off + i;
+            let side = 0.5
+                * (stereo_l.get(idx).copied().unwrap_or(0.0)
+                    - stereo_r.get(idx).copied().unwrap_or(0.0));
+            let l = ((group_buf[i] + side) * gain_l * OUTPUT_MAKEUP).tanh() * 0.97;
+            let r = ((group_buf[i] - side) * gain_r * OUTPUT_MAKEUP).tanh() * 0.97;
+            if idx < stereo_l.len() {
+                stereo_l[idx] = l;
+                stereo_r[idx] = r;
+            }
+            out[i] = 0.5 * (l + r);
         }
     }
 
@@ -1507,25 +1613,33 @@ impl JamboxEngine {
         }
     }
 
-    /// Apply coalesced XY updates. Only active gestures move; a lift already
-    /// processed in this block wins because `KaossMapper::follow` is idle then.
-    ///
-    /// Brightness / morph / vibrato come from UI `synth` commands for the active
-    /// Copy a mono capture block for the next [`Self::render`]. Silence when empty.
-    pub fn set_input_block(&mut self, mono: &[f32]) {
-        let n = mono.len().min(MAX_BLOCK);
+    /// Copy a stereo capture block for the next [`Self::render`]. Silence when empty.
+    /// Mono hosts can call [`Self::set_input_block`], which duplicates to both sides.
+    pub fn set_input_stereo(&mut self, left: &[f32], right: &[f32]) {
+        let n = left.len().min(right.len()).min(MAX_BLOCK);
         if n > 0 {
-            self.input_bus[..n].copy_from_slice(&mono[..n]);
+            self.input_l[..n].copy_from_slice(&left[..n]);
+            self.input_r[..n].copy_from_slice(&right[..n]);
         }
         if n < MAX_BLOCK {
-            self.input_bus[n..].fill(0.0);
+            self.input_l[n..].fill(0.0);
+            self.input_r[n..].fill(0.0);
         }
+    }
+
+    /// Copy a mono capture block (duplicated to L and R) for the next [`Self::render`].
+    pub fn set_input_block(&mut self, mono: &[f32]) {
+        self.set_input_stereo(mono, mono);
     }
 
     pub fn input_level(&self) -> f32 {
         self.input_level
     }
 
+    /// Apply coalesced XY updates. Only active gestures move; a lift already
+    /// processed in this block wins because `KaossMapper::follow` is idle then.
+    ///
+    /// Brightness / morph / vibrato come from UI `synth` commands for the active
     /// Kaoss program — this path only retunes pitch from X.
     pub fn sync_touches(&mut self, touches: &[LatestTouch]) {
         for touch in touches {
@@ -1588,6 +1702,7 @@ impl JamboxEngine {
             }
             SynthParam::DrumLevel => self.drum_level = unit,
             SynthParam::InputLevel => self.input_level = unit,
+            SynthParam::Sweep => self.sweep = unit,
             SynthParam::FmEnable => {
                 let enable = value > 0.5;
                 if enable != self.fm_enabled {
@@ -1991,6 +2106,68 @@ mod tests {
         e.set_input_block(&[0.4f32; 128]);
         e.render(&mut out, &[], &mut midi);
         assert!(peak(&out) > 0.05);
+    }
+
+    #[test]
+    fn stereo_input_keeps_left_and_right() {
+        let mut e = engine();
+        let mut out = vec![0.0f32; 64];
+        let mut midi = MidiOutSink::new();
+        apply_now(
+            &mut e,
+            Command::SetSynth {
+                param: SynthParam::InputLevel,
+                value: 1.0,
+            },
+        );
+        let left = [0.6f32; 64];
+        let right = [0.0f32; 64];
+        e.set_input_stereo(&left, &right);
+        e.render(&mut out, &[], &mut midi);
+        let (l, r) = e.last_stereo();
+        assert!(
+            l.iter().any(|s| *s > 0.2),
+            "left capture must reach the left bus"
+        );
+        assert!(
+            r.iter().all(|s| s.abs() < 0.05),
+            "right must stay quiet when only left is fed, got peak {}",
+            peak(r)
+        );
+        assert!(
+            e.status().in_l.iter().any(|s| *s > 0.2),
+            "scope must publish the incoming left channel"
+        );
+        assert!(e.status().in_r.iter().all(|s| s.abs() < 1e-4));
+    }
+
+    #[test]
+    fn sweep_hard_left_mutes_the_right_bus() {
+        let mut e = engine();
+        let mut out = vec![0.0f32; 256];
+        let mut midi = MidiOutSink::new();
+        e.render(
+            &mut out,
+            &[
+                ScheduledCommand::now(Command::SetSynth {
+                    param: SynthParam::Sweep,
+                    value: 0.0,
+                }),
+                ScheduledCommand::now(Command::NoteOn {
+                    channel: 0,
+                    note: 69,
+                    velocity: 120,
+                }),
+            ],
+            &mut midi,
+        );
+        let (l, r) = e.last_stereo();
+        assert!(peak(l) > 0.01, "hard left must still speak on L");
+        assert!(
+            peak(r) < 1e-4,
+            "hard left must mute R, peak={}",
+            peak(r)
+        );
     }
 
     #[test]

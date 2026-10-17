@@ -18,7 +18,11 @@ pub const NATIVE_FEATURES: &[&str] = &[
     "midi_ports",
     "channel_map",
     "arp",
+    "stereo",
 ];
+
+/// Downsampled L/R points on [`StatusReply`] for the on-screen scope.
+pub const WAVE_VIZ_POINTS: usize = 32;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -455,6 +459,18 @@ pub struct StatusReply {
     pub arp_root: u8,
     #[serde(default)]
     pub arp_step: u8,
+    /// Stereo mix snapshot (L).
+    #[serde(default)]
+    pub wave_l: [f32; WAVE_VIZ_POINTS],
+    /// Stereo mix snapshot (R).
+    #[serde(default)]
+    pub wave_r: [f32; WAVE_VIZ_POINTS],
+    /// Incoming capture snapshot (L), pre-fader.
+    #[serde(default)]
+    pub in_l: [f32; WAVE_VIZ_POINTS],
+    /// Incoming capture snapshot (R), pre-fader.
+    #[serde(default)]
+    pub in_r: [f32; WAVE_VIZ_POINTS],
 }
 
 #[cfg(test)]

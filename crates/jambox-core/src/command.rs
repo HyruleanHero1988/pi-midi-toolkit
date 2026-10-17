@@ -70,6 +70,8 @@ pub enum SynthParam {
     DrumLevel,
     /// 0..1 mic / line trim onto the master bus (0 = muted, safe default).
     InputLevel,
+    /// 0..1 left/right sweep (0 = hard left, 0.5 = center, 1 = hard right).
+    Sweep,
     /// 0 = wavetable melody, 1 = four-operator FM playground.
     FmEnable,
     /// Recipe index as a raw number (not 0..1). See `fm::FM_RECIPES`.

@@ -219,6 +219,34 @@ fn main() {
     {
         let mut model = NativeModel::new();
         let mut ob = Outbox::new();
+        model.set_mode(UiMode::Kaoss);
+        model.kaoss_program = kaoss_ui::KAOSS_PROGRAMS
+            .iter()
+            .position(|p| p.id == "sweep")
+            .expect("sweep");
+        model.tick(1.0 / 60.0, &mut ob);
+        let pad = model.layout.kaoss;
+        model.finger_down(1, pad.x + pad.w / 4, pad.y + pad.h / 2, &mut ob);
+        model.tick(1.0 / 60.0, &mut ob);
+        dump(&model, out.join("kaoss_sweep.ppm"));
+        model.finger_up(1, &mut ob);
+    }
+    {
+        let mut model = NativeModel::new();
+        let mut ob = Outbox::new();
+        model.set_mode(UiMode::Synth);
+        let n = model.status.in_l.len();
+        for i in 0..n {
+            let t = i as f32 / n as f32;
+            model.status.in_l[i] = (t * std::f32::consts::TAU).sin() * 0.7;
+            model.status.in_r[i] = (t * std::f32::consts::TAU + 1.2).sin() * 0.55;
+        }
+        model.tick(1.0 / 60.0, &mut ob);
+        dump(&model, out.join("synth_in_stereo.ppm"));
+    }
+    {
+        let mut model = NativeModel::new();
+        let mut ob = Outbox::new();
         model.set_mode(UiMode::Settings);
         let b = model.layout.settings_update;
         model.finger_down(1, b.x + 4, b.y + 4, &mut ob);

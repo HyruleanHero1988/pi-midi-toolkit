@@ -55,6 +55,11 @@ impl KaossProgram {
             0xd65d0e
         }
     }
+
+    /// True when pad X and/or Y drives the left/right sweep (pan).
+    pub fn uses_sweep(self) -> bool {
+        self.y_param == "sweep" || self.x_param == Some("sweep")
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -291,6 +296,16 @@ pub const KAOSS_PROGRAMS: &[KaossProgram] = &[
         x_param: None,
         curated: false,
     },
+    // X = left/right pan. Y is the same param so the program is sweep-only;
+    // apply uses X (the pad's left-right axis).
+    KaossProgram {
+        id: "sweep",
+        label: "SWEEP",
+        note: false,
+        y_param: "sweep",
+        x_param: Some("sweep"),
+        curated: true,
+    },
 ];
 
 /// Full-pad Y travel maps to ± this many semitones (center Y = 0).
@@ -302,6 +317,9 @@ pub const BEND_CENTER_DEADZONE: f32 = jambox_core::BEND_CENTER_DEADZONE;
 
 /// Bottom rest band for VIB (and similar 0-at-rest Y maps), in pad-Y units.
 pub const ZERO_REST_DEADZONE: f32 = 0.08;
+
+/// Half-width of the SWEEP rest band around the pad midline (center = both).
+pub const SWEEP_CENTER_DEADZONE: f32 = 0.08;
 
 /// Collapse a center-zero axis through a dead band, then remap so the
 /// remaining travel still reaches 0 and 1 (no step at the dead-zone edge).
@@ -603,6 +621,10 @@ mod tests {
         let rate = KAOSS_PROGRAMS.iter().find(|p| p.id == "flange_rate").unwrap();
         assert!(rate.curated && !rate.note);
         assert_eq!(rate.x_param, Some("flanger_rate"));
+        let sweep = KAOSS_PROGRAMS.iter().find(|p| p.id == "sweep").unwrap();
+        assert!(sweep.curated && !sweep.note && sweep.uses_sweep());
+        assert_eq!(sweep.x_param, Some("sweep"));
+        assert_eq!(sweep.y_param, "sweep");
     }
 
     #[test]
