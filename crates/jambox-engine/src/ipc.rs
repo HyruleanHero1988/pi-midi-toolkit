@@ -19,9 +19,7 @@ use crate::bus::{ClipUpdate, ControlSide, MidiInSide};
 use crate::midi::{ingest, MidiIo, MidiMap};
 use crate::protocol::{decode, Decoded, MidiNotice, Request, Response, StatusReply};
 use crate::scope::ScopeTap;
-use jambox_protocol::{
-    HelloReply, RepeatPhase, TouchPhase, NATIVE_FEATURES, PROTOCOL_VERSION,
-};
+use jambox_protocol::{HelloReply, RepeatPhase, TouchPhase, NATIVE_FEATURES, PROTOCOL_VERSION};
 use midi_core::MidiEvent;
 use std::sync::mpsc::{self, Sender};
 
@@ -312,7 +310,12 @@ pub fn handle_line(
             })
         }
         Ok(Decoded::StatusRequest) => Response::Status(cache.reply(control.latest.overwrites())),
-        Ok(Decoded::Scope) => Response::Scope(scope.frame()),
+        Ok(Decoded::Scope { wave, sub_hz }) => {
+            if sub_hz > 0.0 {
+                scope.set_sub_hz(sub_hz);
+            }
+            Response::Scope(scope.frame_with_wave(wave))
+        }
         Ok(Decoded::KnobMap {
             mode,
             fx_kind,
@@ -562,19 +565,9 @@ pub fn serve(
                     break;
                 }
                 match stream {
-                    Ok(stream) => {
-                        spawn_client(
-                            stream,
-                            &shared,
-                            &hub,
-                            &map,
-                            &midi_in,
-                            &midi_io,
-                            &health,
-                            &scope,
-                            &running,
-                        )
-                    }
+                    Ok(stream) => spawn_client(
+                        stream, &shared, &hub, &map, &midi_in, &midi_io, &health, &scope, &running,
+                    ),
                     Err(err) => warn!(%err, "control: accept failed"),
                 }
             }
@@ -594,19 +587,9 @@ pub fn serve(
                     break;
                 }
                 match stream {
-                    Ok(stream) => {
-                        spawn_client(
-                            stream,
-                            &shared,
-                            &hub,
-                            &map,
-                            &midi_in,
-                            &midi_io,
-                            &health,
-                            &scope,
-                            &running,
-                        )
-                    }
+                    Ok(stream) => spawn_client(
+                        stream, &shared, &hub, &map, &midi_in, &midi_io, &health, &scope, &running,
+                    ),
                     Err(err) => warn!(%err, "control: accept failed"),
                 }
             }
@@ -746,7 +729,13 @@ mod tests {
         let midi_in = Mutex::new(midi_in);
         let mut cache = StatusCache::default();
         let mut session = ClientSession::new();
-        let response = call("{not json", &mut control, &mut cache, &midi_in, &mut session);
+        let response = call(
+            "{not json",
+            &mut control,
+            &mut cache,
+            &midi_in,
+            &mut session,
+        );
         assert!(matches!(response, Response::Error { .. }));
     }
 

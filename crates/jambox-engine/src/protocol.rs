@@ -63,6 +63,12 @@ pub enum Request {
     PunchBufferPrio {
         mode: u8,
     },
+    PunchHistory {
+        enabled: bool,
+    },
+    InputBypass {
+        enabled: bool,
+    },
     PunchRptMode {
         mode: u8,
     },
@@ -228,7 +234,15 @@ pub enum Request {
     SetArpLen {
         len: u8,
     },
-    Scope,
+    /// `wave` also returns left, right, and sub traces. `sub_hz` updates the
+    /// crossover when it is above zero (sub low-pass, left/right high-pass);
+    /// zero leaves the current cutoff.
+    Scope {
+        #[serde(default)]
+        wave: bool,
+        #[serde(default)]
+        sub_hz: f32,
+    },
 }
 
 const fn default_velocity() -> u8 {
@@ -496,7 +510,11 @@ pub enum Decoded {
     /// Answer without touching audio.
     StatusRequest,
     /// Master-mix scope. Read from the lock-free tap; audio is not touched.
-    Scope,
+    /// `wave` also snapshots left, right, and the low-passed sub.
+    Scope {
+        wave: bool,
+        sub_hz: f32,
+    },
     /// Same path as USB MIDI in (notes, CC, bend).
     MidiIn(midi_core::MidiEvent),
     /// UI mode buttons: keys / drums / fx.
@@ -761,9 +779,9 @@ pub fn decode(request: Request) -> Result<Decoded, String> {
         Request::PunchGrab { source, active } => {
             Decoded::Command(Command::SetPunchGrab { source, active })
         }
-        Request::PunchBufferPrio { mode } => {
-            Decoded::Command(Command::SetPunchBufferPrio { mode })
-        }
+        Request::PunchBufferPrio { mode } => Decoded::Command(Command::SetPunchBufferPrio { mode }),
+        Request::PunchHistory { enabled } => Decoded::Command(Command::SetPunchHistory { enabled }),
+        Request::InputBypass { enabled } => Decoded::Command(Command::SetInputBypass { enabled }),
         Request::PunchRptMode { mode } => Decoded::Command(Command::SetPunchRptMode { mode }),
         Request::PunchGrid { mode } => Decoded::Command(Command::SetPunchGrid { mode }),
         Request::PunchPads { armed } => Decoded::PunchPads { armed },
@@ -815,7 +833,7 @@ pub fn decode(request: Request) -> Result<Decoded, String> {
         Request::StopAllClips => Decoded::Command(Command::StopAllClips),
         Request::ClipGain { slot, value } => Decoded::Command(Command::SetClipGain { slot, value }),
         Request::Status => Decoded::StatusRequest,
-        Request::Scope => Decoded::Scope,
+        Request::Scope { wave, sub_hz } => Decoded::Scope { wave, sub_hz },
         Request::KaossScale {
             scale_index,
             key,
@@ -1206,7 +1224,9 @@ mod tests {
 
     #[test]
     fn drum_repeat_decodes() {
-        let d = decode_line(r#"{"cmd":"drum_repeat","slots":[1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"latch":true}"#);
+        let d = decode_line(
+            r#"{"cmd":"drum_repeat","slots":[1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"latch":true}"#,
+        );
         match d {
             Decoded::DrumRepeat { slots, latch } => {
                 assert_eq!(slots[0], 1);
