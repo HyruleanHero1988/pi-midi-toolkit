@@ -721,12 +721,14 @@ mod tests {
             &mut session,
         );
         assert!(matches!(response, Response::Ok));
+        // JSON note-ons share the MIDI ingest path, so FULL VEL (on by default)
+        // rewrites 100 → 127 before the command hits the ring.
         assert_eq!(
             audio.midi_commands.pop().unwrap(),
             Command::NoteOn {
                 channel: 0,
                 note: 60,
-                velocity: 100
+                velocity: 127
             }
         );
     }
