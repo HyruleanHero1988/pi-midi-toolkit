@@ -558,6 +558,17 @@ mod tests {
         assert!(!s.wifi_usb_hold);
         assert!(s.full_velocity);
         assert!((s.fx_flanger_rate - 0.35).abs() < 1e-6);
+        assert!((s.synth_width - 0.6).abs() < 1e-6);
+    }
+
+    #[test]
+    fn session_roundtrip_includes_synth_width() {
+        let mut s = SessionState::default();
+        s.synth_width = 0.2;
+        let json = serde_json::to_string(&s).unwrap();
+        let back: SessionState = serde_json::from_str(&json).unwrap();
+        assert!((back.synth_width - 0.2).abs() < 1e-6);
+        assert!((SessionState::default().synth_width - 0.6).abs() < 1e-6);
     }
 
     #[test]

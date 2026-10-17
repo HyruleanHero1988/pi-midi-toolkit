@@ -12595,6 +12595,24 @@ mod tests {
     }
 
     #[test]
+    fn synth_width_slider_emits_width_command() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Synth);
+        let mut out = Outbox::new();
+        let track = model.layout.synth_slider(Layout::SYNTH_SLIDER_COUNT - 1);
+        model.finger_down(1, track.x + track.w - 6, track.y + track.h / 2, &mut out);
+        let batch = out.take();
+        assert!(
+            batch.iter().any(|r| matches!(
+                r,
+                Request::Synth { param, .. } if param == "width"
+            )),
+            "WIDTH should emit synth width, got {batch:?}"
+        );
+        assert!(model.synth_width > 0.8);
+    }
+
+    #[test]
     fn fx_menu_bus_flange_sends_global_flanger_mix() {
         let mut model = NativeModel::new();
         model.set_mode(UiMode::Fx);
