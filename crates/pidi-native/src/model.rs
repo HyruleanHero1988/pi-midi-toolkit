@@ -10226,7 +10226,7 @@ mod tests {
 
     #[test]
     fn kaoss_lifting_one_finger_leaves_the_other_touch() {
-        let mut model = NativeModel::new();
+        let mut model = model_on_kaoss();
         assert!(kaoss_ui::program(model.kaoss_program).note);
         let mut out = Outbox::new();
         let a = model.layout.kaoss_cell(1, 3);
@@ -10282,7 +10282,7 @@ mod tests {
 
     #[test]
     fn kaoss_smear_lift_does_not_touch_up_the_held_finger() {
-        let mut model = NativeModel::new();
+        let mut model = model_on_kaoss();
         let mut out = Outbox::new();
         let a = model.layout.kaoss_cell(1, 3);
         let b = model.layout.kaoss_cell(10, 3);
@@ -10828,7 +10828,7 @@ mod tests {
 
     #[test]
     fn kaoss_flange_plays_note_and_mix_not_rate() {
-        let mut model = NativeModel::new();
+        let mut model = model_on_kaoss();
         select_kaoss_program(&mut model, "flange");
         model.morph_a = 0;
         model.morph_b = 0;
