@@ -13320,6 +13320,7 @@ mod tests {
                 velocity: None,
                 control: Some(70),
                 value: Some(127),
+                controller: None,
             },
             &mut out,
         );
@@ -13337,6 +13338,7 @@ mod tests {
                 velocity: None,
                 control: Some(1),
                 value: Some(100),
+                controller: None,
             },
             &mut out,
         );
@@ -13352,6 +13354,7 @@ mod tests {
                 velocity: None,
                 control: Some(76),
                 value: Some(64),
+                controller: None,
             },
             &mut out,
         );
@@ -13366,6 +13369,7 @@ mod tests {
                 velocity: None,
                 control: Some(71),
                 value: Some(10),
+                controller: None,
             },
             &mut out,
         );
