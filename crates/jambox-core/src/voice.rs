@@ -38,6 +38,8 @@ struct Voice {
     release_age: f32,
     /// Baked release glide for a pad / SEQ take. `None` follows the live slider.
     release_drift_semis: Option<f32>,
+    /// Held by CC64 after note-off until the pedal lifts.
+    pedal: bool,
 }
 
 impl Voice {
@@ -61,6 +63,7 @@ impl Voice {
             bend_target_semis: 0.0,
             release_age: 0.0,
             release_drift_semis: None,
+            pedal: false,
         }
     }
 }
@@ -97,6 +100,7 @@ pub struct VoicePool {
     serial: u64,
     /// Per-voice amplitude at velocity 127.
     voice_amp: f32,
+    sustain: bool,
 }
 
 impl Default for VoicePool {
@@ -111,6 +115,7 @@ impl VoicePool {
             voices: [Voice::silent(); MAX_VOICES],
             serial: 0,
             voice_amp: 0.48,
+            sustain: false,
         }
     }
 
@@ -210,6 +215,7 @@ impl VoicePool {
             v.bend_target_semis = 0.0;
             v.release_age = 0.0;
             v.release_drift_semis = drift_semis;
+            v.pedal = false;
             return;
         }
 
@@ -233,6 +239,7 @@ impl VoicePool {
             bend_target_semis: 0.0,
             release_age: 0.0,
             release_drift_semis: drift_semis,
+            pedal: false,
         };
     }
 
@@ -271,6 +278,10 @@ impl VoicePool {
             let bend = bend_semis.clamp(-24.0, 24.0);
             v.bend_semis = bend;
             v.bend_target_semis = bend;
+            if self.sustain {
+                v.pedal = true;
+                return;
+            }
             v.releasing = true;
             v.target_amp = 0.0;
             v.release_age = 0.0;
@@ -288,8 +299,28 @@ impl VoicePool {
     fn release_note(&mut self, channel: u8, note: u8, recorded: bool) {
         if let Some(slot) = self.find_playing(channel, note, recorded) {
             let v = &mut self.voices[slot];
+            if self.sustain && !recorded {
+                v.pedal = true;
+                return;
+            }
+            v.pedal = false;
             v.releasing = true;
             v.target_amp = 0.0;
+        }
+    }
+
+    pub fn set_sustain(&mut self, on: bool) {
+        self.sustain = on;
+        if on {
+            return;
+        }
+        for v in self.voices.iter_mut() {
+            if v.active && v.pedal {
+                v.pedal = false;
+                v.releasing = true;
+                v.target_amp = 0.0;
+                v.release_age = 0.0;
+            }
         }
     }
 

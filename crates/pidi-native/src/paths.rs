@@ -47,7 +47,14 @@ pub fn data_root_raw() -> PathBuf {
 }
 
 pub fn ensure_layout(root: &Path) {
-    for sub in ["songs", "phrases", "user-presets", "user-wavetables", "takes"] {
+    for sub in [
+        "songs",
+        "phrases",
+        "user-presets",
+        "user-wavetables",
+        "takes",
+        "controllers",
+    ] {
         let _ = fs::create_dir_all(root.join(sub));
     }
 }

@@ -141,13 +141,7 @@ impl CaptureRing {
         self.pull_resampled_inner(dst, in_sr, out_sr, w)
     }
 
-    fn pull_resampled_inner(
-        &self,
-        dst: &mut [f32],
-        in_sr: u32,
-        out_sr: u32,
-        w: usize,
-    ) -> usize {
+    fn pull_resampled_inner(&self, dst: &mut [f32], in_sr: u32, out_sr: u32, w: usize) -> usize {
         let mut r = self.read.load(Ordering::Relaxed);
         let mut available = w.wrapping_sub(r);
         let (target, high) = Self::queue_marks(in_sr, out_sr, dst.len());
@@ -225,6 +219,25 @@ impl Default for CaptureRing {
     }
 }
 
+/// HDMI / loopback / keyboard composite USB audio — skip unless the filter
+/// explicitly names that controller.
+pub fn skip_capture_name(name: &str, filter: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    if lower.contains("hdmi")
+        || lower.contains("monitor")
+        || lower.contains("pulse")
+        || lower.contains("jack")
+        || lower.contains("pipewire")
+    {
+        return true;
+    }
+    let filter = filter.trim();
+    if midi_core::port_looks_like_controller_io(name) {
+        return filter.is_empty() || !midi_core::port_looks_like_controller_io(filter);
+    }
+    false
+}
+
 /// Pick a capture device. Prefers a name substring; skips HDMI / soft plugins
 /// when possible; favors USB PnP / `hw:CARD=` mics over Pulse/Jack ghosts.
 pub fn pick_input(name_filter: &str) -> Result<Device, AudioError> {
@@ -236,12 +249,7 @@ pub fn pick_input(name_filter: &str) -> Result<Device, AudioError> {
         for device in devices {
             let name = device.name().unwrap_or_default();
             let lower = name.to_ascii_lowercase();
-            if lower.contains("hdmi")
-                || lower.contains("monitor")
-                || lower.contains("pulse")
-                || lower.contains("jack")
-                || lower.contains("pipewire")
-            {
+            if skip_capture_name(&name, &filter) {
                 continue;
             }
             if !filter.is_empty() && lower.contains(&filter) {
@@ -480,9 +488,7 @@ fn build_input_stream(
             device.build_input_stream(
                 config,
                 move |data: &[u16], _| {
-                    ring.push_interleaved(data, channels, |s| {
-                        (s as f32 / 65535.0) * 2.0 - 1.0
-                    });
+                    ring.push_interleaved(data, channels, |s| (s as f32 / 65535.0) * 2.0 - 1.0);
                 },
                 err_fn,
                 None,
@@ -653,5 +659,14 @@ mod tests {
             dst.iter().all(|&s| (s - 9_999.0).abs() > 1.0),
             "dropped newest must not appear in output"
         );
+    }
+
+    #[test]
+    fn smk_usb_audio_is_not_the_default_mic() {
+        assert!(skip_capture_name("SMK-37 Elite USB Audio", ""));
+        assert!(skip_capture_name("SMK-37 Elite USB Audio", "usb"));
+        assert!(!skip_capture_name("SMK-37 Elite USB Audio", "smk"));
+        assert!(!skip_capture_name("USB PnP Sound Device", ""));
+        assert!(skip_capture_name("pulse", ""));
     }
 }

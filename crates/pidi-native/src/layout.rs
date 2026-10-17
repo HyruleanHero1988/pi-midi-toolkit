@@ -449,6 +449,8 @@ pub struct Layout {
     pub update_apply: Rect,
     /// When false, SYNTH/FM sliders and scopes grow into the piano strip.
     pub show_on_screen_keys: bool,
+    /// Phrase / kit MIDI notes for screen cells 0..15 (controller profile).
+    pub pad_notes: [u8; 16],
 }
 
 impl Default for Layout {
@@ -1267,6 +1269,7 @@ impl Layout {
             update_check,
             update_apply,
             show_on_screen_keys: true,
+            pad_notes: midi_core::mpk_phrase_notes(),
         }
     }
 
@@ -2966,7 +2969,7 @@ impl Layout {
         for index in 0..16 {
             if self.kit_pad_cell(index).contains(px, py) {
                 let cell = crate::phrases::PHRASE_GRID_CELLS[index];
-                let note = crate::phrases::mpk_note_for_phrase_cell(cell);
+                let note = self.pad_notes[cell];
                 return Hit::Drum { index, note };
             }
         }

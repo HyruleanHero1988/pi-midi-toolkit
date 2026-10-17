@@ -43,8 +43,8 @@ impl ClientHub {
         (tx, rx)
     }
 
-    pub fn broadcast_midi(&self, event: MidiEvent) {
-        let notice = MidiNotice::from_event(event);
+    pub fn broadcast_midi(&self, event: MidiEvent, controller: Option<&str>) {
+        let notice = MidiNotice::from_event(event).with_controller(controller);
         let line = match serde_json::to_string(&Response::Midi(notice)) {
             Ok(s) => s,
             Err(_) => return,
@@ -326,10 +326,18 @@ pub fn handle_line(
         }
         Ok(Decoded::MidiIn(event)) => {
             let mut side = midi_in.lock().unwrap_or_else(|p| p.into_inner());
-            ingest(event, 0, hub, map, |c| side.send(c));
+            ingest(
+                event,
+                0,
+                hub,
+                map,
+                &midi_core::ControllerProfile::generic(),
+                |c| side.send(c),
+            );
             Response::Ok
         }
         Ok(Decoded::Command(command)) => {
+            midi_io.queue_clip_led(&command);
             if send_or_drop(control, cache, command) {
                 Response::Ok
             } else {

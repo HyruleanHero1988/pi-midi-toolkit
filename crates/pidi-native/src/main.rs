@@ -81,6 +81,7 @@ fn main() {
     if !cli.phrases.is_empty() {
         std::env::set_var("PIDI_PHRASES_DIR", &cli.phrases);
     }
+    midi_core::apply_default_overlay_dirs();
     let mut model = NativeModel::new();
     let mut frame = Frame::new();
     let mut client = NativeClient::new(cli.control.clone(), cli.tcp);
@@ -171,7 +172,7 @@ fn main() {
         copy_wave(&client.last_scope.right, &mut model.wave_right);
         copy_wave(&client.last_scope.sub, &mut model.wave_sub);
         model.sync_arp_pattern_from_status();
-        model.apply_midi_ports(&client.last_midi_ports);
+        model.apply_midi_ports_with(&client.last_midi_ports, Some(&mut client.outbox));
         model.tick(dt, &mut client.outbox);
         model.maybe_autosave();
         if model.take_reexec() {

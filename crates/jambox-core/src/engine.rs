@@ -1635,6 +1635,11 @@ impl JamboxEngine {
             }
             SynthParam::DrumLevel => self.drum_level = unit,
             SynthParam::InputLevel => self.input_level = unit,
+            SynthParam::Sustain => {
+                let on = unit >= 0.5;
+                self.voices.set_sustain(on);
+                self.fm.set_sustain(on);
+            }
             SynthParam::FmEnable => {
                 let enable = value > 0.5;
                 if enable != self.fm_enabled {
@@ -1839,6 +1844,42 @@ mod tests {
             (ratio - 2.0).abs() < 0.35,
             "release should keep the +12 bend after the wheel centers, ratio {ratio} ({open} vs {bent})"
         );
+    }
+
+    #[test]
+    fn sustain_holds_a_live_note_until_the_pedal_lifts() {
+        let mut e = engine();
+        apply_now(
+            &mut e,
+            Command::NoteOn {
+                channel: 0,
+                note: 60,
+                velocity: 120,
+            },
+        );
+        apply_now(
+            &mut e,
+            Command::SetSynth {
+                param: SynthParam::Sustain,
+                value: 1.0,
+            },
+        );
+        apply_now(
+            &mut e,
+            Command::NoteOff {
+                channel: 0,
+                note: 60,
+            },
+        );
+        assert_eq!(e.voices.held_count(), 1, "pedal must keep the key gated");
+        apply_now(
+            &mut e,
+            Command::SetSynth {
+                param: SynthParam::Sustain,
+                value: 0.0,
+            },
+        );
+        assert_eq!(e.voices.held_count(), 0, "lifting CC64 must start release");
     }
 
     #[test]

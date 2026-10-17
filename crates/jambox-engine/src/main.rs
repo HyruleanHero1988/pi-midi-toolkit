@@ -165,6 +165,7 @@ fn run(
     user_waves: String,
     buffer_frames: u32,
 ) {
+    midi_core::apply_default_overlay_dirs();
     let running = Arc::new(AtomicBool::new(true));
     {
         let running = running.clone();
@@ -219,12 +220,7 @@ fn run(
             Arc::clone(&scope),
             running.clone(),
         );
-        capture::spawn_input(
-            input,
-            capture,
-            Arc::clone(&audio_health),
-            running.clone(),
-        );
+        capture::spawn_input(input, capture, Arc::clone(&audio_health), running.clone());
     }
 
     let midi_io = Arc::new(midi::MidiIo::new(midi_in, midi_out));
@@ -236,6 +232,7 @@ fn run(
         running.clone(),
     );
     midi::spawn_output(Arc::clone(&midi_io), midi_out_side, running.clone());
+    midi::spawn_feedback(Arc::clone(&midi_io), running.clone());
 
     let endpoint = if tcp {
         ipc::Endpoint::Tcp(control)

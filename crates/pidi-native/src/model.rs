@@ -396,6 +396,8 @@ pub struct NativeModel {
     pub midi_out_connected: String,
     pub midi_inputs: Vec<String>,
     pub midi_outputs: Vec<String>,
+    /// Map for the live keybed (MPK, SMK-37, …). Unknown ports stay MPK-compatible.
+    pub controller_profile: midi_core::ControllerProfile,
     pub last_midi_activity: String,
     /// Per-input destination bitmask (0 = identity).
     pub channel_map_bits: [u16; 16],
@@ -514,8 +516,10 @@ pub struct NativeModel {
     pub probe: bool,
     /// SET→PWR: draw the LOW PWR / THROTTLE status badge. Off by default.
     pub power_warn: bool,
-    /// SET→FULL VEL: rewrite keyboard note-ons to 127. On by default (Tk).
+    /// SET→FULL VEL: rewrite keyboard note-ons to 127. On by default for MPK.
     pub full_vel: bool,
+    /// Profile default last applied, so a user toggle survives a hotplug swap.
+    full_vel_profile_default: bool,
     /// DRUMS→LOCK: note-repeat keeps running after the pad is released.
     pub drum_repeat_lock: bool,
     repeat_held: [u8; DRUM_MODEL_COUNT],
@@ -746,6 +750,7 @@ impl NativeModel {
             midi_out_connected: String::new(),
             midi_inputs: Vec::new(),
             midi_outputs: Vec::new(),
+            controller_profile: midi_core::ControllerProfile::mpk_mini(),
             last_midi_activity: String::new(),
             channel_map_bits: [0; 16],
             map_out_edit: None,
@@ -835,6 +840,7 @@ impl NativeModel {
             probe: false,
             power_warn: false,
             full_vel: true,
+            full_vel_profile_default: true,
             drum_repeat_lock: false,
             repeat_held: [0; DRUM_MODEL_COUNT],
             repeat_latched: [false; DRUM_MODEL_COUNT],
@@ -2609,6 +2615,11 @@ impl NativeModel {
     pub fn on_midi_notice(&mut self, notice: &MidiNotice, outbox: &mut Outbox) {
         let kind = notice.kind.to_ascii_lowercase();
         let note = notice.note.unwrap_or(0);
+        if self.profile_for_notice(notice).is_transport_note(note)
+            && (kind.contains("note") || kind.contains("pressure"))
+        {
+            return;
+        }
         let vel = self.maybe_full_vel(notice.channel, notice.velocity.unwrap_or(0) as u8);
         if self.apply_punch_midi(notice, outbox) {
             return;
@@ -2650,6 +2661,9 @@ impl NativeModel {
             }
             self.push_log(format!("midi off ch{} n{}", notice.channel, note));
         } else if kind == "control_change" || kind == "cc" {
+            if self.apply_mix_cc(notice) {
+                return;
+            }
             let cc = notice.control.unwrap_or(0);
             let raw = notice.value.unwrap_or(0);
             self.last_midi_activity = format!("IN  ch{} cc{} v{}", notice.channel + 1, cc, raw);
@@ -2660,13 +2674,52 @@ impl NativeModel {
     }
 
     pub fn apply_midi_ports(&mut self, ports: &MidiPortsReply) {
+        self.apply_midi_ports_with(ports, None);
+    }
+
+    pub fn apply_midi_ports_with(&mut self, ports: &MidiPortsReply, outbox: Option<&mut Outbox>) {
         if !ports.inputs.is_empty() || !ports.outputs.is_empty() {
             self.midi_inputs = ports.inputs.clone();
             self.midi_outputs = ports.outputs.clone();
         }
         self.midi_in_connected = ports.input_connected.clone();
         self.midi_out_connected = ports.output_connected.clone();
+        let next = self.live_controller_profile();
+        if next.id != self.controller_profile.id {
+            if self.full_vel == self.full_vel_profile_default {
+                self.full_vel = next.full_vel_default;
+                if let Some(out) = outbox {
+                    out.full_vel(self.full_vel);
+                }
+            }
+            self.full_vel_profile_default = next.full_vel_default;
+        }
+        self.controller_profile = next;
+        self.layout.pad_notes = self.controller_profile.phrase_notes;
         self.layout.show_on_screen_keys = !self.hardware_keybed_connected();
+    }
+
+    fn live_controller_profile(&self) -> midi_core::ControllerProfile {
+        let from_connected = midi_core::profile_for_port_name(&self.midi_in_connected);
+        if from_connected.id != "generic" {
+            return from_connected;
+        }
+        self.midi_inputs
+            .iter()
+            .map(|name| midi_core::profile_for_port_name(name))
+            .find(|p| p.id != "generic")
+            .unwrap_or(from_connected)
+    }
+
+    fn profile_for_notice(&self, notice: &MidiNotice) -> midi_core::ControllerProfile {
+        if let Some(id) = notice.controller.as_deref() {
+            midi_core::installed_profiles()
+                .into_iter()
+                .find(|p| p.id == id)
+                .unwrap_or_else(|| self.controller_profile.clone())
+        } else {
+            self.controller_profile.clone()
+        }
     }
 
     /// Hide on-screen piano keys when a known keybed is plugged in.
@@ -5793,7 +5846,7 @@ impl NativeModel {
 
     fn selected_kit_note(&self) -> u8 {
         let cell = phrases::PHRASE_GRID_CELLS[self.kit_selected.min(15)];
-        phrases::mpk_note_for_phrase_cell(cell)
+        self.controller_profile.note_for_phrase_cell(cell)
     }
 
     pub fn selected_drum_model(&self) -> DrumModel {
@@ -6369,29 +6422,54 @@ impl NativeModel {
         let kind = notice.kind.to_ascii_lowercase();
         // Knobs often share the keys channel; pads are channel 10. Only notes
         // are gated so keyboard pitches cannot arm punch.
+        let profile = self.profile_for_notice(notice);
         if kind == "control_change" || kind == "cc" {
-            let Some(index) = jambox_core::punch_index_for_knob_cc(notice.control.unwrap_or(255))
-            else {
+            let Some(index) = profile.punch_index_for_knob(notice.control.unwrap_or(255)) else {
                 return false;
             };
-            let unit = (notice.value.unwrap_or(0) as f32 / 127.0).clamp(0.0, 1.0);
+            let raw = notice.value.unwrap_or(0).min(127) as u8;
+            let unit =
+                midi_core::apply_knob_cc(profile.knob_encoding, self.punch_amount[index], raw);
             self.set_punch_amount_unit(index, unit, outbox);
             return true;
+        }
+        if kind == "channel_pressure" || kind == "aftertouch" {
+            let unit = (notice.value.unwrap_or(0) as f32 / 127.0).clamp(0.0, 1.0);
+            let mut any = false;
+            for index in 0..Layout::PUNCH_PAD_COUNT {
+                if self.punch_armed[index] {
+                    self.set_punch_amount_unit(index, unit, outbox);
+                    any = true;
+                }
+            }
+            return any;
         }
         if notice.channel != DRUM_CHANNEL || !self.punch_pads_fx {
             return false;
         }
         if kind == "note_on" || kind == "noteon" {
             if notice.velocity.unwrap_or(0) == 0 {
-                return jambox_core::punch_index_for_pad_note(notice.note.unwrap_or(255)).is_some();
+                return profile
+                    .punch_index_for_pad(notice.note.unwrap_or(255))
+                    .is_some();
             }
-            if let Some(index) = jambox_core::punch_index_for_pad_note(notice.note.unwrap_or(255)) {
+            if let Some(index) = profile.punch_index_for_pad(notice.note.unwrap_or(255)) {
                 self.toggle_punch_arm(index, outbox);
                 return true;
             }
         }
         if kind == "note_off" || kind == "noteoff" {
-            return jambox_core::punch_index_for_pad_note(notice.note.unwrap_or(255)).is_some();
+            return profile
+                .punch_index_for_pad(notice.note.unwrap_or(255))
+                .is_some();
+        }
+        if kind == "poly_pressure" || kind == "polypressure" || kind == "polyaftertouch" {
+            let Some(index) = profile.punch_index_for_pad(notice.note.unwrap_or(255)) else {
+                return false;
+            };
+            let unit = (notice.value.unwrap_or(0) as f32 / 127.0).clamp(0.0, 1.0);
+            self.set_punch_amount_unit(index, unit, outbox);
+            return true;
         }
         false
     }
@@ -6478,6 +6556,27 @@ impl NativeModel {
     fn apply_mix_bus(&mut self, index: usize, py: i32, outbox: &mut Outbox) {
         let track = self.layout.mix_bus_slider(index);
         let t = Self::mix_slider_value(track, py);
+        self.apply_mix_bus_unit(index, t, outbox);
+    }
+
+    fn apply_mix_cc(&mut self, notice: &MidiNotice) -> bool {
+        let profile = self.profile_for_notice(notice);
+        if !profile.faders_on_channel(notice.channel) {
+            return false;
+        }
+        let Some(index) = profile.fader_index(notice.control.unwrap_or(255)) else {
+            return false;
+        };
+        let t = (notice.value.unwrap_or(0) as f32 / 127.0).clamp(0.0, 1.0);
+        let mut out = Outbox::new();
+        self.apply_mix_bus_unit(index, t, &mut out);
+        // Engine already applied the CC; keep the MIX page in sync only.
+        let _ = out.take();
+        true
+    }
+
+    fn apply_mix_bus_unit(&mut self, index: usize, t: f32, outbox: &mut Outbox) {
+        let t = t.clamp(0.0, 1.0);
         match index {
             Layout::MIX_LIVE => {
                 self.synth_params[2] = t;
@@ -11271,6 +11370,7 @@ mod tests {
                 velocity: Some(80),
                 control: None,
                 value: None,
+                controller: None,
             },
             &mut out,
         );
@@ -11289,6 +11389,7 @@ mod tests {
                 velocity: Some(0),
                 control: None,
                 value: None,
+                controller: None,
             },
             &mut out,
         );
@@ -11526,6 +11627,44 @@ mod tests {
                 .iter()
                 .any(|r| matches!(r, Request::NoteOn { .. })),
             "keys should return when only a DIN interface is connected"
+        );
+    }
+
+    #[test]
+    fn connected_mpk_selects_the_mpk_controller_profile() {
+        let mut model = NativeModel::new();
+        model.apply_midi_ports(&MidiPortsReply {
+            inputs: vec!["MPK mini 3".into()],
+            outputs: vec!["U2MIDI PRO".into()],
+            input_connected: "MPK mini 3".into(),
+            ..MidiPortsReply::default()
+        });
+        assert_eq!(model.controller_profile.id, "mpk-mini");
+        assert_eq!(model.controller_profile.knob_ccs[0], 70);
+    }
+
+    #[test]
+    fn synth_keys_hide_when_smk_37_elite_is_connected() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Synth);
+        model.apply_midi_ports(&MidiPortsReply {
+            inputs: vec!["SMK-37 Elite-Master:SMK-37 Elite-Master MIDI 1 20:0".into()],
+            outputs: vec!["U2MIDI PRO".into()],
+            input_connected: "SMK-37 Elite-Master:SMK-37 Elite-Master MIDI 1 20:0".into(),
+            ..MidiPortsReply::default()
+        });
+        assert!(model.hardware_keybed_connected());
+        assert!(
+            !model.layout.show_on_screen_keys,
+            "SMK-37 Elite already has piano keys"
+        );
+        assert_eq!(model.controller_profile.id, "smk-37-elite");
+        assert_eq!(model.controller_profile.knob_ccs[0], 48);
+        assert_eq!(model.layout.pad_notes[0], 36);
+        assert_eq!(model.controller_profile.punch_index_for_pad(36), Some(0));
+        assert!(
+            !model.full_vel,
+            "Elite velocity is usable; FULL VEL defaults off"
         );
     }
 
@@ -12518,6 +12657,7 @@ mod tests {
             velocity,
             control,
             value,
+            controller: None,
         }
     }
 
@@ -12532,6 +12672,50 @@ mod tests {
                 .iter()
                 .any(|r| matches!(r, Request::KnobMap { mode, .. } if mode == "punch")),
             "FX page should steal MPK knobs/pads for punch, got {batch:?}"
+        );
+    }
+
+    #[test]
+    fn pad_aftertouch_sets_punch_amount() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Fx);
+        let mut out = Outbox::new();
+        model.on_midi_notice(
+            &punch_midi("poly_pressure", Some(40), None, None, Some(64)),
+            &mut out,
+        );
+        assert!((model.punch_amount[0] - 64.0 / 127.0).abs() < 1e-5);
+        assert!(
+            out.take()
+                .iter()
+                .all(|r| !matches!(r, Request::PunchFx { .. })),
+            "aftertouch on a disarmed pad only stores amount"
+        );
+    }
+
+    #[test]
+    fn smk_fader_moves_the_mix_live_slider() {
+        let mut model = NativeModel::new();
+        model.controller_profile = midi_core::ControllerProfile::smk_37_elite();
+        let mut out = Outbox::new();
+        model.on_midi_notice(
+            &MidiNotice {
+                kind: "control_change".into(),
+                channel: 0,
+                note: None,
+                velocity: None,
+                control: Some(20),
+                value: Some(127),
+                controller: Some("smk-37-elite".into()),
+            },
+            &mut out,
+        );
+        assert!((model.synth_params[2] - 1.0).abs() < 1e-5);
+        assert!(
+            out.take()
+                .iter()
+                .all(|r| !matches!(r, Request::Synth { .. })),
+            "engine already applied the fader; UI must not double-send"
         );
     }
 
@@ -12642,6 +12826,93 @@ mod tests {
     }
 
     #[test]
+    fn smk_relative_knob_nudges_punch_amount() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Fx);
+        model.controller_profile = midi_core::ControllerProfile::smk_37_elite();
+        model.punch_amount[0] = 0.5;
+        let mut out = Outbox::new();
+        model.on_midi_notice(
+            &MidiNotice {
+                kind: "control_change".into(),
+                channel: 0,
+                note: None,
+                velocity: None,
+                control: Some(48),
+                value: Some(1),
+                controller: Some("smk-37-elite".into()),
+            },
+            &mut out,
+        );
+        assert!(
+            (model.punch_amount[0] - (0.5 + 1.0 / 64.0)).abs() < 1e-5,
+            "clockwise tick should nudge, not jump; got {}",
+            model.punch_amount[0]
+        );
+        model.on_midi_notice(
+            &MidiNotice {
+                kind: "control_change".into(),
+                channel: 0,
+                note: None,
+                velocity: None,
+                control: Some(48),
+                value: Some(127),
+                controller: Some("smk-37-elite".into()),
+            },
+            &mut out,
+        );
+        assert!(
+            (model.punch_amount[0] - 0.5).abs() < 1e-5,
+            "counterclockwise tick should return to last; got {}",
+            model.punch_amount[0]
+        );
+        model.punch_amount[0] = 0.0;
+        model.on_midi_notice(
+            &MidiNotice {
+                kind: "control_change".into(),
+                channel: 0,
+                note: None,
+                velocity: None,
+                control: Some(48),
+                value: Some(127),
+                controller: Some("smk-37-elite".into()),
+            },
+            &mut out,
+        );
+        assert!(
+            model.punch_amount[0].abs() < 1e-5,
+            "a −1 tick from zero must stay parked, not jump to 1.0; got {}",
+            model.punch_amount[0]
+        );
+        assert!(
+            out.take()
+                .iter()
+                .all(|r| !matches!(r, Request::PunchFx { .. })),
+            "disarmed encoder must only store the amount"
+        );
+    }
+
+    #[test]
+    fn smk_pad_toggles_punch_arm_on_note_36() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Fx);
+        model.controller_profile = midi_core::ControllerProfile::smk_37_elite();
+        let mut out = Outbox::new();
+        model.on_midi_notice(
+            &punch_midi("note_on", Some(36), Some(100), None, None),
+            &mut out,
+        );
+        assert!(
+            model.punch_armed[0],
+            "Elite top-left pad is note 36, not the MPK row-swap"
+        );
+        assert!(
+            !model.punch_armed[4],
+            "MPK Bank A bottom-left must stay off"
+        );
+    }
+
+    #[test]
     fn mpk_pad_toggles_punch_arm() {
         let mut model = NativeModel::new();
         model.set_mode(UiMode::Fx);
@@ -12691,6 +12962,7 @@ mod tests {
                 velocity: Some(100),
                 control: None,
                 value: None,
+                controller: None,
             },
             &mut out,
         );
@@ -12709,6 +12981,7 @@ mod tests {
                 velocity: None,
                 control: Some(70),
                 value: Some(127),
+                controller: None,
             },
             &mut out,
         );
@@ -13373,6 +13646,41 @@ mod tests {
     }
 
     #[test]
+    fn swapping_to_smk_turns_full_vel_off_unless_the_user_set_it() {
+        let mut model = NativeModel::new();
+        assert!(model.full_vel);
+        let mut out = Outbox::new();
+        model.apply_midi_ports_with(
+            &MidiPortsReply {
+                inputs: vec!["SMK-37 Elite".into()],
+                input_connected: "SMK-37 Elite".into(),
+                ..MidiPortsReply::default()
+            },
+            Some(&mut out),
+        );
+        assert!(!model.full_vel);
+        assert!(out
+            .take()
+            .iter()
+            .any(|r| matches!(r, Request::FullVel { on: false })));
+
+        model.full_vel = true;
+        model.full_vel_profile_default = false; // user overrode Elite default
+        model.apply_midi_ports_with(
+            &MidiPortsReply {
+                inputs: vec!["MPK mini 3".into()],
+                input_connected: "MPK mini 3".into(),
+                ..MidiPortsReply::default()
+            },
+            Some(&mut out),
+        );
+        assert!(
+            model.full_vel,
+            "a user FULL VEL on the Elite must survive a swap to MPK"
+        );
+    }
+
+    #[test]
     fn settings_full_vel_toggles_and_defaults_on() {
         let mut model = NativeModel::new();
         assert!(model.full_vel);
@@ -13408,6 +13716,7 @@ mod tests {
                 velocity: Some(40),
                 control: None,
                 value: None,
+                controller: None,
             },
             &mut out,
         );
@@ -13424,6 +13733,7 @@ mod tests {
                 velocity: Some(40),
                 control: None,
                 value: None,
+                controller: None,
             },
             &mut out,
         );
@@ -13441,6 +13751,7 @@ mod tests {
                 velocity: Some(40),
                 control: None,
                 value: None,
+                controller: None,
             },
             &mut out,
         );

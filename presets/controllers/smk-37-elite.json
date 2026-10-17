@@ -1,0 +1,27 @@
+{
+  "id": "smk-37-elite",
+  "name_hints": [
+    "smk-37",
+    "smk37",
+    "smk",
+    "m-vave",
+    "m vave",
+    "mvave",
+    "starrykey",
+    "mke-p37",
+    "mke_p37"
+  ],
+  "keybed": true,
+  "full_vel_default": false,
+  "knob_encoding": "relative_signed",
+  "knob_ccs": [48, 49, 50, 51, 52, 53, 54, 55],
+  "knob_bank2_ccs": [56, 57, 58, 59, 60, 61, 62, 63],
+  "knob_channel": null,
+  "fader_ccs": [20, 21, 22, 23, 24, 25, 26, 27],
+  "fader_channel": null,
+  "punch_pad_notes": [36, 37, 38, 39, 40, 41, 42, 43],
+  "phrase_notes": [36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51],
+  "transport_notes": [76, 80, 81, 82, 83, 84, 85, 86, 87, 91, 92, 93, 94, 95],
+  "feedback_port_hints": ["external", "third"],
+  "skip_audio": true
+}

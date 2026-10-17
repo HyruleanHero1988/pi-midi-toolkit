@@ -2732,7 +2732,7 @@ fn draw_drums(scene: &mut Scene, model: &NativeModel) {
     scene.text(24, HUD_H + 8, "DRUM KIT", 0xfbf1c7);
 
     let sel_cell = phrases::PHRASE_GRID_CELLS[model.kit_selected];
-    let sel_note = phrases::mpk_note_for_phrase_cell(sel_cell);
+    let sel_note = model.controller_profile.note_for_phrase_cell(sel_cell);
     let model_name = drum_model_for_note(sel_note).name().replace('_', " ");
     let macros = model.edit_drum_macros();
     let target = if model.kit_all_drums {
@@ -2764,7 +2764,7 @@ fn draw_drums(scene: &mut Scene, model: &NativeModel) {
     for screen_index in 0..16 {
         let cell = layout.kit_pad_cell(screen_index);
         let phrase_cell = phrases::PHRASE_GRID_CELLS[screen_index];
-        let note = phrases::mpk_note_for_phrase_cell(phrase_cell);
+        let note = model.controller_profile.note_for_phrase_cell(phrase_cell);
         let voice = drum_model_for_note(note).name().replace('_', " ");
         let repeat = model.drum_repeat_for_note(note);
         let selected = !model.kit_all_drums && screen_index == model.kit_selected;

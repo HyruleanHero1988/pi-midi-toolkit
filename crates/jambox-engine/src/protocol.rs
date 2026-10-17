@@ -377,9 +377,16 @@ pub struct MidiNotice {
     pub control: Option<u8>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub value: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub controller: Option<String>,
 }
 
 impl MidiNotice {
+    pub fn with_controller(mut self, id: Option<&str>) -> Self {
+        self.controller = id.filter(|s| !s.is_empty()).map(|s| s.to_string());
+        self
+    }
+
     pub fn from_event(event: midi_core::MidiEvent) -> Self {
         use midi_core::MidiEvent::*;
         match event {
@@ -394,6 +401,7 @@ impl MidiNotice {
                 velocity: Some(velocity as u16),
                 control: None,
                 value: None,
+                controller: None,
             },
             NoteOff {
                 channel,
@@ -406,6 +414,7 @@ impl MidiNotice {
                 velocity: Some(velocity as u16),
                 control: None,
                 value: None,
+                controller: None,
             },
             ControlChange {
                 channel,
@@ -418,6 +427,7 @@ impl MidiNotice {
                 velocity: None,
                 control: Some(controller),
                 value: Some(value as u16),
+                controller: None,
             },
             PitchBend { channel, value } => Self {
                 kind: "pitch_bend".into(),
@@ -426,6 +436,7 @@ impl MidiNotice {
                 velocity: None,
                 control: None,
                 value: Some(value),
+                controller: None,
             },
             PolyPressure {
                 channel,
@@ -438,6 +449,7 @@ impl MidiNotice {
                 velocity: None,
                 control: None,
                 value: Some(pressure as u16),
+                controller: None,
             },
             ChannelPressure { channel, pressure } => Self {
                 kind: "channel_pressure".into(),
@@ -446,6 +458,7 @@ impl MidiNotice {
                 velocity: None,
                 control: None,
                 value: Some(pressure as u16),
+                controller: None,
             },
             ProgramChange { channel, program } => Self {
                 kind: "program_change".into(),
@@ -454,6 +467,7 @@ impl MidiNotice {
                 velocity: None,
                 control: None,
                 value: Some(program as u16),
+                controller: None,
             },
         }
     }
@@ -614,6 +628,7 @@ fn parse_synth_param(name: &str) -> Option<SynthParam> {
         "drum_amp" => SynthParam::DrumAmp,
         "drum_level" => SynthParam::DrumLevel,
         "input_level" => SynthParam::InputLevel,
+        "sustain" => SynthParam::Sustain,
         "fm_enable" => SynthParam::FmEnable,
         "fm_recipe" => SynthParam::FmRecipe,
         "fm_op" => SynthParam::FmOp,

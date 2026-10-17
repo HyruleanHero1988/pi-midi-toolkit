@@ -166,11 +166,7 @@ pub fn pad_from_file(file: &PhraseFile, bpm: f32) -> PhrasePad {
     let length_secs = if file.length > 0.0 {
         file.length
     } else {
-        file.events
-            .iter()
-            .map(|e| e.t)
-            .fold(0.0_f64, f64::max)
-            + 0.05
+        file.events.iter().map(|e| e.t).fold(0.0_f64, f64::max) + 0.05
     };
     let length_ticks = seconds_to_ticks(length_secs, bpm);
     let empty = events.is_empty() || length_ticks == 0;
@@ -336,8 +332,7 @@ pub fn scale_velocity(vel: u8, gain: f32) -> u8 {
     if vel == 0 {
         return 0;
     }
-    ((f32::from(vel) * gain.clamp(0.1, 2.0)).round() as u32)
-        .clamp(1, 127) as u8
+    ((f32::from(vel) * gain.clamp(0.1, 2.0)).round() as u32).clamp(1, 127) as u8
 }
 
 pub fn pad_label(cell: usize) -> String {
@@ -356,15 +351,14 @@ pub const PHRASE_GRID_CELLS: [usize; 16] = [
     0, 1, 2, 3, 4, 13, 6, 7, 8, 9, 10, 11, 12, 5, 14, 15,
 ];
 
-fn mpk_row_swap(within_bank: usize) -> usize {
-    (within_bank + 4) & 7
-}
-
 /// Phrase cell 0..15 → factory MPK note (row-swapped to match the screen).
 pub fn mpk_note_for_phrase_cell(cell: usize) -> u8 {
-    let c = cell & 0x0F;
-    let bank = c & !7;
-    PHRASE_PAD_BASE + bank as u8 + mpk_row_swap(c & 7) as u8
+    midi_core::mpk_note_for_phrase_cell(cell)
+}
+
+/// Phrase cell 0..15 for the live controller (MPK row-swap, SMK 4×4, …).
+pub fn note_for_phrase_cell(profile: &midi_core::ControllerProfile, cell: usize) -> u8 {
+    profile.note_for_phrase_cell(cell)
 }
 
 #[cfg(test)]
@@ -616,7 +610,10 @@ mod tests {
         let restored = bank_from_snapshot(&snap, 120.0);
         assert!(restored[4].empty);
         assert!(persist_bank(&dir, &restored, 120.0));
-        assert!(!pad_path(&dir, 4).is_file(), "unpopulated preset slots must wipe live pads");
+        assert!(
+            !pad_path(&dir, 4).is_file(),
+            "unpopulated preset slots must wipe live pads"
+        );
         assert!(pad_path(&dir, 0).is_file());
         let _ = fs::remove_dir_all(&dir);
     }
