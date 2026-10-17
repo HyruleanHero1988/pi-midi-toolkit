@@ -1,4 +1,5 @@
-//! Three-signal wave view: left, right, and the low end of the mix.
+//! Three-signal wave view: the actual left mix, the actual right mix, and the
+//! low end of the summed bus.
 //!
 //! Each signal has its own orientation, baseline, color, and thickness.
 //! The first layout is a blue horizontal wave, a green vertical wave, and a
