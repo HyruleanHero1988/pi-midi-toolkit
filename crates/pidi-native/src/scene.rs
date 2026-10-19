@@ -1558,6 +1558,7 @@ fn draw_kaoss_axes(scene: &mut Scene, pad: crate::layout::Rect, model: &NativeMo
                     "Y L/R"
                 }
             }
+            "width" => "Y WIDTH",
             _ => "Y",
         };
         let x_label = if prog.note {
@@ -2257,7 +2258,7 @@ fn draw_synth(scene: &mut Scene, model: &NativeModel) {
     }
 
     const LABELS: [&str; Layout::SYNTH_SLIDER_COUNT] = [
-        "MORPH", "TONE", "LEVEL", "ATTACK", "RELEASE", "DRIFT", "FLANGE", "RATE",
+        "MORPH", "TONE", "LEVEL", "ATTACK", "RELEASE", "DRIFT", "FLANGE", "RATE", "WIDTH",
     ];
 
     let a = waves::short_label(model.wave_label(model.morph_a));
@@ -2323,34 +2324,39 @@ fn draw_synth(scene: &mut Scene, model: &NativeModel) {
             model.release_drift
         } else if index == 6 {
             model.fx_voice[3]
-        } else {
+        } else if index == 7 {
             model.fx_flanger_rate
+        } else {
+            model.synth_width
         };
+        // Nine rows leave ~8px tracks; a 4px inset would make the fill vanish.
+        let v_pad = if track.h < 12 { 1 } else { 4 };
+        let fill_h = (track.h - v_pad * 2).max(2);
         let fill = if index == 5 {
             let mid = track.x + track.w / 2;
             let travel = ((value - 0.5).abs() * track.w as f32) as i32;
             if value >= 0.5 {
                 Rect {
                     x: mid,
-                    y: track.y + 4,
+                    y: track.y + v_pad,
                     w: travel.max(2),
-                    h: track.h - 8,
+                    h: fill_h,
                 }
             } else {
                 Rect {
                     x: mid - travel,
-                    y: track.y + 4,
+                    y: track.y + v_pad,
                     w: travel.max(2),
-                    h: track.h - 8,
+                    h: fill_h,
                 }
             }
         } else {
             let fill_w = (track.w as f32 * value) as i32;
             Rect {
                 x: track.x,
-                y: track.y + 4,
+                y: track.y + v_pad,
                 w: fill_w.max(2),
-                h: track.h - 8,
+                h: fill_h,
             }
         };
         scene.fill_rect(
@@ -2361,6 +2367,8 @@ fn draw_synth(scene: &mut Scene, model: &NativeModel) {
                 0x83a598
             } else if index == 6 || index == 7 {
                 0xd79921
+            } else if index == 8 {
+                0x458588
             } else {
                 0x689d6a
             },
@@ -4828,6 +4836,36 @@ mod tests {
             .zip(right.points.iter())
             .any(|(l, r)| (l.1 - r.1).abs() > 1.0);
         assert!(ys_differ, "L and R traces occupy the same line");
+    }
+
+    #[test]
+    fn synth_width_slider_paints_a_visible_fill() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Synth);
+        assert!((model.synth_width - 0.6).abs() < 1e-6);
+        let scene = build(&model);
+        let track = model.layout.synth_slider(crate::layout::Layout::SYNTH_SLIDER_COUNT - 1);
+        let fill = scene
+            .color
+            .iter()
+            .find(|q| {
+                q.color == 0x458588
+                    && q.x >= track.x as f32 - 1.0
+                    && q.y >= track.y as f32 - 1.0
+                    && q.x + q.w <= (track.x + track.w) as f32 + 1.0
+                    && q.y + q.h <= (track.y + track.h) as f32 + 1.0
+            })
+            .expect("WIDTH fill");
+        assert!(
+            fill.h >= 2.0,
+            "nine-row tracks must still show WIDTH, h={}",
+            fill.h
+        );
+        assert!(
+            fill.w > track.w as f32 * 0.4,
+            "default 0.6 should cover most of the bar, w={}",
+            fill.w
+        );
     }
 
     #[test]

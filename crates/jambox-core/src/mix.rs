@@ -63,6 +63,27 @@ pub fn sweep_gains(sweep: f32) -> (f32, f32) {
     }
 }
 
+/// Keyboard pan 0..1. MIDI 60 (C4) is center; ±2 octaves reach the edges.
+pub fn note_sweep(note: u8) -> f32 {
+    ((note as f32 - 60.0) * (1.0 / 48.0) + 0.5).clamp(0.0, 1.0)
+}
+
+/// How far note position pulls L/R at full width. 1 would hard-pan C2/C6.
+const KEYBOARD_PAN: f32 = 0.5;
+
+/// Per-voice gains: C4 stays centered; low notes lean left, high notes right.
+pub fn width_gains(note: u8, width: f32) -> (f32, f32) {
+    let w = width.clamp(0.0, 1.0);
+    let pan = 0.5 + (note_sweep(note) - 0.5) * w * KEYBOARD_PAN;
+    sweep_gains(pan)
+}
+
+/// Wavetable A vs B stereo. Morph 0 and 1 stay dual-mono; 0.5 is the widest.
+pub fn morph_side(a: f32, b: f32, morph: f32, width: f32) -> f32 {
+    let m = morph.clamp(0.0, 1.0);
+    0.5 * (a - b) * width.clamp(0.0, 1.0) * 4.0 * m * (1.0 - m)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -98,5 +119,29 @@ mod tests {
         assert!(l.abs() < 1e-6 && (r - 1.0).abs() < 1e-6);
         let (l, r) = sweep_gains(0.25);
         assert!((l - 1.0).abs() < 1e-6 && (r - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn note_sweep_is_center_at_c4() {
+        assert!((note_sweep(60) - 0.5).abs() < 1e-6);
+        assert!(note_sweep(36) < 0.2);
+        assert!(note_sweep(84) > 0.8);
+        let (l, r) = width_gains(60, 1.0);
+        assert!((l - 1.0).abs() < 1e-5 && (r - 1.0).abs() < 1e-5);
+        let (low_l, low_r) = width_gains(36, 1.0);
+        assert!(low_l > low_r + 0.2);
+        let (high_l, high_r) = width_gains(84, 1.0);
+        assert!(high_r > high_l + 0.2);
+        let (l, r) = width_gains(36, 0.0);
+        assert!((l - 1.0).abs() < 1e-5 && (r - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn morph_side_peaks_at_half_blend() {
+        assert!(morph_side(1.0, -1.0, 0.0, 1.0).abs() < 1e-6);
+        assert!(morph_side(1.0, -1.0, 1.0, 1.0).abs() < 1e-6);
+        let wide = morph_side(1.0, -1.0, 0.5, 1.0);
+        assert!((wide - 1.0).abs() < 1e-5);
+        assert!(morph_side(1.0, -1.0, 0.5, 0.0).abs() < 1e-6);
     }
 }

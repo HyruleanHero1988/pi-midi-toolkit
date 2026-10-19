@@ -236,6 +236,8 @@ pub struct NativeModel {
     pub synth_params: [f32; 5],
     /// Release pitch glide. 0.5 is no drift; above rises, below falls (±12 st).
     pub release_drift: f32,
+    /// Wavetable stereo width. 0 = dual-mono, 1 = A/B split plus keyboard pan.
+    pub synth_width: f32,
     pub vibrato_always: f32,
     /// Vibrato depth in semitones (0..2).
     pub vibrato_depth: f32,
@@ -625,6 +627,7 @@ impl NativeModel {
             status_line: String::new(),
             synth_params: [0.5, 0.5, 0.8, 0.05, 0.3],
             release_drift: 0.5,
+            synth_width: 0.6,
             vibrato_always: 0.0,
             vibrato_depth: 0.5,
             vibrato_rate: 5.0,
@@ -2323,6 +2326,7 @@ impl NativeModel {
         self.seq.cue_beep = s.seq_cue_beep;
         self.synth_params = [s.morph, s.tone, s.level, s.attack, s.release];
         self.release_drift = s.release_drift.clamp(0.0, 1.0);
+        self.synth_width = s.synth_width.clamp(0.0, 1.0);
         self.drum_level = s.drum_level.clamp(0.0, 1.0);
         self.input_level = s.input_level.clamp(0.0, 1.0);
         self.seq_level = s.seq_level.clamp(0.0, 2.0);
@@ -2474,6 +2478,7 @@ impl NativeModel {
         outbox.synth("drum_level", self.drum_level);
         outbox.synth("input_level", self.input_level);
         outbox.synth("sweep", self.sweep);
+        outbox.synth("width", self.synth_width);
         outbox.punch_buffer_prio(self.punch_buffer_prio.as_u8());
         outbox.punch_rpt_mode(self.punch_rpt_mode.as_u8());
         outbox.punch_grid(self.punch_grid_mode.as_u8());
@@ -2530,6 +2535,7 @@ impl NativeModel {
             attack: self.synth_params[3],
             release: self.synth_params[4],
             release_drift: self.release_drift,
+            synth_width: self.synth_width,
             morph_a: self.morph_a,
             morph_b: self.morph_b,
             synth_octave: self.synth_octave,
@@ -5523,6 +5529,16 @@ impl NativeModel {
             self.mark_dirty();
             return;
         }
+        if index == 8 {
+            if !Self::accept_slider_value(self.synth_width, value, moving) {
+                return;
+            }
+            self.synth_width = value;
+            outbox.synth("width", value);
+            self.status_line = format!("width {:.2}", value);
+            self.mark_dirty();
+            return;
+        }
         if index >= 5 {
             return;
         }
@@ -7740,6 +7756,9 @@ impl NativeModel {
             return;
         }
         outbox.synth(name, v);
+        if name == "width" {
+            self.synth_width = v;
+        }
         if name == "vibrato_rate" {
             // Engine maps 0..1 to 1–9 Hz. MIDI vibrato uses the Hz field.
             self.borrow_vibrato_for_kaoss();
@@ -8569,6 +8588,7 @@ impl NativeModel {
         self.drum_level = 1.0;
         self.input_level = 0.0;
         self.sweep = 0.5;
+        self.synth_width = 0.6;
         self.vibrato_always = 0.0;
         self.vibrato_depth = 0.5;
         self.vibrato_rate = 5.0;
@@ -8581,6 +8601,7 @@ impl NativeModel {
         outbox.synth("drum_level", self.drum_level);
         outbox.synth("input_level", self.input_level);
         outbox.synth("sweep", self.sweep);
+        outbox.synth("width", self.synth_width);
         outbox.synth("attack", self.synth_params[3]);
         outbox.synth("release", self.synth_params[4]);
         outbox.synth("release_drift", self.release_drift);
@@ -12571,6 +12592,24 @@ mod tests {
             )),
             "RATE must not change mix"
         );
+    }
+
+    #[test]
+    fn synth_width_slider_emits_width_command() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Synth);
+        let mut out = Outbox::new();
+        let track = model.layout.synth_slider(Layout::SYNTH_SLIDER_COUNT - 1);
+        model.finger_down(1, track.x + track.w - 6, track.y + track.h / 2, &mut out);
+        let batch = out.take();
+        assert!(
+            batch.iter().any(|r| matches!(
+                r,
+                Request::Synth { param, .. } if param == "width"
+            )),
+            "WIDTH should emit synth width, got {batch:?}"
+        );
+        assert!(model.synth_width > 0.8);
     }
 
     #[test]

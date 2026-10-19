@@ -357,6 +357,14 @@ pub const KAOSS_PROGRAMS: &[KaossProgram] = &[
         x_param: Some("sweep"),
         curated: true,
     },
+    KaossProgram {
+        id: "width",
+        label: "WIDTH",
+        note: false,
+        y_param: "width",
+        x_param: None,
+        curated: true,
+    },
 ];
 
 /// Channel-wide MIDI a Kaoss FX program writes while a note is already sounding.
@@ -712,6 +720,9 @@ mod tests {
         assert!(sweep.curated && !sweep.note && sweep.uses_sweep());
         assert_eq!(sweep.x_param, Some("sweep"));
         assert_eq!(sweep.y_param, "sweep");
+        let width = KAOSS_PROGRAMS.iter().find(|p| p.id == "width").unwrap();
+        assert!(width.curated && !width.note);
+        assert_eq!(width.y_param, "width");
     }
 
     #[test]

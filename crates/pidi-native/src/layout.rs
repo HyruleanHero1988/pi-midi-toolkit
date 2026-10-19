@@ -1925,7 +1925,7 @@ impl Layout {
         }
     }
 
-    pub const SYNTH_SLIDER_COUNT: usize = 8;
+    pub const SYNTH_SLIDER_COUNT: usize = 9;
 
     fn synth_play_bottom(&self) -> i32 {
         self.synth_keys.y + self.synth_keys.h
@@ -4175,7 +4175,7 @@ mod tests {
             Hit::ScopeMode
         );
         const LABELS: [&str; Layout::SYNTH_SLIDER_COUNT] = [
-            "MORPH", "TONE", "LEVEL", "ATTACK", "RELEASE", "DRIFT", "FLANGE", "RATE",
+            "MORPH", "TONE", "LEVEL", "ATTACK", "RELEASE", "DRIFT", "FLANGE", "RATE", "WIDTH",
         ];
         for (index, label) in LABELS.iter().enumerate() {
             let track = layout.synth_slider(index);
@@ -4202,7 +4202,10 @@ mod tests {
                 );
             }
         }
-        assert!(layout.synth_slider(0).y + layout.synth_slider(0).h <= layout.synth_slider(7).y);
+        assert!(
+            layout.synth_slider(0).y + layout.synth_slider(0).h
+                <= layout.synth_slider(Layout::SYNTH_SLIDER_COUNT - 1).y
+        );
     }
 
     #[test]

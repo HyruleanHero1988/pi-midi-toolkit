@@ -570,6 +570,8 @@ impl FmSynth {
             tone_lfo_amount: 0.0,
             tone_lfo_rate_hz: 5.0,
             tone_lfo_phase: 0.0,
+            stereo_width: 0.0,
+            morph: 0.0,
         };
         self.render_split(out, &mut unused, ctx);
     }
