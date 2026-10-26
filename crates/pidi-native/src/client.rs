@@ -405,6 +405,19 @@ impl Outbox {
         self.reliable.push_back(Request::FullVel { on });
     }
 
+    pub fn midi_assign(
+        &mut self,
+        stick_x: midi_core::MidiDest,
+        stick_y: midi_core::MidiDest,
+        aftertouch: midi_core::MidiDest,
+    ) {
+        self.reliable.push_back(Request::MidiAssign {
+            stick_x: Some(stick_x.id().into()),
+            stick_y: Some(stick_y.id().into()),
+            aftertouch: Some(aftertouch.id().into()),
+        });
+    }
+
     pub fn drum_repeat_map(&mut self, slots: [u8; 16], latch: bool) {
         self.reliable
             .push_back(Request::DrumRepeat { slots, latch });

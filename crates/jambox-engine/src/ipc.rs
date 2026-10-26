@@ -413,6 +413,14 @@ pub fn handle_line(
             map.set_full_vel(on);
             Response::Ok
         }
+        Ok(Decoded::MidiAssign {
+            stick_x,
+            stick_y,
+            aftertouch,
+        }) => {
+            map.set_assigns(stick_x.as_deref(), stick_y.as_deref(), aftertouch.as_deref());
+            Response::Ok
+        }
         Ok(Decoded::PunchPads { armed }) => {
             map.set_pads_to_fx(armed);
             Response::Ok

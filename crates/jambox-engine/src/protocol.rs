@@ -213,6 +213,14 @@ pub enum Request {
     FullVel {
         on: bool,
     },
+    MidiAssign {
+        #[serde(default)]
+        stick_x: Option<String>,
+        #[serde(default)]
+        stick_y: Option<String>,
+        #[serde(default)]
+        aftertouch: Option<String>,
+    },
     DrumRepeat {
         slots: [u8; 16],
         latch: bool,
@@ -565,6 +573,11 @@ pub enum Decoded {
     },
     FullVel {
         on: bool,
+    },
+    MidiAssign {
+        stick_x: Option<String>,
+        stick_y: Option<String>,
+        aftertouch: Option<String>,
     },
     /// Bank A pads arm punch FX (true) or play the kit (false).
     PunchPads {
@@ -936,6 +949,15 @@ pub fn decode(request: Request) -> Result<Decoded, String> {
         Request::MidiSelect { input, output } => Decoded::MidiSelect { input, output },
         Request::ChannelMap { bits } => Decoded::ChannelMap { bits },
         Request::FullVel { on } => Decoded::FullVel { on },
+        Request::MidiAssign {
+            stick_x,
+            stick_y,
+            aftertouch,
+        } => Decoded::MidiAssign {
+            stick_x,
+            stick_y,
+            aftertouch,
+        },
         Request::DrumRepeat { slots, latch } => Decoded::DrumRepeat { slots, latch },
         Request::SetArp {
             enabled,
@@ -1237,6 +1259,22 @@ mod tests {
     fn full_vel_decodes() {
         let d = decode_line(r#"{"cmd":"full_vel","on":false}"#);
         assert!(matches!(d, Decoded::FullVel { on: false }));
+    }
+
+    #[test]
+    fn midi_assign_decodes() {
+        let d = decode_line(r#"{"cmd":"midi_assign","stick_y":"tone","aftertouch":"vibrato"}"#);
+        match d {
+            Decoded::MidiAssign {
+                stick_y: Some(y),
+                aftertouch: Some(at),
+                stick_x: None,
+            } => {
+                assert_eq!(y, "tone");
+                assert_eq!(at, "vibrato");
+            }
+            _ => panic!("midi_assign decode"),
+        }
     }
 
     #[test]

@@ -230,6 +230,10 @@ pub enum Hit {
     SettingsProbe,
     SettingsPowerWarn,
     SettingsFullVel,
+    SettingsMidi,
+    MidiClose,
+    MidiSource(usize),
+    MidiDest(usize),
     UpdateClose,
     UpdateCheck,
     UpdateApply,
@@ -391,6 +395,7 @@ pub struct Layout {
     pub settings_probe: Rect,
     pub settings_power_warn: Rect,
     pub settings_full_vel: Rect,
+    pub settings_midi: Rect,
     pub seq_rec: Rect,
     pub seq_play: Rect,
     pub seq_keep: Rect,
@@ -1149,10 +1154,16 @@ impl Layout {
                 w: 240,
                 h: 72,
             },
-            settings_full_vel: Rect {
+            settings_midi: Rect {
                 x: 24,
                 y: HUD_H + 116,
-                w: 752,
+                w: 368,
+                h: 80,
+            },
+            settings_full_vel: Rect {
+                x: 408,
+                y: HUD_H + 116,
+                w: 368,
                 h: 80,
             },
             // FX mode owns these rects (not Settings).
@@ -1271,6 +1282,52 @@ impl Layout {
             show_on_screen_keys: true,
             pad_notes: midi_core::mpk_phrase_notes(),
         }
+    }
+
+    pub fn midi_close(&self) -> Rect {
+        self.update_close
+    }
+
+    pub fn midi_source_row(&self, index: usize) -> Rect {
+        let i = (index % 3) as i32;
+        Rect {
+            x: self.content.x + 16,
+            y: self.content.y + 68 + i * 54,
+            w: self.content.w - 32,
+            h: 48,
+        }
+    }
+
+    pub fn midi_dest_cell(&self, index: usize) -> Rect {
+        let i = index % midi_core::MidiDest::ALL.len();
+        let col = (i % 4) as i32;
+        let row = (i / 4) as i32;
+        let top = self.content.y + 240;
+        let w = (self.content.w - 32) / 4;
+        let h = 44;
+        Rect {
+            x: self.content.x + 16 + col * w,
+            y: top + row * (h + 4),
+            w: w - 8,
+            h,
+        }
+    }
+
+    pub fn hit_midi_panel(&self, px: i32, py: i32) -> Hit {
+        if self.midi_close().contains(px, py) {
+            return Hit::MidiClose;
+        }
+        for i in 0..midi_core::MidiSource::ALL.len() {
+            if self.midi_source_row(i).contains(px, py) {
+                return Hit::MidiSource(i);
+            }
+        }
+        for i in 0..midi_core::MidiDest::ALL.len() {
+            if self.midi_dest_cell(i).contains(px, py) {
+                return Hit::MidiDest(i);
+            }
+        }
+        Hit::None
     }
 
     pub fn hit_update_panel(&self, px: i32, py: i32) -> Hit {
@@ -3732,6 +3789,9 @@ impl Layout {
         if self.settings_audio.contains(px, py) {
             return Hit::SettingsAudio;
         }
+        if self.settings_midi.contains(px, py) {
+            return Hit::SettingsMidi;
+        }
         if self.settings_full_vel.contains(px, py) {
             return Hit::SettingsFullVel;
         }
@@ -4505,6 +4565,45 @@ mod tests {
         match layout.hit(UiMode::Chords, label.x + label.w / 2, label.y + label.h / 2) {
             Hit::ChordsStrum { .. } => {}
             other => panic!("expected strum on octave label, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn settings_midi_and_full_vel_sit_side_by_side() {
+        let layout = Layout::new();
+        assert_eq!(
+            layout.hit(
+                UiMode::Settings,
+                layout.settings_midi.x + 4,
+                layout.settings_midi.y + 4
+            ),
+            Hit::SettingsMidi
+        );
+        assert_eq!(
+            layout.hit(
+                UiMode::Settings,
+                layout.settings_full_vel.x + 4,
+                layout.settings_full_vel.y + 4
+            ),
+            Hit::SettingsFullVel
+        );
+        assert!(
+            layout.settings_midi.x + layout.settings_midi.w <= layout.settings_full_vel.x,
+            "MIDI and FULL VEL must not overlap"
+        );
+        assert_eq!(
+            layout.hit_midi_panel(layout.midi_close().x + 4, layout.midi_close().y + 4),
+            Hit::MidiClose
+        );
+        assert_eq!(
+            layout.hit_midi_panel(
+                layout.midi_source_row(2).x + 4,
+                layout.midi_source_row(2).y + 4
+            ),
+            Hit::MidiSource(2)
+        );
+        for i in 0..midi_core::MidiDest::ALL.len() {
+            assert_on_screen("midi dest", layout.midi_dest_cell(i));
         }
     }
 

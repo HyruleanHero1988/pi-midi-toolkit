@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use midi_core::{
     fanout_dest_mask, is_virtual_port_name, matching_port_names, pick_thru_output_name,
-    profile_for_port_name, ControllerProfile, KnobEncoding, MidiEvent,
+    profile_for_port_name, ControllerProfile, KnobEncoding, MidiDest, MidiEvent, MidiSource,
 };
 use midir::{MidiInput, MidiInputConnection, MidiOutput, MidiOutputConnection};
 use tracing::{info, warn};
@@ -68,6 +68,12 @@ pub struct MidiMap {
     fx_index: AtomicU16,
     /// Incoming NoteOns → 127 (MPK velocity workaround). Default on.
     full_vel: AtomicBool,
+    /// Joystick X / pitch-wheel destination.
+    stick_x: AtomicU8,
+    /// Joystick Y / CC1 destination.
+    stick_y: AtomicU8,
+    /// Pad poly aftertouch destination.
+    aftertouch: AtomicU8,
     /// FX page: Bank A pad notes are punch toggles instead of kit hits.
     pads_to_fx: AtomicBool,
     /// Per kit-voice note-repeat slot (0 = off). Hardware pads read this.
@@ -86,6 +92,9 @@ impl Default for MidiMap {
             fx_kind: AtomicU8::new(0),
             fx_index: AtomicU16::new(0),
             full_vel: AtomicBool::new(true),
+            stick_x: AtomicU8::new(MidiDest::default_for(MidiSource::StickX).as_u8()),
+            stick_y: AtomicU8::new(MidiDest::default_for(MidiSource::StickY).as_u8()),
+            aftertouch: AtomicU8::new(MidiDest::default_for(MidiSource::Aftertouch).as_u8()),
             pads_to_fx: AtomicBool::new(true),
             repeat_div: std::array::from_fn(|_| AtomicU8::new(0)),
             repeat_latch: AtomicBool::new(false),
@@ -121,6 +130,27 @@ impl MidiMap {
 
     pub fn set_full_vel(&self, on: bool) {
         self.full_vel.store(on, Ordering::Relaxed);
+    }
+
+    pub fn set_assigns(&self, stick_x: Option<&str>, stick_y: Option<&str>, aftertouch: Option<&str>) {
+        if let Some(dest) = stick_x.and_then(MidiDest::from_id) {
+            self.stick_x.store(dest.as_u8(), Ordering::Relaxed);
+        }
+        if let Some(dest) = stick_y.and_then(MidiDest::from_id) {
+            self.stick_y.store(dest.as_u8(), Ordering::Relaxed);
+        }
+        if let Some(dest) = aftertouch.and_then(MidiDest::from_id) {
+            self.aftertouch.store(dest.as_u8(), Ordering::Relaxed);
+        }
+    }
+
+    fn dest_for(&self, source: MidiSource) -> MidiDest {
+        let raw = match source {
+            MidiSource::StickX => self.stick_x.load(Ordering::Relaxed),
+            MidiSource::StickY => self.stick_y.load(Ordering::Relaxed),
+            MidiSource::Aftertouch => self.aftertouch.load(Ordering::Relaxed),
+        };
+        MidiDest::from_u8(raw)
     }
 
     pub fn set_pads_to_fx(&self, armed: bool) {
@@ -288,12 +318,10 @@ impl MidiMap {
                 Some(Command::NoteOff { channel, note })
             }
             MidiEvent::PitchBend { value, .. } => {
-                // ±2 semitones, same as Python `_bend_range`.
+                let dest = self.dest_for(MidiSource::StickX);
+                let unit = (value as f32 / 16_383.0).clamp(0.0, 1.0);
                 let semis = ((value as f32) - 8192.0) / 8192.0 * 2.0;
-                Some(Command::SetSynth {
-                    param: SynthParam::PitchBend,
-                    value: semis,
-                })
+                dest_command(dest, unit, Some(semis), None)
             }
             MidiEvent::ControlChange {
                 channel,
@@ -304,31 +332,52 @@ impl MidiMap {
                 channel,
                 note,
                 pressure,
-            } => self.interpret_drum_aftertouch(profile, channel, note, pressure),
+            } => self.interpret_aftertouch(profile, Some((channel, note)), pressure),
+            MidiEvent::ChannelPressure { pressure, .. } => {
+                self.interpret_aftertouch(profile, None, pressure)
+            }
             _ => None,
         }
     }
 
-    fn interpret_drum_aftertouch(
+    fn interpret_aftertouch(
         &self,
         profile: &ControllerProfile,
-        channel: u8,
-        note: u8,
+        pad: Option<(u8, u8)>,
         pressure: u8,
     ) -> Option<Command> {
-        if channel != DRUM_CHANNEL || profile.is_transport_note(note) {
-            return None;
+        if let Some((channel, note)) = pad {
+            if profile.is_transport_note(note) {
+                return None;
+            }
+            if self.mode.load(Ordering::Relaxed) == MODE_PUNCH
+                && self.pads_to_fx()
+                && profile.punch_index_for_pad(note).is_some()
+            {
+                return None;
+            }
+            if channel != DRUM_CHANNEL {
+                return dest_command(
+                    self.dest_for(MidiSource::Aftertouch),
+                    (pressure as f32 / 127.0).clamp(0.0, 1.0),
+                    None,
+                    None,
+                );
+            }
+            dest_command(
+                self.dest_for(MidiSource::Aftertouch),
+                (pressure as f32 / 127.0).clamp(0.0, 1.0),
+                None,
+                Some(note),
+            )
+        } else {
+            dest_command(
+                self.dest_for(MidiSource::Aftertouch),
+                (pressure as f32 / 127.0).clamp(0.0, 1.0),
+                None,
+                None,
+            )
         }
-        if self.mode.load(Ordering::Relaxed) == MODE_PUNCH
-            && self.pads_to_fx()
-            && profile.punch_index_for_pad(note).is_some()
-        {
-            return None;
-        }
-        Some(Command::SetDrumAftertouch {
-            model: drum_model_for_note(note).index() as u8,
-            amount: (pressure as f32 / 127.0).clamp(0.0, 1.0),
-        })
     }
 
     fn cc_unit(&self, slot: usize, encoding: KnobEncoding, value: u8) -> f32 {
@@ -353,11 +402,7 @@ impl MidiMap {
     ) -> Option<Command> {
         if controller == CC_MOD {
             let unit = (value as f32 / 127.0).clamp(0.0, 1.0);
-            // Wheel scales existing depth; it must not overwrite Knob 5.
-            return Some(Command::SetSynth {
-                param: SynthParam::VibratoMod,
-                value: unit,
-            });
+            return dest_command(self.dest_for(MidiSource::StickY), unit, None, None);
         }
         if controller == 64
             && profile.fader_index(64).is_none()
@@ -484,6 +529,67 @@ impl MidiMap {
             }),
             _ => None,
         }
+    }
+}
+
+fn dest_command(
+    dest: MidiDest,
+    unit: f32,
+    pitch_semis: Option<f32>,
+    drum_note: Option<u8>,
+) -> Option<Command> {
+    let unit = unit.clamp(0.0, 1.0);
+    match dest {
+        MidiDest::Off => None,
+        MidiDest::Vibrato => Some(Command::SetSynth {
+            param: SynthParam::VibratoMod,
+            value: unit,
+        }),
+        MidiDest::Pitch => Some(Command::SetSynth {
+            param: SynthParam::PitchBend,
+            value: pitch_semis.unwrap_or((unit - 0.5) * 4.0),
+        }),
+        MidiDest::Tone => Some(Command::SetSynth {
+            param: SynthParam::Tone,
+            value: unit,
+        }),
+        MidiDest::Morph => Some(Command::SetSynth {
+            param: SynthParam::Morph,
+            value: unit,
+        }),
+        MidiDest::Level => Some(Command::SetSynth {
+            param: SynthParam::Level,
+            value: unit,
+        }),
+        MidiDest::DrumTone => {
+            if let Some(note) = drum_note {
+                Some(Command::SetDrumAftertouch {
+                    model: drum_model_for_note(note).index() as u8,
+                    amount: unit,
+                })
+            } else {
+                Some(Command::SetSynth {
+                    param: SynthParam::DrumTone,
+                    value: unit,
+                })
+            }
+        }
+        MidiDest::DrumPitch => drum_express(SynthParam::DrumPitch, unit, drum_note),
+        MidiDest::DrumDecay => drum_express(SynthParam::DrumDecay, unit, drum_note),
+        MidiDest::DrumNoise => drum_express(SynthParam::DrumNoise, unit, drum_note),
+        MidiDest::DrumLevel => drum_express(SynthParam::DrumAmp, unit, drum_note),
+    }
+}
+
+fn drum_express(param: SynthParam, unit: f32, drum_note: Option<u8>) -> Option<Command> {
+    if let Some(note) = drum_note {
+        Some(Command::SetDrumMacro {
+            model: drum_model_for_note(note).index() as u8,
+            param,
+            value: unit,
+        })
+    } else {
+        Some(Command::SetSynth { param, value: unit })
     }
 }
 
@@ -1092,6 +1198,59 @@ mod tests {
     }
 
     #[test]
+    fn stick_and_aftertouch_follow_live_assigns() {
+        let map = MidiMap::default();
+        assert_eq!(
+            map.interpret(MidiEvent::ControlChange {
+                channel: 0,
+                controller: CC_MOD,
+                value: 127,
+            }),
+            Some(Command::SetSynth {
+                param: SynthParam::VibratoMod,
+                value: 1.0
+            })
+        );
+        map.set_assigns(None, Some("tone"), Some("vibrato"));
+        assert_eq!(
+            map.interpret(MidiEvent::ControlChange {
+                channel: 0,
+                controller: CC_MOD,
+                value: 64,
+            }),
+            Some(Command::SetSynth {
+                param: SynthParam::Tone,
+                value: 64.0 / 127.0
+            })
+        );
+        assert_eq!(
+            map.interpret(MidiEvent::PolyPressure {
+                channel: 9,
+                note: 36,
+                pressure: 90,
+            }),
+            Some(Command::SetSynth {
+                param: SynthParam::VibratoMod,
+                value: 90.0 / 127.0
+            })
+        );
+        map.set_assigns(Some("off"), None, Some("off"));
+        assert!(map
+            .interpret(MidiEvent::PitchBend {
+                channel: 0,
+                value: 16_383,
+            })
+            .is_none());
+        assert!(map
+            .interpret(MidiEvent::PolyPressure {
+                channel: 9,
+                note: 36,
+                pressure: 40,
+            })
+            .is_none());
+    }
+
+    #[test]
     fn drum_poly_pressure_opens_that_pad_tone() {
         let map = MidiMap::default();
         assert_eq!(
@@ -1116,14 +1275,17 @@ mod tests {
                 amount: 1.0,
             })
         );
-        assert!(
+        assert_eq!(
             map.interpret(MidiEvent::PolyPressure {
                 channel: 0,
                 note: 60,
                 pressure: 90,
-            })
-            .is_none(),
-            "key aftertouch must not rewrite kit tone"
+            }),
+            Some(Command::SetSynth {
+                param: SynthParam::DrumTone,
+                value: 90.0 / 127.0
+            }),
+            "key aftertouch uses the same dest globally, not a pad overlay"
         );
     }
 
