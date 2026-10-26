@@ -122,6 +122,13 @@ impl DrumMacros {
     }
 }
 
+/// Pad aftertouch opens the filter from the stored slider toward full bright.
+pub fn live_tone(slider: f32, pressure: f32) -> f32 {
+    let slider = slider.clamp(0.0, 1.0);
+    let pressure = pressure.clamp(0.0, 1.0);
+    slider + (1.0 - slider) * pressure
+}
+
 /// Sample rate / window for the KIT CRT one-shot (UI thread, not the audio callback).
 pub const DRUM_PREVIEW_SR: f32 = 8_000.0;
 /// ~280 ms so decay/stretch reads as how much of the scope stays alive.
@@ -193,6 +200,8 @@ impl Hit {
 pub struct DrumKit {
     hits: [Hit; MAX_DRUM_HITS],
     macros: [DrumMacros; DRUM_MODEL_COUNT],
+    /// Polyphonic aftertouch overlay per model. 0 leaves the TONE slider alone.
+    aftertouch: [f32; DRUM_MODEL_COUNT],
     rng: u32,
     serial: u64,
     sample_rate: f32,
@@ -205,6 +214,7 @@ impl DrumKit {
         Self {
             hits: [Hit::silent(); MAX_DRUM_HITS],
             macros: [DrumMacros::default(); DRUM_MODEL_COUNT],
+            aftertouch: [0.0; DRUM_MODEL_COUNT],
             rng: 0x1234_5678,
             serial: 0,
             sample_rate: sample_rate.max(8000.0),
@@ -242,6 +252,15 @@ impl DrumKit {
         self.macros[model.index()] = macros.clamped();
     }
 
+    /// Squeeze overlay for one pad. 0 restores the stored TONE slider.
+    pub fn set_aftertouch(&mut self, model: DrumModel, amount: f32) {
+        self.aftertouch[model.index()] = amount.clamp(0.0, 1.0);
+    }
+
+    pub fn aftertouch(&self, model: DrumModel) -> f32 {
+        self.aftertouch[model.index()]
+    }
+
     /// Offline one-shot for the KIT scope. Seeded noise so redraws stay stable.
     pub fn preview(
         model: DrumModel,
@@ -263,6 +282,7 @@ impl DrumKit {
 
     pub fn silence(&mut self) {
         self.hits = [Hit::silent(); MAX_DRUM_HITS];
+        self.aftertouch = [0.0; DRUM_MODEL_COUNT];
     }
 
     /// Trigger a pad. Voice-steals the oldest hit when the kit is full.
@@ -446,7 +466,7 @@ impl DrumKit {
     pub fn render_model(&mut self, model: DrumModel, out: &mut [f32]) {
         let sr = self.sample_rate;
         let m = self.macros[model.index()];
-        let tone = m.tone;
+        let tone = live_tone(m.tone, self.aftertouch[model.index()]);
         let noise_amt = m.noise;
         // Noise low-pass coefficient: darker as tone drops.
         let lp_coef = (0.05 + 0.95 * tone).clamp(0.02, 1.0);
@@ -836,6 +856,44 @@ mod tests {
         });
         assert!((kit.macros_for(DrumModel::Kick).pitch - 0.2).abs() < 1e-6);
         assert!((kit.macros_for(DrumModel::Snare).pitch - 0.2).abs() < 1e-6);
+    }
+
+    #[test]
+    fn aftertouch_opens_tone_without_rewriting_the_slider() {
+        assert!((live_tone(0.25, 0.0) - 0.25).abs() < 1e-6);
+        assert!((live_tone(0.25, 1.0) - 1.0).abs() < 1e-6);
+        assert!((live_tone(0.25, 0.5) - 0.625).abs() < 1e-6);
+
+        let mut dark = DrumMacros::default();
+        dark.tone = 0.0;
+        dark.decay = 0.7;
+        let mut kit = DrumKit::new(48_000.0);
+        kit.rng = 7;
+        kit.set_model_macros(DrumModel::Snare, dark);
+        kit.trigger(DrumModel::Snare, 127);
+        let mut closed = [0.0f32; 2048];
+        kit.render_model(DrumModel::Snare, &mut closed);
+
+        let mut kit = DrumKit::new(48_000.0);
+        kit.rng = 7;
+        kit.set_model_macros(DrumModel::Snare, dark);
+        kit.set_aftertouch(DrumModel::Snare, 1.0);
+        kit.trigger(DrumModel::Snare, 127);
+        let mut open = [0.0f32; 2048];
+        kit.render_model(DrumModel::Snare, &mut open);
+
+        assert!((kit.macros_for(DrumModel::Snare).tone - 0.0).abs() < 1e-6);
+        assert!((kit.aftertouch(DrumModel::Kick) - 0.0).abs() < 1e-6);
+
+        let dark_hf = closed.windows(2).map(|w| (w[1] - w[0]).abs()).sum::<f32>();
+        let bright_hf = open.windows(2).map(|w| (w[1] - w[0]).abs()).sum::<f32>();
+        assert!(
+            bright_hf > dark_hf * 1.15,
+            "aftertouch should open snare tone (bright {bright_hf} vs dark {dark_hf})"
+        );
+
+        kit.silence();
+        assert_eq!(kit.aftertouch(DrumModel::Snare), 0.0);
     }
 
     #[test]

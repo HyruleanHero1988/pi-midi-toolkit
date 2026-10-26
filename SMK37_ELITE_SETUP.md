@@ -24,7 +24,7 @@ the factory CC map disagrees with the overlay.
 | Pads 9–16 | Bank B row-swapped | Sequential 44–51 kit / phrases |
 | FULL VEL | Default **on** (MPK pads are anemic) | Default **off** (curve is usable) |
 | Sustain | CC 64 | CC 64 (pedal jack) |
-| Pad aftertouch | — | Poly pressure → punch amount on FX |
+| Pad aftertouch | — | Poly pressure → kit tone; punch amount on FX |
 | MIDI OUT auto | Skips the MPK | Skips the SMK (U2MIDI stays DIN) |
 | Headphone / mic auto | Skips MPK USB audio | Skips the Elite USB sound card |
 
@@ -96,7 +96,7 @@ Write down what the unit actually sends. Compare to
 | Fader 1 | CC 20 | MIX LIVE | edit `fader_ccs` |
 | Pad 1 (top-left) | ch 10 note 36 | kit kick / punch RPT | edit `phrase_notes` / `punch_pad_notes` |
 | Pad 5 | ch 10 note 40 | kit cell 4 | sequential 4×4, no MPK row-swap |
-| Pad aftertouch | poly pressure | punch amount on FX | skip if the unit has no pad pressure |
+| Pad aftertouch | poly pressure | kit tone (brightens from the TONE slider); punch amount on FX | skip if the unit has no pad pressure |
 | Sustain pedal | CC 64 ≥ 64 | hold live keys | if a fader is also CC 64, remap the fader |
 | Pad bank 2 transport | notes 91–95 / 76 | ignored (not drums) | add extras to `transport_notes` |
 

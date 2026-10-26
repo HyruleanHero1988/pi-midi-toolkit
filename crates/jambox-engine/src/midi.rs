@@ -18,12 +18,9 @@ use tracing::{info, warn};
 
 use crate::bus::{MidiInSide, MidiOutSide};
 use jambox_core::{
-    drum_model_for_note, Command, FxParam, FxTarget, RepeatDivision, SynthParam, DRUM_CHANNEL,
-    DRUM_MODEL_COUNT, SEQ_CLIP_SLOT, SEQ_DRUM_MIX_SLOT, SEQ_KAOSS_MIX_SLOT,
+    drum_model_for_note, hw_repeat_owner, Command, FxParam, FxTarget, RepeatDivision, SynthParam,
+    DRUM_CHANNEL, DRUM_MODEL_COUNT, SEQ_CLIP_SLOT, SEQ_DRUM_MIX_SLOT, SEQ_KAOSS_MIX_SLOT,
 };
-
-/// Repeat-lane owners for hardware pads (`0x1000 | note`).
-const HW_REPEAT_OWNER: u32 = 0x1000;
 
 /// How often the output thread checks the ring once a port is open.
 /// A 0.5 ms poll re-listed every ALSA MIDI port each wake and pegged a core.
@@ -148,14 +145,10 @@ impl MidiMap {
             let drop = slot == 0 || (was_latch && !latch);
             if drop && self.hw_latched[i].swap(false, Ordering::Relaxed) {
                 let note = self.hw_note[i].load(Ordering::Relaxed);
-                stops[i] = HW_REPEAT_OWNER | u32::from(note);
+                stops[i] = hw_repeat_owner(note);
             }
         }
         stops
-    }
-
-    fn hw_repeat_owner(note: u8) -> u32 {
-        HW_REPEAT_OWNER | u32::from(note)
     }
 
     fn interpret_drum_repeat(&self, note: u8, velocity: u8, on: bool) -> Option<Command> {
@@ -166,13 +159,13 @@ impl MidiMap {
             if latch && self.hw_latched[model].swap(false, Ordering::Relaxed) {
                 let prev = self.hw_note[model].load(Ordering::Relaxed);
                 return Some(Command::StopRepeat {
-                    owner: Self::hw_repeat_owner(prev),
+                    owner: hw_repeat_owner(prev),
                 });
             }
             self.hw_note[model].store(note, Ordering::Relaxed);
             self.hw_latched[model].store(latch, Ordering::Relaxed);
             Some(Command::StartRepeat {
-                owner: Self::hw_repeat_owner(note),
+                owner: hw_repeat_owner(note),
                 channel: DRUM_CHANNEL,
                 note,
                 velocity: velocity.max(1),
@@ -183,7 +176,7 @@ impl MidiMap {
         } else {
             self.hw_latched[model].store(false, Ordering::Relaxed);
             Some(Command::StopRepeat {
-                owner: Self::hw_repeat_owner(note),
+                owner: hw_repeat_owner(note),
             })
         }
     }
@@ -307,8 +300,35 @@ impl MidiMap {
                 controller,
                 value,
             } => self.interpret_cc(profile, channel, controller, value),
+            MidiEvent::PolyPressure {
+                channel,
+                note,
+                pressure,
+            } => self.interpret_drum_aftertouch(profile, channel, note, pressure),
             _ => None,
         }
+    }
+
+    fn interpret_drum_aftertouch(
+        &self,
+        profile: &ControllerProfile,
+        channel: u8,
+        note: u8,
+        pressure: u8,
+    ) -> Option<Command> {
+        if channel != DRUM_CHANNEL || profile.is_transport_note(note) {
+            return None;
+        }
+        if self.mode.load(Ordering::Relaxed) == MODE_PUNCH
+            && self.pads_to_fx()
+            && profile.punch_index_for_pad(note).is_some()
+        {
+            return None;
+        }
+        Some(Command::SetDrumAftertouch {
+            model: drum_model_for_note(note).index() as u8,
+            amount: (pressure as f32 / 127.0).clamp(0.0, 1.0),
+        })
     }
 
     fn cc_unit(&self, slot: usize, encoding: KnobEncoding, value: u8) -> f32 {
@@ -1068,6 +1088,68 @@ mod tests {
                 note: 60,
                 velocity: 40,
             }
+        );
+    }
+
+    #[test]
+    fn drum_poly_pressure_opens_that_pad_tone() {
+        let map = MidiMap::default();
+        assert_eq!(
+            map.interpret(MidiEvent::PolyPressure {
+                channel: 9,
+                note: 36,
+                pressure: 64,
+            }),
+            Some(Command::SetDrumAftertouch {
+                model: 0,
+                amount: 64.0 / 127.0,
+            })
+        );
+        assert_eq!(
+            map.interpret(MidiEvent::PolyPressure {
+                channel: 9,
+                note: 37,
+                pressure: 127,
+            }),
+            Some(Command::SetDrumAftertouch {
+                model: 1,
+                amount: 1.0,
+            })
+        );
+        assert!(
+            map.interpret(MidiEvent::PolyPressure {
+                channel: 0,
+                note: 60,
+                pressure: 90,
+            })
+            .is_none(),
+            "key aftertouch must not rewrite kit tone"
+        );
+    }
+
+    #[test]
+    fn punch_page_keeps_pad_aftertouch_for_fx() {
+        let map = MidiMap::default();
+        map.set_punch();
+        assert!(
+            map.interpret(MidiEvent::PolyPressure {
+                channel: 9,
+                note: 36,
+                pressure: 80,
+            })
+            .is_none()
+        );
+        map.set_drums();
+        assert_eq!(
+            map.interpret(MidiEvent::PolyPressure {
+                channel: 9,
+                note: 36,
+                pressure: 80,
+            }),
+            Some(Command::SetDrumAftertouch {
+                model: 0,
+                amount: 80.0 / 127.0,
+            })
         );
     }
 
