@@ -578,6 +578,7 @@ fn draw_midi_panel(scene: &mut Scene, model: &NativeModel) {
             },
             dest.label(),
             if selected { 0xfabd2f } else { 0xebdbb2 },
+            2,
         );
     }
     for (i, dest) in midi_core::MidiDest::ALL.iter().enumerate() {
