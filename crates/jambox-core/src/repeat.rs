@@ -4,6 +4,22 @@ use crate::transport::{Transport, PPQ};
 
 pub const MAX_REPEAT_LANES: usize = 5;
 pub const MAX_REPEAT_EVENTS_PER_BLOCK: usize = 64;
+/// Hardware pad repeat owners (`base | note`). Screen fingers use small ids.
+pub const HW_REPEAT_OWNER_BASE: u32 = 0x1000;
+
+/// Repeat-lane owner for a hardware drum pad note.
+pub const fn hw_repeat_owner(note: u8) -> u32 {
+    HW_REPEAT_OWNER_BASE | (note & 0x7f) as u32
+}
+
+/// Inverse of [`hw_repeat_owner`]. `None` for screen-finger owners.
+pub const fn note_from_hw_repeat_owner(owner: u32) -> Option<u8> {
+    if owner & !0x7f == HW_REPEAT_OWNER_BASE {
+        Some((owner & 0x7f) as u8)
+    } else {
+        None
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RepeatDivision {
@@ -170,6 +186,13 @@ mod tests {
         let mut transport = Transport::new(48_000.0);
         transport.set_bpm(120.0);
         transport
+    }
+
+    #[test]
+    fn hardware_repeat_owners_round_trip_pad_notes() {
+        assert_eq!(hw_repeat_owner(36), HW_REPEAT_OWNER_BASE | 36);
+        assert_eq!(note_from_hw_repeat_owner(hw_repeat_owner(51)), Some(51));
+        assert_eq!(note_from_hw_repeat_owner(3), None);
     }
 
     #[test]

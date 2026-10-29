@@ -48,7 +48,7 @@ pub use punch::{
     PUNCH_LPF, PUNCH_PAD_COUNT, PUNCH_PAD_NOTES, PUNCH_RPT, PUNCH_SEND, PUNCH_SLICE, PUNCH_TAPE,
 };
 pub use drums::{
-    drum_model_for_note, preview_drum, DrumKit, DrumMacros, DrumModel, DRUM_MODEL_COUNT,
+    drum_model_for_note, live_tone, preview_drum, DrumKit, DrumMacros, DrumModel, DRUM_MODEL_COUNT,
     DRUM_PREVIEW_SAMPLES, DRUM_PREVIEW_SEC, DRUM_PREVIEW_SR,
 };
 pub use engine::{
@@ -69,7 +69,8 @@ pub use kaoss::{
     KAOSS_SCALES, MAX_TOUCH_VOICES, NOTE_NAMES, PITCH_BEND_RANGE_SEMIS,
 };
 pub use repeat::{
-    RepeatDivision, RepeatEvent, RepeatRack, MAX_REPEAT_EVENTS_PER_BLOCK, MAX_REPEAT_LANES,
+    hw_repeat_owner, note_from_hw_repeat_owner, RepeatDivision, RepeatEvent, RepeatRack,
+    HW_REPEAT_OWNER_BASE, MAX_REPEAT_EVENTS_PER_BLOCK, MAX_REPEAT_LANES,
 };
 pub use transport::{Quantize, Transport, PPQ};
 pub use voice::{release_drift_semis, VoicePool, MAX_VOICES};

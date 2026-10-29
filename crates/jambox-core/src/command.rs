@@ -152,6 +152,12 @@ pub enum Command {
         param: SynthParam,
         value: f32,
     },
+    /// Live pad pressure on one kit voice. 0 = stored TONE slider;
+    /// 1 = full bright. Does not rewrite the kit macro.
+    SetDrumAftertouch {
+        model: u8,
+        amount: f32,
+    },
     SetFx {
         target: FxTarget,
         param: FxParam,

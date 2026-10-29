@@ -450,6 +450,8 @@ pub fn build(model: &NativeModel) -> Scene {
         draw_power_menu(&mut scene, model);
     } else if model.update_panel_open {
         draw_update_panel(&mut scene, model);
+    } else if model.midi_panel_open {
+        draw_midi_panel(&mut scene, model);
     } else if model.wifi_kb_open {
         draw_wifi_keyboard(&mut scene, model);
     } else if model.wifi_panel_open {
@@ -541,6 +543,50 @@ fn draw_power_menu(scene: &mut Scene, model: &NativeModel) {
     scene.text_centered(layout.power_reboot, "REBOOT", 0x1d2021, 3);
     scene.button(layout.power_screen_off, 0x1d2021);
     scene.text_centered(layout.power_screen_off, "SCREEN OFF", 0xfbf1c7, 2);
+}
+
+fn draw_midi_panel(scene: &mut Scene, model: &NativeModel) {
+    let layout = model.layout;
+    scene.fill_rect(layout.content, 0x111111);
+    scene.text_scaled(
+        layout.content.x + 12,
+        layout.content.y + 12,
+        "MIDI",
+        0xfbf1c7,
+        3,
+    );
+    scene.button(layout.midi_close(), 0x504945);
+    scene.text_centered(layout.midi_close(), "CLOSE", 0xffffff, 2);
+    scene.text(
+        layout.content.x + 16,
+        layout.content.y + 48,
+        "Tap a control, then a destination.",
+        0xa89984,
+    );
+    for (i, source) in midi_core::MidiSource::ALL.iter().enumerate() {
+        let row = layout.midi_source_row(i);
+        let dest = model.midi_dest_for(i);
+        let selected = model.midi_assign_pick == i;
+        scene.button(row, if selected { 0x458588 } else { 0x3c3836 });
+        scene.text(row.x + 12, row.y + 16, source.label(), 0xfbf1c7);
+        scene.text_centered(
+            Rect {
+                x: row.x + row.w - 200,
+                y: row.y,
+                w: 188,
+                h: row.h,
+            },
+            dest.label(),
+            if selected { 0xfabd2f } else { 0xebdbb2 },
+            2,
+        );
+    }
+    for (i, dest) in midi_core::MidiDest::ALL.iter().enumerate() {
+        let cell = layout.midi_dest_cell(i);
+        let current = model.midi_dest_for(model.midi_assign_pick);
+        scene.button(cell, if *dest == current { 0x689d6a } else { 0x3c3836 });
+        scene.text_centered(cell, dest.label(), 0xffffff, 2);
+    }
 }
 
 fn draw_update_panel(scene: &mut Scene, model: &NativeModel) {
@@ -4001,6 +4047,11 @@ fn draw_settings(scene: &mut Scene, model: &NativeModel) {
     scene.text_centered(layout.settings_all_off, "NOTES OFF", 0xffffff, 2);
     scene.fill_rect(layout.settings_audio, 0x458588);
     scene.text_centered(layout.settings_audio, "AUDIO", 0xffffff, 2);
+    scene.fill_rect(
+        layout.settings_midi,
+        0x83a598,
+    );
+    scene.text_centered(layout.settings_midi, "MIDI", 0xffffff, 2);
     scene.fill_rect(
         layout.settings_full_vel,
         if model.full_vel { 0x689d6a } else { 0x3c3836 },

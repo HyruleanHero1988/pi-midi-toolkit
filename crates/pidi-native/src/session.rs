@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::font::FontStyle;
+use midi_core::MidiDest;
 
 /// Stored MIDI/audio routing preference (engine may still always play local).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -313,6 +314,15 @@ pub struct SessionState {
     /// Force keyboard note-ons to velocity 127. Missing in old sessions → on.
     #[serde(default = "default_full_velocity")]
     pub full_velocity: bool,
+    /// Joystick X destination. Missing → pitch.
+    #[serde(default = "default_midi_stick_x")]
+    pub midi_stick_x: MidiDest,
+    /// Joystick Y / CC1 destination. Missing → vibrato.
+    #[serde(default = "default_midi_stick_y")]
+    pub midi_stick_y: MidiDest,
+    /// Pad aftertouch destination. Missing → drum tone.
+    #[serde(default = "default_midi_aftertouch")]
+    pub midi_aftertouch: MidiDest,
     /// Note-repeat latch: tap instead of hold. Missing in old sessions → hold.
     #[serde(default)]
     pub drum_repeat_lock: bool,
@@ -406,6 +416,18 @@ fn default_full_velocity() -> bool {
     true
 }
 
+fn default_midi_stick_x() -> MidiDest {
+    MidiDest::default_for(midi_core::MidiSource::StickX)
+}
+
+fn default_midi_stick_y() -> MidiDest {
+    MidiDest::default_for(midi_core::MidiSource::StickY)
+}
+
+fn default_midi_aftertouch() -> MidiDest {
+    MidiDest::default_for(midi_core::MidiSource::Aftertouch)
+}
+
 fn default_punch_history() -> bool {
     true
 }
@@ -482,6 +504,9 @@ impl Default for SessionState {
             power_warn: false,
             wifi_usb_hold: false,
             full_velocity: default_full_velocity(),
+            midi_stick_x: default_midi_stick_x(),
+            midi_stick_y: default_midi_stick_y(),
+            midi_aftertouch: default_midi_aftertouch(),
             drum_repeat_lock: false,
             fm_user: None,
             fm_patches: Vec::new(),
@@ -645,6 +670,18 @@ mod tests {
         let json = serde_json::to_string(&s).unwrap();
         let back: SessionState = serde_json::from_str(&json).unwrap();
         assert!(!back.full_velocity);
+    }
+
+    #[test]
+    fn session_roundtrip_includes_midi_assigns() {
+        let mut s = SessionState::default();
+        assert_eq!(s.midi_aftertouch, MidiDest::DrumTone);
+        s.midi_stick_y = MidiDest::Tone;
+        s.midi_aftertouch = MidiDest::Vibrato;
+        let json = serde_json::to_string(&s).unwrap();
+        let back: SessionState = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.midi_stick_y, MidiDest::Tone);
+        assert_eq!(back.midi_aftertouch, MidiDest::Vibrato);
     }
 
     #[test]

@@ -3,6 +3,7 @@
 //! Designed for a tight hot path: processors take an event and return zero or more
 //! output events without allocating when possible (small fixed buffers / inline).
 
+mod assign;
 mod controller;
 mod event;
 mod ports;
@@ -10,6 +11,7 @@ mod preset;
 mod process;
 mod stuck;
 
+pub use assign::{MidiDest, MidiSource};
 pub use controller::{
     apply_default_overlay_dirs, apply_knob_cc, apply_overlay_dir, builtin_profiles,
     installed_profiles, merge_profile_json, mpk_knob_ccs, mpk_note_for_phrase_cell,

@@ -524,6 +524,12 @@ pub struct NativeModel {
     pub power_warn: bool,
     /// SET→FULL VEL: rewrite keyboard note-ons to 127. On by default for MPK.
     pub full_vel: bool,
+    /// SET→MIDI controller assignment sheet.
+    pub midi_panel_open: bool,
+    pub midi_assign_pick: usize,
+    pub midi_stick_x: midi_core::MidiDest,
+    pub midi_stick_y: midi_core::MidiDest,
+    pub midi_aftertouch: midi_core::MidiDest,
     /// Profile default last applied, so a user toggle survives a hotplug swap.
     full_vel_profile_default: bool,
     /// DRUMS→LOCK: note-repeat keeps running after the pad is released.
@@ -849,6 +855,11 @@ impl NativeModel {
             probe: false,
             power_warn: false,
             full_vel: true,
+            midi_panel_open: false,
+            midi_assign_pick: 1,
+            midi_stick_x: midi_core::MidiDest::default_for(midi_core::MidiSource::StickX),
+            midi_stick_y: midi_core::MidiDest::default_for(midi_core::MidiSource::StickY),
+            midi_aftertouch: midi_core::MidiDest::default_for(midi_core::MidiSource::Aftertouch),
             full_vel_profile_default: true,
             drum_repeat_lock: false,
             repeat_held: [0; DRUM_MODEL_COUNT],
@@ -951,6 +962,7 @@ impl NativeModel {
         self.update_job_kind = None;
         self.update_busy = false;
         self.update_confirming = false;
+        self.midi_panel_open = false;
         self.wifi_panel_open = false;
         self.wifi_kb_open = false;
         self.wifi_job = None;
@@ -1110,6 +1122,9 @@ impl NativeModel {
         }
         if self.update_panel_open {
             return Some("update");
+        }
+        if self.midi_panel_open {
+            return Some("midi");
         }
         if self.wifi_kb_open {
             return Some("wifi_kb");
@@ -1377,6 +1392,7 @@ impl NativeModel {
         match self.overlay_nav_target() {
             Some("power") => self.close_power_menu(true),
             Some("update") => self.close_update_panel(),
+            Some("midi") => self.close_midi_panel(),
             Some("wifi_kb") => self.close_wifi_keyboard(),
             Some("wifi") => self.close_wifi_panel(),
             Some("kaoss_color") => self.close_kaoss_color_picker(),
@@ -1660,6 +1676,7 @@ impl NativeModel {
             }
         } else if !self.connected && connected {
             outbox.full_vel(self.full_vel);
+            outbox.midi_assign(self.midi_stick_x, self.midi_stick_y, self.midi_aftertouch);
             outbox.channel_map(self.channel_map_bits);
             self.sync_drum_repeat_map(outbox);
         }
@@ -1770,6 +1787,7 @@ impl NativeModel {
         self.synth_pick_a = None;
         self.update_panel_open = false;
         self.update_job = None;
+        self.midi_panel_open = false;
         self.wifi_panel_open = false;
         self.wifi_kb_open = false;
         self.wifi_job = None;
@@ -1791,6 +1809,7 @@ impl NativeModel {
 
     fn open_update_panel(&mut self) {
         self.power_menu_open = false;
+        self.midi_panel_open = false;
         self.wifi_panel_open = false;
         self.wifi_kb_open = false;
         self.wifi_job = None;
@@ -1812,6 +1831,54 @@ impl NativeModel {
         self.mark_dirty();
     }
 
+    fn open_midi_panel(&mut self) {
+        self.power_menu_open = false;
+        self.update_panel_open = false;
+        self.wifi_panel_open = false;
+        self.wifi_kb_open = false;
+        self.midi_panel_open = true;
+        self.status_line = format!(
+            "{} → {}",
+            midi_core::MidiSource::from_index(self.midi_assign_pick).title(),
+            self.midi_dest_for(self.midi_assign_pick).title()
+        );
+        self.mark_dirty();
+    }
+
+    fn close_midi_panel(&mut self) {
+        if !self.midi_panel_open {
+            return;
+        }
+        self.midi_panel_open = false;
+        self.status_line.clear();
+        self.mark_dirty();
+    }
+
+    pub fn midi_dest_for(&self, source: usize) -> midi_core::MidiDest {
+        match source % midi_core::MidiSource::ALL.len() {
+            0 => self.midi_stick_x,
+            1 => self.midi_stick_y,
+            _ => self.midi_aftertouch,
+        }
+    }
+
+    fn set_midi_dest(&mut self, source: usize, dest: midi_core::MidiDest, outbox: &mut Outbox) {
+        match source % midi_core::MidiSource::ALL.len() {
+            0 => self.midi_stick_x = dest,
+            1 => self.midi_stick_y = dest,
+            _ => self.midi_aftertouch = dest,
+        }
+        self.midi_assign_pick = source % midi_core::MidiSource::ALL.len();
+        outbox.midi_assign(self.midi_stick_x, self.midi_stick_y, self.midi_aftertouch);
+        self.status_line = format!(
+            "{} → {}",
+            midi_core::MidiSource::from_index(self.midi_assign_pick).title(),
+            dest.title()
+        );
+        self.session_dirty = true;
+        self.mark_dirty();
+    }
+
     fn close_update_panel(&mut self) {
         if !self.update_panel_open {
             return;
@@ -1828,6 +1895,7 @@ impl NativeModel {
     fn open_wifi_panel(&mut self) {
         self.power_menu_open = false;
         self.update_panel_open = false;
+        self.midi_panel_open = false;
         self.wifi_kb_open = false;
         self.wifi_panel_open = true;
         self.wifi_busy = false;
@@ -2429,6 +2497,9 @@ impl NativeModel {
         self.power_warn = s.power_warn;
         self.wifi_usb_hold = s.wifi_usb_hold;
         self.full_vel = s.full_velocity;
+        self.midi_stick_x = s.midi_stick_x;
+        self.midi_stick_y = s.midi_stick_y;
+        self.midi_aftertouch = s.midi_aftertouch;
         self.drum_repeat_lock = s.drum_repeat_lock;
         self.wave_signals = s.wave_signals;
         for signal in &mut self.wave_signals {
@@ -2467,6 +2538,7 @@ impl NativeModel {
             self.full_vel,
         );
         outbox.full_vel(self.full_vel);
+        outbox.midi_assign(self.midi_stick_x, self.midi_stick_y, self.midi_aftertouch);
         self.sync_drum_repeat_map(outbox);
         outbox.emit_mode("clips", self.pads_out.wire());
         outbox.emit_mode("kaoss", self.kaoss_out.wire());
@@ -2603,6 +2675,9 @@ impl NativeModel {
             power_warn: self.power_warn,
             wifi_usb_hold: self.wifi_usb_hold,
             full_velocity: self.full_vel,
+            midi_stick_x: self.midi_stick_x,
+            midi_stick_y: self.midi_stick_y,
+            midi_aftertouch: self.midi_aftertouch,
             drum_repeat_lock: self.drum_repeat_lock,
             fm_user: self.fm_user,
             fm_patches: self.fm_patches.clone(),
@@ -3035,6 +3110,16 @@ impl NativeModel {
             // The menu is painted over the current page. Do not let that page
             // (home tiles, especially) steal Shut down / Screen off.
             self.layout.hit_power_menu(px, py)
+        } else if self.midi_panel_open {
+            let base = self.layout.hit(self.mode, px, py);
+            if matches!(
+                base,
+                Hit::Nav(_) | Hit::NavBack | Hit::Power | Hit::HomeTile(_) | Hit::SeqRec
+            ) {
+                base
+            } else {
+                self.layout.hit_midi_panel(px, py)
+            }
         } else if self.update_panel_open {
             let base = self.layout.hit(self.mode, px, py);
             if matches!(
@@ -4243,6 +4328,30 @@ impl NativeModel {
             Hit::SettingsFullVel => {
                 self.tap_ui(slot, id, gesture, px, py);
                 self.toggle_full_vel(outbox);
+            }
+            Hit::SettingsMidi => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.open_midi_panel();
+            }
+            Hit::MidiClose => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.close_midi_panel();
+            }
+            Hit::MidiSource(index) => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.midi_assign_pick = index % midi_core::MidiSource::ALL.len();
+                self.status_line = format!(
+                    "{} → {}",
+                    midi_core::MidiSource::from_index(self.midi_assign_pick).title(),
+                    self.midi_dest_for(self.midi_assign_pick).title()
+                );
+                self.mark_dirty();
+            }
+            Hit::MidiDest(index) => {
+                self.tap_ui(slot, id, gesture, px, py);
+                if let Some(dest) = midi_core::MidiDest::ALL.get(index).copied() {
+                    self.set_midi_dest(self.midi_assign_pick, dest, outbox);
+                }
             }
             Hit::SettingsAudio => {
                 self.fingers[slot] = Finger {
@@ -13817,6 +13926,41 @@ mod tests {
             model.full_vel,
             "a user FULL VEL on the Elite must survive a swap to MPK"
         );
+    }
+
+    #[test]
+    fn settings_midi_assigns_aftertouch() {
+        let mut model = NativeModel::new();
+        assert_eq!(model.midi_aftertouch, midi_core::MidiDest::DrumTone);
+        model.set_mode(UiMode::Settings);
+        let mut out = Outbox::new();
+        let midi = model.layout.settings_midi;
+        model.finger_down(1, midi.x + 4, midi.y + 4, &mut out);
+        model.finger_up(1, &mut out);
+        assert!(model.midi_panel_open);
+        let aftertouch = model.layout.midi_source_row(2);
+        model.finger_down(2, aftertouch.x + 4, aftertouch.y + 4, &mut out);
+        model.finger_up(2, &mut out);
+        assert_eq!(model.midi_assign_pick, 2);
+        let vibrato = midi_core::MidiDest::ALL
+            .iter()
+            .position(|d| *d == midi_core::MidiDest::Vibrato)
+            .unwrap();
+        let cell = model.layout.midi_dest_cell(vibrato);
+        model.finger_down(3, cell.x + 4, cell.y + 4, &mut out);
+        model.finger_up(3, &mut out);
+        assert_eq!(model.midi_aftertouch, midi_core::MidiDest::Vibrato);
+        assert_eq!(model.capture_session().midi_aftertouch, midi_core::MidiDest::Vibrato);
+        assert!(out.take().iter().any(|r| matches!(
+            r,
+            Request::MidiAssign {
+                aftertouch: Some(name),
+                ..
+            } if name == "vibrato"
+        )));
+        model.finger_down(4, model.layout.midi_close().x + 4, model.layout.midi_close().y + 4, &mut out);
+        model.finger_up(4, &mut out);
+        assert!(!model.midi_panel_open);
     }
 
     #[test]

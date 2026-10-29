@@ -270,6 +270,15 @@ pub enum Request {
     FullVel {
         on: bool,
     },
+    /// Remap stick / aftertouch destinations. Missing fields keep the last value.
+    MidiAssign {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stick_x: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stick_y: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        aftertouch: Option<String>,
+    },
     /// Per kit-voice note-repeat map for hardware pads. `slots[i]`: 0 = off,
     /// 1 = 1/4, 2 = 1/8, 3 = 1/8T, 4 = 1/16, 5 = triple. `latch` keeps the
     /// grid running after the pad is released.

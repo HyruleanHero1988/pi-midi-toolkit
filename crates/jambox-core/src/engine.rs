@@ -23,7 +23,9 @@ use crate::arp::{
     ArpDivision, ArpEvent, ArpOrder, Arpeggiator, MAX_ARP_EVENTS_PER_BLOCK,
 };
 use crate::kaoss::{unpack_xy, KaossMapper, LatestTouch, TouchDelta};
-use crate::repeat::{RepeatEvent, RepeatRack, MAX_REPEAT_EVENTS_PER_BLOCK};
+use crate::repeat::{
+    note_from_hw_repeat_owner, RepeatEvent, RepeatRack, MAX_REPEAT_EVENTS_PER_BLOCK,
+};
 use crate::transport::Transport;
 use crate::voice::{VoiceContext, VoicePool, MAX_VOICES};
 use crate::wavetable::{WaveBank, TABLE_SIZE};
@@ -1172,11 +1174,14 @@ impl JamboxEngine {
                 }
             }
             Command::NoteOff { channel, note } => {
-                if self.arp.enabled() && channel != DRUM_CHANNEL {
+                if channel == DRUM_CHANNEL {
+                    self.drums
+                        .set_aftertouch(drum_model_for_note(note), 0.0);
+                } else if self.arp.enabled() {
                     if let Some((ch, n)) = self.arp.note_off(note) {
                         self.apply_arp_voice(ch, n, 0, false, relative_frame, midi_out);
                     }
-                } else if channel != DRUM_CHANNEL {
+                } else {
                     self.release_keyed_note(channel, note);
                 }
             }
@@ -1270,6 +1275,9 @@ impl JamboxEngine {
                 param,
                 value,
             } => self.set_drum_macro(model, param, value),
+            Command::SetDrumAftertouch { model, amount } => self
+                .drums
+                .set_aftertouch(DrumModel::from_index(model as usize), amount),
             Command::SetFx {
                 target,
                 param,
@@ -1379,7 +1387,13 @@ impl JamboxEngine {
                     &self.transport,
                 );
             }
-            Command::StopRepeat { owner } => self.repeats.stop(owner),
+            Command::StopRepeat { owner } => {
+                self.repeats.stop(owner);
+                if let Some(note) = note_from_hw_repeat_owner(owner) {
+                    self.drums
+                        .set_aftertouch(drum_model_for_note(note), 0.0);
+                }
+            }
             Command::StopAllRepeats => self.repeats.stop_all(),
             Command::RepeatHit {
                 owner,
@@ -1881,6 +1895,10 @@ impl JamboxEngine {
 
     pub fn drum_macros_for(&self, model: DrumModel) -> DrumMacros {
         self.drums.macros_for(model)
+    }
+
+    pub fn drum_aftertouch(&self, model: DrumModel) -> f32 {
+        self.drums.aftertouch(model)
     }
 
     /// Clip slot mode, for status / UI mirroring.
@@ -3389,6 +3407,51 @@ mod tests {
         );
         assert!((e.drum_macros_for(DrumModel::Kick).pitch - 0.1).abs() < 1e-6);
         assert!((e.drum_macros_for(DrumModel::Snare).pitch - 0.1).abs() < 1e-6);
+    }
+
+    #[test]
+    fn drum_aftertouch_opens_tone_until_the_pad_lifts() {
+        let mut e = engine();
+        apply_now(
+            &mut e,
+            Command::SetDrumMacro {
+                model: DrumModel::Kick.index() as u8,
+                param: SynthParam::DrumTone,
+                value: 0.4,
+            },
+        );
+        apply_now(
+            &mut e,
+            Command::SetDrumAftertouch {
+                model: DrumModel::Kick.index() as u8,
+                amount: 0.8,
+            },
+        );
+        assert!((e.drum_macros_for(DrumModel::Kick).tone - 0.4).abs() < 1e-6);
+        assert!((e.drum_aftertouch(DrumModel::Kick) - 0.8).abs() < 1e-6);
+        assert_eq!(e.drum_aftertouch(DrumModel::Snare), 0.0);
+        apply_now(
+            &mut e,
+            Command::NoteOff {
+                channel: DRUM_CHANNEL,
+                note: 36,
+            },
+        );
+        assert_eq!(e.drum_aftertouch(DrumModel::Kick), 0.0);
+        apply_now(
+            &mut e,
+            Command::SetDrumAftertouch {
+                model: DrumModel::Kick.index() as u8,
+                amount: 1.0,
+            },
+        );
+        apply_now(
+            &mut e,
+            Command::StopRepeat {
+                owner: crate::hw_repeat_owner(36),
+            },
+        );
+        assert_eq!(e.drum_aftertouch(DrumModel::Kick), 0.0);
     }
 
     fn energy(buf: &[f32]) -> f32 {
