@@ -219,6 +219,8 @@ impl MidiMap {
             3 => Some(RepeatDivision::EighthTriplet),
             4 => Some(RepeatDivision::Sixteenth),
             5 => Some(RepeatDivision::QuarterTriplet),
+            6 => Some(RepeatDivision::Half),
+            7 => Some(RepeatDivision::Whole),
             _ => None,
         }
     }

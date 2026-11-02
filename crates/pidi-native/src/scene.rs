@@ -2539,9 +2539,14 @@ fn draw_cycle_scope(scene: &mut Scene, rect: Rect, samples: &[f32], color: u32) 
         let b = ((col + 1) * n / SCOPE_COLUMNS).max(a + 1).min(n);
         let mut lo = f32::MAX;
         let mut hi = f32::MIN;
-        for sample in &samples[a..b] {
-            lo = lo.min(*sample);
-            hi = hi.max(*sample);
+        // Include the first sample of the next column (wrapping at the end) so
+        // a jump that lands exactly on a column boundary still gets a vertical
+        // span. Without it square/saw lose their mid-cycle edge (2048/192
+        // puts sample 1024 at the start of column 96) and the wrap edge.
+        for k in a..=b {
+            let sample = samples[k % n];
+            lo = lo.min(sample);
+            hi = hi.max(sample);
         }
         min[col] = (lo.clamp(-1.0, 1.0) * 32767.0) as i16;
         max[col] = (hi.clamp(-1.0, 1.0) * 32767.0) as i16;

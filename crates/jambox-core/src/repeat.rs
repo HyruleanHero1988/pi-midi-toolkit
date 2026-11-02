@@ -29,6 +29,10 @@ pub enum RepeatDivision {
     Sixteenth,
     /// Three hits in the space of two quarter notes (1/4 triplet).
     QuarterTriplet,
+    /// Half note (two beats).
+    Half,
+    /// Whole note (one 4/4 bar).
+    Whole,
 }
 
 impl RepeatDivision {
@@ -39,6 +43,8 @@ impl RepeatDivision {
             Self::EighthTriplet => PPQ as u64 / 3,
             Self::Sixteenth => PPQ as u64 / 4,
             Self::QuarterTriplet => PPQ as u64 * 2 / 3,
+            Self::Half => PPQ as u64 * 2,
+            Self::Whole => PPQ as u64 * 4,
         }
     }
 }
@@ -129,6 +135,45 @@ impl RepeatRack {
             division,
             next_frame: next_frame.max(at_frame.saturating_add(1)),
         };
+    }
+
+    /// Grid-locked variant of [`start`]: if `at_frame` is within
+    /// `QUANTIZE_LATE_WINDOW` of the previous grid line the caller should hit
+    /// now (returns `true`) and the lane continues from the next line;
+    /// otherwise nothing plays until the next grid line (returns `false`).
+    pub fn start_quantized(
+        &mut self,
+        owner: u32,
+        channel: u8,
+        note: u8,
+        velocity: u8,
+        division: RepeatDivision,
+        at_frame: u64,
+        transport: &Transport,
+    ) -> bool {
+        const QUANTIZE_LATE_WINDOW: f64 = 0.15;
+        let grid = transport.ticks_to_samples(division.ticks()).max(1.0);
+        let pos = at_frame as f64 / grid;
+        let fire_now = pos - pos.floor() <= QUANTIZE_LATE_WINDOW;
+        if fire_now {
+            self.start(
+                owner, channel, note, velocity, division, at_frame, transport,
+            );
+            return true;
+        }
+        self.stop(owner);
+        let slot = self.lanes.iter().position(|lane| !lane.active).unwrap_or(0);
+        let next_frame = (pos.ceil() * grid).round() as u64;
+        self.lanes[slot] = RepeatLane {
+            active: true,
+            owner,
+            channel: channel & 0x0f,
+            note: note & 0x7f,
+            velocity: velocity.clamp(1, 127),
+            division,
+            next_frame: next_frame.max(at_frame),
+        };
+        false
     }
 
     pub fn stop(&mut self, owner: u32) {

@@ -68,16 +68,21 @@ pub enum RepeatDivisionChoice {
     EighthTriplet,
     Sixteenth,
     Triple,
+    Half,
+    Whole,
 }
 
 impl RepeatDivisionChoice {
-    pub const ALL: [Self; 6] = [
+    /// New entries go at the end: grid cell indices are stable (tests use 0/4/5).
+    pub const ALL: [Self; 8] = [
         Self::Off,
         Self::Quarter,
         Self::Eighth,
         Self::EighthTriplet,
         Self::Sixteenth,
         Self::Triple,
+        Self::Half,
+        Self::Whole,
     ];
 
     pub fn from_index(index: usize) -> Self {
@@ -96,6 +101,8 @@ impl RepeatDivisionChoice {
             Self::EighthTriplet => 3,
             Self::Sixteenth => 4,
             Self::Triple => 5,
+            Self::Half => 6,
+            Self::Whole => 7,
         }
     }
 
@@ -106,6 +113,8 @@ impl RepeatDivisionChoice {
             Self::EighthTriplet => RepeatDivision::EighthTriplet,
             Self::Sixteenth => RepeatDivision::Sixteenth,
             Self::Triple => RepeatDivision::QuarterTriplet,
+            Self::Half => RepeatDivision::Half,
+            Self::Whole => RepeatDivision::Whole,
         }
     }
 
@@ -117,6 +126,8 @@ impl RepeatDivisionChoice {
             Self::EighthTriplet => "1/8T",
             Self::Sixteenth => "1/16",
             Self::Triple => "TRIPLE",
+            Self::Half => "1/2",
+            Self::Whole => "1",
         }
     }
 
@@ -128,6 +139,8 @@ impl RepeatDivisionChoice {
             Self::EighthTriplet => Some("1/8T"),
             Self::Sixteenth => Some("1/16"),
             Self::Triple => Some("TRIP"),
+            Self::Half => Some("1/2"),
+            Self::Whole => Some("1"),
         }
     }
 
@@ -147,6 +160,8 @@ impl RepeatDivisionChoice {
             Self::EighthTriplet => jambox_core::PPQ as u64 / 3,
             Self::Sixteenth => jambox_core::PPQ as u64 / 4,
             Self::Triple => jambox_core::PPQ as u64 * 2 / 3,
+            Self::Half => jambox_core::PPQ as u64 * 2,
+            Self::Whole => jambox_core::PPQ as u64 * 4,
         }
     }
 }
@@ -238,6 +253,8 @@ pub struct NativeModel {
     pub release_drift: f32,
     /// Wavetable stereo width. 0 = dual-mono, 1 = A/B split plus keyboard pan.
     pub synth_width: f32,
+    /// Last synth-slider tap (index, time) for double-tap-to-neutral.
+    synth_slider_tap: Option<(usize, Instant)>,
     pub vibrato_always: f32,
     /// Vibrato depth in semitones (0..2).
     pub vibrato_depth: f32,
@@ -634,6 +651,7 @@ impl NativeModel {
             synth_params: [0.5, 0.5, 0.8, 0.05, 0.3],
             release_drift: 0.5,
             synth_width: 0.6,
+            synth_slider_tap: None,
             vibrato_always: 0.0,
             vibrato_depth: 0.5,
             vibrato_rate: 5.0,
@@ -3607,18 +3625,33 @@ impl NativeModel {
                 self.status_line.clear();
             }
             Hit::SynthSlider(index) => {
-                self.fingers[slot] = Finger {
-                    active: true,
-                    id,
-                    gesture,
-                    x: 0.0,
-                    y: 0.0,
-                    px,
-                    py,
-                    surface: Surface::SynthSlider { index },
-                    gate_on: false,
-                };
-                self.apply_synth_slider(index, px, py, false, outbox);
+                const DOUBLE_TAP: Duration = Duration::from_millis(300);
+                let now = Instant::now();
+                let double = matches!(
+                    self.synth_slider_tap,
+                    Some((prev, at)) if prev == index && now.duration_since(at) <= DOUBLE_TAP
+                );
+                if double {
+                    // Double-tap: snap to neutral (drift's centre is 0.5, the rest 0).
+                    self.synth_slider_tap = None;
+                    self.tap_ui(slot, id, gesture, px, py);
+                    let neutral = if index == 5 { 0.5 } else { 0.0 };
+                    self.set_synth_slider_unit(index, neutral, false, outbox);
+                } else {
+                    self.synth_slider_tap = Some((index, now));
+                    self.fingers[slot] = Finger {
+                        active: true,
+                        id,
+                        gesture,
+                        x: 0.0,
+                        y: 0.0,
+                        px,
+                        py,
+                        surface: Surface::SynthSlider { index },
+                        gate_on: false,
+                    };
+                    self.apply_synth_slider(index, px, py, false, outbox);
+                }
             }
             Hit::FmRecipe(index) => {
                 self.tap_ui(slot, id, gesture, px, py);

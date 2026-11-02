@@ -2279,9 +2279,9 @@ impl Layout {
     }
 
     pub fn kit_repeat_choice_cell(&self, index: usize) -> Rect {
-        let cols = 3i32;
+        let cols = 4i32;
         let rows = 2i32;
-        let i = (index % 6) as i32;
+        let i = (index % crate::model::RepeatDivisionChoice::ALL.len()) as i32;
         let col = i % cols;
         let row = i / cols;
         let gw = self.kit_divisions.w / cols;
@@ -3073,7 +3073,7 @@ impl Layout {
         if self.kit_repeat_lock_row().contains(px, py) {
             return Hit::KitRepeatLock;
         }
-        for index in 0..6 {
+        for index in 0..crate::model::RepeatDivisionChoice::ALL.len() {
             if self.kit_repeat_choice_cell(index).contains(px, py) {
                 return Hit::Division(index);
             }

@@ -712,35 +712,56 @@ impl FmSynth {
     }
 
     /// One cycle of the current patch at full sustain — for the on-screen scope.
+    ///
+    /// Mirrors the live voice: each operator is scaled by its sustain level
+    /// (a sustain-0 modulator has died away while the key is held), the
+    /// one-sample-delayed modulation runs oversampled so it behaves like the
+    /// audio-rate render, and one settling cycle runs before capture so the
+    /// feedback loop doesn't start from silence.
     pub fn preview_cycle(patch: FmPatch, out: &mut [f32]) {
+        const OVERSAMPLE: usize = 8;
         if out.is_empty() {
             return;
         }
-        let n = out.len() as f32;
+        let steps = out.len() * OVERSAMPLE;
         let mut sine = [0.0f32; SINE_SIZE];
         let tau = std::f32::consts::TAU;
         for (i, sample) in sine.iter_mut().enumerate() {
             *sample = (i as f32 * tau / SINE_SIZE as f32).sin();
         }
+        let size = SINE_SIZE as f32;
+        let mut inc = [0.0f32; FM_OP_COUNT];
+        let mut level = [0.0f32; FM_OP_COUNT];
+        for i in 0..FM_OP_COUNT {
+            inc[i] = clang_ratio(patch.ops[i].ratio) * size / steps as f32;
+            level[i] = patch.ops[i].sustain.clamp(0.0, 1.0);
+        }
         let mut phase = [0.0f32; FM_OP_COUNT];
         let mut last = [0.0f32; FM_OP_COUNT];
-        let size = SINE_SIZE as f32;
-        for sample in out.iter_mut() {
-            let mut mix = 0.0f32;
-            let prev = last;
-            for i in 0..FM_OP_COUNT {
-                let inc = clang_ratio(patch.ops[i].ratio) * SINE_SIZE as f32 / n;
-                let mod_phase = phase_mod(&prev, &patch.matrix, i);
-                let s = sine_at(&sine, phase[i] + mod_phase);
-                let shaped = waveshape(s, patch.ops[i].fold);
-                last[i] = shaped;
-                mix += shaped * patch.ops[i].audio;
-                phase[i] += inc;
-                if phase[i] >= size {
-                    phase[i] -= size * (phase[i] / size).floor();
+        for pass in 0..2 {
+            for step in 0..steps {
+                let mut mix = 0.0f32;
+                let prev = last;
+                for i in 0..FM_OP_COUNT {
+                    let mod_phase = phase_mod(&prev, &patch.matrix, i);
+                    let s = sine_at(&sine, phase[i] + mod_phase);
+                    last[i] = waveshape(s, patch.ops[i].fold) * level[i];
+                    mix += last[i] * patch.ops[i].audio;
+                    phase[i] += inc[i];
+                    if phase[i] >= size {
+                        phase[i] -= size * (phase[i] / size).floor();
+                    }
+                }
+                if pass == 1 && step % OVERSAMPLE == 0 {
+                    out[step / OVERSAMPLE] = mix * 0.72;
                 }
             }
-            *sample = mix * 0.72;
+        }
+        // Stacked carriers can sum past full scale; fit them instead of clipping.
+        let peak = out.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+        if peak > 0.95 {
+            let gain = 0.95 / peak;
+            out.iter_mut().for_each(|v| *v *= gain);
         }
     }
 

@@ -988,6 +988,8 @@ fn map_repeat_division(division: WireRepeatDivision) -> RepeatDivision {
         WireRepeatDivision::EighthTriplet => RepeatDivision::EighthTriplet,
         WireRepeatDivision::Sixteenth => RepeatDivision::Sixteenth,
         WireRepeatDivision::QuarterTriplet => RepeatDivision::QuarterTriplet,
+        WireRepeatDivision::Half => RepeatDivision::Half,
+        WireRepeatDivision::Whole => RepeatDivision::Whole,
     }
 }
 

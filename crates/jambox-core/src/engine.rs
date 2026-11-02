@@ -45,6 +45,8 @@ const MAX_BLOCK: usize = MAX_RENDER_BLOCK;
 const OUTPUT_MAKEUP: f32 = 1.25;
 /// Extra kit bus gain, matching Python `DRUM_BUS_GAIN`.
 const DRUM_BUS_GAIN: f32 = 1.55;
+/// Note repeat starts on the next division line instead of on the press.
+const REPEAT_QUANTIZE_START: bool = true;
 
 const ATTACK_SEC_MIN: f32 = 0.002;
 const ATTACK_SEC_MAX: f32 = 0.400;
@@ -1370,22 +1372,38 @@ impl JamboxEngine {
                 velocity,
                 division,
             } => {
-                if channel == DRUM_CHANNEL {
-                    self.drums.trigger(drum_model_for_note(note), velocity);
-                } else {
-                    let group = self.bank.nearer_index();
-                    self.voices.note_on(channel, note, velocity, group);
-                    self.voices.note_off_latched(channel, note, self.bend_semis);
+                // Grid-locked repeat: the first hit waits for the next division
+                // line unless the press is already (just after) on it.
+                let fire_now = !REPEAT_QUANTIZE_START
+                    || self.repeats.start_quantized(
+                        owner,
+                        channel,
+                        note,
+                        velocity,
+                        division,
+                        absolute_frame,
+                        &self.transport,
+                    );
+                if fire_now {
+                    if channel == DRUM_CHANNEL {
+                        self.drums.trigger(drum_model_for_note(note), velocity);
+                    } else {
+                        let group = self.bank.nearer_index();
+                        self.voices.note_on(channel, note, velocity, group);
+                        self.voices.note_off_latched(channel, note, self.bend_semis);
+                    }
                 }
-                self.repeats.start(
-                    owner,
-                    channel,
-                    note,
-                    velocity,
-                    division,
-                    absolute_frame,
-                    &self.transport,
-                );
+                if !REPEAT_QUANTIZE_START {
+                    self.repeats.start(
+                        owner,
+                        channel,
+                        note,
+                        velocity,
+                        division,
+                        absolute_frame,
+                        &self.transport,
+                    );
+                }
             }
             Command::StopRepeat { owner } => {
                 self.repeats.stop(owner);

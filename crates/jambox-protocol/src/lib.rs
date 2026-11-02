@@ -50,6 +50,8 @@ pub enum RepeatDivision {
     EighthTriplet,
     Sixteenth,
     QuarterTriplet,
+    Half,
+    Whole,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
