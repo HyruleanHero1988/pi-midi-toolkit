@@ -80,11 +80,12 @@ pub enum SynthParam {
     FmEnable,
     /// Recipe index as a raw number (not 0..1). See `fm::FM_RECIPES`.
     FmRecipe,
-    /// Selected operator 0..3 as a raw number (not 0..1).
+    /// Selected operator 0..5 as a raw number (not 0..1).
     FmOp,
-    /// Packed draw: integer `from + to*4`, fraction is amount. See `fm::pack_fm_link`.
+    /// Packed draw: integer link index (A–D: `from + to*4`; E/F: `16 + from + to*6`),
+    /// fraction is amount. See `fm::pack_fm_link`.
     FmConnect,
-    /// Wipe the 4×4 draw matrix. Value ignored.
+    /// Wipe the 6×6 draw matrix. Value ignored.
     FmClear,
     /// Selected-op fold (sine → square).
     FmBright,
@@ -94,6 +95,8 @@ pub enum SynthParam {
     FmHit,
     /// Selected-op audio mix (how much you hear it).
     FmTail,
+    /// FM stereo width 0..1 (key-tracked pan). 0 = dual mono.
+    FmWidth,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

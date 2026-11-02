@@ -230,6 +230,9 @@ pub enum Hit {
     SettingsProbe,
     SettingsPowerWarn,
     SettingsFullVel,
+    SettingsScale,
+    SettingsKaossYBend,
+    SettingsKaossYVel,
     SettingsMidi,
     MidiClose,
     MidiSource(usize),
@@ -395,6 +398,9 @@ pub struct Layout {
     pub settings_probe: Rect,
     pub settings_power_warn: Rect,
     pub settings_full_vel: Rect,
+    pub settings_scale: Rect,
+    pub settings_kaoss_y_bend: Rect,
+    pub settings_kaoss_y_vel: Rect,
     pub settings_midi: Rect,
     pub seq_rec: Rect,
     pub seq_play: Rect,
@@ -1157,13 +1163,31 @@ impl Layout {
             settings_midi: Rect {
                 x: 24,
                 y: HUD_H + 116,
-                w: 368,
+                w: 116,
+                h: 80,
+            },
+            settings_kaoss_y_bend: Rect {
+                x: 148,
+                y: HUD_H + 116,
+                w: 118,
+                h: 80,
+            },
+            settings_kaoss_y_vel: Rect {
+                x: 274,
+                y: HUD_H + 116,
+                w: 118,
                 h: 80,
             },
             settings_full_vel: Rect {
                 x: 408,
                 y: HUD_H + 116,
-                w: 368,
+                w: 180,
+                h: 80,
+            },
+            settings_scale: Rect {
+                x: 596,
+                y: HUD_H + 116,
+                w: 180,
                 h: 80,
             },
             // FX mode owns these rects (not Settings).
@@ -2179,9 +2203,10 @@ impl Layout {
 
     pub fn fm_op_center(&self, index: usize) -> (i32, i32) {
         let g = self.fm_graph();
-        let col = (index % 2) as i32;
-        let row = (index / 2) as i32;
-        let x = g.x + g.w * (1 + col * 2) / 4;
+        // Six ops in a 3×2 grid: A B C on top, D E F below.
+        let col = (index % 3) as i32;
+        let row = (index / 3) as i32;
+        let x = g.x + g.w * (1 + col * 2) / 6;
         let y = g.y + g.h * (1 + row * 2) / 4;
         (x, y)
     }
@@ -2214,8 +2239,11 @@ impl Layout {
         }
     }
 
+    /// RATIO, OUT, FOLD, ENV (selected op) + WIDTH (whole FM voice).
+    pub const FM_SLIDER_COUNT: usize = 5;
+
     pub fn fm_slider(&self, index: usize) -> Rect {
-        let n = 4i32;
+        let n = Self::FM_SLIDER_COUNT as i32;
         let area_x = 600;
         let area_w = 188;
         let w = area_w / n;
@@ -2980,7 +3008,7 @@ impl Layout {
         if let Some(index) = self.fm_op_hit(px, py) {
             return Hit::FmOp(index);
         }
-        for index in 0..4 {
+        for index in 0..Self::FM_SLIDER_COUNT {
             if self.fm_slider(index).contains(px, py) {
                 return Hit::FmSlider(index);
             }
@@ -3795,6 +3823,15 @@ impl Layout {
         if self.settings_full_vel.contains(px, py) {
             return Hit::SettingsFullVel;
         }
+        if self.settings_scale.contains(px, py) {
+            return Hit::SettingsScale;
+        }
+        if self.settings_kaoss_y_bend.contains(px, py) {
+            return Hit::SettingsKaossYBend;
+        }
+        if self.settings_kaoss_y_vel.contains(px, py) {
+            return Hit::SettingsKaossYVel;
+        }
         if self.settings_log.contains(px, py) {
             return Hit::SettingsLog;
         }
@@ -4070,6 +4107,23 @@ pub enum Surface {
 mod tests {
     use super::*;
     use crate::chords;
+
+    #[test]
+    fn six_fm_ops_sit_inside_the_graph_without_overlap() {
+        let layout = Layout::new();
+        let g = layout.fm_graph();
+        let r = Layout::FM_OP_RADIUS;
+        let centers: Vec<_> = (0..jambox_core::FM_OP_COUNT)
+            .map(|i| layout.fm_op_center(i))
+            .collect();
+        for (i, &(x, y)) in centers.iter().enumerate() {
+            assert!(x - r >= g.x && x + r <= g.x + g.w && y >= g.y && y <= g.y + g.h, "op {i}");
+            assert_eq!(layout.fm_op_hit(x, y), Some(i));
+            for &(x2, y2) in &centers[i + 1..] {
+                assert!((x - x2).pow(2) + (y - y2).pow(2) >= (2 * r).pow(2));
+            }
+        }
+    }
 
     fn bottom(r: Rect) -> i32 {
         r.y + r.h

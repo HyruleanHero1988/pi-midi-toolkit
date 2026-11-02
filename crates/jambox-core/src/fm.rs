@@ -1,9 +1,11 @@
-//! Four-operator FM playground, patched by drawing.
+//! Six-operator FM playground (DX7-sized), patched by drawing.
 //!
 //! Inspired by LOVE Synthesizers FIRST LOVE: you swipe one operator into
 //! another instead of filling in a DX7 matrix. Each operator is a sine that
-//! can fold toward a square, and a 4×4 amount matrix (including self = feedback)
-//! is the algorithm.
+//! can fold toward a square, and a 6×6 amount matrix (including self = feedback)
+//! is the algorithm — any DX7 algorithm can be drawn, plus ones it can't do.
+//! Operators E and F were added later; the stock recipes leave them silent so
+//! older patches sound the same.
 //!
 //! Bounded for the Pi 2: 8 voices, sine table lookup, no allocation after
 //! [`FmSynth::new`].
@@ -14,8 +16,12 @@ use crate::voice::{midi_to_hz, tone_svf_sample, VoiceContext};
 const SINE_SIZE: usize = 2048;
 const SINE_MASK: usize = SINE_SIZE - 1;
 pub const MAX_FM_VOICES: usize = 8;
-pub const FM_RECIPE_COUNT: usize = 8;
-pub const FM_OP_COUNT: usize = 4;
+pub const FM_RECIPE_COUNT: usize = 10;
+pub const FM_OP_COUNT: usize = 6;
+/// Operator count before the 6-op upgrade (old sessions and wire links).
+pub const LEGACY_FM_OP_COUNT: usize = 4;
+/// Packed link indices below this are the legacy `from + to*4` form.
+const LEGACY_LINK_SLOTS: usize = LEGACY_FM_OP_COUNT * LEGACY_FM_OP_COUNT;
 /// Heard mix pad only. Never bake this into `last[]` or the envelope target —
 /// that made every recipe a mild tone while the on-screen scope still looked
 /// jagged (preview uses a full-scale wave).
@@ -30,8 +36,9 @@ pub const CLANG_RATIOS: [f32; 10] = [0.5, 1.0, 1.414, 2.0, 3.0, 3.5, 5.0, 7.0, 1
 pub const CLANG_LABELS: [&str; 10] = [
     "1/2", "1:1", "√2", "2:1", "3:1", "3.5", "5:1", "7:1", "11", "14",
 ];
-pub const OP_NAMES: [&str; FM_OP_COUNT] = ["A", "B", "C", "D"];
-pub const OP_COLORS: [u32; FM_OP_COUNT] = [0xfb4934, 0xfe8019, 0xb8bb26, 0x458588];
+pub const OP_NAMES: [&str; FM_OP_COUNT] = ["A", "B", "C", "D", "E", "F"];
+pub const OP_COLORS: [u32; FM_OP_COUNT] =
+    [0xfb4934, 0xfe8019, 0xb8bb26, 0x458588, 0xb16286, 0x8ec07c];
 
 #[derive(Debug, Clone, Copy)]
 pub struct FmRecipe {
@@ -90,6 +97,18 @@ pub const FM_RECIPES: [FmRecipe; FM_RECIPE_COUNT] = [
         title: "Growl",
         hint: "A onto itself and D, B into D. Messy.",
     },
+    FmRecipe {
+        id: "dx_ep",
+        label: "DX E.PIANO",
+        title: "DX e. piano",
+        hint: "Three pairs, like DX7 algo 5: B→A, D→C, F→E.",
+    },
+    FmRecipe {
+        id: "dx_brass",
+        label: "DX BRASS",
+        title: "DX brass",
+        hint: "F fans into C D E, B into A. Four carriers swell in.",
+    },
 ];
 
 pub fn fm_recipe(index: usize) -> &'static FmRecipe {
@@ -109,18 +128,32 @@ pub fn clang_label(unit: f32) -> &'static str {
     CLANG_LABELS[clang_index(unit)]
 }
 
-/// Pack a drawn connection: integer 0..15 is from + to*4, fraction is amount.
+/// Pack a drawn connection; the fraction is the amount.
+///
+/// Wire-compatible with the 4-op engine: links among A–D keep the old integer
+/// `from + to*4` (0..15). Links touching E or F use `16 + from + to*6`
+/// (16..51), which an old engine never produced.
 pub fn pack_fm_link(from: usize, to: usize, amount: f32) -> f32 {
     let from = from % FM_OP_COUNT;
     let to = to % FM_OP_COUNT;
-    (from + to * FM_OP_COUNT) as f32 + amount.clamp(0.02, 0.99)
+    let idx = if from < LEGACY_FM_OP_COUNT && to < LEGACY_FM_OP_COUNT {
+        from + to * LEGACY_FM_OP_COUNT
+    } else {
+        LEGACY_LINK_SLOTS + from + to * FM_OP_COUNT
+    };
+    idx as f32 + amount.clamp(0.02, 0.99)
 }
 
 pub fn unpack_fm_link(value: f32) -> (usize, usize, f32) {
     let v = value.max(0.0);
     let idx = v.floor() as usize;
     let amount = v.fract().clamp(0.02, 1.0);
-    (idx % FM_OP_COUNT, (idx / FM_OP_COUNT) % FM_OP_COUNT, amount)
+    if idx < LEGACY_LINK_SLOTS {
+        (idx % LEGACY_FM_OP_COUNT, idx / LEGACY_FM_OP_COUNT, amount)
+    } else {
+        let idx = idx - LEGACY_LINK_SLOTS;
+        (idx % FM_OP_COUNT, (idx / FM_OP_COUNT) % FM_OP_COUNT, amount)
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -163,7 +196,7 @@ impl FmOpParams {
     }
 }
 
-/// Four operators plus who wiggles whom. `matrix[src][dst]` is the draw amount.
+/// Six operators plus who wiggles whom. `matrix[src][dst]` is the draw amount.
 #[derive(Debug, Clone, Copy)]
 pub struct FmPatch {
     pub ops: [FmOpParams; FM_OP_COUNT],
@@ -192,93 +225,126 @@ fn quiet(ratio: f32) -> FmOpParams {
 
 /// Starting graphs. Each recipe is a different wiring, not a rerun of A→D.
 pub fn fm_recipe_patch(index: usize) -> FmPatch {
+    // E and F start silent and unpatched so the classic recipes are unchanged.
     let mut p = FmPatch {
-        ops: [FmOpParams::default(); FM_OP_COUNT],
+        ops: [quiet(0.15); FM_OP_COUNT],
         matrix: [[0.0; FM_OP_COUNT]; FM_OP_COUNT],
     };
     match index % FM_RECIPE_COUNT {
         0 => {
             // Bell: two inharmonic strikes into a ringing D.
-            p.ops = [
+            p.ops[..4].copy_from_slice(&[
                 op(0.52, 0.0, 0.06, 0.10, 0.0),
                 op(0.82, 0.0, 0.0, 0.06, 0.0),
                 quiet(0.15),
                 op(0.12, 1.0, 0.0, 0.50, 0.48),
-            ];
+            ]);
             p.matrix[0][3] = 0.70;
             p.matrix[1][3] = 0.38;
         }
         1 => {
             // E.piano: 14:1 tine dies while held; B is a parallel warm sine.
-            p.ops = [
+            p.ops[..4].copy_from_slice(&[
                 op(0.92, 0.0, 0.0, 0.03, 0.0),
                 op(0.12, 0.48, 0.0, 0.32, 0.90),
                 quiet(0.15),
                 op(0.12, 0.72, 0.0, 0.42, 0.78),
-            ];
+            ]);
             p.matrix[0][3] = 0.55;
         }
         2 => {
             // Bass: folded A with feedback, 2:1 into D.
-            p.ops = [
+            p.ops[..4].copy_from_slice(&[
                 op(0.32, 0.0, 0.48, 0.22, 0.92),
                 quiet(0.15),
                 quiet(0.15),
                 op(0.12, 1.0, 0.10, 0.30, 1.0),
-            ];
+            ]);
             p.matrix[0][0] = 0.58;
             p.matrix[0][3] = 0.62;
         }
         3 => {
             // Brass: slow stack A→B→D, no fold — brightness after the press.
-            p.ops = [
+            p.ops[..4].copy_from_slice(&[
                 op(0.12, 0.0, 0.0, 0.78, 1.0),
                 op(0.12, 0.0, 0.0, 0.55, 1.0),
                 quiet(0.15),
                 op(0.12, 1.0, 0.0, 0.36, 1.0),
-            ];
+            ]);
             p.matrix[0][1] = 0.62;
             p.matrix[1][3] = 0.50;
         }
         4 => {
             // Flute: almost just D, tiny A puff + D feedback for air.
-            p.ops = [
+            p.ops[..4].copy_from_slice(&[
                 op(0.12, 0.0, 0.0, 0.42, 0.25),
                 quiet(0.15),
                 quiet(0.15),
                 op(0.12, 1.0, 0.0, 0.48, 1.0),
-            ];
+            ]);
             p.matrix[0][3] = 0.10;
             p.matrix[3][3] = 0.16;
         }
         5 => {
             // Organ: additive drawbars. Instant, holds, almost no FM.
-            p.ops = [
+            p.ops[..4].copy_from_slice(&[
                 op(0.32, 0.52, 0.0, 0.02, 1.0),
                 op(0.42, 0.36, 0.0, 0.02, 1.0),
                 op(0.62, 0.20, 0.0, 0.02, 1.0),
                 op(0.12, 0.62, 0.0, 0.02, 1.0),
-            ];
+            ]);
         }
         6 => {
             // Pluck: A→B→D, all percussive.
-            p.ops = [
+            p.ops[..4].copy_from_slice(&[
                 op(0.42, 0.0, 0.18, 0.0, 0.0),
                 op(0.32, 0.0, 0.0, 0.04, 0.0),
                 quiet(0.15),
                 op(0.12, 1.0, 0.0, 0.10, 0.0),
-            ];
+            ]);
             p.matrix[0][1] = 0.50;
             p.matrix[1][3] = 0.56;
         }
+        8 => {
+            // DX7 algorithm 5 (three 2-op stacks): tine pair, body pair, air pair.
+            p.ops = [
+                op(0.12, 0.62, 0.0, 0.40, 0.70),
+                op(0.95, 0.0, 0.0, 0.03, 0.0),
+                op(0.12, 0.46, 0.0, 0.34, 0.85),
+                op(0.12, 0.0, 0.0, 0.28, 0.40),
+                op(0.32, 0.22, 0.0, 0.30, 0.60),
+                op(0.12, 0.0, 0.0, 0.20, 0.30),
+            ];
+            p.matrix[1][0] = 0.52;
+            p.matrix[3][2] = 0.34;
+            p.matrix[5][4] = 0.30;
+            p.matrix[5][5] = 0.20;
+        }
+        9 => {
+            // DX7 algorithm 22-style: one modulator (F, with feedback) drives
+            // three carriers; B→A adds the bite. Slow envelopes = brass swell.
+            p.ops = [
+                op(0.12, 0.42, 0.0, 0.70, 1.0),
+                op(0.12, 0.0, 0.0, 0.62, 0.85),
+                op(0.12, 0.34, 0.0, 0.72, 1.0),
+                op(0.32, 0.26, 0.0, 0.74, 1.0),
+                op(0.42, 0.16, 0.0, 0.76, 1.0),
+                op(0.12, 0.0, 0.0, 0.66, 0.90),
+            ];
+            p.matrix[1][0] = 0.50;
+            p.matrix[5][2] = 0.46;
+            p.matrix[5][3] = 0.36;
+            p.matrix[5][4] = 0.30;
+            p.matrix[5][5] = 0.28;
+        }
         _ => {
             // Growl: silent A rasps itself then chews D. Dirt is FM, not a mixed square.
-            p.ops = [
+            p.ops[..4].copy_from_slice(&[
                 op(0.12, 0.0, 0.58, 0.22, 0.90),
                 op(0.32, 0.0, 0.22, 0.20, 0.80),
                 quiet(0.15),
                 op(0.12, 1.0, 0.06, 0.36, 1.0),
-            ];
+            ]);
             p.matrix[0][0] = 0.82;
             p.matrix[0][3] = 0.68;
             p.matrix[1][3] = 0.40;
@@ -341,6 +407,9 @@ pub struct FmSynth {
     selected: usize,
     patch: FmPatch,
     sustain: bool,
+    /// Stereo width 0..1: low keys lean left, high keys right (same curve as
+    /// the wavetable WIDTH). 0 = the old dual-mono output.
+    width: f32,
 }
 
 impl Default for FmSynth {
@@ -364,6 +433,7 @@ impl FmSynth {
             selected: 3,
             patch: fm_recipe_patch(0),
             sustain: false,
+            width: 0.0,
         }
     }
 
@@ -388,6 +458,14 @@ impl FmSynth {
         self.recipe = index;
         self.patch = fm_recipe_patch(index);
         self.selected = 3;
+    }
+
+    pub fn width(&self) -> f32 {
+        self.width
+    }
+
+    pub fn set_width(&mut self, unit: f32) {
+        self.width = unit.clamp(0.0, 1.0);
     }
 
     pub fn set_selected(&mut self, op: usize) {
@@ -577,7 +655,21 @@ impl FmSynth {
     }
 
     /// Live FM → `live`; clip / SEQ / song FM → `recorded` (or into `live` if empty).
+    /// Mono: width is ignored.
     pub fn render_split(&mut self, live: &mut [f32], recorded: &mut [f32], ctx: VoiceContext) {
+        self.render_split_stereo(live, &mut [], recorded, ctx);
+    }
+
+    /// Like [`render_split`], but voices pan into `live` (L) / `live_r` (R) by
+    /// key and [`FmSynth::set_width`]. Empty `live_r` = mono (width ignored).
+    /// At width 0 both sides get unity gain, so output matches the old mix.
+    pub fn render_split_stereo(
+        &mut self,
+        live: &mut [f32],
+        live_r: &mut [f32],
+        recorded: &mut [f32],
+        ctx: VoiceContext,
+    ) {
         let sample_rate = ctx.sample_rate;
         let pitch_mul = ctx.pitch_mul;
         let sr = sample_rate.max(8000.0);
@@ -587,6 +679,7 @@ impl FmSynth {
         let mut rel = [0.0f32; FM_OP_COUNT];
         let mut sus = [0.0f32; FM_OP_COUNT];
         let mut inc_ratio = [0.0f32; FM_OP_COUNT];
+        let used = used_ops(&patch);
         for i in 0..FM_OP_COUNT {
             atk[i] = env_step(patch.ops[i].attack_sec(), sr);
             dec[i] = env_step(patch.ops[i].decay_sec(), sr);
@@ -601,7 +694,14 @@ impl FmSynth {
             if !v.active {
                 continue;
             }
-            let dest = if v.recorded && recorded.len() >= n {
+            let to_recorded = v.recorded && recorded.len() >= n;
+            let stereo = !to_recorded && live_r.len() >= n;
+            let (gl, gr) = if stereo {
+                crate::mix::width_gains(v.note, self.width)
+            } else {
+                (1.0, 1.0)
+            };
+            let dest = if to_recorded {
                 &mut recorded[..n]
             } else {
                 &mut live[..n]
@@ -656,10 +756,13 @@ impl FmSynth {
             let lfo_inc = std::f64::consts::TAU * ctx.tone_lfo_rate_hz.max(0.01) as f64
                 / ctx.sample_rate.max(8000.0) as f64;
 
-            for sample in dest.iter_mut() {
+            for (idx, sample) in dest.iter_mut().enumerate() {
                 let mut mix = 0.0f32;
                 let prev = v.last;
                 for i in 0..FM_OP_COUNT {
+                    if !used[i] {
+                        continue;
+                    }
                     v.amp[i] = step_env(
                         v.amp[i],
                         v.target,
@@ -699,7 +802,13 @@ impl FmSynth {
                         sample_rate,
                     );
                 }
-                *sample += mix * VOICE_AMP * if v.recorded { 1.0 } else { ctx.live_gain };
+                let out = mix * VOICE_AMP * if v.recorded { 1.0 } else { ctx.live_gain };
+                if stereo {
+                    *sample += out * gl;
+                    live_r[idx] += out * gr;
+                } else {
+                    *sample += out;
+                }
                 scale += scale_step;
             }
             v.tone_lp = tone_lp;
@@ -801,6 +910,31 @@ impl FmSynth {
 
 /// One-sample-delayed FM: self-links use the hotter feedback scale.
 #[inline]
+/// Ops that are heard or modulate a heard op. Others (e.g. E/F on a
+/// classic 4-op recipe) are skipped so six ops cost no more than four on the Pi.
+fn used_ops(patch: &FmPatch) -> [bool; FM_OP_COUNT] {
+    let mut used = [false; FM_OP_COUNT];
+    for i in 0..FM_OP_COUNT {
+        used[i] = patch.ops[i].audio > 0.0;
+    }
+    // Walk modulators backwards from the carriers until nothing changes.
+    loop {
+        let mut changed = false;
+        for src in 0..FM_OP_COUNT {
+            if used[src] {
+                continue;
+            }
+            if (0..FM_OP_COUNT).any(|dst| dst != src && used[dst] && patch.matrix[src][dst] > 0.001) {
+                used[src] = true;
+                changed = true;
+            }
+        }
+        if !changed {
+            return used;
+        }
+    }
+}
+
 fn phase_mod(
     prev: &[f32; FM_OP_COUNT],
     matrix: &[[f32; FM_OP_COUNT]; FM_OP_COUNT],
@@ -883,6 +1017,104 @@ fn step_env(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn fm_ctx() -> VoiceContext {
+        VoiceContext {
+            sample_rate: 48_000.0,
+            pitch_mul: 1.0,
+            wheel_mul: 1.0,
+            release_drift_semis: 0.0,
+            bend_slew_dt: 0.0,
+            attack_sec: 0.0,
+            release_sec: 0.0,
+            live_gain: 1.0,
+            clip_gains: [1.0; MAX_CLIPS],
+            live_tone: 1.0,
+            tone_lfo_amount: 0.0,
+            tone_lfo_rate_hz: 5.0,
+            tone_lfo_phase: 0.0,
+            stereo_width: 0.0,
+            morph: 0.0,
+        }
+    }
+
+    fn energy(buf: &[f32]) -> f32 {
+        buf.iter().map(|s| s * s).sum()
+    }
+
+    #[test]
+    #[test]
+    fn fm_link_packing_is_wire_compatible_and_reaches_e_f() {
+        // A–D links keep the old 4-op integers (old engines decode them right).
+        for from in 0..4 {
+            for to in 0..4 {
+                let v = pack_fm_link(from, to, 0.5);
+                assert_eq!(v.floor() as usize, from + to * 4);
+                let (f, t, a) = unpack_fm_link(v);
+                assert_eq!((f, t), (from, to));
+                assert!((a - 0.5).abs() < 1e-4);
+            }
+        }
+        for from in 0..FM_OP_COUNT {
+            for to in 0..FM_OP_COUNT {
+                let (f, t, _) = unpack_fm_link(pack_fm_link(from, to, 0.7));
+                assert_eq!((f, t), (from, to));
+            }
+        }
+        assert!(pack_fm_link(5, 4, 0.5) >= 16.0);
+    }
+
+    #[test]
+    fn classic_recipes_leave_e_and_f_silent_and_dx_recipes_use_them() {
+        for r in 0..8 {
+            let p = fm_recipe_patch(r);
+            for op in 4..FM_OP_COUNT {
+                assert_eq!(p.ops[op].audio, 0.0, "recipe {r}");
+                for k in 0..FM_OP_COUNT {
+                    assert_eq!(p.matrix[op][k], 0.0);
+                    assert_eq!(p.matrix[k][op], 0.0);
+                }
+            }
+            assert!(!used_ops(&p)[4] && !used_ops(&p)[5]);
+        }
+        for r in 8..FM_RECIPE_COUNT {
+            let u = used_ops(&fm_recipe_patch(r));
+            assert!(u[4] && u[5], "recipe {r} should use all six ops");
+        }
+    }
+
+    #[test]
+    fn six_op_recipe_renders_audio() {
+        let mut fm = FmSynth::new();
+        fm.set_recipe(8);
+        fm.note_on(0, 60, 110);
+        let mut l = [0.0f32; 512];
+        fm.render_split(&mut l, &mut [], fm_ctx());
+        assert!(energy(&l) > 0.01);
+    }
+
+    fn fm_width_zero_is_dual_mono_and_width_pans_by_key() {
+        let mut fm = FmSynth::new();
+        fm.note_on(0, 36, 110); // low key
+        let (mut l, mut r) = ([0.0f32; 256], [0.0f32; 256]);
+        fm.render_split_stereo(&mut l, &mut r, &mut [], fm_ctx());
+        assert_eq!(l, r, "width 0 must keep the old dual-mono output");
+
+        let mut fm = FmSynth::new();
+        fm.set_width(1.0);
+        fm.note_on(0, 36, 110);
+        let (mut l, mut r) = ([0.0f32; 256], [0.0f32; 256]);
+        fm.render_split_stereo(&mut l, &mut r, &mut [], fm_ctx());
+        assert!(energy(&l) > energy(&r) * 1.5, "low key leans left");
+
+        let mut fm = FmSynth::new();
+        fm.set_width(1.0);
+        fm.note_on(0, 84, 110);
+        let (mut l, mut r) = ([0.0f32; 256], [0.0f32; 256]);
+        fm.render_split_stereo(&mut l, &mut r, &mut [], fm_ctx());
+        assert!(energy(&r) > energy(&l) * 1.5, "high key leans right");
+    }
+
 
     #[test]
     fn recipes_have_unique_ids() {
@@ -968,7 +1200,7 @@ mod tests {
         let mut seen = std::collections::BTreeSet::new();
         for i in 0..FM_RECIPE_COUNT {
             let p = fm_recipe_patch(i);
-            let mut key = [0u8; 16];
+            let mut key = [0u8; FM_OP_COUNT * FM_OP_COUNT];
             for src in 0..FM_OP_COUNT {
                 for dst in 0..FM_OP_COUNT {
                     key[src * FM_OP_COUNT + dst] = (p.matrix[src][dst] * 25.0).round() as u8;
@@ -987,7 +1219,7 @@ mod tests {
             bass.matrix[0][0] > 0.3 && brass.matrix[0][1] > 0.3,
             "bass is A feedback, brass is A→B→D"
         );
-        assert!(fm_recipe_patch(5).ops.iter().all(|o| o.audio > 0.1));
+        assert!(fm_recipe_patch(5).ops[..4].iter().all(|o| o.audio > 0.1));
         assert_eq!(fm_recipe_patch(5).matrix, [[0.0; FM_OP_COUNT]; FM_OP_COUNT]);
     }
 

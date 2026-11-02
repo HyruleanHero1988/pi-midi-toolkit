@@ -68,6 +68,14 @@ pub struct MidiMap {
     fx_index: AtomicU16,
     /// Incoming NoteOns → 127 (MPK velocity workaround). Default on.
     full_vel: AtomicBool,
+    /// Scale mode: snap keybed notes into `scale_mask` above `scale_root`.
+    scale_on: AtomicBool,
+    scale_root: AtomicU8,
+    scale_mask: AtomicU16,
+    /// Snapped note per (channel, input note) so a note-off always releases
+    /// what its note-on played, even if the scale changed in between.
+    /// `0xff` = nothing held.
+    scale_held: [AtomicU8; 16 * 128],
     /// Joystick X / pitch-wheel destination.
     stick_x: AtomicU8,
     /// Joystick Y / CC1 destination.
@@ -92,6 +100,10 @@ impl Default for MidiMap {
             fx_kind: AtomicU8::new(0),
             fx_index: AtomicU16::new(0),
             full_vel: AtomicBool::new(true),
+            scale_on: AtomicBool::new(false),
+            scale_root: AtomicU8::new(0),
+            scale_mask: AtomicU16::new(jambox_protocol::default_scale_mask()),
+            scale_held: std::array::from_fn(|_| AtomicU8::new(0xff)),
             stick_x: AtomicU8::new(MidiDest::default_for(MidiSource::StickX).as_u8()),
             stick_y: AtomicU8::new(MidiDest::default_for(MidiSource::StickY).as_u8()),
             aftertouch: AtomicU8::new(MidiDest::default_for(MidiSource::Aftertouch).as_u8()),
@@ -130,6 +142,53 @@ impl MidiMap {
 
     pub fn set_full_vel(&self, on: bool) {
         self.full_vel.store(on, Ordering::Relaxed);
+    }
+
+    /// Scale mode on/off. An empty mask is treated as chromatic (no-op).
+    pub fn set_scale_lock(&self, on: bool, root: u8, mask: u16) {
+        self.scale_root.store(root % 12, Ordering::Relaxed);
+        self.scale_mask.store(mask & 0x0fff, Ordering::Relaxed);
+        self.scale_on.store(on, Ordering::Relaxed);
+    }
+
+    pub fn scale_lock(&self) -> (bool, u8, u16) {
+        (
+            self.scale_on.load(Ordering::Relaxed),
+            self.scale_root.load(Ordering::Relaxed),
+            self.scale_mask.load(Ordering::Relaxed),
+        )
+    }
+
+    /// Scale mode: move keybed notes onto the scale. Drum channel and the
+    /// controller's transport notes pass through untouched.
+    pub fn apply_scale(&self, event: MidiEvent, profile: &ControllerProfile) -> MidiEvent {
+        let (on, root, mask) = self.scale_lock();
+        let lookup = |channel: u8, note: u8| (channel as usize & 0x0f) * 128 + (note as usize & 0x7f);
+        match event {
+            MidiEvent::NoteOn { channel, note, velocity }
+                if velocity > 0 && on && channel != DRUM_CHANNEL && !profile.is_transport_note(note) =>
+            {
+                let snapped = snap_to_scale(note, root, mask);
+                self.scale_held[lookup(channel, note)].store(snapped, Ordering::Relaxed);
+                MidiEvent::NoteOn { channel, note: snapped, velocity }
+            }
+            MidiEvent::NoteOn { channel, note, velocity: 0 } => {
+                let held = self.scale_held[lookup(channel, note)].swap(0xff, Ordering::Relaxed);
+                let note = if held == 0xff { note } else { held };
+                MidiEvent::NoteOn { channel, note, velocity: 0 }
+            }
+            MidiEvent::NoteOff { channel, note, velocity } => {
+                let held = self.scale_held[lookup(channel, note)].swap(0xff, Ordering::Relaxed);
+                let note = if held == 0xff { note } else { held };
+                MidiEvent::NoteOff { channel, note, velocity }
+            }
+            MidiEvent::PolyPressure { channel, note, pressure } => {
+                let held = self.scale_held[lookup(channel, note)].load(Ordering::Relaxed);
+                let note = if held == 0xff { note } else { held };
+                MidiEvent::PolyPressure { channel, note, pressure }
+            }
+            other => other,
+        }
     }
 
     pub fn set_assigns(&self, stick_x: Option<&str>, stick_y: Option<&str>, aftertouch: Option<&str>) {
@@ -644,6 +703,29 @@ fn mix_fader_command(index: usize, unit: f32) -> Option<Command> {
     }
 }
 
+/// Nearest note whose pitch class is in `mask` (bit i = `root + i`).
+/// Ties go down. An empty mask leaves the note alone.
+pub fn snap_to_scale(note: u8, root: u8, mask: u16) -> u8 {
+    let mask = mask & 0x0fff;
+    if mask == 0 {
+        return note;
+    }
+    let in_scale = |n: i16| {
+        let rel = (n - root as i16).rem_euclid(12);
+        mask & (1 << rel) != 0
+    };
+    let n = note as i16;
+    for d in 0..12i16 {
+        if n - d >= 0 && in_scale(n - d) {
+            return (n - d) as u8;
+        }
+        if n + d <= 127 && in_scale(n + d) {
+            return (n + d) as u8;
+        }
+    }
+    note
+}
+
 /// Push a MIDI event into DSP and to every UI client.
 ///
 /// `dest_mask` is the live channel-map bitmask (`bit j` = emit on channel `j`).
@@ -656,6 +738,7 @@ pub fn ingest(
     mut send: impl FnMut(Command) -> bool,
 ) {
     let event = map.apply_velocity(event);
+    let event = map.apply_scale(event, profile);
     let mask = fanout_dest_mask(dest_mask, event.channel());
     for dest in 0..16u8 {
         if mask & (1 << dest) == 0 {
@@ -1141,6 +1224,42 @@ mod tests {
             }),
             Some(Command::StopRepeat { owner: 0x1000 | 36 })
         );
+    }
+
+    #[test]
+    fn snap_to_scale_picks_nearest_and_ties_down() {
+        let major = jambox_protocol::default_scale_mask();
+        assert_eq!(snap_to_scale(60, 0, major), 60);
+        assert_eq!(snap_to_scale(61, 0, major), 60); // C# → C (tie, down)
+        assert_eq!(snap_to_scale(66, 0, major), 65); // F# → F
+        // A minor pentatonic (A C D E G) rooted at A.
+        let pent: u16 = 1 | 1 << 3 | 1 << 5 | 1 << 7 | 1 << 10;
+        assert_eq!(snap_to_scale(59, 9, pent), 60); // B → C
+        assert_eq!(snap_to_scale(65, 9, pent), 64); // F → E (tie, down)
+        assert_eq!(snap_to_scale(61, 0, 0), 61);
+        assert_eq!(snap_to_scale(127, 0, major), 127);
+    }
+
+    #[test]
+    fn scale_lock_snaps_keys_and_releases_what_it_played() {
+        let map = MidiMap::default();
+        let profile = ControllerProfile::mpk_mini();
+        let on = MidiEvent::NoteOn { channel: 0, note: 61, velocity: 100 };
+        assert_eq!(map.apply_scale(on, &profile), on, "off by default");
+        map.set_scale_lock(true, 0, jambox_protocol::default_scale_mask());
+        assert_eq!(
+            map.apply_scale(on, &profile),
+            MidiEvent::NoteOn { channel: 0, note: 60, velocity: 100 }
+        );
+        // Scale changes while held: the note-off still releases C.
+        map.set_scale_lock(true, 1, 0b1);
+        assert_eq!(
+            map.apply_scale(MidiEvent::NoteOff { channel: 0, note: 61, velocity: 0 }, &profile),
+            MidiEvent::NoteOff { channel: 0, note: 60, velocity: 0 }
+        );
+        // Drum pads pass through.
+        let pad = MidiEvent::NoteOn { channel: 9, note: 37, velocity: 100 };
+        assert_eq!(map.apply_scale(pad, &profile), pad);
     }
 
     #[test]

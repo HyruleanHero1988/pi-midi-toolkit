@@ -1023,10 +1023,11 @@ impl JamboxEngine {
 
         if *fm_enabled || fm.active_count() > 0 {
             group_buf[..n].iter_mut().for_each(|s| *s = 0.0);
-            fm.render_split(&mut group_buf[..n], &mut [], ctx);
+            group_buf_r[..n].iter_mut().for_each(|s| *s = 0.0);
+            fm.render_split_stereo(&mut group_buf[..n], &mut group_buf_r[..n], &mut [], ctx);
             for i in 0..n {
                 key_bus[i] += group_buf[i];
-                key_bus_r[i] += group_buf[i];
+                key_bus_r[i] += group_buf_r[i];
             }
         }
 
@@ -1847,7 +1848,9 @@ impl JamboxEngine {
                 }
             }
             SynthParam::FmRecipe => {
-                self.fm.set_recipe(value.round().clamp(0.0, 7.0) as usize);
+                self.fm.set_recipe(
+                    value.round().clamp(0.0, (crate::fm::FM_RECIPE_COUNT - 1) as f32) as usize,
+                );
             }
             SynthParam::FmOp => {
                 self.fm.set_selected(value.round() as usize);
@@ -1863,6 +1866,7 @@ impl JamboxEngine {
             SynthParam::FmClang => self.fm.set_clang(unit),
             SynthParam::FmHit => self.fm.set_hit(unit),
             SynthParam::FmTail => self.fm.set_tail(unit),
+            SynthParam::FmWidth => self.fm.set_width(unit),
         }
     }
 

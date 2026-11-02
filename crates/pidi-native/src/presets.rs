@@ -27,6 +27,12 @@ pub struct PresetSnapshot {
     /// `None` inside the vec is an empty pad.
     #[serde(default)]
     pub phrases: Option<Vec<Option<PhraseFile>>>,
+    /// Per kit-voice note-repeat slots. `None` = older preset (leave repeats).
+    #[serde(default)]
+    pub drum_repeat: Option<Vec<u8>>,
+    /// Note-repeat latch. `None` = older preset (leave it).
+    #[serde(default)]
+    pub drum_repeat_lock: Option<bool>,
 }
 
 fn default_morph_b() -> u16 {
@@ -47,6 +53,8 @@ impl Default for PresetSnapshot {
             morph_b: 1,
             bpm: None,
             phrases: None,
+            drum_repeat: None,
+            drum_repeat_lock: None,
         }
     }
 }

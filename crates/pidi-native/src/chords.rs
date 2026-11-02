@@ -550,8 +550,84 @@ pub fn progression_in_key(prog: &Progression, key: u8) -> [Option<ChordSpec>; PA
     out
 }
 
+/// Every quality, most specific (4-note) first so a held 7th wins over its triad.
+pub const FINGERED_QUALITIES: [ChordQuality; 9] = [
+    ChordQuality::Dom7,
+    ChordQuality::Maj7,
+    ChordQuality::Min7,
+    ChordQuality::Add9,
+    ChordQuality::Maj,
+    ChordQuality::Min,
+    ChordQuality::Dim,
+    ChordQuality::Aug,
+    ChordQuality::Sus4,
+];
+
+fn quality_pc_mask(quality: ChordQuality) -> u16 {
+    quality
+        .intervals()
+        .iter()
+        .flatten()
+        .fold(0u16, |m, i| m | 1 << (i % 12))
+}
+
+/// Name a chord from keys held on the keybed (fingered chord).
+///
+/// Needs at least three distinct pitch classes that exactly match one quality
+/// from some root. The lowest held note is tried first as the root, so a
+/// root-position chord wins ties (e.g. C6 vs Am7 both read as their bass).
+pub fn recognize_fingered(notes: &[u8]) -> Option<ChordSpec> {
+    let mut mask = 0u16;
+    for n in notes {
+        mask |= 1 << (n % 12);
+    }
+    if mask.count_ones() < 3 {
+        return None;
+    }
+    let bass = notes.iter().min().copied()? % 12;
+    let roots = (0..12u8).map(|i| (bass + i) % 12);
+    for root in roots {
+        if mask & (1 << root) == 0 {
+            continue;
+        }
+        let rel = ((mask >> root) | (mask << (12 - root))) & 0x0fff;
+        for q in FINGERED_QUALITIES {
+            if quality_pc_mask(q) == rel {
+                return Some(ChordSpec::new(root, q));
+            }
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fingered_root_position_triads_and_sevenths() {
+        use ChordQuality::*;
+        assert_eq!(recognize_fingered(&[60, 64, 67]), Some(ChordSpec::new(0, Maj)));
+        assert_eq!(recognize_fingered(&[57, 60, 64]), Some(ChordSpec::new(9, Min)));
+        assert_eq!(recognize_fingered(&[55, 59, 62, 65]), Some(ChordSpec::new(7, Dom7)));
+        assert_eq!(recognize_fingered(&[57, 60, 64, 67]), Some(ChordSpec::new(9, Min7)));
+        assert_eq!(recognize_fingered(&[60, 62, 64, 67]), Some(ChordSpec::new(0, Add9)));
+    }
+
+    #[test]
+    fn fingered_inversions_find_the_real_root() {
+        use ChordQuality::*;
+        // E G C — first inversion C major.
+        assert_eq!(recognize_fingered(&[64, 67, 72]), Some(ChordSpec::new(0, Maj)));
+        // Doubled notes across octaves are fine.
+        assert_eq!(recognize_fingered(&[48, 60, 64, 67, 72]), Some(ChordSpec::new(0, Maj)));
+    }
+
+    #[test]
+    fn fingered_needs_three_pitch_classes_and_a_known_shape() {
+        assert_eq!(recognize_fingered(&[60, 64]), None);
+        assert_eq!(recognize_fingered(&[60, 72, 84]), None);
+        assert_eq!(recognize_fingered(&[60, 61, 62]), None);
+    }
+
     use super::*;
 
     #[test]

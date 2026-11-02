@@ -413,6 +413,14 @@ pub fn handle_line(
             map.set_full_vel(on);
             Response::Ok
         }
+        Ok(Decoded::KaossYRange { bend_semis, vel_min, vel_max }) => {
+            jambox_core::set_kaoss_y_range(bend_semis, vel_min, vel_max);
+            Response::Ok
+        }
+        Ok(Decoded::ScaleLock { on, root, mask }) => {
+            map.set_scale_lock(on, root, mask);
+            Response::Ok
+        }
         Ok(Decoded::MidiAssign {
             stick_x,
             stick_y,

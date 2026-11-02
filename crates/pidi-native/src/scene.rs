@@ -2678,19 +2678,27 @@ fn draw_fm(scene: &mut Scene, model: &NativeModel) {
     draw_fm_graph(scene, model);
     draw_fm_scope(scene, model);
 
-    const LABELS: [&str; 4] = ["RATIO", "OUT", "FOLD", "ENV"];
-    for index in 0..4 {
+    const LABELS: [&str; Layout::FM_SLIDER_COUNT] = ["RATIO", "OUT", "FOLD", "ENV", "WIDE"];
+    for index in 0..Layout::FM_SLIDER_COUNT {
         let track = layout.fm_slider(index);
         scene.fill_rect(track, 0x20202c);
         scene.text(track.x, track.y - 16, LABELS[index], 0xc0c0d0);
-        let fill_h = (track.h as f32 * model.fm_params[index]) as i32;
+        let value = if index == 4 { model.fm_width } else { model.fm_params[index] };
+        let fill_h = (track.h as f32 * value) as i32;
         let fill = Rect {
             x: track.x + 3,
             y: track.y + track.h - fill_h,
             w: track.w - 6,
             h: fill_h.max(2),
         };
-        scene.fill_rect(fill, if index == 2 { 0xfe8019 } else { 0x8ec07c });
+        scene.fill_rect(
+            fill,
+            match index {
+                2 => 0xfe8019,
+                4 => 0x83a598,
+                _ => 0x8ec07c,
+            },
+        );
     }
     scene.text(
         layout.fm_slider(0).x,
@@ -4071,6 +4079,15 @@ fn draw_settings(scene: &mut Scene, model: &NativeModel) {
         0xffffff,
         2,
     );
+    scene.fill_rect(
+        layout.settings_scale,
+        if model.scale_lock != 0 { 0x689d6a } else { 0x3c3836 },
+    );
+    scene.text_centered(layout.settings_scale, &model.scale_lock_label(), 0xffffff, 2);
+    scene.fill_rect(layout.settings_kaoss_y_bend, 0x504945);
+    scene.text_centered(layout.settings_kaoss_y_bend, &model.kaoss_y_bend_label(), 0xffffff, 2);
+    scene.fill_rect(layout.settings_kaoss_y_vel, 0x504945);
+    scene.text_centered(layout.settings_kaoss_y_vel, &model.kaoss_y_vel_label(), 0xffffff, 2);
     scene.fill_rect(layout.settings_log, 0x504945);
     scene.text_centered(layout.settings_log, "LOG", 0xffffff, 2);
     scene.fill_rect(layout.settings_map, 0x83a598);

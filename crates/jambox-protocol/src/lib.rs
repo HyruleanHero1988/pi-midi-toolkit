@@ -272,6 +272,25 @@ pub enum Request {
     FullVel {
         on: bool,
     },
+    /// Scale mode: snap keybed notes (not drum pads) to the nearest note in a
+    /// scale. `mask` bit `i` = semitone `i` above `root` is in the scale.
+    /// Missing fields → C major.
+    ScaleLock {
+        on: bool,
+        #[serde(default)]
+        root: u8,
+        #[serde(default = "default_scale_mask")]
+        mask: u16,
+    },
+    /// Kaoss Y range: ± bend semitones and the velocity span bottom→top.
+    KaossYRange {
+        #[serde(default = "default_y_bend")]
+        bend_semis: u8,
+        #[serde(default = "default_y_vel_min")]
+        vel_min: u8,
+        #[serde(default = "default_y_vel_max")]
+        vel_max: u8,
+    },
     /// Remap stick / aftertouch destinations. Missing fields keep the last value.
     MidiAssign {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -673,4 +692,19 @@ mod tests {
             }
         ));
     }
+}
+
+/// C major (ionian) as a 12-bit pitch-class mask: 0,2,4,5,7,9,11.
+pub fn default_scale_mask() -> u16 {
+    0b1010_1011_0101
+}
+
+pub fn default_y_bend() -> u8 {
+    12
+}
+pub fn default_y_vel_min() -> u8 {
+    72
+}
+pub fn default_y_vel_max() -> u8 {
+    127
 }

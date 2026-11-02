@@ -405,6 +405,19 @@ impl Outbox {
         self.reliable.push_back(Request::FullVel { on });
     }
 
+    pub fn kaoss_y_range(&mut self, bend_semis: u8, vel_min: u8, vel_max: u8) {
+        self.reliable.push_back(Request::KaossYRange {
+            bend_semis,
+            vel_min,
+            vel_max,
+        });
+    }
+
+    pub fn scale_lock(&mut self, on: bool, root: u8, mask: u16) {
+        self.reliable
+            .push_back(Request::ScaleLock { on, root, mask });
+    }
+
     pub fn midi_assign(
         &mut self,
         stick_x: midi_core::MidiDest,

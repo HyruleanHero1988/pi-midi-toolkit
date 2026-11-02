@@ -314,6 +314,18 @@ pub struct SessionState {
     /// Force keyboard note-ons to velocity 127. Missing in old sessions → on.
     #[serde(default = "default_full_velocity")]
     pub full_velocity: bool,
+    /// Scale mode: `KAOSS_SCALES` index the keybed snaps to (0 = OFF). Root is
+    /// the Chords song key. Missing in old sessions → off.
+    #[serde(default)]
+    pub scale_lock: u8,
+    /// Kaoss Y range: ± bend semitones (1..12). Missing → 12 (old behaviour).
+    #[serde(default = "default_kaoss_y_bend")]
+    pub kaoss_y_bend: u8,
+    /// Kaoss Y velocity span bottom→top. Missing → 72..127 (old behaviour).
+    #[serde(default = "default_kaoss_y_vel_min")]
+    pub kaoss_y_vel_min: u8,
+    #[serde(default = "default_kaoss_y_vel_max")]
+    pub kaoss_y_vel_max: u8,
     /// Joystick X destination. Missing → pitch.
     #[serde(default = "default_midi_stick_x")]
     pub midi_stick_x: MidiDest,
@@ -326,6 +338,10 @@ pub struct SessionState {
     /// Note-repeat latch: tap instead of hold. Missing in old sessions → hold.
     #[serde(default)]
     pub drum_repeat_lock: bool,
+    /// Per kit-voice note-repeat division slots (0 = off, see
+    /// `RepeatDivisionChoice::as_slot`). Missing in old sessions → all off.
+    #[serde(default)]
+    pub drum_repeat: Vec<u8>,
     /// Touch-drawn FM graph the user saved. Missing in old sessions → none.
     /// Kept so an older file still loads; new saves live in `fm_patches`.
     #[serde(default)]
@@ -333,6 +349,9 @@ pub struct SessionState {
     /// Named FM patches. Missing in old sessions → empty (then `fm_user` is imported).
     #[serde(default)]
     pub fm_patches: Vec<FmNamedPatch>,
+    /// FM stereo width 0..1. Missing in old sessions → 0 (dual mono, old sound).
+    #[serde(default)]
+    pub fm_width: f32,
     /// Left, right, and sub wave layout. Missing → the first test layout.
     #[serde(default = "crate::wave_viz::default_signals")]
     pub wave_signals: [crate::wave_viz::WaveSignal; 3],
@@ -358,6 +377,64 @@ pub struct FmUserPatch {
     pub env: [f32; 4],
     pub sustain: [f32; 4],
     pub matrix: [[f32; 4]; 4],
+    /// Six-op extension (ops E/F and the full 6×6 matrix). Missing in sessions
+    /// saved before 6-op; older apps ignore it and still read the A–D fields.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ext: Option<FmUserPatchExt>,
+}
+
+/// Ops E and F (`ratio, audio, fold, env, sustain` each) plus the 6×6 matrix.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct FmUserPatchExt {
+    pub ops: [[f32; 5]; 2],
+    pub matrix: [[f32; 6]; 6],
+}
+
+impl FmUserPatch {
+    /// Build from six-op arrays. Always writes the legacy A–D view too.
+    pub fn from_six(ops: [[f32; 5]; 6], matrix: [[f32; 6]; 6]) -> Self {
+        let mut m4 = [[0.0; 4]; 4];
+        for (s, row) in m4.iter_mut().enumerate() {
+            row.copy_from_slice(&matrix[s][..4]);
+        }
+        let col = |k: usize| [ops[0][k], ops[1][k], ops[2][k], ops[3][k]];
+        Self {
+            ratio: col(0),
+            audio: col(1),
+            fold: col(2),
+            env: col(3),
+            sustain: col(4),
+            matrix: m4,
+            ext: Some(FmUserPatchExt {
+                ops: [ops[4], ops[5]],
+                matrix,
+            }),
+        }
+    }
+
+    /// Six-op view: `(ratio, audio, fold, env, sustain)` per op and the 6×6
+    /// matrix. Legacy patches get silent, unlinked E/F (same sound as before).
+    pub fn to_six(&self) -> ([[f32; 5]; 6], [[f32; 6]; 6]) {
+        let quiet = [0.15, 0.0, 0.0, 0.3, 0.0];
+        let mut ops = [quiet; 6];
+        for (i, op) in ops.iter_mut().take(4).enumerate() {
+            *op = [self.ratio[i], self.audio[i], self.fold[i], self.env[i], self.sustain[i]];
+        }
+        let mut matrix = [[0.0; 6]; 6];
+        match &self.ext {
+            Some(ext) => {
+                ops[4] = ext.ops[0];
+                ops[5] = ext.ops[1];
+                matrix = ext.matrix;
+            }
+            None => {
+                for s in 0..4 {
+                    matrix[s][..4].copy_from_slice(&self.matrix[s]);
+                }
+            }
+        }
+        (ops, matrix)
+    }
 }
 
 fn default_drum_level() -> f32 {
@@ -410,6 +487,18 @@ fn default_vibrato_rate() -> f32 {
 
 fn default_fx_flanger_rate() -> f32 {
     0.35
+}
+
+fn default_kaoss_y_bend() -> u8 {
+    jambox_core::DEFAULT_Y_BEND_SEMIS
+}
+
+fn default_kaoss_y_vel_min() -> u8 {
+    jambox_core::DEFAULT_Y_VEL_MIN
+}
+
+fn default_kaoss_y_vel_max() -> u8 {
+    jambox_core::DEFAULT_Y_VEL_MAX
 }
 
 fn default_full_velocity() -> bool {
@@ -504,12 +593,18 @@ impl Default for SessionState {
             power_warn: false,
             wifi_usb_hold: false,
             full_velocity: default_full_velocity(),
+            scale_lock: 0,
+            kaoss_y_bend: default_kaoss_y_bend(),
+            kaoss_y_vel_min: default_kaoss_y_vel_min(),
+            kaoss_y_vel_max: default_kaoss_y_vel_max(),
             midi_stick_x: default_midi_stick_x(),
             midi_stick_y: default_midi_stick_y(),
             midi_aftertouch: default_midi_aftertouch(),
             drum_repeat_lock: false,
+            drum_repeat: Vec::new(),
             fm_user: None,
             fm_patches: Vec::new(),
+            fm_width: 0.0,
             wave_signals: crate::wave_viz::default_signals(),
             wave_sub_hz: crate::wave_viz::default_sub_hz(),
         }
@@ -540,6 +635,36 @@ pub fn save(path: &Path, state: &SessionState) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_four_op_fm_patch_loads_with_silent_e_f() {
+        let json = r#"{"ratio":[0.1,0.2,0.3,0.4],"audio":[1,0,0,0.5],"fold":[0,0,0,0],
+            "env":[0.3,0.3,0.3,0.3],"sustain":[1,1,1,1],
+            "matrix":[[0,0.5,0,0],[0,0,0,0],[0,0,0,0],[0,0,0.25,0]]}"#;
+        let p: FmUserPatch = serde_json::from_str(json).unwrap();
+        assert!(p.ext.is_none());
+        let (ops, m) = p.to_six();
+        assert_eq!(ops[3][0], 0.4);
+        assert_eq!(ops[4][1], 0.0);
+        assert_eq!(ops[5][1], 0.0);
+        assert_eq!(m[0][1], 0.5);
+        assert_eq!(m[3][2], 0.25);
+        assert!(m[4].iter().chain(m[5].iter()).all(|&v| v == 0.0));
+    }
+
+    #[test]
+    fn six_op_fm_patch_round_trips_and_keeps_legacy_view() {
+        let mut ops = [[0.2, 0.0, 0.0, 0.3, 0.5]; 6];
+        ops[5] = [0.9, 0.7, 0.1, 0.2, 0.4];
+        let mut m = [[0.0; 6]; 6];
+        m[5][3] = 0.6;
+        m[1][0] = 0.3;
+        let p = FmUserPatch::from_six(ops, m);
+        assert_eq!(p.matrix[1][0], 0.3, "old apps still see the A–D wiring");
+        let json = serde_json::to_string(&p).unwrap();
+        let back: FmUserPatch = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.to_six(), (ops, m));
+    }
 
     #[test]
     fn out_mode_cycles() {

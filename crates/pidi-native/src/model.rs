@@ -85,6 +85,15 @@ impl RepeatDivisionChoice {
         Self::Whole,
     ];
 
+    /// Inverse of `as_slot`; unknown slots (newer files) → Off.
+    pub fn from_slot(slot: u8) -> Self {
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|c| c.as_slot() == slot)
+            .unwrap_or(Self::Off)
+    }
+
     pub fn from_index(index: usize) -> Self {
         Self::ALL[index % Self::ALL.len()]
     }
@@ -284,6 +293,8 @@ pub struct NativeModel {
     pub fm_ops: [jambox_core::FmOpParams; jambox_core::FM_OP_COUNT],
     pub fm_matrix: [[f32; jambox_core::FM_OP_COUNT]; jambox_core::FM_OP_COUNT],
     pub fm_params: [f32; 4],
+    /// FM WIDTH slider (global, not per-op). 0 = dual mono (old sound).
+    pub fm_width: f32,
     /// True while the heard graph is the saved user patch, not a recipe.
     pub fm_user_live: bool,
     pub fm_user_index: Option<usize>,
@@ -438,6 +449,8 @@ pub struct NativeModel {
     pub chords_octave: i8,
     pub chords_arm: bool,
     pub chords_current: Option<ChordSpec>,
+    /// Keybed notes held while in Chords mode, for fingered-chord recognition.
+    pub chords_fingered: Vec<u8>,
     pub chords_palette: [Option<ChordSpec>; PALETTE_SLOTS],
     pub chords_overlay: Option<ChordsOverlay>,
     chords_held: [(Option<u32>, usize, QualityRow); MAX_FINGERS],
@@ -541,6 +554,12 @@ pub struct NativeModel {
     pub power_warn: bool,
     /// SET→FULL VEL: rewrite keyboard note-ons to 127. On by default for MPK.
     pub full_vel: bool,
+    /// SET→SCALE: `KAOSS_SCALES` index the keybed snaps to (0 = OFF).
+    pub scale_lock: u8,
+    /// SET→Y BEND: Kaoss pad Y bend range, ± semitones.
+    pub kaoss_y_bend: u8,
+    /// SET→Y VEL: Kaoss pad Y velocity span (bottom, top).
+    pub kaoss_y_vel: (u8, u8),
     /// SET→MIDI controller assignment sheet.
     pub midi_panel_open: bool,
     pub midi_assign_pick: usize,
@@ -672,6 +691,7 @@ impl NativeModel {
             fm_selected: 3,
             fm_ops: fm_patch.ops,
             fm_matrix: fm_patch.matrix,
+            fm_width: 0.0,
             fm_params: [
                 fm_patch.ops[3].ratio,
                 fm_patch.ops[3].audio,
@@ -798,6 +818,7 @@ impl NativeModel {
             chords_octave: 0,
             chords_arm: false,
             chords_current: Some(ChordSpec::new(0, chords::ChordQuality::Maj)),
+            chords_fingered: Vec::new(),
             chords_palette: [None; PALETTE_SLOTS],
             chords_overlay: None,
             chords_held: [(None, 0, QualityRow::Maj); MAX_FINGERS],
@@ -873,6 +894,9 @@ impl NativeModel {
             probe: false,
             power_warn: false,
             full_vel: true,
+            scale_lock: 0,
+            kaoss_y_bend: jambox_core::DEFAULT_Y_BEND_SEMIS,
+            kaoss_y_vel: (jambox_core::DEFAULT_Y_VEL_MIN, jambox_core::DEFAULT_Y_VEL_MAX),
             midi_panel_open: false,
             midi_assign_pick: 1,
             midi_stick_x: midi_core::MidiDest::default_for(midi_core::MidiSource::StickX),
@@ -1302,6 +1326,7 @@ impl NativeModel {
     }
 
     fn leave_chords_mode(&mut self, outbox: &mut Outbox) {
+        self.chords_fingered.clear();
         let ids: Vec<i32> = self
             .fingers
             .iter()
@@ -1694,6 +1719,8 @@ impl NativeModel {
             }
         } else if !self.connected && connected {
             outbox.full_vel(self.full_vel);
+            self.push_scale_lock(outbox);
+            self.push_kaoss_y_range(outbox);
             outbox.midi_assign(self.midi_stick_x, self.midi_stick_y, self.midi_aftertouch);
             outbox.channel_map(self.channel_map_bits);
             self.sync_drum_repeat_map(outbox);
@@ -2515,10 +2542,16 @@ impl NativeModel {
         self.power_warn = s.power_warn;
         self.wifi_usb_hold = s.wifi_usb_hold;
         self.full_vel = s.full_velocity;
+        self.scale_lock = s.scale_lock % jambox_core::KAOSS_SCALES.len() as u8;
+        let (b, lo, hi) =
+            jambox_core::clamp_y_range(s.kaoss_y_bend, s.kaoss_y_vel_min, s.kaoss_y_vel_max);
+        self.kaoss_y_bend = b;
+        self.kaoss_y_vel = (lo, hi);
         self.midi_stick_x = s.midi_stick_x;
         self.midi_stick_y = s.midi_stick_y;
         self.midi_aftertouch = s.midi_aftertouch;
         self.drum_repeat_lock = s.drum_repeat_lock;
+        self.set_drum_repeat_slots(&s.drum_repeat);
         self.wave_signals = s.wave_signals;
         for signal in &mut self.wave_signals {
             signal.offset = signal.offset.clamp(0.0, 1.0);
@@ -2533,6 +2566,7 @@ impl NativeModel {
             .wave_sub_hz
             .clamp(crate::wave_viz::SUB_HZ_MIN, crate::wave_viz::SUB_HZ_MAX);
         self.fm_patches = s.fm_patches.clone();
+        self.fm_width = s.fm_width.clamp(0.0, 1.0);
         if self.fm_patches.is_empty() {
             if let Some(old) = s.fm_user {
                 self.fm_patches.push(session::FmNamedPatch {
@@ -2556,6 +2590,8 @@ impl NativeModel {
             self.full_vel,
         );
         outbox.full_vel(self.full_vel);
+        self.push_scale_lock(outbox);
+        self.push_kaoss_y_range(outbox);
         outbox.midi_assign(self.midi_stick_x, self.midi_stick_y, self.midi_aftertouch);
         self.sync_drum_repeat_map(outbox);
         outbox.emit_mode("clips", self.pads_out.wire());
@@ -2693,12 +2729,18 @@ impl NativeModel {
             power_warn: self.power_warn,
             wifi_usb_hold: self.wifi_usb_hold,
             full_velocity: self.full_vel,
+            scale_lock: self.scale_lock,
+            kaoss_y_bend: self.kaoss_y_bend,
+            kaoss_y_vel_min: self.kaoss_y_vel.0,
+            kaoss_y_vel_max: self.kaoss_y_vel.1,
             midi_stick_x: self.midi_stick_x,
             midi_stick_y: self.midi_stick_y,
             midi_aftertouch: self.midi_aftertouch,
             drum_repeat_lock: self.drum_repeat_lock,
+            drum_repeat: self.drum_repeat_save_slots(),
             fm_user: self.fm_user,
             fm_patches: self.fm_patches.clone(),
+            fm_width: self.fm_width,
             wave_signals: self.wave_signals,
             wave_sub_hz: self.wave_sub_hz,
         }
@@ -2744,10 +2786,12 @@ impl NativeModel {
                     self.seq.push_note(true, notice.channel, note, vel);
                     self.push_pad_rec(true, notice.channel, note, vel);
                 }
+                self.chords_fingered_edge(notice.channel, note, true, outbox);
                 self.last_midi_activity =
                     format!("IN  ch{} n{} v{}", notice.channel + 1, note, vel);
                 self.push_log(format!("midi on ch{} n{} v{}", notice.channel, note, vel));
             } else if self.mode != UiMode::Arp {
+                self.chords_fingered_edge(notice.channel, note, false, outbox);
                 self.note_midi_held(notice.channel, false);
                 if notice.channel == DRUM_CHANNEL {
                     self.handle_hardware_drum_repeat(note, false, outbox);
@@ -2757,6 +2801,7 @@ impl NativeModel {
                 self.push_log(format!("midi off ch{} n{}", notice.channel, note));
             }
         } else if kind == "note_off" || kind == "noteoff" {
+            self.chords_fingered_edge(notice.channel, note, false, outbox);
             self.note_midi_held(notice.channel, false);
             if notice.channel == DRUM_CHANNEL {
                 self.handle_hardware_drum_repeat(note, false, outbox);
@@ -2949,6 +2994,88 @@ impl NativeModel {
             127
         } else {
             velocity
+        }
+    }
+
+    /// Scale mode's 12-bit pitch-class mask for a `KAOSS_SCALES` index.
+    pub fn scale_lock_mask(index: u8) -> u16 {
+        jambox_core::kaoss_scale(index as usize)
+            .degrees
+            .iter()
+            .fold(0u16, |m, d| m | 1 << (d % 12))
+    }
+
+    fn push_scale_lock(&self, outbox: &mut Outbox) {
+        outbox.scale_lock(
+            self.scale_lock != 0,
+            self.chords_key,
+            Self::scale_lock_mask(self.scale_lock),
+        );
+    }
+
+    /// Apply the Y range locally (UI-side previews/MIDI out) and on the engine.
+    fn push_kaoss_y_range(&self, outbox: &mut Outbox) {
+        let (lo, hi) = self.kaoss_y_vel;
+        // Unit tests run in parallel in one process; keep the shared globals at
+        // their defaults there (jambox-core tests the mapping itself).
+        #[cfg(not(test))]
+        jambox_core::set_kaoss_y_range(self.kaoss_y_bend, lo, hi);
+        outbox.kaoss_y_range(self.kaoss_y_bend, lo, hi);
+    }
+
+    /// SET→Y BEND tap: ±12 → 7 → 5 → 2 → 1 → ±12 semitones.
+    fn cycle_kaoss_y_bend(&mut self, outbox: &mut Outbox) {
+        const STEPS: [u8; 5] = [12, 7, 5, 2, 1];
+        let i = STEPS.iter().position(|&s| s == self.kaoss_y_bend).map_or(0, |i| i + 1);
+        self.kaoss_y_bend = STEPS[i % STEPS.len()];
+        self.push_kaoss_y_range(outbox);
+        self.status_line = self.kaoss_y_bend_label();
+        self.mark_dirty();
+    }
+
+    /// SET→Y VEL tap: cycle velocity spans for pad bottom→top.
+    fn cycle_kaoss_y_vel(&mut self, outbox: &mut Outbox) {
+        const SPANS: [(u8, u8); 5] = [(72, 127), (1, 127), (40, 127), (100, 127), (127, 127)];
+        let i = SPANS.iter().position(|&s| s == self.kaoss_y_vel).map_or(0, |i| i + 1);
+        self.kaoss_y_vel = SPANS[i % SPANS.len()];
+        self.push_kaoss_y_range(outbox);
+        self.status_line = self.kaoss_y_vel_label();
+        self.mark_dirty();
+    }
+
+    pub fn kaoss_y_bend_label(&self) -> String {
+        format!("Y BEND ±{}", self.kaoss_y_bend)
+    }
+
+    pub fn kaoss_y_vel_label(&self) -> String {
+        format!("Y VEL {}-{}", self.kaoss_y_vel.0, self.kaoss_y_vel.1)
+    }
+
+    /// SET→SCALE tap: OFF → each curated scale (not chromatic) → OFF.
+    fn cycle_scale_lock(&mut self, outbox: &mut Outbox) {
+        let scales = jambox_core::KAOSS_SCALES;
+        let n = scales.len();
+        let mut i = self.scale_lock as usize;
+        self.scale_lock = loop {
+            i = (i + 1) % n;
+            if i == 0 || (scales[i].curated && scales[i].id != "chromatic") {
+                break i as u8;
+            }
+        };
+        self.push_scale_lock(outbox);
+        self.status_line = self.scale_lock_label();
+        self.mark_dirty();
+    }
+
+    pub fn scale_lock_label(&self) -> String {
+        if self.scale_lock == 0 {
+            "SCALE: OFF".into()
+        } else {
+            format!(
+                "SCALE: {} {}",
+                chords::KEY_NAMES[self.chords_key as usize % 12],
+                jambox_core::kaoss_scale(self.scale_lock as usize).label
+            )
         }
     }
 
@@ -4362,6 +4489,18 @@ impl NativeModel {
                 self.tap_ui(slot, id, gesture, px, py);
                 self.toggle_full_vel(outbox);
             }
+            Hit::SettingsKaossYBend => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.cycle_kaoss_y_bend(outbox);
+            }
+            Hit::SettingsKaossYVel => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.cycle_kaoss_y_vel(outbox);
+            }
+            Hit::SettingsScale => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.cycle_scale_lock(outbox);
+            }
             Hit::SettingsMidi => {
                 self.tap_ui(slot, id, gesture, px, py);
                 self.open_midi_panel();
@@ -5736,25 +5875,23 @@ impl NativeModel {
     }
 
     fn fm_snapshot(&self) -> session::FmUserPatch {
-        session::FmUserPatch {
-            ratio: self.fm_ops.map(|op| op.ratio),
-            audio: self.fm_ops.map(|op| op.audio),
-            fold: self.fm_ops.map(|op| op.fold),
-            env: self.fm_ops.map(|op| op.env),
-            sustain: self.fm_ops.map(|op| op.sustain),
-            matrix: self.fm_matrix,
-        }
+        session::FmUserPatch::from_six(
+            self.fm_ops
+                .map(|op| [op.ratio, op.audio, op.fold, op.env, op.sustain]),
+            self.fm_matrix,
+        )
     }
 
     fn apply_fm_snapshot(&mut self, patch: session::FmUserPatch) {
-        for i in 0..jambox_core::FM_OP_COUNT {
-            self.fm_ops[i].ratio = patch.ratio[i];
-            self.fm_ops[i].audio = patch.audio[i];
-            self.fm_ops[i].fold = patch.fold[i];
-            self.fm_ops[i].env = patch.env[i];
-            self.fm_ops[i].sustain = patch.sustain[i];
+        let (ops, matrix) = patch.to_six();
+        for (i, [ratio, audio, fold, env, sustain]) in ops.into_iter().enumerate() {
+            self.fm_ops[i].ratio = ratio;
+            self.fm_ops[i].audio = audio;
+            self.fm_ops[i].fold = fold;
+            self.fm_ops[i].env = env;
+            self.fm_ops[i].sustain = sustain;
         }
-        self.fm_matrix = patch.matrix;
+        self.fm_matrix = matrix;
         self.sync_fm_sliders_from_op();
     }
 
@@ -5791,6 +5928,7 @@ impl NativeModel {
             outbox.synth("fm_hit", op.env);
         }
         outbox.synth("fm_op", self.fm_selected as f32);
+        outbox.synth("fm_width", self.fm_width);
     }
 
     fn select_fm_recipe(&mut self, index: usize, outbox: &mut Outbox) {
@@ -5976,12 +6114,19 @@ impl NativeModel {
     }
 
     fn apply_fm_slider(&mut self, index: usize, py: i32, outbox: &mut Outbox) {
-        if index >= 4 {
+        if index >= Layout::FM_SLIDER_COUNT {
             return;
         }
         let track = self.layout.fm_slider(index);
         let y = 1.0 - ((py - track.y) as f32 / track.h.max(1) as f32);
         let value = y.clamp(0.0, 1.0);
+        if index == 4 {
+            self.fm_width = value;
+            outbox.synth("fm_width", value);
+            self.status_line = format!("FM WIDTH {:.2}", value);
+            self.mark_dirty();
+            return;
+        }
         self.fm_params[index] = value;
         let op = &mut self.fm_ops[self.fm_selected];
         match index {
@@ -6062,6 +6207,19 @@ impl NativeModel {
             slots[i] = choice.as_slot();
         }
         slots
+    }
+
+    fn drum_repeat_save_slots(&self) -> Vec<u8> {
+        self.drum_repeat.iter().map(|c| c.as_slot()).collect()
+    }
+
+    /// Restore saved repeat slots. Missing entries (shorter/older lists) → Off.
+    fn set_drum_repeat_slots(&mut self, slots: &[u8]) {
+        for (i, choice) in self.drum_repeat.iter_mut().enumerate() {
+            *choice = slots
+                .get(i)
+                .map_or(RepeatDivisionChoice::Off, |&s| RepeatDivisionChoice::from_slot(s));
+        }
     }
 
     fn sync_drum_repeat_map(&mut self, outbox: &mut Outbox) {
@@ -8652,6 +8810,7 @@ impl NativeModel {
         outbox.synth("attack", p.attack);
         outbox.synth("release", p.release);
         self.sync_wave_bank();
+        self.apply_preset_drum_repeat(&p, outbox);
         if let Some(files) = p.phrases.as_deref() {
             let bpm = p.bpm.unwrap_or(self.bpm).clamp(40.0, 240.0);
             self.bpm = bpm;
@@ -8663,6 +8822,26 @@ impl NativeModel {
         } else {
             self.status_line = format!("loaded {}", p.name);
         }
+    }
+
+    /// Restore note-repeat settings saved with a preset (older presets: untouched).
+    fn apply_preset_drum_repeat(&mut self, p: &PresetSnapshot, outbox: &mut Outbox) {
+        if p.drum_repeat.is_none() && p.drum_repeat_lock.is_none() {
+            return;
+        }
+        if let Some(slots) = p.drum_repeat.as_deref() {
+            self.set_drum_repeat_slots(slots);
+        }
+        if let Some(lock) = p.drum_repeat_lock {
+            self.drum_repeat_lock = lock;
+        }
+        for index in 0..DRUM_MODEL_COUNT {
+            if self.repeat_voice_active(index) && !self.drum_repeat[index].is_on() {
+                self.stop_repeat_voice(index, outbox);
+            }
+        }
+        self.sync_drum_repeat_map(outbox);
+        self.mark_dirty();
     }
 
     fn apply_preset_phrases(
@@ -8703,6 +8882,8 @@ impl NativeModel {
             morph_b: self.morph_b,
             bpm: Some(self.bpm),
             phrases: Some(phrases),
+            drum_repeat: Some(self.drum_repeat_save_slots()),
+            drum_repeat_lock: Some(self.drum_repeat_lock),
         };
         if presets::save_slot(&dir, index, &preset) {
             self.preset_occupied[index] = true;
@@ -8936,6 +9117,27 @@ impl NativeModel {
         }
     }
 
+    /// Fingered chords: keys held on the keybed in Chords mode pick the chord.
+    /// The keys already sound through the engine, so no extra block is played.
+    fn chords_fingered_edge(&mut self, channel: u8, note: u8, on: bool, outbox: &mut Outbox) {
+        if self.mode != UiMode::Chords || channel == DRUM_CHANNEL {
+            return;
+        }
+        if on {
+            if !self.chords_fingered.contains(&note) {
+                self.chords_fingered.push(note);
+            }
+            if let Some(spec) = chords::recognize_fingered(&self.chords_fingered) {
+                if self.chords_current != Some(spec) {
+                    self.chords_select(spec, false, outbox);
+                    self.mark_dirty();
+                }
+            }
+        } else {
+            self.chords_fingered.retain(|n| *n != note);
+        }
+    }
+
     fn chords_select(&mut self, spec: ChordSpec, play_block: bool, outbox: &mut Outbox) {
         self.chords_combo_grace = 0.0;
         self.chords_current = Some(spec);
@@ -8967,6 +9169,7 @@ impl NativeModel {
         }
         let delta = ((new_key as i16 - old_key as i16).rem_euclid(12)) as u8;
         self.chords_key = new_key;
+        self.push_scale_lock(outbox);
         if let Some(spec) = self.chords_current {
             self.chords_current = Some(spec.transpose(delta));
         }
@@ -11563,6 +11766,67 @@ mod tests {
     }
 
     #[test]
+    fn drum_repeat_settings_survive_session_round_trip() {
+        let mut model = NativeModel::new();
+        let kick = jambox_core::DrumModel::Kick.index();
+        model.drum_repeat[kick] = RepeatDivisionChoice::Sixteenth;
+        model.drum_repeat[1] = RepeatDivisionChoice::Whole;
+        model.drum_repeat_lock = true;
+        let json = serde_json::to_string(&model.capture_session()).unwrap();
+        let saved: SessionState = serde_json::from_str(&json).unwrap();
+        let mut fresh = NativeModel::new();
+        let mut out = Outbox::new();
+        fresh.apply_session(&saved, &mut out);
+        assert_eq!(fresh.drum_repeat, model.drum_repeat);
+        assert!(fresh.drum_repeat_lock);
+        let expected = model.drum_repeat_slots();
+        assert!(out.take().iter().any(|r| matches!(
+            r,
+            Request::DrumRepeat { slots, latch: true } if *slots == expected
+        )));
+    }
+
+    #[test]
+    fn old_session_without_drum_repeat_loads_all_off() {
+        let mut v = serde_json::to_value(NativeModel::new().capture_session()).unwrap();
+        v.as_object_mut().unwrap().remove("drum_repeat");
+        let s: SessionState = serde_json::from_value(v).unwrap();
+        assert!(s.drum_repeat.is_empty());
+        let mut model = NativeModel::new();
+        model.drum_repeat = [RepeatDivisionChoice::Eighth; DRUM_MODEL_COUNT];
+        model.apply_session(&s, &mut Outbox::new());
+        assert!(model.drum_repeat.iter().all(|d| !d.is_on()));
+        // Unknown future slot values degrade to Off instead of panicking.
+        assert_eq!(RepeatDivisionChoice::from_slot(200), RepeatDivisionChoice::Off);
+        for c in RepeatDivisionChoice::ALL {
+            assert_eq!(RepeatDivisionChoice::from_slot(c.as_slot()), c);
+        }
+    }
+
+    #[test]
+    fn preset_restores_drum_repeat_and_old_presets_leave_it() {
+        let mut model = NativeModel::new();
+        let mut out = Outbox::new();
+        let mut p = PresetSnapshot::default();
+        model.drum_repeat = [RepeatDivisionChoice::Quarter; DRUM_MODEL_COUNT];
+        model.apply_preset_drum_repeat(&p, &mut out);
+        assert!(model.drum_repeat.iter().all(|d| *d == RepeatDivisionChoice::Quarter));
+        assert!(out.take().is_empty(), "old preset sends nothing");
+        p.drum_repeat = Some(vec![RepeatDivisionChoice::Triple.as_slot()]);
+        p.drum_repeat_lock = Some(true);
+        let p: PresetSnapshot =
+            serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
+        model.apply_preset_drum_repeat(&p, &mut out);
+        assert_eq!(model.drum_repeat[0], RepeatDivisionChoice::Triple);
+        assert!(model.drum_repeat[1..].iter().all(|d| !d.is_on()));
+        assert!(model.drum_repeat_lock);
+        assert!(out
+            .take()
+            .iter()
+            .any(|r| matches!(r, Request::DrumRepeat { latch: true, .. })));
+    }
+
+    #[test]
     fn repeat_lock_survives_pad_release() {
         let mut model = NativeModel::new();
         model.set_mode(UiMode::Drums);
@@ -12918,6 +13182,110 @@ mod tests {
         );
         assert!(!model.punch_active());
         assert!((model.punch_amount[3] - stored).abs() < 1e-5);
+    }
+
+    fn key_notice(kind: &str, note: u8, vel: u16) -> MidiNotice {
+        MidiNotice {
+            kind: kind.into(),
+            channel: 0,
+            note: Some(note),
+            velocity: Some(vel),
+            control: None,
+            value: None,
+            controller: None,
+        }
+    }
+
+    #[test]
+    fn fingered_chord_on_keybed_selects_chord_in_chords_mode() {
+        let mut model = NativeModel::new();
+        let mut out = Outbox::new();
+        model.switch_mode(UiMode::Chords, &mut out);
+        for n in [57u8, 60, 64, 67] {
+            model.on_midi_notice(&key_notice("note_on", n, 100), &mut out);
+        }
+        assert_eq!(
+            model.chords_current,
+            Some(ChordSpec::new(9, chords::ChordQuality::Min7))
+        );
+        for n in [57u8, 60, 64, 67] {
+            model.on_midi_notice(&key_notice("note_off", n, 0), &mut out);
+        }
+        assert!(model.chords_fingered.is_empty());
+        // Outside Chords mode the keybed does not change the chord.
+        model.switch_mode(UiMode::Synth, &mut out);
+        for n in [62u8, 66, 69] {
+            model.on_midi_notice(&key_notice("note_on", n, 100), &mut out);
+        }
+        assert_eq!(
+            model.chords_current,
+            Some(ChordSpec::new(9, chords::ChordQuality::Min7))
+        );
+    }
+
+    #[test]
+    fn settings_scale_cycles_and_sends_scale_lock() {
+        let mut model = NativeModel::new();
+        let mut out = Outbox::new();
+        assert_eq!(model.scale_lock, 0);
+        model.cycle_scale_lock(&mut out);
+        assert_ne!(model.scale_lock, 0);
+        let batch = out.take();
+        assert!(
+            batch
+                .iter()
+                .any(|r| matches!(r, Request::ScaleLock { on: true, root: 0, .. })),
+            "got {batch:?}"
+        );
+        let mut guard = 0;
+        while model.scale_lock != 0 {
+            model.cycle_scale_lock(&mut out);
+            guard += 1;
+            assert!(guard < 64);
+        }
+        assert!(out
+            .take()
+            .iter()
+            .any(|r| matches!(r, Request::ScaleLock { on: false, .. })));
+        // Session round trip.
+        model.scale_lock = 3;
+        let s = model.capture_session();
+        assert_eq!(s.scale_lock, 3);
+    }
+
+    #[test]
+    fn settings_kaoss_y_range_cycles_sends_and_persists() {
+        let mut model = NativeModel::new();
+        let mut out = Outbox::new();
+        assert_eq!(model.kaoss_y_bend, 12);
+        assert_eq!(model.kaoss_y_vel, (72, 127));
+        model.cycle_kaoss_y_bend(&mut out);
+        model.cycle_kaoss_y_vel(&mut out);
+        assert_eq!(model.kaoss_y_bend, 7);
+        assert_eq!(model.kaoss_y_vel, (1, 127));
+        assert!(out.take().iter().any(|r| matches!(
+            r,
+            Request::KaossYRange { bend_semis: 7, vel_min: 1, vel_max: 127 }
+        )));
+        let s = model.capture_session();
+        assert_eq!((s.kaoss_y_bend, s.kaoss_y_vel_min, s.kaoss_y_vel_max), (7, 1, 127));
+    }
+
+    #[test]
+    fn fm_width_slider_sends_fm_width_and_persists() {
+        let mut model = NativeModel::new();
+        let mut out = Outbox::new();
+        assert_eq!(model.fm_width, 0.0);
+        let track = model.layout.fm_slider(4);
+        model.apply_fm_slider(4, track.y, &mut out); // top = full width
+        assert!((model.fm_width - 1.0).abs() < 1e-3);
+        assert!(out.take().iter().any(|r| matches!(
+            r,
+            Request::Synth { param, value, .. } if param == "fm_width" && (*value - 1.0).abs() < 1e-3
+        )));
+        // Selected op untouched.
+        assert_eq!(model.fm_ops[model.fm_selected].ratio, model.fm_params[0]);
+        assert!((model.capture_session().fm_width - 1.0).abs() < 1e-3);
     }
 
     fn punch_midi(

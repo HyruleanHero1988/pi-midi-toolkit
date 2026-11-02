@@ -2,6 +2,7 @@
 //!
 //! The UI sends 0..1 pad coordinates plus a stable gesture id. Pitch, tone, and
 //! note ownership live here so a stalled renderer cannot leave a voice hanging.
+use std::sync::atomic::{AtomicU8, Ordering};
 
 pub const MAX_TOUCH_VOICES: usize = 5;
 pub const DEFAULT_ROOT_MIDI: u8 = 48;
@@ -339,10 +340,48 @@ pub fn apply_center_deadzone(y: f32, dead: f32) -> f32 {
     }
 }
 
+/// Kaoss Y range, settable at runtime (Trello: "define ranges for X and Y").
+/// Stored as process-wide atomics so the UI and engine share one code path;
+/// defaults equal the old fixed behaviour (±12 st bend, velocity 72..127).
+static Y_BEND_SEMIS: AtomicU8 = AtomicU8::new(DEFAULT_Y_BEND_SEMIS);
+static Y_VEL_MIN: AtomicU8 = AtomicU8::new(DEFAULT_Y_VEL_MIN);
+static Y_VEL_MAX: AtomicU8 = AtomicU8::new(DEFAULT_Y_VEL_MAX);
+pub const DEFAULT_Y_BEND_SEMIS: u8 = 12;
+pub const DEFAULT_Y_VEL_MIN: u8 = 72;
+pub const DEFAULT_Y_VEL_MAX: u8 = 127;
+
+/// Set the Y range. Bend is clamped to 1..=12 st (MIDI out assumes a ±12 synth
+/// bend range); velocity to 1..=127 with min ≤ max.
+pub fn clamp_y_range(bend_semis: u8, vel_min: u8, vel_max: u8) -> (u8, u8, u8) {
+    let lo = vel_min.clamp(1, 127);
+    let hi = vel_max.clamp(1, 127).max(lo);
+    (bend_semis.clamp(1, 12), lo, hi)
+}
+
+pub fn set_kaoss_y_range(bend_semis: u8, vel_min: u8, vel_max: u8) {
+    let (b, lo, hi) = clamp_y_range(bend_semis, vel_min, vel_max);
+    Y_BEND_SEMIS.store(b, Ordering::Relaxed);
+    Y_VEL_MIN.store(lo, Ordering::Relaxed);
+    Y_VEL_MAX.store(hi, Ordering::Relaxed);
+}
+
+/// Current (bend_semis, vel_min, vel_max).
+pub fn kaoss_y_range() -> (u8, u8, u8) {
+    (
+        Y_BEND_SEMIS.load(Ordering::Relaxed),
+        Y_VEL_MIN.load(Ordering::Relaxed),
+        Y_VEL_MAX.load(Ordering::Relaxed),
+    )
+}
+
 /// Pad Y (0 = bottom, 1 = top) → pitch-bend semitones. Midline is unison.
 pub fn y_to_bend_semis(y: f32) -> f32 {
+    bend_semis_in_range(y, Y_BEND_SEMIS.load(Ordering::Relaxed))
+}
+
+pub fn bend_semis_in_range(y: f32, range_semis: u8) -> f32 {
     let shaped = apply_center_deadzone(y, BEND_CENTER_DEADZONE);
-    (shaped - 0.5) * 2.0 * PITCH_BEND_RANGE_SEMIS
+    (shaped - 0.5) * 2.0 * range_semis as f32
 }
 
 /// Rate-limit a bend so sparse UI updates glide instead of stepping.
@@ -396,7 +435,13 @@ pub fn note_index_at_x(x: f32, n_notes: usize) -> usize {
 
 /// Soft at the bottom of the pad, full at the top — always audible.
 pub fn velocity_at_y(y: f32) -> u8 {
-    (72 + (y.clamp(0.0, 1.0) * 55.0).round() as i32).clamp(72, 127) as u8
+    let (_, lo, hi) = kaoss_y_range();
+    velocity_in_range(y, lo, hi)
+}
+
+pub fn velocity_in_range(y: f32, lo: u8, hi: u8) -> u8 {
+    let (lo, hi) = (lo as i32, hi.max(lo) as i32);
+    (lo + (y.clamp(0.0, 1.0) * (hi - lo) as f32).round() as i32).clamp(lo, hi) as u8
 }
 
 pub fn tone_at_y(y: f32) -> f32 {
@@ -725,6 +770,20 @@ fn count_filled(notes: &[u8; 32]) -> usize {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn y_range_maps_bend_and_velocity_and_clamps() {
+        // Pure helpers only: the live globals stay at defaults for other tests.
+        assert_eq!(super::kaoss_y_range(), (12, 72, 127));
+        assert_eq!(super::velocity_in_range(0.0, 72, 127), 72);
+        assert_eq!(super::velocity_in_range(1.0, 72, 127), 127);
+        assert_eq!(super::velocity_in_range(0.0, 1, 100), 1);
+        assert_eq!(super::velocity_in_range(1.0, 1, 100), 100);
+        assert!((super::bend_semis_in_range(1.0, 2) - 2.0).abs() < 1e-4);
+        assert!((super::bend_semis_in_range(0.0, 2) + 2.0).abs() < 1e-4);
+        assert_eq!(super::clamp_y_range(40, 120, 90), (12, 120, 120));
+        assert_eq!(super::clamp_y_range(0, 0, 0), (1, 1, 1));
+    }
+
     use super::*;
 
     #[test]

@@ -213,6 +213,22 @@ pub enum Request {
     FullVel {
         on: bool,
     },
+    /// Scale mode: snap keybed notes into `mask` above `root` (C major if missing).
+    ScaleLock {
+        on: bool,
+        #[serde(default)]
+        root: u8,
+        #[serde(default = "jambox_protocol::default_scale_mask")]
+        mask: u16,
+    },
+    KaossYRange {
+        #[serde(default = "jambox_protocol::default_y_bend")]
+        bend_semis: u8,
+        #[serde(default = "jambox_protocol::default_y_vel_min")]
+        vel_min: u8,
+        #[serde(default = "jambox_protocol::default_y_vel_max")]
+        vel_max: u8,
+    },
     MidiAssign {
         #[serde(default)]
         stick_x: Option<String>,
@@ -574,6 +590,16 @@ pub enum Decoded {
     FullVel {
         on: bool,
     },
+    ScaleLock {
+        on: bool,
+        root: u8,
+        mask: u16,
+    },
+    KaossYRange {
+        bend_semis: u8,
+        vel_min: u8,
+        vel_max: u8,
+    },
     MidiAssign {
         stick_x: Option<String>,
         stick_y: Option<String>,
@@ -653,6 +679,7 @@ fn parse_synth_param(name: &str) -> Option<SynthParam> {
         "fm_clang" => SynthParam::FmClang,
         "fm_hit" => SynthParam::FmHit,
         "fm_tail" => SynthParam::FmTail,
+        "fm_width" => SynthParam::FmWidth,
         _ => return None,
     })
 }
@@ -949,6 +976,12 @@ pub fn decode(request: Request) -> Result<Decoded, String> {
         Request::MidiSelect { input, output } => Decoded::MidiSelect { input, output },
         Request::ChannelMap { bits } => Decoded::ChannelMap { bits },
         Request::FullVel { on } => Decoded::FullVel { on },
+        Request::ScaleLock { on, root, mask } => Decoded::ScaleLock { on, root, mask },
+        Request::KaossYRange { bend_semis, vel_min, vel_max } => Decoded::KaossYRange {
+            bend_semis,
+            vel_min,
+            vel_max,
+        },
         Request::MidiAssign {
             stick_x,
             stick_y,
@@ -1255,6 +1288,28 @@ mod tests {
     fn audio_reopen_decodes() {
         let d = decode_line(r#"{"cmd":"audio_reopen"}"#);
         assert!(matches!(d, Decoded::AudioReopen));
+    }
+
+    #[test]
+    fn scale_lock_decodes_with_defaults() {
+        let d = decode_line(r#"{"cmd":"scale_lock","on":true}"#);
+        assert!(matches!(
+            d,
+            Decoded::ScaleLock { on: true, root: 0, mask: 0b1010_1011_0101 }
+        ));
+        let d = decode_line(r#"{"cmd":"scale_lock","on":true,"root":9,"mask":1165}"#);
+        assert!(matches!(d, Decoded::ScaleLock { on: true, root: 9, mask: 1165 }));
+    }
+
+    #[test]
+    fn kaoss_y_range_decodes_with_defaults() {
+        let d = decode_line(r#"{"cmd":"kaoss_y_range"}"#);
+        assert!(matches!(
+            d,
+            Decoded::KaossYRange { bend_semis: 12, vel_min: 72, vel_max: 127 }
+        ));
+        let d = decode_line(r#"{"cmd":"kaoss_y_range","bend_semis":2,"vel_min":1,"vel_max":90}"#);
+        assert!(matches!(d, Decoded::KaossYRange { bend_semis: 2, vel_min: 1, vel_max: 90 }));
     }
 
     #[test]

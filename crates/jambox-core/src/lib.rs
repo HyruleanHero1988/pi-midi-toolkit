@@ -58,13 +58,14 @@ pub use engine::{
 pub use fm::{
     clang_index, clang_label, clang_ratio, fm_recipe, fm_recipe_patch, pack_fm_link,
     unpack_fm_link, FmOpParams, FmPatch, FmRecipe, FmSynth, CLANG_LABELS, CLANG_RATIOS,
-    FM_OP_COUNT, FM_RECIPES, FM_RECIPE_COUNT, MAX_FM_VOICES, OP_COLORS, OP_NAMES,
+    FM_OP_COUNT, LEGACY_FM_OP_COUNT, FM_RECIPES, FM_RECIPE_COUNT, MAX_FM_VOICES, OP_COLORS, OP_NAMES,
 };
 pub use fx::{FxParams, FxUnit};
 pub use kaoss::{
     apply_center_deadzone, kaoss_scale, kaoss_scale_index_by_id, migrate_legacy_scale_index,
     note_at_x, note_index_at_x, pack_xy, scale_notes, slew_bend, stick_note_x, tone_at_y,
-    unpack_xy, velocity_at_y, y_to_bend_semis, KaossMapper, KaossScale, LatestTouch, TouchDelta,
+    unpack_xy, velocity_at_y, y_to_bend_semis, set_kaoss_y_range, kaoss_y_range, clamp_y_range,
+    DEFAULT_Y_BEND_SEMIS, DEFAULT_Y_VEL_MIN, DEFAULT_Y_VEL_MAX, KaossMapper, KaossScale, LatestTouch, TouchDelta,
     BEND_CENTER_DEADZONE, BEND_SLEW_SEMIS_PER_SEC, DEFAULT_KAOSS_SCALE_INDEX, DEFAULT_ROOT_MIDI,
     KAOSS_SCALES, MAX_TOUCH_VOICES, NOTE_NAMES, PITCH_BEND_RANGE_SEMIS,
 };
