@@ -43,10 +43,13 @@ Modes today in `tools/midi-tone`:
 ## Hardware
 
 - **Pi 2 Model B** (today) — upgrade path to Pi 4/5 if DSI/audio ceiling hits
-- **Display (ordered):** BigTreeTech **Pi TFT70 V2.1** — 7″, 800×480, DSI, capacitive GT911 (replaces resistive ADS7846 HDMI panel). See PLAN “Display / touch bring-up”
+- **Display (have):** BigTreeTech **Pi TFT70 V2.1** — 7″, 800×480, DSI, capacitive GT911 (replaces resistive ADS7846 HDMI panel). See PLAN “Display / touch bring-up”
+- **Network:** Ethernet and/or LOTEKOO RT5370 USB Wi‑Fi dongle
+- **Case (for now):** Otdorpatio ABS project box — not the final enclosure
 - **In:** MPK mini mk3 USB
 - **Out (mapper / song / pad emit):** USB-MIDI-to-DIN → hardware synth (when you have it)
 - Powered hub if USB devices brown out
+- Second unit for brother after this one is stable — [PARTS.md](PARTS.md) is the clone shopping list
 
 ## What’s active now
 
