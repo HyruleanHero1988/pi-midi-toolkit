@@ -1,19 +1,25 @@
 # Pi armv7 engines (committed)
 
-These binaries are the **Raspberry Pi 2** (`armv7-unknown-linux-gnueabihf`)
-builds of `midi-engine`, `jambox-engine`, and `pidi-native`.
+These binaries are the **Raspberry Pi 2 / 32-bit lab** 
+(`armv7-unknown-linux-gnueabihf`) builds of `midi-engine`, `jambox-engine`,
+and `pidi-native`.
+
+Official new hardware is the **Pi 4B 64-bit** path under
+[`dist/aarch64`](../aarch64/) — see [docs/AARCH64.md](../../docs/AARCH64.md).
+Lab SSH deploy still defaults here until that card is the live device.
 
 The Pi never `cargo build`s. **SET → UPDATE** copies this directory into
-`~/pi-midi-toolkit/bin/` (the live systemd paths) after overlaying the rest
-of the repo. Live `bin/` is not overwritten by the generic overlay so a
-half-applied update cannot clobber a running engine with a host-arch file.
+`~/pi-midi-toolkit/bin/` when the running kiosk is not aarch64 (or when
+`PIDI_DIST_ARCH=armv7`). Live `bin/` is not overwritten by the generic
+overlay so a half-applied update cannot clobber a running engine with a
+host-arch file.
 
 ## How these files get onto `master`
 
-A green GitHub Actions run on `master` (crates / lockfile / this build
-script) cross-builds here and **commits the ELFs back** to `master`.
-SET→UPDATE then has matching binaries for that tree. Artifact uploads on
-the workflow run are a backup download, not the OTA path.
+A green GitHub Actions run on `master` (crates / lockfile / build scripts)
+cross-builds **both** armv7 and aarch64 and **commits the ELFs back** to
+`master`. SET→UPDATE then has matching binaries for that tree. Artifact
+uploads on the workflow run are a backup download, not the OTA path.
 
 If `github-actions[bot]` cannot push (branch protection), either allow that
 bot to update `master` or rebuild by hand as below.

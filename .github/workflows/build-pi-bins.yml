@@ -1,4 +1,4 @@
-name: Build Pi armv7 bins
+name: Build Pi bins (armv7 + aarch64)
 
 on:
   workflow_dispatch:
@@ -11,6 +11,7 @@ on:
       - "Cargo.lock"
       - "deploy/build-pi-bins.sh"
       - "deploy/ubuntu-armhf-ports.sh"
+      - "deploy/ubuntu-arm64-ports.sh"
       - ".github/workflows/build-pi-bins.yml"
   push:
     branches:
@@ -22,10 +23,11 @@ on:
       - "Cargo.lock"
       - "deploy/build-pi-bins.sh"
       - "deploy/ubuntu-armhf-ports.sh"
+      - "deploy/ubuntu-arm64-ports.sh"
       - ".github/workflows/build-pi-bins.yml"
 
 # Bin commits use [skip ci] and do not match the path filters above
-# (dist/armv7 is omitted on purpose) so they cannot loop this workflow.
+# (dist/armv7 and dist/aarch64 are omitted on purpose) so they cannot loop.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
@@ -36,44 +38,85 @@ jobs:
     runs-on: ubuntu-22.04
     permissions:
       contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: armv7
+            rust_target: armv7-unknown-linux-gnueabihf
+            multiarch: armhf
+            ports_script: deploy/ubuntu-armhf-ports.sh
+            gcc_pkg: gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf
+            lib_pkgs: >-
+              libasound2-dev:armhf libsdl2-dev:armhf libgles2-mesa-dev:armhf
+              libegl1-mesa-dev:armhf libgbm-dev:armhf libdrm-dev:armhf
+          - arch: aarch64
+            rust_target: aarch64-unknown-linux-gnu
+            multiarch: arm64
+            ports_script: deploy/ubuntu-arm64-ports.sh
+            gcc_pkg: gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+            lib_pkgs: >-
+              libasound2-dev:arm64 libsdl2-dev:arm64 libgles2-mesa-dev:arm64
+              libegl1-mesa-dev:arm64 libgbm-dev:arm64 libdrm-dev:arm64
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: true
 
-      - name: Install armhf cross toolchain + SDL/ALSA
+      - name: Install ${{ matrix.multiarch }} cross toolchain + SDL/ALSA
         run: |
           set -euo pipefail
-          sudo dpkg --add-architecture armhf
-          # archive.ubuntu.com has no armhf; pin those sources to amd64 and
-          # pull armhf from ports.ubuntu.com (see deploy/ubuntu-armhf-ports.sh).
-          sudo ./deploy/ubuntu-armhf-ports.sh
+          sudo dpkg --add-architecture ${{ matrix.multiarch }}
+          # archive.ubuntu.com has no armhf/arm64; pin those sources to amd64 and
+          # pull the foreign arch from ports.ubuntu.com.
+          sudo ./${{ matrix.ports_script }}
           sudo apt-get update -qq
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf pkg-config \
-            libasound2-dev:armhf libsdl2-dev:armhf libgles2-mesa-dev:armhf \
-            libegl1-mesa-dev:armhf libgbm-dev:armhf libdrm-dev:armhf
+            ${{ matrix.gcc_pkg }} pkg-config ${{ matrix.lib_pkgs }}
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: armv7-unknown-linux-gnueabihf
+          targets: ${{ matrix.rust_target }}
 
-      - name: Cross-build and stage dist/armv7
+      - name: Cross-build and stage dist/${{ matrix.arch }}
         env:
           SKIP_APT: "1"
           PACKAGES: midi-engine,jambox-engine,pidi-native
+          ARCHES: ${{ matrix.arch }}
         run: ./deploy/build-pi-bins.sh
 
       - name: Upload staged binaries
         uses: actions/upload-artifact@v4
         with:
-          name: armv7-bins
-          path: dist/armv7/
+          name: ${{ matrix.arch }}-bins
+          path: dist/${{ matrix.arch }}/
           if-no-files-found: error
 
+  publish:
+    needs: build
+    if: github.ref == 'refs/heads/master' && github.event_name != 'pull_request'
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+
+      - name: Download armv7 bins
+        uses: actions/download-artifact@v4
+        with:
+          name: armv7-bins
+          path: dist/armv7/
+
+      - name: Download aarch64 bins
+        uses: actions/download-artifact@v4
+        with:
+          name: aarch64-bins
+          path: dist/aarch64/
+
       - name: Commit staged binaries to master
-        if: github.ref == 'refs/heads/master' && github.event_name != 'pull_request'
         env:
           BUILT_SHA: ${{ github.sha }}
         run: |
@@ -89,24 +132,26 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          git add dist/armv7/midi-engine dist/armv7/jambox-engine dist/armv7/pidi-native
+          git add \
+            dist/armv7/midi-engine dist/armv7/jambox-engine dist/armv7/pidi-native \
+            dist/aarch64/midi-engine dist/aarch64/jambox-engine dist/aarch64/pidi-native
           if git diff --staged --quiet; then
-            echo "armv7 ELFs match master — nothing to publish"
+            echo "armv7/aarch64 ELFs match master — nothing to publish"
             exit 0
           fi
-          git add dist/armv7/VERSION
+          git add dist/armv7/VERSION dist/aarch64/VERSION
 
           MSG=$(printf '%s\n' \
-            "Rebuild Pi armv7 engines from CI." \
+            "Rebuild Pi armv7 + aarch64 engines from CI." \
             "" \
             "Built from ${BUILT_SHA} so SET→UPDATE can copy" \
-            "dist/armv7/{midi-engine,jambox-engine,pidi-native} onto bin/." \
+            "dist/{armv7,aarch64}/{midi-engine,jambox-engine,pidi-native} onto bin/." \
             "" \
             "[skip ci]")
           git commit -m "$MSG"
 
           if git push origin HEAD:refs/heads/master; then
-            echo "published dist/armv7 to master"
+            echo "published dist/armv7 and dist/aarch64 to master"
             exit 0
           fi
 

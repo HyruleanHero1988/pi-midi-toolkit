@@ -10,12 +10,13 @@ When the user asks you to do something and you finish it, deploy to the lab Pi i
 Skip deploy only when the work cannot affect the device: a question, a commit/PR-only request, or docs/comments with no runtime change.
 
 1. Cross-build only the packages you changed:
-   `.\deploy\build-pi-bins.ps1 -Packages "pidi-native"`
-   (add `jambox-engine` / `midi-engine` if those crates changed)
+   `.\deploy\build-pi-bins.ps1 -Arch armv7 -Packages "pidi-native"`
+   (add `jambox-engine` / `midi-engine` if those crates changed; use `-Arch aarch64` only when the live lab Pi is 64-bit)
 2. Then upload and restart the kiosk:
    `python deploy_master.py`
+   (add `--arch aarch64` only when deploying to a 64-bit Pi 4B)
 
-The Pi runs the prebuilt armv7 bins in `dist/armv7`. A Windows debug test is not enough. Build must go through Ubuntu-22.04 WSL (glibc 2.35) so Bookworm can start the binary.
+The live lab Pi still uses prebuilt armv7 bins in `dist/armv7` until the Pi 4 card is flashed. A Windows debug test is not enough. Build must go through Ubuntu-22.04 WSL (glibc 2.35) so Bookworm can start the binary. See `docs/AARCH64.md`.
 
 Do not commit or push unless asked. Deploy is separate from git.
 

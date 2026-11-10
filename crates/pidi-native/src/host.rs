@@ -170,9 +170,13 @@ fn midi_engine_candidates() -> Vec<PathBuf> {
         out.push(PathBuf::from(p));
     }
     let root = find_repo_root();
+    let staged = format!("dist/{}/midi-engine", crate::ota::staged_dist_dirname());
     for rel in [
         "bin/midi-engine",
+        staged.as_str(),
+        // Keep the other arch as a secondary fallback during dual-arch transition.
         "dist/armv7/midi-engine",
+        "dist/aarch64/midi-engine",
         "target/release/midi-engine",
         "target/debug/midi-engine",
     ] {
@@ -238,7 +242,7 @@ pub fn map_list_ports() -> (String, Vec<String>) {
         let Some(bin) = resolve_midi_engine() else {
             return (
                 "midi-engine not found".into(),
-                vec!["REFRESH: no midi-engine binary (bin/, dist/armv7/, PATH)".into()],
+                vec!["REFRESH: no midi-engine binary (bin/, dist/armv7|aarch64/, PATH)".into()],
             );
         };
         let (code, stdout, stderr) = run_capture(Command::new(&bin).arg("list"), 8);

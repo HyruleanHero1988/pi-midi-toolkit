@@ -1,25 +1,33 @@
-# Example cross-compile config for Raspberry Pi 2 (armv7).
+# Example cross-compile config for Raspberry Pi (armv7 and/or aarch64).
 #
 # Preferred: run the repo script (installs the linker when sudo is available,
-# stages dist/armv7 for git commit so SET→UPDATE can install the engines):
+# stages dist/<arch> for git commit so SET→UPDATE can install the engines):
 #
-#   ./deploy/build-pi-bins.sh
+#   ./deploy/build-pi-bins.sh                      # armv7 (default)
+#   ARCHES=aarch64 ./deploy/build-pi-bins.sh
+#   ARCHES=armv7,aarch64 ./deploy/build-pi-bins.sh
+#   .\deploy\build-pi-bins.ps1 -Arch both          # Windows / WSL 22.04
 #
 # Copy this file to `.cargo/config.toml` after installing a linker, OR use
 # the `cross` tool:
 #
 #   cargo install cross --git https://github.com/cross-rs/cross
 #   cross build --release -p midi-engine --target armv7-unknown-linux-gnueabihf
+#   cross build --release -p midi-engine --target aarch64-unknown-linux-gnu
 #
-# Native linker alternative (Debian/WSL / cloud-agent VM):
+# Native linker alternatives (Debian/WSL / cloud-agent VM):
 #
 #   [target.armv7-unknown-linux-gnueabihf]
 #   linker = "arm-linux-gnueabihf-gcc"
 #
+#   [target.aarch64-unknown-linux-gnu]
+#   linker = "aarch64-linux-gnu-gcc"
+#
 # Then:
 #   rustup target add armv7-unknown-linux-gnueabihf
-#   cargo build --release -p midi-engine --target armv7-unknown-linux-gnueabihf
+#   rustup target add aarch64-unknown-linux-gnu
 
 [build]
-# Uncomment to default all builds to the Pi target (usually leave commented on Windows).
+# Uncomment to default all builds to a Pi target (usually leave commented on Windows).
 # target = "armv7-unknown-linux-gnueabihf"
+# target = "aarch64-unknown-linux-gnu"

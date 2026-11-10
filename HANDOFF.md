@@ -42,8 +42,9 @@ Modes today in `tools/midi-tone`:
 
 ## Hardware
 
-- **Pi 2 Model B** (today) — upgrade path to Pi 4/5 if DSI/audio ceiling hits
-- **Display (ordered):** BigTreeTech **Pi TFT70 V2.1** — 7″, 800×480, DSI, capacitive GT911 (replaces resistive ADS7846 HDMI panel). See PLAN “Display / touch bring-up”
+- **Official target:** Raspberry Pi **4 Model B** on **64-bit** Bookworm — see [docs/AARCH64.md](docs/AARCH64.md)
+- **Lab today:** Pi 2 Model B / `dist/armv7` until the Pi 4 SD is flashed (dual-arch fallback)
+- **Display:** BigTreeTech **Pi TFT70 V2.1** — 7″, 800×480, DSI, capacitive GT911. See PLAN “Display / touch bring-up”
 - **In:** MPK mini mk3 USB
 - **Out (mapper / song / pad emit):** USB-MIDI-to-DIN → hardware synth (when you have it)
 - Powered hub if USB devices brown out
@@ -70,14 +71,14 @@ Done (CLI / headless):
 Still needs hardware / machine:
 
 1. MPK + USB-DIN → `list` / `test` / `run`
-2. armv7 cross build + deploy to Pi
+2. Dual-arch cross build (`dist/armv7` + `dist/aarch64`) + deploy to Pi
 3. Later: **Map mode in the kiosk** talking to `midi-engine` (don’t launch a second app)
 
 ## Host setup
 
 Rust toolchain on PATH for engine work. midi-tone is Python venv on the Pi.
 
-When crates land on `master`, CI cross-builds `dist/armv7` and commits the ELFs; SET→UPDATE copies them onto `bin/` (`midi-engine`, `jambox-engine`, `pidi-native`). **Local builds are first-class:** from Windows run `.\deploy\build-pi-bins.ps1` (Ubuntu 22.04 WSL or Docker — same glibc floor as CI). Do not stage bins from Debian 13 / Ubuntu 24.04 WSL (they need newer glibc than Pi Bookworm). Do not use Git LFS for the ELFs (archive downloads would get pointer files).
+When crates land on `master`, CI cross-builds **`dist/armv7` and `dist/aarch64`** and commits the ELFs; SET→UPDATE copies the arch-matching tree onto `bin/` (`midi-engine`, `jambox-engine`, `pidi-native`). **Local builds are first-class:** from Windows run `.\deploy\build-pi-bins.ps1` (default `-Arch both`; Ubuntu 22.04 WSL or Docker — same glibc floor as CI). Lab SSH deploy still defaults to armv7 (`python deploy_master.py`); use `--arch aarch64` after the Pi 4 flash. Do not stage bins from Debian 13 / Ubuntu 24.04 WSL (they need newer glibc than Pi Bookworm). Do not use Git LFS for the ELFs (archive downloads would get pointer files).
 
 ## Not related to play-my-synth
 

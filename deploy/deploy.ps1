@@ -2,10 +2,13 @@
 # Usage:
 #   .\deploy\deploy.ps1 -PiHost pi@192.168.1.50
 #   .\deploy\deploy.ps1 -PiHost pi@192.168.1.50 -Target armv7-unknown-linux-gnueabihf
+#   .\deploy\deploy.ps1 -PiHost pi@192.168.1.50 -Target aarch64-unknown-linux-gnu -Arch aarch64
 param(
     [Parameter(Mandatory = $true)]
     [string]$PiHost,
     [string]$Target = "",
+    [ValidateSet("armv7", "aarch64")]
+    [string]$Arch = "armv7",
     [string]$RemoteDir = "/home/pi/pi-midi-toolkit"
 )
 
@@ -33,11 +36,14 @@ if (-not (Test-Path $Bin)) {
     throw "binary not found: $Bin (cross-compile needs a linker; see .cargo/config.toml.example)"
 }
 
-if ($Target -eq "armv7-unknown-linux-gnueabihf") {
-    $Stage = Join-Path $Root "dist\armv7"
+if ($Target -eq "aarch64-unknown-linux-gnu") { $Arch = "aarch64" }
+elseif ($Target -eq "armv7-unknown-linux-gnueabihf") { $Arch = "armv7" }
+
+if ($Target -eq "armv7-unknown-linux-gnueabihf" -or $Target -eq "aarch64-unknown-linux-gnu") {
+    $Stage = Join-Path $Root "dist\$Arch"
     New-Item -ItemType Directory -Force -Path $Stage | Out-Null
     Copy-Item $Bin (Join-Path $Stage "midi-engine") -Force
-    Write-Host "staged dist/armv7/midi-engine (commit dist/armv7 so SET->UPDATE can install it)"
+    Write-Host "staged dist/$Arch/midi-engine (commit dist/$Arch so SET->UPDATE can install it)"
 }
 
 ssh $PiHost "mkdir -p '$RemoteDir/bin' '$RemoteDir/presets'"
