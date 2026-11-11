@@ -3,11 +3,13 @@
 # Usage:
 #   ./deploy/deploy.sh pi@192.168.1.50
 #   TARGET=armv7-unknown-linux-gnueabihf ./deploy/deploy.sh pi@192.168.1.50
+#   TARGET=aarch64-unknown-linux-gnu ./deploy/deploy.sh pi@192.168.1.50
 #   WITH_JAMBOX=1 ./deploy/deploy.sh pi@192.168.1.50   # also ship the audio engine
 #   USE_STAGED=1 ./deploy/deploy.sh pi@192.168.1.50    # scp dist/armv7 (no cargo)
+#   PI_DIST_ARCH=aarch64 USE_STAGED=1 ./deploy/deploy.sh pi@192.168.1.50
 #
 # Daily SET→UPDATE path needs those same ELFs committed: ./deploy/build-pi-bins.sh
-# Armv7 builds from this script are also copied into dist/armv7 for that commit.
+# Matching TARGET builds are also copied into dist/<arch> for that commit.
 #
 # jambox-engine links ALSA, so cross-building it needs libasound for the target
 # (e.g. via `cross` or `build-pi-bins.sh`). It is opt-in so the mapper deploy
@@ -23,17 +25,27 @@ cd "$ROOT"
 
 USE_STAGED="${USE_STAGED:-}"
 WITH_JAMBOX="${WITH_JAMBOX:-}"
-STAGE="$ROOT/dist/armv7"
+# Lab default remains armv7 until the Pi 4B is the live device.
+PI_DIST_ARCH="${PI_DIST_ARCH:-armv7}"
+case "$PI_DIST_ARCH" in
+  arm64) PI_DIST_ARCH=aarch64 ;;
+esac
+case "$TARGET" in
+  aarch64-unknown-linux-gnu) PI_DIST_ARCH=aarch64 ;;
+  armv7-unknown-linux-gnueabihf) PI_DIST_ARCH=armv7 ;;
+esac
+STAGE="$ROOT/dist/$PI_DIST_ARCH"
 
-stage_armv7() {
+stage_for_target() {
   local src="$1" name="$2"
-  if [[ "$TARGET" != "armv7-unknown-linux-gnueabihf" ]]; then
-    return 0
-  fi
+  case "$TARGET" in
+    armv7-unknown-linux-gnueabihf|aarch64-unknown-linux-gnu) ;;
+    *) return 0 ;;
+  esac
   mkdir -p "$STAGE"
   cp "$src" "$STAGE/$name"
   chmod +x "$STAGE/$name"
-  echo "staged $STAGE/$name (commit dist/armv7 so SET→UPDATE can install it)"
+  echo "staged $STAGE/$name (commit dist/$PI_DIST_ARCH so SET→UPDATE can install it)"
 }
 
 if [[ -n "$USE_STAGED" ]]; then
@@ -53,7 +65,7 @@ elif [[ -n "$TARGET" ]]; then
   echo "cross-building for $TARGET ..."
   cargo build --release -p midi-engine --target "$TARGET"
   BIN="$ROOT/target/$TARGET/release/midi-engine"
-  stage_armv7 "$BIN" midi-engine
+  stage_for_target "$BIN" midi-engine
 else
   echo "building host release (use TARGET=... for Pi cross-compile) ..."
   cargo build --release -p midi-engine
@@ -64,7 +76,7 @@ if [[ -n "$WITH_JAMBOX" && -z "$USE_STAGED" ]]; then
   if [[ -n "$TARGET" ]]; then
     cargo build --release -p jambox-engine --target "$TARGET"
     JAMBOX_BIN="$ROOT/target/$TARGET/release/jambox-engine"
-    stage_armv7 "$JAMBOX_BIN" jambox-engine
+    stage_for_target "$JAMBOX_BIN" jambox-engine
   else
     cargo build --release -p jambox-engine
     JAMBOX_BIN="$ROOT/target/release/jambox-engine"

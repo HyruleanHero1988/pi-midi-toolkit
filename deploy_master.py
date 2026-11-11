@@ -6,6 +6,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import os
 import pathlib
 import subprocess
 import sys
@@ -16,9 +17,31 @@ import paramiko
 
 ROOT = pathlib.Path(__file__).resolve().parent
 CREDS_PATH = ROOT / "apps" / "pidi" / ".pi-credentials"
-STAGE = ROOT / "dist" / "armv7"
 REMOTE_REPO = "/home/ray/pi-midi-toolkit"
 DATA = "/home/ray/.local/share/pidi"
+
+# Lab Pi stays on armv7 until the Pi 4B 64-bit card is the live device.
+# Override: python deploy_master.py --arch aarch64  or  PI_DIST_ARCH=aarch64
+VALID_DIST_ARCHES = ("armv7", "aarch64")
+
+
+def resolve_dist_arch(argv: list[str] | None = None) -> str:
+    args = list(sys.argv[1:] if argv is None else argv)
+    arch = os.environ.get("PI_DIST_ARCH", "armv7").strip().lower()
+    if "--arch" in args:
+        i = args.index("--arch")
+        if i + 1 >= len(args):
+            raise SystemExit("usage: deploy_master.py [--arch armv7|aarch64]")
+        arch = args[i + 1].strip().lower()
+    if arch == "arm64":
+        arch = "aarch64"
+    if arch not in VALID_DIST_ARCHES:
+        raise SystemExit(f"unsupported --arch / PI_DIST_ARCH '{arch}' (want armv7 or aarch64)")
+    return arch
+
+
+def stage_dir(arch: str) -> pathlib.Path:
+    return ROOT / "dist" / arch
 
 KEEP_REPO = {
     ".git",
@@ -211,13 +234,15 @@ def main() -> int:
     if not CREDS_PATH.is_file():
         print(f"missing {CREDS_PATH}", file=sys.stderr)
         return 1
+    arch = resolve_dist_arch()
+    stage = stage_dir(arch)
     for name in ("jambox-engine", "pidi-native", "midi-engine"):
-        if not (STAGE / name).is_file():
-            print(f"missing {STAGE / name}", file=sys.stderr)
+        if not (stage / name).is_file():
+            print(f"missing {stage / name}", file=sys.stderr)
             return 1
 
     sha = git_sha()
-    print(f"deploying master {sha[:7]} …", flush=True)
+    print(f"deploying master {sha[:7]} (dist/{arch}) …", flush=True)
 
     tar_data = build_tar()
     print(f"repo tar: {len(tar_data) // 1024} KiB sha256={sha256_bytes(tar_data)[:16]}…", flush=True)
@@ -248,16 +273,17 @@ def main() -> int:
 
         sudo(client, password, "systemctl stop pidi-native jambox-engine 2>/dev/null || true")
         for name in ("jambox-engine", "pidi-native", "midi-engine"):
-            sftp_put_file(client, STAGE / name, f"{REMOTE_REPO}/bin/{name}")
+            sftp_put_file(client, stage / name, f"{REMOTE_REPO}/bin/{name}")
 
         components = {
-            "pidi-native": sha256_file(STAGE / "pidi-native")[:16],
+            "pidi-native": sha256_file(stage / "pidi-native")[:16],
         }
         version = {
             "sha": sha,
             "branch": "master",
             "source": "ssh-deploy",
             "repo_url": "local",
+            "dist_arch": arch,
             "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "components": components,
         }

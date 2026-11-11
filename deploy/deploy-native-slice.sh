@@ -6,7 +6,12 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 HOST="${1:-}"
 REMOTE_DIR="${REMOTE_DIR:-/home/pi/pi-midi-toolkit}"
-STAGE="$ROOT/dist/armv7"
+# Lab default remains armv7; set PI_DIST_ARCH=aarch64 for a 64-bit Pi 4B.
+PI_DIST_ARCH="${PI_DIST_ARCH:-armv7}"
+case "$PI_DIST_ARCH" in
+  arm64) PI_DIST_ARCH=aarch64 ;;
+esac
+STAGE="$ROOT/dist/$PI_DIST_ARCH"
 
 if [[ -z "$HOST" ]]; then
   echo "usage: $0 user@host" >&2
