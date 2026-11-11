@@ -69,7 +69,8 @@ jobs:
           sudo dpkg --add-architecture ${{ matrix.multiarch }}
           # archive.ubuntu.com has no armhf/arm64; pin those sources to amd64 and
           # pull the foreign arch from ports.ubuntu.com.
-          sudo ./${{ matrix.ports_script }}
+          # Run via bash so a missing +x bit cannot break CI (sudo ./script needs exec).
+          sudo bash "${{ matrix.ports_script }}"
           sudo apt-get update -qq
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
             ${{ matrix.gcc_pkg }} pkg-config ${{ matrix.lib_pkgs }}
