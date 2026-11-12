@@ -197,3 +197,9 @@ Edit `presets/active.json` on the device for the live map (port name changes nee
 ## Roadmap
 
 See [PLAN.md](PLAN.md). After Phase 1 feels solid on hardware: drum retrigger → phrase loop → optional arp. Touch UI stays off the MIDI hot path.
+
+## License
+
+PiDI is free software licensed under the GNU General Public License v3.0 or later. See [LICENSE](LICENSE).
+
+Bundled third-party assets keep their own licenses: see [`apps/pidi/wavetables/AKWF-LICENSE.md`](apps/pidi/wavetables/AKWF-LICENSE.md) (CC0 wavetables) and [`demo-songs/LICENSE.txt`](demo-songs/LICENSE.txt) (demo MIDI files).
