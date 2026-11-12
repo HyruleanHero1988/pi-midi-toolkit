@@ -557,7 +557,7 @@ JUCE 9 now supports XInput2 multitouch on Linux, but:
   framework to avoid;
 - it moves the application to C++ or requires a Rust bridge;
 - armv7 is expected to work but is not a routinely exercised target;
-- JUCE is AGPL or commercial, while the Rust workspace is MIT.
+- JUCE is AGPL or commercial, while the Rust workspace is GPL-3.0-or-later.
 
 Our strongest code is already the Rust audio/MIDI core. Rewriting it into JUCE
 does not address the actual Tk event/render and queue defects.
