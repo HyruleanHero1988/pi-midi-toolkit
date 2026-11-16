@@ -221,8 +221,14 @@ impl ClipSlot {
         self.mode = mode;
     }
 
+    /// Release drift this pad plays with. Only a LOCKED pad pins its recorded
+    /// drift; a FOLLOW pad tracks the live DRIFT slider like live keys do.
     pub fn playback_drift(&self) -> Option<f32> {
-        self.voice.release_drift
+        if self.voice.locked {
+            self.voice.release_drift
+        } else {
+            None
+        }
     }
 
     pub fn playback_tone(&self) -> f32 {

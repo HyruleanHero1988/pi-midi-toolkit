@@ -3810,6 +3810,118 @@ mod tests {
         );
     }
 
+    fn pad_render(voice: ClipVoice, live_pair: (u16, u16), live_fx: Option<(u16, FxParam, f32)>) -> Vec<f32> {
+        let mut e = engine();
+        apply_now(&mut e, Command::SetMorphPair { a: live_pair.0, b: live_pair.1 });
+        apply_now(&mut e, Command::SetSynth { param: SynthParam::Morph, value: 0.0 });
+        if let Some((i, param, v)) = live_fx {
+            apply_now(&mut e, Command::SetFx { target: FxTarget::Voice(i), param, value: v });
+        }
+        load_locked_clip(&mut e, voice);
+        let mut midi = MidiOutSink::new();
+        let mut buf = vec![0.0f32; 2048];
+        for _ in 0..6 {
+            e.render(&mut buf, &[], &mut midi);
+        }
+        buf
+    }
+
+    fn saw_voice(locked: bool) -> ClipVoice {
+        ClipVoice {
+            locked,
+            morph_a: 2,
+            morph_b: 2,
+            morph: 0.0,
+            tone: 1.0,
+            ..ClipVoice::default()
+        }
+    }
+
+    #[test]
+    fn follow_pad_tracks_live_morph_while_lock_keeps_its_snapshot() {
+        let live_sine = (0, 0);
+        let follow = pad_render(saw_voice(false), live_sine, None);
+        let lock = pad_render(saw_voice(true), live_sine, None);
+        let sine_ref = pad_render(
+            ClipVoice {
+                locked: true,
+                morph_a: 0,
+                morph_b: 0,
+                ..ClipVoice::default()
+            },
+            live_sine,
+            None,
+        );
+        assert!(correlate(&follow, &sine_ref) > 0.99, "FOLLOW plays the live sine");
+        assert!(correlate(&lock, &sine_ref) < 0.9, "LOCK keeps its recorded saw");
+    }
+
+    #[test]
+    fn follow_pad_hears_live_voice_fx_but_lock_does_not() {
+        let drive = Some((0, FxParam::Drive, 1.0));
+        let follow_dry = pad_render(saw_voice(false), (0, 0), None);
+        let follow_fx = pad_render(saw_voice(false), (0, 0), drive);
+        let lock_dry = pad_render(saw_voice(true), (0, 0), None);
+        let lock_fx = pad_render(saw_voice(true), (0, 0), drive);
+        assert!(
+            correlate(&follow_dry, &follow_fx) < 0.99,
+            "live Kaoss / voice FX must reach a FOLLOW pad"
+        );
+        assert!(
+            correlate(&lock_dry, &lock_fx) > 0.9999,
+            "live Kaoss / voice FX must not reach a LOCKED pad"
+        );
+    }
+
+    fn drift_crossings(locked: bool) -> (usize, usize) {
+        let mut e = engine();
+        apply_now(&mut e, Command::SetSynth { param: SynthParam::Release, value: 1.0 });
+        apply_now(&mut e, Command::SetSynth { param: SynthParam::ReleaseDrift, value: 0.5 });
+        let clip = Clip::new(
+            vec![
+                ClipEvent {
+                    tick: 0,
+                    kind: ClipEventKind::NoteOn { channel: 0, note: 57, velocity: 120 },
+                },
+                ClipEvent {
+                    tick: 192,
+                    kind: ClipEventKind::NoteOff { channel: 0, note: 57 },
+                },
+            ],
+            PPQ * 4,
+        );
+        let voice = ClipVoice {
+            locked,
+            release_drift: Some(1.0),
+            ..ClipVoice::default()
+        };
+        let _ = e.apply_clip_update(0, Some(Box::new(clip)), Some(LaunchMode::Loop), None, Some(voice));
+        apply_now(&mut e, Command::LaunchClip { slot: 0, quantize: Quantize::Off });
+        let mut midi = MidiOutSink::new();
+        let mut block = vec![0.0f32; 1024];
+        for _ in 0..5 {
+            e.render(&mut block, &[], &mut midi);
+        }
+        let mut early = vec![0.0f32; 1024];
+        e.render(&mut early, &[], &mut midi);
+        let mut late = vec![0.0f32; 1024];
+        for _ in 0..20 {
+            e.render(&mut late, &[], &mut midi);
+        }
+        (zero_crossings(&early).max(1), zero_crossings(&late))
+    }
+
+    #[test]
+    fn follow_pad_uses_live_drift_but_lock_keeps_the_recorded_one() {
+        let (z0, z1) = drift_crossings(true);
+        assert!(z1 > z0 + z0 / 3, "LOCK keeps drifting up, {z0} -> {z1}");
+        let (z0, z1) = drift_crossings(false);
+        assert!(
+            z1 <= z0 + z0 / 3,
+            "FOLLOW with the live DRIFT slider centered must not drift, {z0} -> {z1}"
+        );
+    }
+
     #[test]
     fn locked_clip_fx_ignores_live_voice_fx() {
         let mut e = engine();
