@@ -7,7 +7,8 @@
 use midi_core::MidiEvent;
 
 use crate::clip::{
-    Clip, ClipEventKind, ClipVoice, LaunchMode, SeqEvent, Sequencer, MAX_CLIPS, SEQ_KAOSS_MIX_SLOT,
+    Clip, ClipEventKind, ClipVoice, LaunchMode, SeqEvent, Sequencer, MAX_CLIPS, MAX_SLOT_RELEASES,
+    SEQ_KAOSS_MIX_SLOT,
 };
 use crate::mix::MixSource;
 use crate::command::{
@@ -472,6 +473,21 @@ impl JamboxEngine {
         &mut self.sequencer
     }
 
+    fn apply_released(&mut self, released: &[SeqEvent]) {
+        for ev in released {
+            match ev.kind {
+                ClipEventKind::NoteOff { channel, note } => {
+                    self.voices.note_off_recorded(channel, note);
+                    self.fm.note_off_recorded(channel, note);
+                }
+                ClipEventKind::TouchUp { owner } => {
+                    self.clip_touch_up(owner as u32, ev.slot as u8);
+                }
+                _ => {}
+            }
+        }
+    }
+
     /// Audio-thread clip pointer swap. Bakes a locked voice without allocating.
     pub fn apply_clip_update(
         &mut self,
@@ -519,6 +535,17 @@ impl JamboxEngine {
                 fx.reset();
             }
         }
+        // The old clip's open notes would never see their note-off once it is gone.
+        let mut released = [SeqEvent {
+            frame: 0,
+            slot: 0,
+            kind: ClipEventKind::NoteOff {
+                channel: 0,
+                note: 0,
+            },
+        }; MAX_SLOT_RELEASES];
+        let n = self.sequencer.release_held(slot, &mut released);
+        self.apply_released(&released[..n]);
         self.sequencer
             .slot_mut(slot)
             .and_then(|s| s.swap_boxed(clip))
@@ -1344,18 +1371,7 @@ impl JamboxEngine {
                     },
                 }; MAX_BLOCK_COMMANDS];
                 let n = self.sequencer.stop_all(&mut flush);
-                for ev in flush.iter().take(n) {
-                    match ev.kind {
-                        ClipEventKind::NoteOff { channel, note } => {
-                            self.voices.note_off_recorded(channel, note);
-                            self.fm.note_off_recorded(channel, note);
-                        }
-                        ClipEventKind::TouchUp { owner } => {
-                            self.clip_touch_up(owner as u32, ev.slot as u8);
-                        }
-                        _ => {}
-                    }
-                }
+                self.apply_released(&flush[..n]);
             }
             Command::SetClipMode { slot, mode } => {
                 if let Some(s) = self.sequencer.slot_mut(slot as usize) {
@@ -3501,6 +3517,73 @@ mod tests {
                 slot: 0,
                 quantize: Quantize::Off,
             },
+        );
+    }
+
+    fn render_blocks(e: &mut JamboxEngine, blocks: usize) -> f32 {
+        let mut midi = MidiOutSink::new();
+        let mut last = 0.0;
+        for _ in 0..blocks {
+            let mut buf = vec![0.0f32; 2048];
+            e.render(&mut buf, &[], &mut midi);
+            last = energy(&buf);
+        }
+        last
+    }
+
+    #[test]
+    fn clearing_a_playing_pad_silences_its_held_notes() {
+        let mut e = engine();
+        launch_held_clip(&mut e, 72, 1.0);
+        assert!(render_blocks(&mut e, 1) > 0.1, "pad should be sounding");
+        let previous = e.apply_clip_update(0, None, None, Some(1.0), None);
+        assert!(previous.is_some());
+        // Long enough for the release tail to die out.
+        let tail = render_blocks(&mut e, 400);
+        assert!(
+            tail < 1e-4,
+            "CLEAR must release the note the cleared clip was holding, e={tail}"
+        );
+    }
+
+    #[test]
+    fn replacing_a_playing_clip_releases_its_held_notes() {
+        let mut e = engine();
+        launch_held_clip(&mut e, 72, 1.0);
+        assert!(render_blocks(&mut e, 1) > 0.1);
+        let empty = Box::new(Clip::new(Vec::new(), PPQ));
+        let _ = e.apply_clip_update(0, Some(empty), None, None, None);
+        assert!(render_blocks(&mut e, 400) < 1e-4);
+    }
+
+    #[test]
+    fn clearing_one_pad_leaves_other_pads_sounding() {
+        let mut e = engine();
+        launch_held_clip(&mut e, 72, 1.0);
+        let other = Clip::new(
+            vec![ClipEvent {
+                tick: 0,
+                kind: ClipEventKind::NoteOn {
+                    channel: 0,
+                    note: 60,
+                    velocity: 120,
+                },
+            }],
+            PPQ * 8,
+        );
+        e.sequencer_mut().slot_mut(1).unwrap().set_clip(Some(other));
+        apply_now(
+            &mut e,
+            Command::LaunchClip {
+                slot: 1,
+                quantize: Quantize::Off,
+            },
+        );
+        render_blocks(&mut e, 1);
+        let _ = e.apply_clip_update(0, None, None, Some(1.0), None);
+        assert!(
+            render_blocks(&mut e, 50) > 0.1,
+            "pad 2 keeps playing after pad 1 is cleared"
         );
     }
 

@@ -14719,6 +14719,67 @@ mod tests {
         assert_eq!(model.seq.recorded_on_notes(), vec![36]);
     }
 
+    fn tap_rect(model: &mut NativeModel, out: &mut Outbox, id: i32, r: crate::layout::Rect) {
+        model.finger_down(id, r.x + 4, r.y + 4, out);
+        model.finger_up(id, out);
+    }
+
+    fn pad_with_one_note() -> PhrasePad {
+        crate::phrases::from_wire(
+            vec![jambox_protocol::WireClipEvent::midi(0, true, 0, 60, 100)],
+            960,
+            120.0,
+            true,
+        )
+    }
+
+    #[test]
+    fn pad_edit_clear_then_tap_empties_that_pad_and_the_engine_slot() {
+        let mut model = NativeModel::new();
+        let mut out = Outbox::new();
+        model.set_mode(UiMode::Pads);
+        model.phrases[3] = pad_with_one_note();
+        model.phrases[4] = pad_with_one_note();
+        model.phrase_playing[3] = true;
+        let r = model.layout.pads_edit;
+        tap_rect(&mut model, &mut out, 1, r);
+        let r = model.layout.pads_clear;
+        tap_rect(&mut model, &mut out, 2, r);
+        assert!(model.pads_clear_armed);
+        let _ = out.take();
+        let r = model.layout.phrase_cell(3);
+        tap_rect(&mut model, &mut out, 3, r);
+        assert!(model.phrases[3].empty);
+        assert!(!model.phrase_playing[3]);
+        assert!(!model.phrases[4].empty, "only the tapped pad is cleared");
+        assert!(!model.pads_clear_armed, "CLEAR disarms after one pad");
+        let reqs = out.take();
+        assert!(reqs.iter().any(|r| matches!(r, Request::ClipClear { slot: 3 })));
+        assert!(!reqs
+            .iter()
+            .any(|r| matches!(r, Request::ClipClear { slot } if *slot != 3)));
+        assert!(
+            !reqs.iter().any(|r| matches!(r, Request::ClipLaunch { .. })),
+            "clearing must not launch the pad"
+        );
+    }
+
+    #[test]
+    fn pad_clear_arm_is_ignored_in_play_view_and_taps_launch_instead() {
+        let mut model = NativeModel::new();
+        let mut out = Outbox::new();
+        model.set_mode(UiMode::Pads);
+        model.phrases[0] = pad_with_one_note();
+        model.pads_edit = false;
+        let clr = model.layout.pads_clear;
+        model.finger_down(1, clr.x + 4, clr.y + 4, &mut out);
+        model.finger_up(1, &mut out);
+        assert!(!model.pads_clear_armed);
+        let r = model.layout.phrase_cell(0);
+        tap_rect(&mut model, &mut out, 2, r);
+        assert!(!model.phrases[0].empty);
+    }
+
     #[test]
     fn kaoss_slide_records_seq_gestures_not_midi_notes() {
         let mut model = model_on_kaoss();
