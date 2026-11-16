@@ -296,6 +296,17 @@ pub struct JamboxEngine {
     status: EngineStatus,
 }
 
+/// Keys carry a stereo image (`key_bus` / `key_bus_r`); kit and mic punch run mono.
+fn new_punch_racks(sr: f32) -> [PunchRack; PunchSource::COUNT] {
+    std::array::from_fn(|i| {
+        if i == PunchSource::Keys as usize {
+            PunchRack::new_stereo(sr)
+        } else {
+            PunchRack::new(sr)
+        }
+    })
+}
+
 /// Keep wet insert tanks moving after the last voice in a group goes idle,
 /// so a strum's delay / reverb can finish instead of getting chopped off.
 fn flush_fx_tails(
@@ -384,7 +395,7 @@ impl JamboxEngine {
             drum_fx,
             drum_group_fx: FxUnit::new(sr),
             bus_fx: FxUnit::new(sr),
-            punch: std::array::from_fn(|_| PunchRack::new(sr)),
+            punch: new_punch_racks(sr),
             clip_fx: (0..MAX_CLIPS).map(|_| FxUnit::new(sr)).collect(),
             clip_table: [[0.0; TABLE_SIZE]; MAX_CLIPS],
             clip_baked: [false; MAX_CLIPS],
@@ -607,7 +618,7 @@ impl JamboxEngine {
         let punch_prio = self.punch[0].buffer_prio();
         let punch_rpt_mode = self.punch[0].rpt_mode();
         let punch_grid = self.punch[0].grid_mode();
-        self.punch = std::array::from_fn(|_| PunchRack::new(sr));
+        self.punch = new_punch_racks(sr);
         for rack in &mut self.punch {
             rack.set_buffer_prio(punch_prio);
             rack.set_rpt_mode(punch_rpt_mode);
@@ -1092,7 +1103,11 @@ impl JamboxEngine {
 
         // Keys, kit, and mic each have their own punch buffer.
         let bpm = transport.bpm() as f32;
-        punch[PunchSource::Keys as usize].process(&mut key_bus[..n], bpm);
+        punch[PunchSource::Keys as usize].process_stereo(
+            &mut key_bus[..n],
+            &mut key_bus_r[..n],
+            bpm,
+        );
         punch[PunchSource::Drums as usize].process(&mut drum_bus[..n], bpm);
         let input_gain = *input_level;
         let off = *span_off;
@@ -2774,6 +2789,68 @@ mod tests {
             .sum();
         assert!(diff > 1.0, "crush should grit the master, diff={diff}");
         assert!(peak(&wet_buf) > 0.01);
+    }
+
+    #[test]
+    fn keys_punch_fx_wet_both_channels() {
+        let notes = [(0u8, 57u8), (0, 64), (0, 71), (0, 76)];
+        let render_stereo = |slot: Option<u8>| -> (Vec<f32>, Vec<f32>) {
+            let mut e = engine();
+            let mut midi = MidiOutSink::new();
+            let on: Vec<ScheduledCommand> = notes
+                .iter()
+                .map(|(channel, note)| {
+                    ScheduledCommand::now(Command::NoteOn {
+                        channel: *channel,
+                        note: *note,
+                        velocity: 110,
+                    })
+                })
+                .collect();
+            let mut buf = vec![0.0f32; 4096];
+            e.render(&mut buf, &on, &mut midi);
+            if let Some(slot) = slot {
+                apply_now(
+                    &mut e,
+                    Command::SetPunchFx {
+                        source: PunchSource::Keys as u8,
+                        slot,
+                        amount: 0.8,
+                    },
+                );
+            }
+            let (mut l, mut r) = (Vec::new(), Vec::new());
+            for _ in 0..12 {
+                e.render(&mut buf, &[], &mut midi);
+                let (bl, br) = e.last_stereo();
+                l.extend_from_slice(bl);
+                r.extend_from_slice(br);
+            }
+            (l, r)
+        };
+        let diff = |a: &[f32], b: &[f32]| -> f32 { a.iter().zip(b).map(|(x, y)| (x - y).abs()).sum() };
+        let (dry_l, dry_r) = render_stereo(None);
+        assert!(diff(&dry_l, &dry_r) > 1.0, "test needs a stereo image");
+        for (name, slot) in [
+            ("RPT", crate::PUNCH_RPT),
+            ("TAPE", crate::PUNCH_TAPE),
+            ("LPF", crate::PUNCH_LPF),
+            ("HPF", crate::PUNCH_HPF),
+            ("SLICE", crate::PUNCH_SLICE),
+            ("DROP", crate::PUNCH_DROP),
+            ("CRUSH", crate::PUNCH_CRUSH),
+        ] {
+            let (l, r) = render_stereo(Some(slot));
+            let dl = diff(&l, &dry_l);
+            let dr = diff(&r, &dry_r);
+            assert!(dl > 1.0, "{name}: left must be wet, diff={dl}");
+            assert!(dr > 1.0, "{name}: right must be wet, diff={dr}");
+            assert!(
+                dr > 0.25 * dl,
+                "{name}: right wetness must be comparable to left, L={dl} R={dr}"
+            );
+            assert!(diff(&l, &r) > 1.0, "{name}: stereo image must survive");
+        }
     }
 
     #[test]
