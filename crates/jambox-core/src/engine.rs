@@ -7,7 +7,8 @@
 use midi_core::MidiEvent;
 
 use crate::clip::{
-    Clip, ClipEventKind, ClipVoice, LaunchMode, SeqEvent, Sequencer, MAX_CLIPS, SEQ_KAOSS_MIX_SLOT,
+    Clip, ClipEventKind, ClipVoice, LaunchMode, SeqEvent, Sequencer, MAX_CLIPS, MAX_SLOT_RELEASES,
+    SEQ_KAOSS_MIX_SLOT,
 };
 use crate::mix::MixSource;
 use crate::command::{
@@ -483,6 +484,21 @@ impl JamboxEngine {
         &mut self.sequencer
     }
 
+    fn apply_released(&mut self, released: &[SeqEvent]) {
+        for ev in released {
+            match ev.kind {
+                ClipEventKind::NoteOff { channel, note } => {
+                    self.voices.note_off_recorded(channel, note);
+                    self.fm.note_off_recorded(channel, note);
+                }
+                ClipEventKind::TouchUp { owner } => {
+                    self.clip_touch_up(owner as u32, ev.slot as u8);
+                }
+                _ => {}
+            }
+        }
+    }
+
     /// Audio-thread clip pointer swap. Bakes a locked voice without allocating.
     pub fn apply_clip_update(
         &mut self,
@@ -530,6 +546,17 @@ impl JamboxEngine {
                 fx.reset();
             }
         }
+        // The old clip's open notes would never see their note-off once it is gone.
+        let mut released = [SeqEvent {
+            frame: 0,
+            slot: 0,
+            kind: ClipEventKind::NoteOff {
+                channel: 0,
+                note: 0,
+            },
+        }; MAX_SLOT_RELEASES];
+        let n = self.sequencer.release_held(slot, &mut released);
+        self.apply_released(&released[..n]);
         self.sequencer
             .slot_mut(slot)
             .and_then(|s| s.swap_boxed(clip))
@@ -1359,18 +1386,7 @@ impl JamboxEngine {
                     },
                 }; MAX_BLOCK_COMMANDS];
                 let n = self.sequencer.stop_all(&mut flush);
-                for ev in flush.iter().take(n) {
-                    match ev.kind {
-                        ClipEventKind::NoteOff { channel, note } => {
-                            self.voices.note_off_recorded(channel, note);
-                            self.fm.note_off_recorded(channel, note);
-                        }
-                        ClipEventKind::TouchUp { owner } => {
-                            self.clip_touch_up(owner as u32, ev.slot as u8);
-                        }
-                        _ => {}
-                    }
-                }
+                self.apply_released(&flush[..n]);
             }
             Command::SetClipMode { slot, mode } => {
                 if let Some(s) = self.sequencer.slot_mut(slot as usize) {
@@ -3581,6 +3597,73 @@ mod tests {
         );
     }
 
+    fn render_blocks(e: &mut JamboxEngine, blocks: usize) -> f32 {
+        let mut midi = MidiOutSink::new();
+        let mut last = 0.0;
+        for _ in 0..blocks {
+            let mut buf = vec![0.0f32; 2048];
+            e.render(&mut buf, &[], &mut midi);
+            last = energy(&buf);
+        }
+        last
+    }
+
+    #[test]
+    fn clearing_a_playing_pad_silences_its_held_notes() {
+        let mut e = engine();
+        launch_held_clip(&mut e, 72, 1.0);
+        assert!(render_blocks(&mut e, 1) > 0.1, "pad should be sounding");
+        let previous = e.apply_clip_update(0, None, None, Some(1.0), None);
+        assert!(previous.is_some());
+        // Long enough for the release tail to die out.
+        let tail = render_blocks(&mut e, 400);
+        assert!(
+            tail < 1e-4,
+            "CLEAR must release the note the cleared clip was holding, e={tail}"
+        );
+    }
+
+    #[test]
+    fn replacing_a_playing_clip_releases_its_held_notes() {
+        let mut e = engine();
+        launch_held_clip(&mut e, 72, 1.0);
+        assert!(render_blocks(&mut e, 1) > 0.1);
+        let empty = Box::new(Clip::new(Vec::new(), PPQ));
+        let _ = e.apply_clip_update(0, Some(empty), None, None, None);
+        assert!(render_blocks(&mut e, 400) < 1e-4);
+    }
+
+    #[test]
+    fn clearing_one_pad_leaves_other_pads_sounding() {
+        let mut e = engine();
+        launch_held_clip(&mut e, 72, 1.0);
+        let other = Clip::new(
+            vec![ClipEvent {
+                tick: 0,
+                kind: ClipEventKind::NoteOn {
+                    channel: 0,
+                    note: 60,
+                    velocity: 120,
+                },
+            }],
+            PPQ * 8,
+        );
+        e.sequencer_mut().slot_mut(1).unwrap().set_clip(Some(other));
+        apply_now(
+            &mut e,
+            Command::LaunchClip {
+                slot: 1,
+                quantize: Quantize::Off,
+            },
+        );
+        render_blocks(&mut e, 1);
+        let _ = e.apply_clip_update(0, None, None, Some(1.0), None);
+        assert!(
+            render_blocks(&mut e, 50) > 0.1,
+            "pad 2 keeps playing after pad 1 is cleared"
+        );
+    }
+
     #[test]
     fn live_tone_knob_does_not_rewrite_a_clip_loop() {
         let mut clip_only = engine();
@@ -3801,6 +3884,118 @@ mod tests {
         assert!(
             correlate(&locked_buf, &saw_buf) > correlate(&locked_buf, &sine_buf),
             "locked pad should keep the saw snapshot, not follow live sine"
+        );
+    }
+
+    fn pad_render(voice: ClipVoice, live_pair: (u16, u16), live_fx: Option<(u16, FxParam, f32)>) -> Vec<f32> {
+        let mut e = engine();
+        apply_now(&mut e, Command::SetMorphPair { a: live_pair.0, b: live_pair.1 });
+        apply_now(&mut e, Command::SetSynth { param: SynthParam::Morph, value: 0.0 });
+        if let Some((i, param, v)) = live_fx {
+            apply_now(&mut e, Command::SetFx { target: FxTarget::Voice(i), param, value: v });
+        }
+        load_locked_clip(&mut e, voice);
+        let mut midi = MidiOutSink::new();
+        let mut buf = vec![0.0f32; 2048];
+        for _ in 0..6 {
+            e.render(&mut buf, &[], &mut midi);
+        }
+        buf
+    }
+
+    fn saw_voice(locked: bool) -> ClipVoice {
+        ClipVoice {
+            locked,
+            morph_a: 2,
+            morph_b: 2,
+            morph: 0.0,
+            tone: 1.0,
+            ..ClipVoice::default()
+        }
+    }
+
+    #[test]
+    fn follow_pad_tracks_live_morph_while_lock_keeps_its_snapshot() {
+        let live_sine = (0, 0);
+        let follow = pad_render(saw_voice(false), live_sine, None);
+        let lock = pad_render(saw_voice(true), live_sine, None);
+        let sine_ref = pad_render(
+            ClipVoice {
+                locked: true,
+                morph_a: 0,
+                morph_b: 0,
+                ..ClipVoice::default()
+            },
+            live_sine,
+            None,
+        );
+        assert!(correlate(&follow, &sine_ref) > 0.99, "FOLLOW plays the live sine");
+        assert!(correlate(&lock, &sine_ref) < 0.9, "LOCK keeps its recorded saw");
+    }
+
+    #[test]
+    fn follow_pad_hears_live_voice_fx_but_lock_does_not() {
+        let drive = Some((0, FxParam::Drive, 1.0));
+        let follow_dry = pad_render(saw_voice(false), (0, 0), None);
+        let follow_fx = pad_render(saw_voice(false), (0, 0), drive);
+        let lock_dry = pad_render(saw_voice(true), (0, 0), None);
+        let lock_fx = pad_render(saw_voice(true), (0, 0), drive);
+        assert!(
+            correlate(&follow_dry, &follow_fx) < 0.99,
+            "live Kaoss / voice FX must reach a FOLLOW pad"
+        );
+        assert!(
+            correlate(&lock_dry, &lock_fx) > 0.9999,
+            "live Kaoss / voice FX must not reach a LOCKED pad"
+        );
+    }
+
+    fn drift_crossings(locked: bool) -> (usize, usize) {
+        let mut e = engine();
+        apply_now(&mut e, Command::SetSynth { param: SynthParam::Release, value: 1.0 });
+        apply_now(&mut e, Command::SetSynth { param: SynthParam::ReleaseDrift, value: 0.5 });
+        let clip = Clip::new(
+            vec![
+                ClipEvent {
+                    tick: 0,
+                    kind: ClipEventKind::NoteOn { channel: 0, note: 57, velocity: 120 },
+                },
+                ClipEvent {
+                    tick: 192,
+                    kind: ClipEventKind::NoteOff { channel: 0, note: 57 },
+                },
+            ],
+            PPQ * 4,
+        );
+        let voice = ClipVoice {
+            locked,
+            release_drift: Some(1.0),
+            ..ClipVoice::default()
+        };
+        let _ = e.apply_clip_update(0, Some(Box::new(clip)), Some(LaunchMode::Loop), None, Some(voice));
+        apply_now(&mut e, Command::LaunchClip { slot: 0, quantize: Quantize::Off });
+        let mut midi = MidiOutSink::new();
+        let mut block = vec![0.0f32; 1024];
+        for _ in 0..5 {
+            e.render(&mut block, &[], &mut midi);
+        }
+        let mut early = vec![0.0f32; 1024];
+        e.render(&mut early, &[], &mut midi);
+        let mut late = vec![0.0f32; 1024];
+        for _ in 0..20 {
+            e.render(&mut late, &[], &mut midi);
+        }
+        (zero_crossings(&early).max(1), zero_crossings(&late))
+    }
+
+    #[test]
+    fn follow_pad_uses_live_drift_but_lock_keeps_the_recorded_one() {
+        let (z0, z1) = drift_crossings(true);
+        assert!(z1 > z0 + z0 / 3, "LOCK keeps drifting up, {z0} -> {z1}");
+        let (z0, z1) = drift_crossings(false);
+        assert!(
+            z1 <= z0 + z0 / 3,
+            "FOLLOW with the live DRIFT slider centered must not drift, {z0} -> {z1}"
         );
     }
 

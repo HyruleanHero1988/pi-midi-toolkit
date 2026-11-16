@@ -22,6 +22,8 @@ pub const SEQ_KAOSS_MIX_SLOT: u8 = 18;
 const MAX_SLOT_NOTES: usize = 24;
 /// Kaoss contacts one clip may hold open (matches `MAX_TOUCH_VOICES`).
 const MAX_SLOT_TOUCHES: usize = 5;
+/// Most releases [`Sequencer::release_held`] can emit for one slot.
+pub const MAX_SLOT_RELEASES: usize = MAX_SLOT_NOTES + MAX_SLOT_TOUCHES;
 
 /// What a clip event does. Kept `Copy` so scheduling never allocates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -219,8 +221,14 @@ impl ClipSlot {
         self.mode = mode;
     }
 
+    /// Release drift this pad plays with. Only a LOCKED pad pins its recorded
+    /// drift; a FOLLOW pad tracks the live DRIFT slider like live keys do.
     pub fn playback_drift(&self) -> Option<f32> {
-        self.voice.release_drift
+        if self.voice.locked {
+            self.voice.release_drift
+        } else {
+            None
+        }
     }
 
     pub fn playback_tone(&self) -> f32 {
@@ -377,6 +385,15 @@ impl Sequencer {
             self.slots[index].state = SlotState::Idle;
         }
         n
+    }
+
+    /// Note-offs / touch-ups for everything `index` still holds open. Call before
+    /// replacing or dropping a playing clip, or its notes ring forever.
+    pub fn release_held(&mut self, index: usize, out: &mut [SeqEvent]) -> usize {
+        if index >= self.slots.len() {
+            return 0;
+        }
+        self.flush_held(index, 0, out)
     }
 
     fn flush_held(&mut self, index: usize, frame: u32, out: &mut [SeqEvent]) -> usize {
