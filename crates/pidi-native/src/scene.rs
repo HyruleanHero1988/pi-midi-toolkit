@@ -809,7 +809,7 @@ fn draw_chrome(scene: &mut Scene, model: &NativeModel) {
     let layout = model.layout;
     // Tk top bar: warm charcoal, cyan brand, ← BACK / HOME / POWER, jam tabs.
     scene.fill_rect(layout.nav, 0x1d2021);
-    scene.text_scaled(10, 16, "PiDI", 0x00d4ff, 3);
+    scene.text_scaled(10, 16, crate::font::BRAND, 0x00d4ff, 3);
 
     let back = layout.nav_back();
     scene.button(
@@ -4546,6 +4546,33 @@ mod tests {
     use super::*;
     use crate::client::Outbox;
     use crate::model::NativeModel;
+
+    #[test]
+    fn nav_brand_reads_pidi_with_lowercase_i_and_fits_before_back() {
+        for style in [FontStyle::Retro, FontStyle::Smooth] {
+            let mut model = NativeModel::new();
+            model.font_style = style;
+            let scene = build(&model);
+            let brand: Vec<&GlyphQuad> = scene
+                .glyphs
+                .iter()
+                .filter(|g| g.color == 0x00d4ff && g.y < model.layout.nav.h as f32)
+                .collect();
+            assert_eq!(brand.len(), 4, "{style:?}: P i D I");
+            let i_quad = brand[1];
+            let cap_i = brand[3];
+            assert_ne!(
+                (i_quad.u0, i_quad.v0),
+                (cap_i.u0, cap_i.v0),
+                "{style:?}: second glyph must be the lowercase i, not a capital I"
+            );
+            let right = brand.iter().map(|g| g.x + g.w).fold(0.0f32, f32::max);
+            assert!(
+                right < model.layout.nav_back().x as f32 - 4.0,
+                "{style:?}: brand must clear the back button, right edge {right}"
+            );
+        }
+    }
 
     #[test]
     fn punch_rpt_and_slice_draw_grid_ticks() {
