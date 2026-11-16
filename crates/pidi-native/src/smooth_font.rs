@@ -205,6 +205,9 @@ impl SmoothAtlas {
 }
 
 fn smooth_index(ch: char) -> usize {
+    if ch == crate::font::BRAND_I {
+        return (b'i' - FIRST) as usize;
+    }
     let mut code = ch as u32;
     if (b'a' as u32..=b'z' as u32).contains(&code) {
         code -= 32;
@@ -245,6 +248,21 @@ mod tests {
             "scale-2 ascender box should fit a 40–48px button, got {h}"
         );
         assert!(h > 8.0, "scale-2 must stay readable, got {h}");
+    }
+
+    #[test]
+    fn brand_i_uses_the_lowercase_glyph() {
+        let atlas = smooth_atlas().expect("smooth atlas");
+        assert_ne!(
+            smooth_index(crate::font::BRAND_I),
+            smooth_index('I'),
+            "brand i must not fold to a capital I"
+        );
+        assert_eq!(smooth_index('i'), smooth_index('I'), "plain text stays caps");
+        let lower = atlas.glyph(crate::font::BRAND_I);
+        let upper = atlas.glyph('I');
+        assert!(lower.height > 0.0);
+        assert!((lower.u0, lower.v0) != (upper.u0, upper.v0));
     }
 
     #[test]
