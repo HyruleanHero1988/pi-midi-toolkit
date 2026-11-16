@@ -70,8 +70,26 @@ impl PunchSource {
 /// RPT / SLICE beat lengths as amount rises: 1/4, 1/8, 1/16, 1/32.
 pub const PUNCH_GRID_BEATS: [f32; 4] = [1.0, 0.5, 0.25, 0.125];
 /// Slider marks at the 1/8, 1/16, and 1/32 boundaries (1/4 is the bottom band).
+///
+/// Single source of truth for the beat grid: the UI draws a divider at each
+/// value and [`punch_grid_index`] counts how many of them the amount has
+/// reached, so a division changes exactly where its divider is drawn.
 pub const PUNCH_GRID_TICKS: [f32; 3] = [0.25, 0.50, 0.75];
 pub const PUNCH_GRID_LABELS: [&str; 4] = ["1/4", "1/8", "1/16", "1/32"];
+
+/// Amount range `(low, high)` owned by grid division `index` (0 = 1/4 … 3 = 1/32),
+/// bounded by the slider ends and [`PUNCH_GRID_TICKS`].
+pub fn punch_grid_band(index: usize) -> (f32, f32) {
+    let i = index.min(PUNCH_GRID_TICKS.len());
+    let low = if i == 0 { 0.0 } else { PUNCH_GRID_TICKS[i - 1] };
+    let high = PUNCH_GRID_TICKS.get(i).copied().unwrap_or(1.0);
+    (low, high)
+}
+
+/// Division label for `amount` (`"1/4"` … `"1/32"`).
+pub fn punch_grid_label(amount: f32) -> &'static str {
+    PUNCH_GRID_LABELS[punch_grid_index(amount)]
+}
 
 /// Who wins when several buffer pads are armed. Cycles on the FX page.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -327,8 +345,10 @@ pub fn punch_slot_has_grid(index: usize) -> bool {
     index == PUNCH_RPT as usize || index == PUNCH_SLICE as usize
 }
 
+/// Division selected by `amount`: a division starts exactly at its divider.
 pub fn punch_grid_index(amount: f32) -> usize {
-    (amount.clamp(0.0, 1.0) * 3.999).floor() as usize
+    let amount = amount.clamp(0.0, 1.0);
+    PUNCH_GRID_TICKS.iter().filter(|tick| amount >= **tick).count()
 }
 
 pub fn punch_index_for_knob_cc(controller: u8) -> Option<usize> {
@@ -1206,11 +1226,40 @@ mod tests {
         assert_eq!(punch_grid_index(0.51), 2);
         assert_eq!(punch_grid_index(0.76), 3);
         assert_eq!(punch_grid_index(1.0), 3);
+        assert_eq!(punch_grid_index(f32::NAN), 0);
         assert!(punch_slot_has_grid(PUNCH_RPT as usize));
         assert!(punch_slot_has_grid(PUNCH_SLICE as usize));
         assert!(!punch_slot_has_grid(PUNCH_TAPE as usize));
         assert_eq!(PUNCH_GRID_LABELS[punch_grid_index(0.1)], "1/4");
         assert_eq!(PUNCH_GRID_LABELS[punch_grid_index(0.4)], "1/8");
+    }
+
+    #[test]
+    fn grid_division_changes_exactly_at_each_divider() {
+        for (i, tick) in PUNCH_GRID_TICKS.iter().enumerate() {
+            assert_eq!(punch_grid_index(*tick - 1e-4), i, "just below divider {i}");
+            assert_eq!(punch_grid_index(*tick), i + 1, "at divider {i}");
+            assert_eq!(punch_grid_index(*tick + 1e-4), i + 1, "just above divider {i}");
+        }
+        assert_eq!(punch_grid_index(0.0), 0);
+        assert_eq!(punch_grid_index(1.0), PUNCH_GRID_LABELS.len() - 1);
+        assert_eq!(PUNCH_GRID_TICKS.len() + 1, PUNCH_GRID_LABELS.len());
+        assert_eq!(PUNCH_GRID_LABELS.len(), PUNCH_GRID_BEATS.len());
+    }
+
+    #[test]
+    fn grid_bands_tile_the_slider_and_agree_with_the_index() {
+        let mut prev_high = 0.0;
+        for i in 0..PUNCH_GRID_LABELS.len() {
+            let (low, high) = punch_grid_band(i);
+            assert_eq!(low, prev_high, "band {i} must start where the last ended");
+            assert!(high > low);
+            let mid = 0.5 * (low + high);
+            assert_eq!(punch_grid_index(mid), i);
+            assert_eq!(punch_grid_label(mid), PUNCH_GRID_LABELS[i]);
+            prev_high = high;
+        }
+        assert_eq!(prev_high, 1.0);
     }
 
     #[test]

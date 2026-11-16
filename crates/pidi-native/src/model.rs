@@ -6801,9 +6801,8 @@ impl NativeModel {
         if index >= Layout::PUNCH_PAD_COUNT {
             return;
         }
-        let cell = self.layout.punch_pad_cell(index);
-        let y = 1.0 - ((py - cell.y) as f32 / cell.h.max(1) as f32);
-        self.set_punch_amount_unit(index, y.clamp(0.0, 1.0), outbox);
+        let amount = self.layout.punch_amount_at(index, py);
+        self.set_punch_amount_unit(index, amount, outbox);
     }
 
     fn set_punch_amount_unit(&mut self, index: usize, amount: f32, outbox: &mut Outbox) {
@@ -6816,10 +6815,18 @@ impl NativeModel {
         if self.punch_armed[index] {
             outbox.punch_fx(self.punch_source, index as u8, amount);
         }
+        let division = if self.punch_grid_mode == jambox_core::PunchGridMode::Beat
+            && jambox_core::punch_slot_has_grid(index)
+        {
+            format!(" {}", jambox_core::punch_grid_label(amount))
+        } else {
+            String::new()
+        };
         self.status_line = format!(
-            "{} {} {:.0}%{}",
+            "{} {}{} {:.0}%{}",
             jambox_core::PunchSource::from_u8(self.punch_source).label(),
             jambox_core::PUNCH_LABELS[index],
+            division,
             amount * 100.0,
             if self.punch_armed[index] { " on" } else { "" }
         );
@@ -13163,6 +13170,33 @@ mod tests {
             model.punch_amount[1] > 0.85,
             "slide to the top should raise the stored amount"
         );
+    }
+
+    #[test]
+    fn punch_rpt_touch_selects_the_division_drawn_under_the_finger() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Fx);
+        for pad in [0usize, 5] {
+            for band in 0..jambox_core::PUNCH_GRID_LABELS.len() {
+                let (low, high) = jambox_core::punch_grid_band(band);
+                let y = model
+                    .layout
+                    .punch_y_for_amount(pad, 0.5 * (low + high))
+                    .round() as i32;
+                let x = model.layout.punch_pad_cell(pad).x + 12;
+                let mut out = Outbox::new();
+                let start_y = model.layout.punch_pad_cell(pad).y + 8;
+                model.finger_down(1, x, start_y, &mut out);
+                model.finger_move(1, x, y, &mut out);
+                model.finger_up(1, &mut out);
+                let amount = model.punch_amount[pad];
+                assert_eq!(
+                    jambox_core::punch_grid_index(amount),
+                    band,
+                    "pad {pad} touch at band {band} mid gave amount {amount}"
+                );
+            }
+        }
     }
 
     #[test]

@@ -4326,25 +4326,25 @@ fn draw_fx(scene: &mut Scene, model: &NativeModel) {
             },
             0x1d2021,
         );
-        let fill_h = ((cell.h - 10) as f32 * amount) as i32;
+        let track = layout.punch_pad_track(index);
+        let fill_top = layout.punch_y_for_amount(index, amount).round() as i32;
         scene.fill_rect(
             Rect {
-                x: cell.x + 6,
-                y: cell.y + cell.h - fill_h - 5,
-                w: cell.w - 12,
-                h: fill_h,
+                x: track.x,
+                y: fill_top,
+                w: track.w,
+                h: track.y + track.h - fill_top,
             },
             if armed { PUNCH_COLOR[index] } else { 0x3c3836 },
         );
         if model.punch_grid_mode == jambox_core::PunchGridMode::Beat
             && jambox_core::punch_slot_has_grid(index)
         {
-            let inner_h = (cell.h - 28) as f32;
-            let inner_top = (cell.y + 22) as f32;
             let line_color = if armed { 0xfbf1c7 } else { 0x7c6f64 };
             let label_color = if armed { 0xfbf1c7 } else { 0xa89984 };
             for tick in jambox_core::PUNCH_GRID_TICKS {
-                let y = (inner_top + inner_h * (1.0 - tick)).round() as i32;
+                // Two pixels centered on the exact divider row.
+                let y = layout.punch_y_for_amount(index, tick).round() as i32 - 1;
                 scene.fill_rect(
                     Rect {
                         x: cell.x + 8,
@@ -4355,9 +4355,10 @@ fn draw_fx(scene: &mut Scene, model: &NativeModel) {
                     line_color,
                 );
             }
-            const BAND_MIDS: [f32; 4] = [0.125, 0.375, 0.625, 0.875];
-            for (label, mid) in jambox_core::PUNCH_GRID_LABELS.iter().zip(BAND_MIDS.iter()) {
-                let y = (inner_top + inner_h * (1.0 - mid) - 6.0).round() as i32;
+            for (band, label) in jambox_core::PUNCH_GRID_LABELS.iter().enumerate() {
+                let (low, high) = jambox_core::punch_grid_band(band);
+                let mid_y = layout.punch_y_for_amount(index, 0.5 * (low + high));
+                let y = (mid_y - 4.0).round() as i32;
                 scene.text_scaled(cell.x + 10, y, label, label_color, 1);
             }
         }
@@ -4795,6 +4796,70 @@ mod tests {
                 "{style:?}: brand must clear the back button, right edge {right}"
             );
         }
+    }
+
+    #[test]
+    fn punch_grid_division_flips_exactly_at_the_drawn_dividers() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Fx);
+        let scene = build(&model);
+        for pad in [0usize, 5] {
+            let cell = model.layout.punch_pad_cell(pad);
+            let mut dividers: Vec<&ColorQuad> = scene
+                .color
+                .iter()
+                .filter(|q| {
+                    q.color == 0x7c6f64
+                        && q.h <= 2.5
+                        && q.w > 20.0
+                        && q.x >= cell.x as f32 - 0.5
+                        && q.x + q.w <= (cell.x + cell.w) as f32 + 1.0
+                        && q.y > cell.y as f32
+                        && q.y < (cell.y + cell.h) as f32
+                })
+                .collect();
+            dividers.sort_by(|a, b| a.y.total_cmp(&b.y));
+            assert_eq!(dividers.len(), jambox_core::PUNCH_GRID_TICKS.len());
+            // Top divider separates the last two divisions, and so on down.
+            for (k, quad) in dividers.iter().enumerate() {
+                let upper = jambox_core::PUNCH_GRID_LABELS.len() - 1 - k;
+                let top_row = quad.y as i32;
+                let at = |py: i32| {
+                    jambox_core::punch_grid_index(model.layout.punch_amount_at(pad, py))
+                };
+                assert_eq!(at(top_row), upper, "pad {pad}: row above divider {k}");
+                assert_eq!(at(top_row + 1), upper - 1, "pad {pad}: row below divider {k}");
+                assert_eq!(at(top_row - 6), upper, "pad {pad}: well above divider {k}");
+                assert_eq!(at(top_row + 7), upper - 1, "pad {pad}: well below divider {k}");
+            }
+            // Slider ends clamp to the first and last division.
+            let track = model.layout.punch_pad_track(pad);
+            assert_eq!(
+                jambox_core::punch_grid_index(model.layout.punch_amount_at(pad, track.y + track.h + 20)),
+                0
+            );
+            assert_eq!(
+                jambox_core::punch_grid_index(model.layout.punch_amount_at(pad, cell.y)),
+                3
+            );
+        }
+    }
+
+    #[test]
+    fn punch_fill_top_matches_touch_position() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Fx);
+        model.punch_amount[2] = 0.6;
+        let scene = build(&model);
+        let track = model.layout.punch_pad_track(2);
+        let fill = scene
+            .color
+            .iter()
+            .find(|q| q.color == 0x3c3836 && q.x == track.x as f32 && q.w == track.w as f32 && q.y > track.y as f32)
+            .expect("fill quad");
+        let amount_at_top = model.layout.punch_amount_at(2, fill.y as i32);
+        assert!((amount_at_top - 0.6).abs() < 0.02, "fill edge reads {amount_at_top}");
+        assert_eq!(fill.y + fill.h, (track.y + track.h) as f32);
     }
 
     #[test]
