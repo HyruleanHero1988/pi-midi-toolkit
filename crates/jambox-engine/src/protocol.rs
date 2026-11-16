@@ -236,6 +236,10 @@ pub enum Request {
         stick_y: Option<String>,
         #[serde(default)]
         aftertouch: Option<String>,
+        #[serde(default)]
+        stick_x_range: Option<String>,
+        #[serde(default)]
+        stick_y_range: Option<String>,
     },
     DrumRepeat {
         slots: [u8; 16],
@@ -604,6 +608,8 @@ pub enum Decoded {
         stick_x: Option<String>,
         stick_y: Option<String>,
         aftertouch: Option<String>,
+        stick_x_range: Option<String>,
+        stick_y_range: Option<String>,
     },
     /// Bank A pads arm punch FX (true) or play the kit (false).
     PunchPads {
@@ -986,10 +992,14 @@ pub fn decode(request: Request) -> Result<Decoded, String> {
             stick_x,
             stick_y,
             aftertouch,
+            stick_x_range,
+            stick_y_range,
         } => Decoded::MidiAssign {
             stick_x,
             stick_y,
             aftertouch,
+            stick_x_range,
+            stick_y_range,
         },
         Request::DrumRepeat { slots, latch } => Decoded::DrumRepeat { slots, latch },
         Request::SetArp {
@@ -1326,11 +1336,32 @@ mod tests {
                 stick_y: Some(y),
                 aftertouch: Some(at),
                 stick_x: None,
+                stick_x_range: None,
+                stick_y_range: None,
             } => {
                 assert_eq!(y, "tone");
                 assert_eq!(at, "vibrato");
             }
             _ => panic!("midi_assign decode"),
+        }
+    }
+
+    #[test]
+    fn midi_assign_carries_the_stick_range_toggle() {
+        let d = decode_line(
+            r#"{"cmd":"midi_assign","stick_x_range":"distance","stick_y_range":"bipolar"}"#,
+        );
+        match d {
+            Decoded::MidiAssign {
+                stick_x_range: Some(x),
+                stick_y_range: Some(y),
+                stick_x: None,
+                stick_y: None,
+                aftertouch: None,
+            } => {
+                assert_eq!((x.as_str(), y.as_str()), ("distance", "bipolar"));
+            }
+            _ => panic!("midi_assign range decode"),
         }
     }
 

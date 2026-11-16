@@ -576,7 +576,7 @@ fn draw_midi_panel(scene: &mut Scene, model: &NativeModel) {
     scene.text(
         layout.content.x + 16,
         layout.content.y + 48,
-        "Tap a control, then a destination.",
+        "Tap a control, then a destination. RANGE sets the travel.",
         0xa89984,
     );
     for (i, source) in midi_core::MidiSource::ALL.iter().enumerate() {
@@ -585,6 +585,13 @@ fn draw_midi_panel(scene: &mut Scene, model: &NativeModel) {
         let selected = model.midi_assign_pick == i;
         scene.button(row, if selected { 0x458588 } else { 0x3c3836 });
         scene.text(row.x + 12, row.y + 16, source.label(), 0xfbf1c7);
+        let range_cell = layout.midi_range_cell(i);
+        if range_cell.w > 0 {
+            let range = model.midi_range_for(i);
+            let bipolar = range == midi_core::StickRange::Bipolar;
+            scene.button(range_cell, if bipolar { 0x076678 } else { 0x79740e });
+            scene.text_centered(range_cell, range.label(), 0xffffff, 2);
+        }
         scene.text_centered(
             Rect {
                 x: row.x + row.w - 200,

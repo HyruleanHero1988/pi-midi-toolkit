@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 use midi_core::{
     fanout_dest_mask, is_virtual_port_name, matching_port_names, pick_thru_output_name,
     profile_for_port_name, ControllerProfile, KnobEncoding, MidiDest, MidiEvent, MidiSource,
+    StickRange,
 };
 use midir::{MidiInput, MidiInputConnection, MidiOutput, MidiOutputConnection};
 use tracing::{info, warn};
@@ -32,6 +33,8 @@ const HOTPLUG_POLL: Duration = Duration::from_millis(400);
 /// K1–K8 are CC 70–77 in order. The names below are the drum/FM/FX bindings.
 /// Keys mode maps the same eight CCs onto the synth sliders left to right.
 pub const CC_MOD: u8 = 1;
+/// Second half of a bipolar joystick Y (down), on controllers that split it.
+pub const CC_STICK_DOWN: u8 = 2;
 pub const CC_MORPH: u8 = 70;
 pub const CC_TONE: u8 = 71;
 pub const CC_ATTACK: u8 = 72;
@@ -82,6 +85,12 @@ pub struct MidiMap {
     stick_y: AtomicU8,
     /// Pad poly aftertouch destination.
     aftertouch: AtomicU8,
+    /// Stick X / Y travel mapping ([`StickRange`] as a byte).
+    stick_x_range: AtomicU8,
+    stick_y_range: AtomicU8,
+    /// Last CC1 (up) and CC2 (down) values, so either half can recompute Y.
+    stick_y_up: AtomicU8,
+    stick_y_down: AtomicU8,
     /// FX page: Bank A pad notes are punch toggles instead of kit hits.
     pads_to_fx: AtomicBool,
     /// Per kit-voice note-repeat slot (0 = off). Hardware pads read this.
@@ -107,6 +116,10 @@ impl Default for MidiMap {
             stick_x: AtomicU8::new(MidiDest::default_for(MidiSource::StickX).as_u8()),
             stick_y: AtomicU8::new(MidiDest::default_for(MidiSource::StickY).as_u8()),
             aftertouch: AtomicU8::new(MidiDest::default_for(MidiSource::Aftertouch).as_u8()),
+            stick_x_range: AtomicU8::new(StickRange::default_for(MidiSource::StickX).as_u8()),
+            stick_y_range: AtomicU8::new(StickRange::default_for(MidiSource::StickY).as_u8()),
+            stick_y_up: AtomicU8::new(0),
+            stick_y_down: AtomicU8::new(0),
             pads_to_fx: AtomicBool::new(true),
             repeat_div: std::array::from_fn(|_| AtomicU8::new(0)),
             repeat_latch: AtomicBool::new(false),
@@ -201,6 +214,32 @@ impl MidiMap {
         if let Some(dest) = aftertouch.and_then(MidiDest::from_id) {
             self.aftertouch.store(dest.as_u8(), Ordering::Relaxed);
         }
+    }
+
+    pub fn set_stick_ranges(&self, stick_x: Option<&str>, stick_y: Option<&str>) {
+        if let Some(range) = stick_x.and_then(StickRange::from_id) {
+            self.stick_x_range.store(range.as_u8(), Ordering::Relaxed);
+        }
+        if let Some(range) = stick_y.and_then(StickRange::from_id) {
+            self.stick_y_range.store(range.as_u8(), Ordering::Relaxed);
+        }
+    }
+
+    fn stick_x_range(&self) -> StickRange {
+        StickRange::from_u8(self.stick_x_range.load(Ordering::Relaxed))
+    }
+
+    fn stick_y_range(&self) -> StickRange {
+        StickRange::from_u8(self.stick_y_range.load(Ordering::Relaxed))
+    }
+
+    fn stick_y_command(&self) -> Option<Command> {
+        let amount = midi_core::stick_y_amount(
+            self.stick_y_up.load(Ordering::Relaxed),
+            self.stick_y_down.load(Ordering::Relaxed),
+            self.stick_y_range(),
+        );
+        dest_command(self.dest_for(MidiSource::StickY), amount, None, None)
     }
 
     fn dest_for(&self, source: MidiSource) -> MidiDest {
@@ -380,8 +419,7 @@ impl MidiMap {
             }
             MidiEvent::PitchBend { value, .. } => {
                 let dest = self.dest_for(MidiSource::StickX);
-                let unit = (value as f32 / 16_383.0).clamp(0.0, 1.0);
-                let semis = ((value as f32) - 8192.0) / 8192.0 * 2.0;
+                let (unit, semis) = midi_core::stick_x_amount(value, self.stick_x_range());
                 dest_command(dest, unit, Some(semis), None)
             }
             MidiEvent::ControlChange {
@@ -462,8 +500,19 @@ impl MidiMap {
         value: u8,
     ) -> Option<Command> {
         if controller == CC_MOD {
-            let unit = (value as f32 / 127.0).clamp(0.0, 1.0);
-            return dest_command(self.dest_for(MidiSource::StickY), unit, None, None);
+            self.stick_y_up.store(value.min(127), Ordering::Relaxed);
+            return self.stick_y_command();
+        }
+        // The other half of a bipolar stick travel. Only claimed while Y is
+        // bipolar and CC2 is not already a mapped knob / fader.
+        if controller == CC_STICK_DOWN
+            && self.stick_y_range() == StickRange::Bipolar
+            && profile.fader_index(controller).is_none()
+            && profile.knob_index(controller).is_none()
+            && profile.knob_bank2_index(controller).is_none()
+        {
+            self.stick_y_down.store(value.min(127), Ordering::Relaxed);
+            return self.stick_y_command();
         }
         if controller == 64
             && profile.fader_index(64).is_none()
@@ -1318,6 +1367,110 @@ mod tests {
                 velocity: 40,
             }
         );
+    }
+
+    fn wheel(map: &MidiMap, value: u16) -> Option<Command> {
+        map.interpret(MidiEvent::PitchBend { channel: 0, value })
+    }
+
+    fn mod_cc(map: &MidiMap, controller: u8, value: u8) -> Option<Command> {
+        map.interpret(MidiEvent::ControlChange {
+            channel: 0,
+            controller,
+            value,
+        })
+    }
+
+    fn tone(value: f32) -> Option<Command> {
+        Some(Command::SetSynth {
+            param: SynthParam::Tone,
+            value,
+        })
+    }
+
+    #[test]
+    fn default_stick_ranges_keep_the_old_mapping() {
+        let map = MidiMap::default();
+        map.set_assigns(Some("tone"), Some("tone"), None);
+        assert_eq!(wheel(&map, 8192), tone(0.5), "X rest is neutral");
+        assert_eq!(mod_cc(&map, CC_MOD, 0), tone(0.0), "Y rest is 0");
+        assert_eq!(mod_cc(&map, CC_MOD, 127), tone(1.0));
+    }
+
+    #[test]
+    fn x_distance_mode_rests_at_zero_and_rises_either_way() {
+        let map = MidiMap::default();
+        map.set_assigns(Some("tone"), None, None);
+        map.set_stick_ranges(Some("distance"), None);
+        assert_eq!(wheel(&map, 8192), tone(0.0));
+        let left = wheel(&map, 0);
+        let right = wheel(&map, 16_383);
+        assert!(matches!(left, Some(Command::SetSynth { value, .. }) if value > 0.99));
+        assert!(matches!(right, Some(Command::SetSynth { value, .. }) if value > 0.99));
+    }
+
+    #[test]
+    fn y_bipolar_mode_keeps_tone_on_neutral_at_rest() {
+        let map = MidiMap::default();
+        map.set_assigns(None, Some("tone"), None);
+        map.set_stick_ranges(None, Some("bipolar"));
+        assert_eq!(mod_cc(&map, CC_MOD, 0), tone(0.5), "rest must not zero the tone");
+        assert_eq!(mod_cc(&map, CC_MOD, 127), tone(1.0));
+    }
+
+    #[test]
+    fn y_bipolar_uses_cc2_for_the_down_half_when_the_controller_sends_it() {
+        let map = MidiMap::default();
+        map.set_assigns(None, Some("tone"), None);
+        map.set_stick_ranges(None, Some("bipolar"));
+        assert_eq!(mod_cc(&map, CC_STICK_DOWN, 127), tone(0.0));
+        assert_eq!(mod_cc(&map, CC_MOD, 127), tone(0.5), "both halves cancel");
+        assert_eq!(mod_cc(&map, CC_STICK_DOWN, 0), tone(1.0));
+    }
+
+    #[test]
+    fn cc2_is_ignored_unless_y_is_bipolar() {
+        let map = MidiMap::default();
+        map.set_assigns(None, Some("tone"), None);
+        assert!(
+            mod_cc(&map, CC_STICK_DOWN, 127).is_none(),
+            "distance mode must not claim CC2"
+        );
+    }
+
+    #[test]
+    fn y_bipolar_pitch_rests_in_tune() {
+        let map = MidiMap::default();
+        map.set_assigns(None, Some("pitch"), None);
+        map.set_stick_ranges(None, Some("bipolar"));
+        assert_eq!(
+            mod_cc(&map, CC_MOD, 0),
+            Some(Command::SetSynth {
+                param: SynthParam::PitchBend,
+                value: 0.0
+            })
+        );
+        map.set_stick_ranges(None, Some("distance"));
+        assert!(matches!(
+            mod_cc(&map, CC_MOD, 0),
+            Some(Command::SetSynth { value, .. }) if value < -1.9
+        ), "old distance behavior is unchanged: rest bends down");
+    }
+
+    #[test]
+    fn x_pitch_is_unchanged_in_bipolar_mode() {
+        let map = MidiMap::default();
+        assert_eq!(
+            wheel(&map, 8192),
+            Some(Command::SetSynth {
+                param: SynthParam::PitchBend,
+                value: 0.0
+            })
+        );
+        assert!(matches!(
+            wheel(&map, 16_383),
+            Some(Command::SetSynth { value, .. }) if (value - 2.0).abs() < 0.01
+        ));
     }
 
     #[test]

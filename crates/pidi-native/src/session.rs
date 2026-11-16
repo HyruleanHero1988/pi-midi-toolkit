@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::font::FontStyle;
-use midi_core::MidiDest;
+use midi_core::{MidiDest, StickRange};
 
 /// Stored MIDI/audio routing preference (engine may still always play local).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -332,6 +332,12 @@ pub struct SessionState {
     /// Joystick Y / CC1 destination. Missing → vibrato.
     #[serde(default = "default_midi_stick_y")]
     pub midi_stick_y: MidiDest,
+    /// Joystick X travel mapping. Missing → bipolar (full range, rest = neutral).
+    #[serde(default = "default_stick_x_range")]
+    pub midi_stick_x_range: StickRange,
+    /// Joystick Y travel mapping. Missing → distance (rest = 0), the old behavior.
+    #[serde(default = "default_stick_y_range")]
+    pub midi_stick_y_range: StickRange,
     /// Pad aftertouch destination. Missing → drum tone.
     #[serde(default = "default_midi_aftertouch")]
     pub midi_aftertouch: MidiDest,
@@ -513,6 +519,14 @@ fn default_midi_stick_y() -> MidiDest {
     MidiDest::default_for(midi_core::MidiSource::StickY)
 }
 
+fn default_stick_x_range() -> StickRange {
+    StickRange::default_for(midi_core::MidiSource::StickX)
+}
+
+fn default_stick_y_range() -> StickRange {
+    StickRange::default_for(midi_core::MidiSource::StickY)
+}
+
 fn default_midi_aftertouch() -> MidiDest {
     MidiDest::default_for(midi_core::MidiSource::Aftertouch)
 }
@@ -599,6 +613,8 @@ impl Default for SessionState {
             kaoss_y_vel_max: default_kaoss_y_vel_max(),
             midi_stick_x: default_midi_stick_x(),
             midi_stick_y: default_midi_stick_y(),
+            midi_stick_x_range: default_stick_x_range(),
+            midi_stick_y_range: default_stick_y_range(),
             midi_aftertouch: default_midi_aftertouch(),
             drum_repeat_lock: false,
             drum_repeat: Vec::new(),
@@ -807,6 +823,27 @@ mod tests {
         let back: SessionState = serde_json::from_str(&json).unwrap();
         assert_eq!(back.midi_stick_y, MidiDest::Tone);
         assert_eq!(back.midi_aftertouch, MidiDest::Vibrato);
+    }
+
+    #[test]
+    fn session_roundtrip_keeps_the_stick_range_toggles() {
+        let mut s = SessionState::default();
+        assert_eq!(s.midi_stick_x_range, StickRange::Bipolar);
+        assert_eq!(s.midi_stick_y_range, StickRange::Distance);
+        s.midi_stick_x_range = StickRange::Distance;
+        s.midi_stick_y_range = StickRange::Bipolar;
+        let json = serde_json::to_string(&s).unwrap();
+        let back: SessionState = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.midi_stick_x_range, StickRange::Distance);
+        assert_eq!(back.midi_stick_y_range, StickRange::Bipolar);
+    }
+
+    #[test]
+    fn old_sessions_keep_the_old_stick_ranges() {
+        let json = r#"{"version":1,"bpm":120.0,"morph":0.5,"tone":0.5,"level":0.8,"attack":0.05,"release":0.3,"morph_a":0,"morph_b":1,"kaoss_scale_index":1,"kaoss_key":0,"kaoss_octaves":2,"kaoss_program":0,"kaoss_gate":0,"kaoss_hold":false,"fx_bus":[0.0,0.0,0.0]}"#;
+        let s: SessionState = serde_json::from_str(json).unwrap();
+        assert_eq!(s.midi_stick_x_range, StickRange::Bipolar);
+        assert_eq!(s.midi_stick_y_range, StickRange::Distance);
     }
 
     #[test]

@@ -423,11 +423,15 @@ impl Outbox {
         stick_x: midi_core::MidiDest,
         stick_y: midi_core::MidiDest,
         aftertouch: midi_core::MidiDest,
+        stick_x_range: midi_core::StickRange,
+        stick_y_range: midi_core::StickRange,
     ) {
         self.reliable.push_back(Request::MidiAssign {
             stick_x: Some(stick_x.id().into()),
             stick_y: Some(stick_y.id().into()),
             aftertouch: Some(aftertouch.id().into()),
+            stick_x_range: Some(stick_x_range.id().into()),
+            stick_y_range: Some(stick_y_range.id().into()),
         });
     }
 

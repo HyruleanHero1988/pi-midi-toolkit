@@ -299,6 +299,12 @@ pub enum Request {
         stick_y: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         aftertouch: Option<String>,
+        /// `"bipolar"` (full range, rest = neutral) or `"distance"` (rest = 0,
+        /// either direction raises it). Missing keeps the last value.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stick_x_range: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stick_y_range: Option<String>,
     },
     /// Per kit-voice note-repeat map for hardware pads. `slots[i]`: 0 = off,
     /// 1 = 1/4, 2 = 1/8, 3 = 1/8T, 4 = 1/16, 5 = triple. `latch` keeps the
