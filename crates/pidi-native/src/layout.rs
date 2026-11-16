@@ -3807,6 +3807,32 @@ impl Layout {
         }
     }
 
+    /// Slider track inside a punch pad, below the pad title. Fill, grid
+    /// dividers, band labels and touch input all use this one rect, so what is
+    /// drawn is exactly what is selected.
+    pub fn punch_pad_track(&self, index: usize) -> Rect {
+        let cell = self.punch_pad_cell(index);
+        Rect {
+            x: cell.x + 6,
+            y: cell.y + 22,
+            w: cell.w - 12,
+            h: cell.h - 28,
+        }
+    }
+
+    /// Screen Y (top = amount 1, bottom = amount 0) for a punch amount.
+    pub fn punch_y_for_amount(&self, index: usize, amount: f32) -> f32 {
+        let track = self.punch_pad_track(index);
+        track.y as f32 + track.h as f32 * (1.0 - amount.clamp(0.0, 1.0))
+    }
+
+    /// Punch amount for a touch at pixel row `py` (sampled at the pixel center).
+    pub fn punch_amount_at(&self, index: usize, py: i32) -> f32 {
+        let track = self.punch_pad_track(index);
+        let t = (py as f32 + 0.5 - track.y as f32) / track.h.max(1) as f32;
+        (1.0 - t).clamp(0.0, 1.0)
+    }
+
     fn hit_settings(&self, px: i32, py: i32) -> Hit {
         if self.settings_panic.contains(px, py) {
             return Hit::SettingsPanic;
@@ -4718,6 +4744,32 @@ mod tests {
         match layout.hit(UiMode::Chords, play.x + play.w / 2, play.y + play.h / 2) {
             Hit::ChordsStrum { .. } => {}
             other => panic!("center of wide plate should strum, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn punch_track_maps_amount_and_y_both_ways_inside_the_pad() {
+        let layout = Layout::default();
+        for pad in 0..Layout::PUNCH_PAD_COUNT {
+            let cell = layout.punch_pad_cell(pad);
+            let track = layout.punch_pad_track(pad);
+            assert!(track.x >= cell.x && track.x + track.w <= cell.x + cell.w);
+            assert!(track.y > cell.y + 14, "track must clear the pad title");
+            assert!(track.y + track.h <= cell.y + cell.h);
+            for band in 0..jambox_core::PUNCH_GRID_LABELS.len() {
+                let (low, high) = jambox_core::punch_grid_band(band);
+                let mid = 0.5 * (low + high);
+                let y = layout.punch_y_for_amount(pad, mid).round() as i32;
+                assert_eq!(
+                    jambox_core::punch_grid_index(layout.punch_amount_at(pad, y)),
+                    band,
+                    "pad {pad}: label row of band {band} must select that band"
+                );
+                assert!(y > track.y && y < track.y + track.h);
+            }
+            let bottom = layout.punch_amount_at(pad, track.y + track.h - 1);
+            let top = layout.punch_amount_at(pad, track.y);
+            assert!(bottom < 0.05 && top > 0.95, "pad {pad}: ends {bottom} {top}");
         }
     }
 
