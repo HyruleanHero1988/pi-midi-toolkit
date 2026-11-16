@@ -237,6 +237,7 @@ pub enum Hit {
     MidiClose,
     MidiSource(usize),
     MidiDest(usize),
+    MidiRange(usize),
     UpdateClose,
     UpdateCheck,
     UpdateApply,
@@ -1322,6 +1323,19 @@ impl Layout {
         }
     }
 
+    /// Bipolar / distance toggle on a stick row. Zero-width for aftertouch,
+    /// which has no stick travel.
+    pub fn midi_range_cell(&self, index: usize) -> Rect {
+        let row = self.midi_source_row(index);
+        let has_range = index % midi_core::MidiSource::ALL.len() < 2;
+        Rect {
+            x: row.x + row.w - 200 - 164,
+            y: row.y + 6,
+            w: if has_range { 152 } else { 0 },
+            h: row.h - 12,
+        }
+    }
+
     pub fn midi_dest_cell(&self, index: usize) -> Rect {
         let i = index % midi_core::MidiDest::ALL.len();
         let col = (i % 4) as i32;
@@ -1342,6 +1356,10 @@ impl Layout {
             return Hit::MidiClose;
         }
         for i in 0..midi_core::MidiSource::ALL.len() {
+            let range = self.midi_range_cell(i);
+            if range.w > 0 && range.contains(px, py) {
+                return Hit::MidiRange(i);
+            }
             if self.midi_source_row(i).contains(px, py) {
                 return Hit::MidiSource(i);
             }
@@ -4722,6 +4740,28 @@ mod tests {
         for i in 0..midi_core::MidiDest::ALL.len() {
             assert_on_screen("midi dest", layout.midi_dest_cell(i));
         }
+    }
+
+    #[test]
+    fn midi_range_buttons_fit_their_row_without_covering_other_text() {
+        let layout = Layout::new();
+        for i in 0..2 {
+            let row = layout.midi_source_row(i);
+            let range = layout.midi_range_cell(i);
+            assert!(range.w > 0);
+            assert_on_screen("midi range", range);
+            assert!(range.x >= row.x && range.x + range.w <= row.x + row.w);
+            assert!(range.y >= row.y && range.y + range.h <= row.y + row.h);
+            // Destination label sits in the right-most 200 px of the row.
+            assert!(range.x + range.w <= row.x + row.w - 200);
+            // Source label (left) needs about 200 px at the default text scale.
+            assert!(range.x >= row.x + 12 + 200);
+            assert_eq!(
+                layout.hit_midi_panel(range.x + 4, range.y + 4),
+                Hit::MidiRange(i)
+            );
+        }
+        assert_eq!(layout.midi_range_cell(2).w, 0);
     }
 
     #[test]

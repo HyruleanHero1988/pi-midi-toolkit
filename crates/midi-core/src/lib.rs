@@ -11,7 +11,9 @@ mod preset;
 mod process;
 mod stuck;
 
-pub use assign::{MidiDest, MidiSource};
+pub use assign::{
+    stick_x_amount, stick_y_amount, MidiDest, MidiSource, StickRange, STICK_DISTANCE_DEADZONE,
+};
 pub use controller::{
     apply_default_overlay_dirs, apply_knob_cc, apply_overlay_dir, builtin_profiles,
     installed_profiles, merge_profile_json, mpk_knob_ccs, mpk_note_for_phrase_cell,

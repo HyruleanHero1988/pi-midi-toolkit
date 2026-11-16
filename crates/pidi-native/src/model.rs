@@ -565,6 +565,8 @@ pub struct NativeModel {
     pub midi_assign_pick: usize,
     pub midi_stick_x: midi_core::MidiDest,
     pub midi_stick_y: midi_core::MidiDest,
+    pub midi_stick_x_range: midi_core::StickRange,
+    pub midi_stick_y_range: midi_core::StickRange,
     pub midi_aftertouch: midi_core::MidiDest,
     /// Profile default last applied, so a user toggle survives a hotplug swap.
     full_vel_profile_default: bool,
@@ -901,6 +903,8 @@ impl NativeModel {
             midi_assign_pick: 1,
             midi_stick_x: midi_core::MidiDest::default_for(midi_core::MidiSource::StickX),
             midi_stick_y: midi_core::MidiDest::default_for(midi_core::MidiSource::StickY),
+            midi_stick_x_range: midi_core::StickRange::default_for(midi_core::MidiSource::StickX),
+            midi_stick_y_range: midi_core::StickRange::default_for(midi_core::MidiSource::StickY),
             midi_aftertouch: midi_core::MidiDest::default_for(midi_core::MidiSource::Aftertouch),
             full_vel_profile_default: true,
             drum_repeat_lock: false,
@@ -1721,7 +1725,7 @@ impl NativeModel {
             outbox.full_vel(self.full_vel);
             self.push_scale_lock(outbox);
             self.push_kaoss_y_range(outbox);
-            outbox.midi_assign(self.midi_stick_x, self.midi_stick_y, self.midi_aftertouch);
+            self.send_midi_assign(outbox);
             outbox.channel_map(self.channel_map_bits);
             self.sync_drum_repeat_map(outbox);
         }
@@ -1899,6 +1903,44 @@ impl NativeModel {
         self.mark_dirty();
     }
 
+    fn send_midi_assign(&self, outbox: &mut Outbox) {
+        outbox.midi_assign(
+            self.midi_stick_x,
+            self.midi_stick_y,
+            self.midi_aftertouch,
+            self.midi_stick_x_range,
+            self.midi_stick_y_range,
+        );
+    }
+
+    /// Travel mapping for a source row. Aftertouch has no stick travel, so it
+    /// always reads as distance.
+    pub fn midi_range_for(&self, source: usize) -> midi_core::StickRange {
+        match source % midi_core::MidiSource::ALL.len() {
+            0 => self.midi_stick_x_range,
+            1 => self.midi_stick_y_range,
+            _ => midi_core::StickRange::Distance,
+        }
+    }
+
+    fn toggle_midi_range(&mut self, source: usize, outbox: &mut Outbox) {
+        let source = source % midi_core::MidiSource::ALL.len();
+        match source {
+            0 => self.midi_stick_x_range = self.midi_stick_x_range.toggled(),
+            1 => self.midi_stick_y_range = self.midi_stick_y_range.toggled(),
+            _ => return,
+        }
+        self.midi_assign_pick = source;
+        self.send_midi_assign(outbox);
+        self.status_line = format!(
+            "{} range: {}",
+            midi_core::MidiSource::from_index(source).title(),
+            self.midi_range_for(source).title()
+        );
+        self.session_dirty = true;
+        self.mark_dirty();
+    }
+
     pub fn midi_dest_for(&self, source: usize) -> midi_core::MidiDest {
         match source % midi_core::MidiSource::ALL.len() {
             0 => self.midi_stick_x,
@@ -1914,7 +1956,7 @@ impl NativeModel {
             _ => self.midi_aftertouch = dest,
         }
         self.midi_assign_pick = source % midi_core::MidiSource::ALL.len();
-        outbox.midi_assign(self.midi_stick_x, self.midi_stick_y, self.midi_aftertouch);
+        self.send_midi_assign(outbox);
         self.status_line = format!(
             "{} → {}",
             midi_core::MidiSource::from_index(self.midi_assign_pick).title(),
@@ -2549,6 +2591,8 @@ impl NativeModel {
         self.kaoss_y_vel = (lo, hi);
         self.midi_stick_x = s.midi_stick_x;
         self.midi_stick_y = s.midi_stick_y;
+        self.midi_stick_x_range = s.midi_stick_x_range;
+        self.midi_stick_y_range = s.midi_stick_y_range;
         self.midi_aftertouch = s.midi_aftertouch;
         self.drum_repeat_lock = s.drum_repeat_lock;
         self.set_drum_repeat_slots(&s.drum_repeat);
@@ -2592,7 +2636,7 @@ impl NativeModel {
         outbox.full_vel(self.full_vel);
         self.push_scale_lock(outbox);
         self.push_kaoss_y_range(outbox);
-        outbox.midi_assign(self.midi_stick_x, self.midi_stick_y, self.midi_aftertouch);
+        self.send_midi_assign(outbox);
         self.sync_drum_repeat_map(outbox);
         outbox.emit_mode("clips", self.pads_out.wire());
         outbox.emit_mode("kaoss", self.kaoss_out.wire());
@@ -2735,6 +2779,8 @@ impl NativeModel {
             kaoss_y_vel_max: self.kaoss_y_vel.1,
             midi_stick_x: self.midi_stick_x,
             midi_stick_y: self.midi_stick_y,
+            midi_stick_x_range: self.midi_stick_x_range,
+            midi_stick_y_range: self.midi_stick_y_range,
             midi_aftertouch: self.midi_aftertouch,
             drum_repeat_lock: self.drum_repeat_lock,
             drum_repeat: self.drum_repeat_save_slots(),
@@ -4518,6 +4564,10 @@ impl NativeModel {
                     self.midi_dest_for(self.midi_assign_pick).title()
                 );
                 self.mark_dirty();
+            }
+            Hit::MidiRange(index) => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.toggle_midi_range(index, outbox);
             }
             Hit::MidiDest(index) => {
                 self.tap_ui(slot, id, gesture, px, py);
@@ -14407,6 +14457,113 @@ mod tests {
         model.finger_down(4, model.layout.midi_close().x + 4, model.layout.midi_close().y + 4, &mut out);
         model.finger_up(4, &mut out);
         assert!(!model.midi_panel_open);
+    }
+
+    fn open_midi_panel_for_test(model: &mut NativeModel, out: &mut Outbox) {
+        model.set_mode(UiMode::Settings);
+        let midi = model.layout.settings_midi;
+        model.finger_down(1, midi.x + 4, midi.y + 4, out);
+        model.finger_up(1, out);
+        assert!(model.midi_panel_open);
+    }
+
+    #[test]
+    fn stick_range_toggle_defaults_preserve_current_behavior() {
+        let model = NativeModel::new();
+        assert_eq!(model.midi_stick_x_range, midi_core::StickRange::Bipolar);
+        assert_eq!(model.midi_stick_y_range, midi_core::StickRange::Distance);
+        assert_eq!(model.midi_range_for(2), midi_core::StickRange::Distance);
+    }
+
+    #[test]
+    fn midi_panel_range_button_toggles_each_axis_and_tells_the_engine() {
+        let mut model = NativeModel::new();
+        let mut out = Outbox::new();
+        open_midi_panel_for_test(&mut model, &mut out);
+        let _ = out.take();
+
+        let y = model.layout.midi_range_cell(1);
+        model.finger_down(2, y.x + 4, y.y + 4, &mut out);
+        model.finger_up(2, &mut out);
+        assert_eq!(model.midi_stick_y_range, midi_core::StickRange::Bipolar);
+        assert_eq!(
+            model.midi_stick_x_range,
+            midi_core::StickRange::Bipolar,
+            "X is untouched"
+        );
+        assert!(out.take().iter().any(|r| matches!(
+            r,
+            Request::MidiAssign {
+                stick_y_range: Some(y),
+                stick_x_range: Some(x),
+                ..
+            } if y == "bipolar" && x == "bipolar"
+        )));
+
+        let x = model.layout.midi_range_cell(0);
+        model.finger_down(3, x.x + 4, x.y + 4, &mut out);
+        model.finger_up(3, &mut out);
+        assert_eq!(model.midi_stick_x_range, midi_core::StickRange::Distance);
+        assert!(out.take().iter().any(|r| matches!(
+            r,
+            Request::MidiAssign { stick_x_range: Some(x), .. } if x == "distance"
+        )));
+        assert!(model.status_line.contains("distance"));
+
+        model.finger_down(4, y.x + 4, y.y + 4, &mut out);
+        model.finger_up(4, &mut out);
+        assert_eq!(model.midi_stick_y_range, midi_core::StickRange::Distance);
+    }
+
+    #[test]
+    fn aftertouch_row_has_no_range_button() {
+        let mut model = NativeModel::new();
+        let mut out = Outbox::new();
+        open_midi_panel_for_test(&mut model, &mut out);
+        assert_eq!(model.layout.midi_range_cell(2).w, 0);
+        let row = model.layout.midi_source_row(2);
+        model.finger_down(2, row.x + row.w - 200 - 100, row.y + 20, &mut out);
+        model.finger_up(2, &mut out);
+        assert_eq!(model.midi_assign_pick, 2);
+        assert_eq!(model.midi_stick_x_range, midi_core::StickRange::Bipolar);
+        assert_eq!(model.midi_stick_y_range, midi_core::StickRange::Distance);
+    }
+
+    #[test]
+    fn stick_ranges_persist_through_the_session_and_resync_the_engine() {
+        let mut model = NativeModel::new();
+        let mut out = Outbox::new();
+        open_midi_panel_for_test(&mut model, &mut out);
+        let y = model.layout.midi_range_cell(1);
+        model.finger_down(2, y.x + 4, y.y + 4, &mut out);
+        model.finger_up(2, &mut out);
+        let saved = model.capture_session();
+        assert_eq!(saved.midi_stick_y_range, midi_core::StickRange::Bipolar);
+        let json = serde_json::to_string(&saved).unwrap();
+        let back: SessionState = serde_json::from_str(&json).unwrap();
+
+        let mut fresh = NativeModel::new();
+        let mut out = Outbox::new();
+        fresh.apply_session(&back, &mut out);
+        assert_eq!(fresh.midi_stick_y_range, midi_core::StickRange::Bipolar);
+        assert!(out.take().iter().any(|r| matches!(
+            r,
+            Request::MidiAssign { stick_y_range: Some(y), .. } if y == "bipolar"
+        )));
+    }
+
+    #[test]
+    fn engine_link_resync_resends_the_stick_ranges() {
+        let mut model = NativeModel::new();
+        model.midi_stick_y_range = midi_core::StickRange::Bipolar;
+        let mut out = Outbox::new();
+        model.note_engine_link(false, &mut out);
+        let _ = out.take();
+        model.note_engine_link(true, &mut out);
+        assert!(out.take().iter().any(|r| matches!(
+            r,
+            Request::MidiAssign { stick_y_range: Some(y), .. } if y == "bipolar"
+        )));
     }
 
     #[test]

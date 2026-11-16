@@ -447,8 +447,11 @@ pub fn handle_line(
             stick_x,
             stick_y,
             aftertouch,
+            stick_x_range,
+            stick_y_range,
         }) => {
             map.set_assigns(stick_x.as_deref(), stick_y.as_deref(), aftertouch.as_deref());
+            map.set_stick_ranges(stick_x_range.as_deref(), stick_y_range.as_deref());
             Response::Ok
         }
         Ok(Decoded::PunchPads { armed }) => {

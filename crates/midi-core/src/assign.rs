@@ -177,6 +177,114 @@ impl MidiDest {
     }
 }
 
+/// How a stick axis turns its travel into a 0..1 amount.
+///
+/// - `Bipolar` (full range): the middle of the travel is the neutral point and
+///   the whole travel is used, so a target like PITCH or TONE sits at its
+///   neutral value at rest, goes down one way and up the other.
+/// - `Distance` (unipolar): the amount is how far the stick is from rest.
+///   Rest is 0 and either direction raises it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StickRange {
+    Bipolar,
+    Distance,
+}
+
+/// Wheel noise at rest must not read as a deflection in distance mode.
+pub const STICK_DISTANCE_DEADZONE: f32 = 0.02;
+
+impl StickRange {
+    /// Factory behavior: the pitch wheel (X) is full range, CC1 (Y) is distance.
+    pub fn default_for(source: MidiSource) -> Self {
+        match source {
+            MidiSource::StickX => Self::Bipolar,
+            MidiSource::StickY | MidiSource::Aftertouch => Self::Distance,
+        }
+    }
+
+    pub fn toggled(self) -> Self {
+        match self {
+            Self::Bipolar => Self::Distance,
+            Self::Distance => Self::Bipolar,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Bipolar => "BIPOLAR",
+            Self::Distance => "DISTANCE",
+        }
+    }
+
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Bipolar => "bipolar (full range)",
+            Self::Distance => "distance from center",
+        }
+    }
+
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Bipolar => "bipolar",
+            Self::Distance => "distance",
+        }
+    }
+
+    pub fn from_id(name: &str) -> Option<Self> {
+        Some(match name {
+            "bipolar" | "full" => Self::Bipolar,
+            "distance" | "unipolar" => Self::Distance,
+            _ => return None,
+        })
+    }
+
+    pub fn as_u8(self) -> u8 {
+        match self {
+            Self::Bipolar => 0,
+            Self::Distance => 1,
+        }
+    }
+
+    pub fn from_u8(value: u8) -> Self {
+        if value == 1 {
+            Self::Distance
+        } else {
+            Self::Bipolar
+        }
+    }
+}
+
+/// Joystick X is the 14-bit pitch wheel (0..16383, rest 8192). Returns the
+/// 0..1 amount and the pitch-bend value in semitones (+-2 full travel).
+pub fn stick_x_amount(wheel: u16, range: StickRange) -> (f32, f32) {
+    let s = ((wheel as f32 - 8192.0) / 8192.0).clamp(-1.0, 1.0);
+    match range {
+        StickRange::Bipolar => (0.5 + 0.5 * s, s * 2.0),
+        StickRange::Distance => {
+            let d = s.abs();
+            let d = if d <= STICK_DISTANCE_DEADZONE { 0.0 } else { d };
+            (d, d * 2.0)
+        }
+    }
+}
+
+/// Joystick Y is CC1 (`up`, rest 0). Some controllers send the other half of
+/// the travel on a second CC (`down`, rest 0).
+///
+/// `Distance` is the raw CC1 value: rest 0, more travel = more amount.
+/// `Bipolar` puts rest at 0.5 (the neutral of TONE, MORPH, PITCH...), `up`
+/// moves toward 1 and `down`, when the controller sends it, toward 0.
+pub fn stick_y_amount(up: u8, down: u8, range: StickRange) -> f32 {
+    match range {
+        StickRange::Distance => (up as f32 / 127.0).clamp(0.0, 1.0),
+        StickRange::Bipolar => {
+            let s = ((up as f32 - down as f32) / 127.0).clamp(-1.0, 1.0);
+            0.5 + 0.5 * s
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -196,5 +304,56 @@ mod tests {
         for dest in MidiDest::ALL {
             assert_eq!(MidiDest::from_u8(dest.as_u8()), dest);
         }
+    }
+
+    #[test]
+    fn range_defaults_keep_the_old_behavior() {
+        assert_eq!(StickRange::default_for(MidiSource::StickX), StickRange::Bipolar);
+        assert_eq!(StickRange::default_for(MidiSource::StickY), StickRange::Distance);
+    }
+
+    #[test]
+    fn range_ids_and_bytes_round_trip() {
+        for r in [StickRange::Bipolar, StickRange::Distance] {
+            assert_eq!(StickRange::from_id(r.id()), Some(r));
+            assert_eq!(StickRange::from_u8(r.as_u8()), r);
+            assert_eq!(r.toggled().toggled(), r);
+        }
+        assert_eq!(StickRange::from_id("nope"), None);
+    }
+
+    #[test]
+    fn x_bipolar_centers_on_neutral_and_uses_the_whole_travel() {
+        let (u, semis) = stick_x_amount(8192, StickRange::Bipolar);
+        assert!((u - 0.5).abs() < 1e-6 && semis.abs() < 1e-6);
+        let (lo, lo_semis) = stick_x_amount(0, StickRange::Bipolar);
+        let (hi, hi_semis) = stick_x_amount(16383, StickRange::Bipolar);
+        assert!(lo < 0.001 && hi > 0.999);
+        assert!((lo_semis + 2.0).abs() < 1e-3 && (hi_semis - 2.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn x_distance_is_zero_at_rest_and_rises_both_ways() {
+        assert_eq!(stick_x_amount(8192, StickRange::Distance).0, 0.0);
+        assert_eq!(stick_x_amount(8192 + 50, StickRange::Distance).0, 0.0);
+        let left = stick_x_amount(0, StickRange::Distance).0;
+        let right = stick_x_amount(16383, StickRange::Distance).0;
+        assert!(left > 0.99 && right > 0.99);
+        assert!(stick_x_amount(4096, StickRange::Distance).0 > 0.4);
+    }
+
+    #[test]
+    fn y_distance_is_the_raw_cc1_value() {
+        assert_eq!(stick_y_amount(0, 0, StickRange::Distance), 0.0);
+        assert_eq!(stick_y_amount(127, 0, StickRange::Distance), 1.0);
+        assert_eq!(stick_y_amount(127, 127, StickRange::Distance), 1.0);
+    }
+
+    #[test]
+    fn y_bipolar_rests_on_neutral_not_zero() {
+        assert_eq!(stick_y_amount(0, 0, StickRange::Bipolar), 0.5);
+        assert_eq!(stick_y_amount(127, 0, StickRange::Bipolar), 1.0);
+        assert_eq!(stick_y_amount(0, 127, StickRange::Bipolar), 0.0);
+        assert_eq!(stick_y_amount(127, 127, StickRange::Bipolar), 0.5);
     }
 }
