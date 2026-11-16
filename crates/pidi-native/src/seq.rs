@@ -321,6 +321,11 @@ pub enum SeqAction {
         events: Vec<WireClipEvent>,
         length_ticks: u32,
         launch: bool,
+        /// Start the loop now, ignoring the QNT grid. Overdub timestamps are
+        /// measured from the REC press, so the loop must restart on that press;
+        /// a bar-quantized launch would play it up to a bar late and every
+        /// recorded hit would land that far from where it was played.
+        immediate: bool,
     },
     Stop,
     Clear,
@@ -570,6 +575,7 @@ impl SeqModel {
             events,
             length_ticks,
             launch: true,
+            immediate: false,
         }
     }
 
@@ -597,6 +603,7 @@ impl SeqModel {
             events,
             length_ticks,
             launch: true,
+            immediate: true,
         }
     }
 
@@ -666,6 +673,7 @@ impl SeqModel {
             events: wire,
             length_ticks,
             launch: true,
+            immediate: false,
         }
     }
 
@@ -684,6 +692,7 @@ impl SeqModel {
             events,
             length_ticks,
             launch: true,
+            immediate: false,
         }
     }
 
@@ -712,6 +721,7 @@ impl SeqModel {
                 events,
                 length_ticks,
                 launch: true,
+                immediate: false,
             }
         }
     }
@@ -728,6 +738,7 @@ impl SeqModel {
             events,
             length_ticks,
             launch: true,
+            immediate: false,
         }
     }
 
@@ -751,6 +762,7 @@ impl SeqModel {
             events,
             length_ticks,
             launch: true,
+            immediate: false,
         }
     }
 
@@ -791,6 +803,7 @@ impl SeqModel {
             events,
             length_ticks,
             launch: self.is_playing(),
+            immediate: false,
         }
     }
 
@@ -805,6 +818,7 @@ impl SeqModel {
             events,
             length_ticks,
             launch: self.is_playing(),
+            immediate: false,
         }
     }
 
@@ -832,6 +846,7 @@ impl SeqModel {
             events,
             length_ticks,
             launch: self.is_playing(),
+            immediate: false,
         }
     }
 
@@ -1192,6 +1207,146 @@ mod tests {
         assert!(seq.has_pending() || seq.state == SeqState::Review);
         assert!(matches!(seq.keep(), SeqAction::Upload { .. }));
         assert_eq!(seq.layer_count(), 2);
+    }
+
+    const DRUM: u8 = CUE_CHANNEL;
+
+    fn hit(t: f64, note: u8) -> [RecEvent; 2] {
+        [
+            RecEvent { t, on: true, channel: DRUM, note, velocity: 110 },
+            RecEvent { t: t + 0.02, on: false, channel: DRUM, note, velocity: 0 },
+        ]
+    }
+
+    /// A 2 s backbone (120 BPM: 1 s = 2 * PPQ ticks) with a kick on the downbeat.
+    fn seeded_backbone() -> SeqModel {
+        let mut seq = SeqModel::new();
+        seq.bpm = 120.0;
+        seq.seed_playing_backbone(hit(0.0, 36).to_vec(), 2.0);
+        seq
+    }
+
+    fn on_ticks(events: &[WireClipEvent], note: u8) -> Vec<u32> {
+        let mut ticks: Vec<u32> = events
+            .iter()
+            .filter(|e| e.on && e.note == note)
+            .map(|e| e.tick)
+            .collect();
+        ticks.sort_unstable();
+        ticks
+    }
+
+    fn expect_upload(action: SeqAction) -> (Vec<WireClipEvent>, u32, bool) {
+        match action {
+            SeqAction::Upload { events, length_ticks, immediate, .. } => {
+                (events, length_ticks, immediate)
+            }
+            other => panic!("expected upload, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn overdub_arm_restarts_the_loop_now_not_on_the_qnt_grid() {
+        let mut seq = seeded_backbone();
+        let (_, _, immediate) = expect_upload(seq.toggle_record());
+        assert!(
+            immediate,
+            "overdub times hits from the REC press; a bar-quantized relaunch would shift them"
+        );
+    }
+
+    #[test]
+    fn only_the_overdub_arm_ignores_the_launch_grid() {
+        let mut seq = seeded_backbone();
+        assert!(matches!(seq.toggle_record(), SeqAction::Upload { immediate: true, .. }));
+        seq.push_note_at(true, DRUM, 38, 100, 0.5);
+        seq.push_note_at(false, DRUM, 38, 0, 0.52);
+        let (_, _, review_immediate) = expect_upload(seq.toggle_record());
+        assert!(!review_immediate, "REVIEW playback still honours QNT");
+        let (_, _, keep_immediate) = expect_upload(seq.keep());
+        assert!(!keep_immediate, "KEEP still honours QNT");
+        seq.state = SeqState::Stopped;
+        let (_, _, play_immediate) = expect_upload(seq.toggle_play());
+        assert!(!play_immediate, "PLAY still honours QNT");
+    }
+
+    #[test]
+    fn overdub_plays_back_exactly_the_hits_that_were_recorded() {
+        let mut seq = seeded_backbone();
+        let _ = seq.toggle_record();
+        // Snare at 0.5 s, hat just before the loop end, and one on the downbeat.
+        for (t, note) in [(0.0, 42), (0.5, 38), (1.0, 38), (1.998, 46)] {
+            for ev in hit(t, note) {
+                seq.push_note_at(ev.on, ev.channel, ev.note, ev.velocity, ev.t);
+            }
+        }
+        let (events, length_ticks, _) = expect_upload(seq.toggle_record());
+        assert_eq!(length_ticks, 3840);
+        assert_eq!(on_ticks(&events, 36), vec![0], "backbone kick untouched");
+        assert_eq!(on_ticks(&events, 38), vec![960, 1920]);
+        assert_eq!(on_ticks(&events, 42), vec![0]);
+        assert_eq!(on_ticks(&events, 46), vec![3836]);
+        let offs = events.iter().filter(|e| !e.on).count();
+        let ons = events.iter().filter(|e| e.on).count();
+        assert_eq!(ons, offs, "every hit has exactly one release");
+        assert_eq!(ons, 5);
+        let (events, _, _) = expect_upload(seq.keep());
+        assert_eq!(events.iter().filter(|e| e.on).count(), 5, "KEEP adds nothing");
+    }
+
+    #[test]
+    fn dropping_an_overdub_leaves_only_the_backbone_hits() {
+        let mut seq = seeded_backbone();
+        let _ = seq.toggle_record();
+        for ev in hit(0.5, 38) {
+            seq.push_note_at(ev.on, ev.channel, ev.note, ev.velocity, ev.t);
+        }
+        let _ = seq.toggle_record();
+        let (events, _, _) = expect_upload(seq.drop());
+        assert_eq!(on_ticks(&events, 36), vec![0]);
+        assert!(on_ticks(&events, 38).is_empty(), "dropped pass must not linger");
+    }
+
+    #[test]
+    fn a_second_overdub_pass_does_not_replay_the_first_take_twice() {
+        let mut seq = seeded_backbone();
+        let _ = seq.toggle_record();
+        for ev in hit(0.5, 38) {
+            seq.push_note_at(ev.on, ev.channel, ev.note, ev.velocity, ev.t);
+        }
+        let _ = seq.toggle_record();
+        let _ = seq.keep();
+        let _ = seq.toggle_record();
+        for ev in hit(1.5, 42) {
+            seq.push_note_at(ev.on, ev.channel, ev.note, ev.velocity, ev.t);
+        }
+        let _ = seq.toggle_record();
+        let (events, _, _) = expect_upload(seq.keep());
+        assert_eq!(on_ticks(&events, 38), vec![960]);
+        assert_eq!(on_ticks(&events, 42), vec![2880]);
+        assert_eq!(on_ticks(&events, 36), vec![0]);
+    }
+
+    #[test]
+    fn extend_mode_take_plays_each_hit_once() {
+        let mut seq = seeded_backbone();
+        seq.toggle_extend();
+        let _ = seq.toggle_record();
+        for ev in hit(0.25, 38) {
+            seq.push_note_at(ev.on, ev.channel, ev.note, ev.velocity, ev.t);
+        }
+        for ev in hit(2.5, 42) {
+            seq.push_note_at(ev.on, ev.channel, ev.note, ev.velocity, ev.t);
+        }
+        let _ = seq.toggle_record();
+        let (events, length_ticks, _) = expect_upload(seq.keep());
+        assert_eq!(length_ticks, 7680, "two cycles");
+        assert_eq!(on_ticks(&events, 42), vec![4800]);
+        assert_eq!(
+            on_ticks(&events, 38),
+            vec![480],
+            "a 2-cycle take plays once per 2-cycle pass, not once per cycle"
+        );
     }
 
     #[test]

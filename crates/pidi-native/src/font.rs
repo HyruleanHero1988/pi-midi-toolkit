@@ -1,4 +1,8 @@
-//! 5×7 bitmap font, ASCII 32..95. Packed as 5 columns of 7 bits.
+//! 5×7 bitmap font, ASCII 32..95 plus [`BRAND_I`]. Packed as 5 columns of 7 bits.
+//!
+//! Both UI fonts fold `a-z` to capitals, so ordinary text can never show a
+//! lowercase letter. The product name is the one exception: draw [`BRAND`]
+//! ("PiDI") and the lowercase `i` is rendered instead of being folded.
 
 use serde::{Deserialize, Serialize};
 
@@ -7,6 +11,12 @@ pub use crate::smooth_font::smooth_atlas;
 pub const GLYPH_W: i32 = 5;
 pub const GLYPH_H: i32 = 7;
 pub const GLYPH_STRIDE: i32 = 6;
+
+/// Private-use stand-in for the lowercase `i` in the product name. Everything
+/// else keeps the all-caps fold; only this code point bypasses it.
+pub const BRAND_I: char = '\u{E069}';
+/// On-screen product name, exactly "PiDI".
+pub const BRAND: &str = "P\u{E069}DI";
 
 /// UI text style — retro bitmap (default) or anti-aliased TTF.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -58,7 +68,7 @@ impl FontStyle {
     }
 }
 
-const FONT: [&[u8; 5]; 64] = [
+const FONT: [&[u8; 5]; 65] = [
     &[0x00, 0x00, 0x00, 0x00, 0x00], // space
     &[0x00, 0x00, 0x5F, 0x00, 0x00], // !
     &[0x00, 0x07, 0x00, 0x07, 0x00], // "
@@ -123,13 +133,19 @@ const FONT: [&[u8; 5]; 64] = [
     &[0x00, 0x41, 0x41, 0x7F, 0x00], // ]
     &[0x04, 0x02, 0x01, 0x02, 0x04], // ^
     &[0x40, 0x40, 0x40, 0x40, 0x40], // _
+    &[0x00, 0x44, 0x7D, 0x40, 0x00], // BRAND_I (lowercase i, dot + serifed stem)
 ];
+
+const BRAND_I_SLOT: usize = 64;
 
 /// Atlas slot for ASCII 32..95, or `None` if the 5×7 font cannot draw `ch`.
 ///
 /// Must use `u32` (not `char as u8`): U+232B ERASE TO THE LEFT (`⌫`) has
 /// low byte 0x2B, which is `'+'`.
 fn font_index(ch: char) -> Option<usize> {
+    if ch == BRAND_I {
+        return Some(BRAND_I_SLOT);
+    }
     let mut code = ch as u32;
     if (b'a' as u32..=b'z' as u32).contains(&code) {
         code -= 32;
@@ -146,18 +162,18 @@ pub fn glyph(ch: char) -> &'static [u8; 5] {
 }
 
 pub const ATLAS_COLS: u32 = 16;
-pub const ATLAS_ROWS: u32 = 4;
+pub const ATLAS_ROWS: u32 = 5;
 pub const ATLAS_CELL: u32 = 8;
 
 pub fn atlas_size() -> (u32, u32) {
     (ATLAS_COLS * ATLAS_CELL, ATLAS_ROWS * ATLAS_CELL)
 }
 
-/// White-on-transparent RGBA atlas for GLES text. One 8×8 cell per ASCII 32..95.
+/// White-on-transparent RGBA atlas for GLES text. One 8×8 cell per ASCII 32..95 plus the brand `i`.
 pub fn atlas_rgba() -> (u32, u32, Vec<u8>) {
     let (w, h) = atlas_size();
     let mut data = vec![0u8; (w * h * 4) as usize];
-    for i in 0..64 {
+    for i in 0..FONT.len() {
         let bits = FONT[i];
         let col = (i as u32) % ATLAS_COLS;
         let row = (i as u32) / ATLAS_COLS;
@@ -213,8 +229,33 @@ mod tests {
     #[test]
     fn atlas_has_ink_for_a() {
         let (w, h, data) = atlas_rgba();
-        assert_eq!((w, h), (128, 32));
+        assert_eq!((w, h), (128, 40));
         assert!(data.chunks(4).any(|p| p[3] > 0));
+    }
+
+    #[test]
+    fn brand_i_is_lowercase_and_ordinary_text_stays_caps() {
+        assert_ne!(glyph(BRAND_I), glyph('I'));
+        assert_ne!(glyph(BRAND_I), FONT[0]);
+        assert_eq!(glyph('i'), glyph('I'), "plain lowercase still folds to caps");
+        assert_ne!(glyph_uv(BRAND_I), glyph_uv('I'));
+        let (w, h, data) = atlas_rgba();
+        let (u0, v0, u1, v1) = glyph_uv(BRAND_I);
+        let (x0, y0) = ((u0 * w as f32).round() as u32, (v0 * h as f32).round() as u32);
+        let (x1, y1) = ((u1 * w as f32).round() as u32, (v1 * h as f32).round() as u32);
+        assert!(y1 <= h && x1 <= w);
+        let ink = (y0..y1)
+            .flat_map(|y| (x0..x1).map(move |x| (x, y)))
+            .filter(|(x, y)| data[((y * w + x) * 4 + 3) as usize] > 0)
+            .count();
+        assert!(ink > 8, "brand i must have ink in the atlas, ink={ink}");
+    }
+
+    #[test]
+    fn brand_text_is_pidi_and_four_cells_wide() {
+        let shown: String = BRAND.chars().map(|c| if c == BRAND_I { 'i' } else { c }).collect();
+        assert_eq!(shown, "PiDI");
+        assert_eq!(BRAND.chars().count(), 4);
     }
 
     #[test]
