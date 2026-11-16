@@ -627,6 +627,54 @@ mod tests {
         assert_eq!(*hits.last().unwrap(), bar * (cycles - 1) + beat * 3);
     }
 
+    /// Kick on 1, snare on 3, and a hat one tick before the loop end.
+    fn drum_take() -> Clip {
+        let hit = |tick: u32, note: u8| ClipEvent {
+            tick,
+            kind: ClipEventKind::NoteOn {
+                channel: 9,
+                note,
+                velocity: 100,
+            },
+        };
+        Clip::new(
+            vec![
+                hit(0, 36),
+                hit(PPQ * 2, 38),
+                hit(PPQ * 4 - 1, 42),
+            ],
+            PPQ * 4,
+        )
+    }
+
+    #[test]
+    fn looped_drum_take_plays_each_hit_once_per_pass_under_every_quantize() {
+        let t = transport();
+        let bar = t.samples_per_beat() as u64 * 4;
+        for q in [Quantize::Off, Quantize::Beat, Quantize::Bar] {
+            let mut seq = Sequencer::new();
+            seq.slot_mut(0).unwrap().set_clip(Some(drum_take()));
+            seq.launch(0, 777, q, &t);
+            let start = t.next_boundary(777, q);
+            let passes = 4u64;
+            let hits = run(&mut seq, &t, start + bar * passes, 128);
+            assert_eq!(
+                hits.len() as u64,
+                3 * passes,
+                "{q:?}: no extra or missing hits over {passes} passes, got {hits:?}"
+            );
+            let pass_start = |n: u64| start + bar * n;
+            for n in 0..passes {
+                let in_pass = hits
+                    .iter()
+                    .filter(|h| **h >= pass_start(n) && **h < pass_start(n + 1))
+                    .count();
+                assert_eq!(in_pass, 3, "{q:?}: pass {n} has exactly its three hits");
+            }
+            assert_eq!(hits[0], start, "{q:?}: first hit lands on the launch grid");
+        }
+    }
+
     #[test]
     fn one_shot_stops_after_its_length() {
         let t = transport();
