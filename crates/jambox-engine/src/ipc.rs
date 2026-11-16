@@ -30,27 +30,43 @@ static NEXT_SESSION: AtomicU32 = AtomicU32::new(1);
 /// Fan-out for unsolicited MIDI notices (engine → every connected UI).
 #[derive(Default)]
 pub struct ClientHub {
-    txs: Mutex<Vec<Sender<String>>>,
+    txs: Mutex<Vec<(u32, Sender<String>)>>,
 }
 
 impl ClientHub {
-    pub fn subscribe(&self) -> (Sender<String>, mpsc::Receiver<String>) {
+    /// Register a client. The returned id doubles as the session id so the hub
+    /// can tell which client a MIDI event came from.
+    pub fn subscribe(&self) -> (u32, Sender<String>, mpsc::Receiver<String>) {
+        let id = NEXT_SESSION.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = mpsc::channel();
         self.txs
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .push(tx.clone());
-        (tx, rx)
+            .push((id, tx.clone()));
+        (id, tx, rx)
     }
 
+    /// Hardware MIDI: every connected UI hears it.
     pub fn broadcast_midi(&self, event: MidiEvent, controller: Option<&str>) {
+        self.broadcast_midi_from(None, event, controller);
+    }
+
+    /// Fan out an event, skipping the client that sent it. A UI already knows
+    /// about the notes it just played (it records them itself); echoing them
+    /// back made every on-screen hit land in the SEQ take twice.
+    pub fn broadcast_midi_from(
+        &self,
+        origin: Option<u32>,
+        event: MidiEvent,
+        controller: Option<&str>,
+    ) {
         let notice = MidiNotice::from_event(event).with_controller(controller);
         let line = match serde_json::to_string(&Response::Midi(notice)) {
             Ok(s) => s,
             Err(_) => return,
         };
         let mut guard = self.txs.lock().unwrap_or_else(|p| p.into_inner());
-        guard.retain(|tx| tx.send(line.clone()).is_ok());
+        guard.retain(|(id, tx)| origin == Some(*id) || tx.send(line.clone()).is_ok());
     }
 }
 
@@ -121,8 +137,12 @@ pub struct ClientSession {
 
 impl ClientSession {
     pub fn new() -> Self {
+        Self::with_id(NEXT_SESSION.fetch_add(1, Ordering::Relaxed))
+    }
+
+    pub fn with_id(id: u32) -> Self {
         Self {
-            id: NEXT_SESSION.fetch_add(1, Ordering::Relaxed),
+            id,
             hello: false,
             realtime_owner: false,
             client: String::new(),
@@ -161,6 +181,7 @@ impl Default for ClientSession {
 /// Handle one client connection until it disconnects.
 fn serve_client<R: BufRead>(
     reader: R,
+    session_id: u32,
     tx: Sender<String>,
     shared: &Shared,
     running: &AtomicBool,
@@ -171,7 +192,7 @@ fn serve_client<R: BufRead>(
     health: &AudioHealth,
     scope: &ScopeTap,
 ) {
-    let mut session = ClientSession::new();
+    let mut session = ClientSession::with_id(session_id);
     for line in reader.lines() {
         if !running.load(Ordering::Relaxed) {
             break;
@@ -329,6 +350,7 @@ pub fn handle_line(
             ingest(
                 event,
                 0,
+                Some(session.id),
                 hub,
                 map,
                 &midi_core::ControllerProfile::generic(),
@@ -664,7 +686,7 @@ fn spawn_client<S: ClientStream>(
         }
     };
     let mut writer = stream;
-    let (tx, rx) = hub.subscribe();
+    let (session_id, tx, rx) = hub.subscribe();
     let shared = Arc::clone(shared);
     let running = Arc::clone(running);
     let hub = Arc::clone(hub);
@@ -676,6 +698,7 @@ fn spawn_client<S: ClientStream>(
     std::thread::spawn(move || {
         serve_client(
             BufReader::new(reader),
+            session_id,
             tx,
             &shared,
             &running,
@@ -747,6 +770,70 @@ mod tests {
                 velocity: 127
             }
         );
+    }
+
+    fn send_note_as(
+        hub: &ClientHub,
+        session: &mut ClientSession,
+        line: &str,
+    ) {
+        let (mut control, midi_in, _midi_out, _audio) = bus::channel();
+        let midi_in = Mutex::new(midi_in);
+        let mut cache = StatusCache::default();
+        let response = handle_line(
+            line,
+            &mut control,
+            &mut cache,
+            hub,
+            &MidiMap::default(),
+            &midi_in,
+            &MidiIo::default(),
+            &AudioHealth::new(),
+            &ScopeTap::new(),
+            session,
+        );
+        assert!(matches!(response, Response::Ok));
+    }
+
+    #[test]
+    fn a_ui_note_is_not_echoed_back_to_the_ui_that_sent_it() {
+        let hub = ClientHub::default();
+        let (ui_id, _ui_tx, ui_rx) = hub.subscribe();
+        let (_other_id, _other_tx, other_rx) = hub.subscribe();
+        let mut session = ClientSession::with_id(ui_id);
+        send_note_as(
+            &hub,
+            &mut session,
+            r#"{"cmd":"note_on","channel":9,"note":36,"velocity":110}"#,
+        );
+        send_note_as(
+            &hub,
+            &mut session,
+            r#"{"cmd":"note_off","channel":9,"note":36}"#,
+        );
+        assert!(
+            ui_rx.try_recv().is_err(),
+            "the sender records its own notes; an echo would record every hit twice"
+        );
+        assert!(other_rx.try_recv().is_ok(), "other clients still hear note-on");
+        assert!(other_rx.try_recv().is_ok(), "other clients still hear note-off");
+    }
+
+    #[test]
+    fn hardware_midi_still_reaches_every_ui() {
+        let hub = ClientHub::default();
+        let (_a, _atx, a_rx) = hub.subscribe();
+        let (_b, _btx, b_rx) = hub.subscribe();
+        hub.broadcast_midi(
+            MidiEvent::NoteOn {
+                channel: 9,
+                note: 36,
+                velocity: 100,
+            },
+            Some("generic"),
+        );
+        assert!(a_rx.try_recv().is_ok());
+        assert!(b_rx.try_recv().is_ok());
     }
 
     #[test]

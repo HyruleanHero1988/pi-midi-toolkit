@@ -8401,6 +8401,7 @@ impl NativeModel {
                 events,
                 length_ticks,
                 launch,
+                immediate,
             } => {
                 outbox.tempo(self.seq.bpm);
                 self.bpm = self.seq.bpm;
@@ -8418,7 +8419,12 @@ impl NativeModel {
                 outbox.clip_gain(SEQ_DRUM_MIX_SLOT, self.seq_drum_level);
                 outbox.clip_gain(SEQ_KAOSS_MIX_SLOT, self.seq_kaoss_level);
                 if launch {
-                    outbox.clip_launch(SEQ_CLIP_SLOT, self.clip_quantize.wire());
+                    let grid = if immediate {
+                        "off"
+                    } else {
+                        self.clip_quantize.wire()
+                    };
+                    outbox.clip_launch(SEQ_CLIP_SLOT, grid);
                 }
             }
         }
@@ -14717,6 +14723,80 @@ mod tests {
         let kick = model.layout.kit_pad_cell(4);
         model.finger_down(2, kick.x + 4, kick.y + 4, &mut out);
         assert_eq!(model.seq.recorded_on_notes(), vec![36]);
+    }
+
+    fn seq_launch_grids(reqs: &[Request]) -> Vec<String> {
+        reqs.iter()
+            .filter_map(|r| match r {
+                Request::ClipLaunch { slot, quantize } if *slot == SEQ_CLIP_SLOT => {
+                    Some(quantize.clone().unwrap_or_default())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn model_with_seeded_drum_backbone(q: ClipQuantize) -> NativeModel {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Drums);
+        model.clip_quantize = q;
+        model.seq.bpm = 120.0;
+        model.seq.seed_playing_backbone(
+            vec![crate::seq::RecEvent {
+                t: 0.0,
+                on: true,
+                channel: 9,
+                note: 36,
+                velocity: 100,
+            }],
+            2.0,
+        );
+        model
+    }
+
+    #[test]
+    fn overdub_starts_the_loop_immediately_under_every_quantize_setting() {
+        for q in [ClipQuantize::Off, ClipQuantize::Beat, ClipQuantize::Bar] {
+            let mut model = model_with_seeded_drum_backbone(q);
+            let mut out = Outbox::new();
+            let rec = model.layout.nav_chrome_rec();
+            model.finger_down(1, rec.x + 4, rec.y + 4, &mut out);
+            model.finger_up(1, &mut out);
+            assert_eq!(model.seq.state, crate::seq::SeqState::Overdub);
+            assert_eq!(
+                seq_launch_grids(&out.take()),
+                vec!["off".to_string()],
+                "{}: take clock starts on the REC press, so the loop must too",
+                q.label()
+            );
+        }
+    }
+
+    #[test]
+    fn play_and_keep_still_follow_the_quantize_setting() {
+        for q in [ClipQuantize::Off, ClipQuantize::Beat, ClipQuantize::Bar] {
+            let mut model = model_with_seeded_drum_backbone(q);
+            let mut out = Outbox::new();
+            model.seq.state = crate::seq::SeqState::Stopped;
+            let action = model.seq.toggle_play();
+            model.apply_seq_action(action, &mut out);
+            assert_eq!(seq_launch_grids(&out.take()), vec![q.wire().to_string()]);
+        }
+    }
+
+    #[test]
+    fn on_screen_drum_hits_under_qnt_bar_record_one_note_on_each() {
+        let mut model = model_with_seeded_drum_backbone(ClipQuantize::Bar);
+        let mut out = Outbox::new();
+        let action = model.seq.toggle_record();
+        model.apply_seq_action(action, &mut out);
+        let kick = model.layout.kit_pad_cell(4);
+        let tom = model.layout.kit_pad_cell(5);
+        for (id, cell) in [(1, kick), (2, tom), (3, kick)] {
+            model.finger_down(id, cell.x + 4, cell.y + 4, &mut out);
+            model.finger_up(id, &mut out);
+        }
+        assert_eq!(model.seq.recorded_on_notes(), vec![36, 45, 36]);
     }
 
     #[test]
