@@ -22,6 +22,7 @@ mod engine;
 mod fm;
 mod fx;
 mod kaoss;
+mod tempo_fx;
 mod mix;
 mod punch;
 mod repeat;
@@ -61,7 +62,15 @@ pub use fm::{
     unpack_fm_link, FmOpParams, FmPatch, FmRecipe, FmSynth, CLANG_LABELS, CLANG_RATIOS,
     FM_OP_COUNT, LEGACY_FM_OP_COUNT, FM_RECIPES, FM_RECIPE_COUNT, MAX_FM_VOICES, OP_COLORS, OP_NAMES,
 };
-pub use fx::{FxParams, FxUnit};
+pub use fx::{
+    FxParams, FxUnit, DELAY_TIME_SEC_MIN, DELAY_TIME_SEC_SPAN, FLANGER_RATE_HZ_MIN,
+    FLANGER_RATE_HZ_SPAN,
+};
+pub use tempo_fx::{
+    tempo_fx_delay_sec, tempo_fx_delay_unit, tempo_fx_flanger_rate_unit, tempo_fx_grid_index,
+    tempo_fx_grid_label, tempo_fx_lfo_hz, tempo_fx_tone_lfo_unit, TEMPO_FX_GRID_BEATS,
+    TEMPO_FX_GRID_LABELS, TEMPO_FX_GRID_TICKS,
+};
 pub use kaoss::{
     apply_center_deadzone, kaoss_scale, kaoss_scale_index_by_id, migrate_legacy_scale_index,
     note_at_x, note_index_at_x, pack_xy, scale_notes, slew_bend, stick_note_x, tone_at_y,

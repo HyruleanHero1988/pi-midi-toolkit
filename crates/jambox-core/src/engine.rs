@@ -51,6 +51,8 @@ const REPEAT_QUANTIZE_START: bool = true;
 
 const ATTACK_SEC_MIN: f32 = 0.002;
 const ATTACK_SEC_MAX: f32 = 0.400;
+const DECAY_SEC_MIN: f32 = 0.010;
+const DECAY_SEC_MAX: f32 = 1.200;
 const RELEASE_SEC_MIN: f32 = 0.010;
 const RELEASE_SEC_MAX: f32 = 0.800;
 
@@ -275,6 +277,11 @@ pub struct JamboxEngine {
     input_bypass: bool,
     clip_gain: [f32; MAX_CLIPS],
     attack_sec: f32,
+    /// Global wavetable ADSR decay (all keys/clips share this for now).
+    /// Future: per-target envelopes (bass vs melody) without changing stage math.
+    decay_sec: f32,
+    /// Global sustain level 0..1 (1 = no dip after attack — legacy AR shape).
+    sustain_level: f32,
     release_sec: f32,
     vib_depth_semis: f32,
     vib_rate_hz: f32,
@@ -447,6 +454,8 @@ impl JamboxEngine {
             input_bypass: false,
             clip_gain: [1.0; MAX_CLIPS],
             attack_sec: 0.012,
+            decay_sec: 0.080,
+            sustain_level: 1.0,
             release_sec: 0.030,
             vib_depth_semis: 0.5,
             vib_rate_hz: 5.0,
@@ -902,6 +911,8 @@ impl JamboxEngine {
             stereo_width,
             clip_gain,
             attack_sec,
+            decay_sec,
+            sustain_level,
             release_sec,
             vib_depth_semis,
             vib_rate_hz,
@@ -945,6 +956,8 @@ impl JamboxEngine {
             release_drift_semis: *release_drift_semis,
             bend_slew_dt: dt,
             attack_sec: *attack_sec,
+            decay_sec: *decay_sec,
+            sustain_level: *sustain_level,
             release_sec: *release_sec,
             live_gain: *level,
             clip_gains: *clip_gain,
@@ -1822,7 +1835,6 @@ impl JamboxEngine {
 
     fn set_synth(&mut self, param: SynthParam, value: f32) {
         let unit = value.clamp(0.0, 1.0);
-        let mut macros = self.drums.macros();
         match param {
             SynthParam::Morph => self.bank.set_morph(unit),
             SynthParam::Tone => self.tone = unit,
@@ -1830,6 +1842,10 @@ impl JamboxEngine {
             SynthParam::Attack => {
                 self.attack_sec = map_exp_time(unit, ATTACK_SEC_MIN, ATTACK_SEC_MAX)
             }
+            SynthParam::Decay => {
+                self.decay_sec = map_exp_time(unit, DECAY_SEC_MIN, DECAY_SEC_MAX)
+            }
+            SynthParam::SustainLevel => self.sustain_level = unit,
             SynthParam::Release => {
                 self.release_sec = map_exp_time(unit, RELEASE_SEC_MIN, RELEASE_SEC_MAX)
             }
@@ -1849,26 +1865,14 @@ impl JamboxEngine {
                     self.bend_semis = value;
                 }
             }
-            SynthParam::DrumPitch => {
-                macros.pitch = unit;
-                self.drums.set_macros(macros);
-            }
-            SynthParam::DrumDecay => {
-                macros.decay = unit;
-                self.drums.set_macros(macros);
-            }
-            SynthParam::DrumNoise => {
-                macros.noise = unit;
-                self.drums.set_macros(macros);
-            }
-            SynthParam::DrumTone => {
-                macros.tone = unit;
-                self.drums.set_macros(macros);
-            }
-            SynthParam::DrumAmp => {
-                macros.level = unit;
-                self.drums.set_macros(macros);
-            }
+            // Kit-wide knob / ALL DRUMS: rewrite only the touched field on each
+            // voice. Copying model 0's whole struct used to wipe snare LEVEL
+            // when a kick-side pitch/tone CC arrived.
+            SynthParam::DrumPitch => self.drums.map_macros_all(|m| m.pitch = unit),
+            SynthParam::DrumDecay => self.drums.map_macros_all(|m| m.decay = unit),
+            SynthParam::DrumNoise => self.drums.map_macros_all(|m| m.noise = unit),
+            SynthParam::DrumTone => self.drums.map_macros_all(|m| m.tone = unit),
+            SynthParam::DrumAmp => self.drums.map_macros_all(|m| m.level = unit),
             SynthParam::DrumLevel => self.drum_level = unit,
             SynthParam::InputLevel => self.input_level = unit,
             SynthParam::Sweep => self.sweep = unit,
@@ -3550,6 +3554,177 @@ mod tests {
         );
         assert!((e.drum_macros_for(DrumModel::Kick).pitch - 0.1).abs() < 1e-6);
         assert!((e.drum_macros_for(DrumModel::Snare).pitch - 0.1).abs() < 1e-6);
+    }
+
+    #[test]
+    fn global_adsr_decay_and_sustain_level_apply() {
+        let mut e = engine();
+        apply_now(
+            &mut e,
+            Command::SetSynth {
+                param: SynthParam::Decay,
+                value: 1.0,
+            },
+        );
+        apply_now(
+            &mut e,
+            Command::SetSynth {
+                param: SynthParam::SustainLevel,
+                value: 0.4,
+            },
+        );
+        assert!((e.sustain_level - 0.4).abs() < 1e-6);
+        assert!(e.decay_sec > 0.5, "max decay knob should be long, got {}", e.decay_sec);
+    }
+
+    #[test]
+    fn snare_level_survives_kick_trigger_and_kit_wide_pitch() {
+        let mut e = engine();
+        apply_now(
+            &mut e,
+            Command::SetDrumMacro {
+                model: DrumModel::Snare.index() as u8,
+                param: SynthParam::DrumAmp,
+                value: 0.92,
+            },
+        );
+        apply_now(
+            &mut e,
+            Command::NoteOn {
+                channel: DRUM_CHANNEL,
+                note: 36,
+                velocity: 110,
+            },
+        );
+        assert!(
+            (e.drum_macros_for(DrumModel::Snare).level - 0.92).abs() < 1e-6,
+            "kick note-on must not rewrite snare LEVEL"
+        );
+        apply_now(
+            &mut e,
+            Command::SetSynth {
+                param: SynthParam::DrumPitch,
+                value: 0.2,
+            },
+        );
+        assert!(
+            (e.drum_macros_for(DrumModel::Snare).level - 0.92).abs() < 1e-6,
+            "kit-wide pitch must not stamp kick LEVEL onto snare"
+        );
+        assert!((e.drum_macros_for(DrumModel::Snare).pitch - 0.2).abs() < 1e-6);
+        assert!((e.drum_macros_for(DrumModel::Kick).pitch - 0.2).abs() < 1e-6);
+    }
+
+    #[test]
+    fn playing_loud_snare_does_not_raise_kick_level() {
+        let mut e = engine();
+        apply_now(
+            &mut e,
+            Command::SetDrumMacro {
+                model: DrumModel::Snare.index() as u8,
+                param: SynthParam::DrumAmp,
+                value: 0.95,
+            },
+        );
+        apply_now(
+            &mut e,
+            Command::SetDrumMacro {
+                model: DrumModel::Kick.index() as u8,
+                param: SynthParam::DrumAmp,
+                value: 0.25,
+            },
+        );
+        for velocity in [1u8, 40, 80, 110, 127] {
+            apply_now(
+                &mut e,
+                Command::NoteOn {
+                    channel: DRUM_CHANNEL,
+                    note: 45, // B6 → snare after A6/B6 swap
+                    velocity,
+                },
+            );
+            apply_now(
+                &mut e,
+                Command::NoteOff {
+                    channel: DRUM_CHANNEL,
+                    note: 45,
+                },
+            );
+            assert!(
+                (e.drum_macros_for(DrumModel::Snare).level - 0.95).abs() < 1e-6,
+                "snare LEVEL must stay 0.95 after vel={velocity}"
+            );
+            assert!(
+                (e.drum_macros_for(DrumModel::Kick).level - 0.25).abs() < 1e-6,
+                "kick LEVEL must stay 0.25 after snare vel={velocity}, got {}",
+                e.drum_macros_for(DrumModel::Kick).level
+            );
+        }
+        apply_now(
+            &mut e,
+            Command::NoteOn {
+                channel: DRUM_CHANNEL,
+                note: 36,
+                velocity: 20,
+            },
+        );
+        assert!(
+            (e.drum_macros_for(DrumModel::Snare).level - 0.95).abs() < 1e-6,
+            "soft kick must not pull snare LEVEL down"
+        );
+        assert!(
+            (e.drum_macros_for(DrumModel::Kick).level - 0.25).abs() < 1e-6,
+            "kick LEVEL must stay put when kick itself is triggered"
+        );
+    }
+
+    #[test]
+    fn playing_loud_kick_does_not_raise_snare_level() {
+        let mut e = engine();
+        apply_now(
+            &mut e,
+            Command::SetDrumMacro {
+                model: DrumModel::Kick.index() as u8,
+                param: SynthParam::DrumAmp,
+                value: 0.9,
+            },
+        );
+        apply_now(
+            &mut e,
+            Command::SetDrumMacro {
+                model: DrumModel::Snare.index() as u8,
+                param: SynthParam::DrumAmp,
+                value: 0.3,
+            },
+        );
+        for velocity in [30u8, 90, 127] {
+            apply_now(
+                &mut e,
+                Command::NoteOn {
+                    channel: DRUM_CHANNEL,
+                    note: 36,
+                    velocity,
+                },
+            );
+            assert!(
+                (e.drum_macros_for(DrumModel::Kick).level - 0.9).abs() < 1e-6,
+                "kick LEVEL unchanged at vel={velocity}"
+            );
+            assert!(
+                (e.drum_macros_for(DrumModel::Snare).level - 0.3).abs() < 1e-6,
+                "snare LEVEL must not inherit kick's loudness at vel={velocity}"
+            );
+        }
+        apply_now(
+            &mut e,
+            Command::NoteOn {
+                channel: DRUM_CHANNEL,
+                note: 45,
+                velocity: 100,
+            },
+        );
+        assert!((e.drum_macros_for(DrumModel::Kick).level - 0.9).abs() < 1e-6);
+        assert!((e.drum_macros_for(DrumModel::Snare).level - 0.3).abs() < 1e-6);
     }
 
     #[test]

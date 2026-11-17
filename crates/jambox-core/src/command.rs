@@ -46,6 +46,10 @@ pub enum SynthParam {
     Tone,
     Level,
     Attack,
+    /// 0..1 → exponential decay time (peak → sustain while gated).
+    Decay,
+    /// 0..1 sustain *level* after decay (not the sustain pedal — see [`Self::Sustain`]).
+    SustainLevel,
     Release,
     /// 0..1, center 0.5. Each note glides this far in semitones across its release.
     /// 0 = −12 st, 0.5 = none, 1 = +12 st.

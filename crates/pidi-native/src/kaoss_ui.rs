@@ -20,40 +20,135 @@ pub struct KaossProgram {
     pub curated: bool,
 }
 
+/// Job family for a program (derived from `note` + `midi_gesture()`).
+///
+/// - **Note** — pad pitch on X (`note: true`)
+/// - **Fx** — local synth / insert / punch params (`note: false`, not MIDI-out)
+/// - **Midi** — external CC / channel-pressure gestures (`midi_gesture()`)
+///
+/// WIDTH / SWEEP are **Fx**: they drive local `synth("width"|"sweep")`, not USB CC.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum KaossProgramCategory {
+    Note,
+    Fx,
+    Midi,
+}
+
+/// PROG picker filter chips. Default **Note** (Kaossilator-first).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum KaossProgramFilter {
+    Note,
+    Fx,
+    Midi,
+    All,
+}
+
+impl Default for KaossProgramFilter {
+    fn default() -> Self {
+        Self::Note
+    }
+}
+
+impl KaossProgramFilter {
+    pub const ALL: [Self; 4] = [Self::Note, Self::Fx, Self::Midi, Self::All];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Note => "NOTE",
+            Self::Fx => "FX",
+            Self::Midi => "MIDI",
+            Self::All => "ALL",
+        }
+    }
+
+    pub fn wire(self) -> &'static str {
+        match self {
+            Self::Note => "note",
+            Self::Fx => "fx",
+            Self::Midi => "midi",
+            Self::All => "all",
+        }
+    }
+
+    pub fn from_wire(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "fx" => Self::Fx,
+            "midi" => Self::Midi,
+            "all" => Self::All,
+            _ => Self::Note,
+        }
+    }
+
+    pub fn matches(self, cat: KaossProgramCategory) -> bool {
+        match self {
+            Self::All => true,
+            Self::Note => cat == KaossProgramCategory::Note,
+            Self::Fx => cat == KaossProgramCategory::Fx,
+            Self::Midi => cat == KaossProgramCategory::Midi,
+        }
+    }
+
+    /// Chip fill when selected.
+    pub fn selected_color(self) -> u32 {
+        match self {
+            Self::Note => 0x458588,
+            Self::Fx => 0xd65d0e,
+            Self::Midi => 0xb16286,
+            Self::All => 0x689d6a,
+        }
+    }
+}
+
 impl KaossProgram {
+    /// Derived category for filter chips / chrome tags.
+    pub fn category(self) -> KaossProgramCategory {
+        if self.note {
+            KaossProgramCategory::Note
+        } else if self.midi_gesture().is_some() {
+            KaossProgramCategory::Midi
+        } else {
+            KaossProgramCategory::Fx
+        }
+    }
+
     /// Short family tag for chrome / picker.
     pub fn family_tag(self) -> &'static str {
-        if self.note {
-            "NOTE"
-        } else {
-            "FX"
+        match self.category() {
+            KaossProgramCategory::Note => "NOTE",
+            KaossProgramCategory::Fx => "FX",
+            KaossProgramCategory::Midi => "MIDI",
         }
     }
 
     /// Idle tile fill in the PROG picker (selected uses a brighter cousin).
     pub fn picker_color(self) -> u32 {
-        if self.note {
-            0x458588 // teal — plays a tone
-        } else {
-            0xd65d0e // orange — sculpts an existing tone
+        match self.category() {
+            KaossProgramCategory::Note => 0x458588, // teal — plays a tone
+            KaossProgramCategory::Fx => 0xd65d0e,   // orange — local scrub
+            KaossProgramCategory::Midi => 0xb16286, // purple — USB gestures
         }
     }
 
     pub fn picker_selected_color(self) -> u32 {
-        if self.note {
-            0x689d6a
-        } else {
-            0xfe8019
+        match self.category() {
+            KaossProgramCategory::Note => 0x689d6a,
+            KaossProgramCategory::Fx => 0xfe8019,
+            KaossProgramCategory::Midi => 0xd3869b,
+        }
+    }
+
+    /// Dimmed idle fill (e.g. MIDI tiles when KAOSS out is Local-only).
+    pub fn picker_dim_color(self) -> u32 {
+        match self.category() {
+            KaossProgramCategory::Note => 0x2a4a4c,
+            KaossProgramCategory::Fx => 0x6a3a18,
+            KaossProgramCategory::Midi => 0x5a3450,
         }
     }
 
     /// PROG toolbar button fill.
     pub fn chrome_color(self) -> u32 {
-        if self.note {
-            0x458588
-        } else {
-            0xd65d0e
-        }
+        self.picker_color()
     }
 
     /// True when pad X and/or Y drives the left/right sweep (pan).
@@ -106,6 +201,7 @@ pub const KAOSS_PROGRAMS: &[KaossProgram] = &[
         x_param: Some("tone"),
         curated: true,
     },
+    // X = BPM-synced delay time (1/4..1/32); Y = mix. See `tempo_fx`.
     KaossProgram {
         id: "echo",
         label: "ECHO",
@@ -211,7 +307,7 @@ pub const KAOSS_PROGRAMS: &[KaossProgram] = &[
         x_param: Some("drive"),
         curated: false,
     },
-    // X = tone; Y = delay time. Mix-desk overlay (not a pitch pad).
+    // X = tone; Y = BPM-synced delay time (1/4..1/32). Mix-desk overlay.
     KaossProgram {
         id: "dub",
         label: "DUB",
@@ -229,7 +325,7 @@ pub const KAOSS_PROGRAMS: &[KaossProgram] = &[
         x_param: None,
         curated: true,
     },
-    // X = scale pitch; Y = how fast the tone filter oscillates (auto-wah).
+    // X = scale pitch; Y = BPM-synced auto-wah rate (1 cycle per 1/4..1/32).
     KaossProgram {
         id: "wah",
         label: "WAH",
@@ -238,7 +334,7 @@ pub const KAOSS_PROGRAMS: &[KaossProgram] = &[
         x_param: None,
         curated: true,
     },
-    // FX twin of FLANGE — rate + mix, no pad note.
+    // FX twin of FLANGE — BPM-synced rate (X) + mix (Y), no pad note.
     KaossProgram {
         id: "flange_rate",
         label: "FL RATE",
@@ -265,6 +361,7 @@ pub const KAOSS_PROGRAMS: &[KaossProgram] = &[
         x_param: None,
         curated: true,
     },
+    // Same BPM-synced tone LFO as WAH, without starting a pad note.
     KaossProgram {
         id: "wah_fx",
         label: "WAH FX",
@@ -365,7 +462,30 @@ pub const KAOSS_PROGRAMS: &[KaossProgram] = &[
         x_param: None,
         curated: true,
     },
+    // SPIKE 4 — signature destroy gestures. Ride Punch DSP under the hood
+    // (isolator / slicer) without cloning the Punch rack into PROG.
+    // Appended so older session program indices stay put.
+    KaossProgram {
+        id: "scream",
+        label: "SCREAM",
+        note: false,
+        y_param: "drive",
+        x_param: Some("isolator"),
+        curated: true,
+    },
+    KaossProgram {
+        id: "slice",
+        label: "SLICE",
+        note: false,
+        y_param: "punch_slice",
+        x_param: None,
+        curated: true,
+    },
 ];
+
+/// Instant PROG recall slots (favorites). `KAOSS_FAV_EMPTY` = unassigned.
+pub const KAOSS_FAV_SLOTS: usize = 6;
+pub const KAOSS_FAV_EMPTY: u16 = u16::MAX;
 
 /// Channel-wide MIDI a Kaoss FX program writes while a note is already sounding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -396,7 +516,100 @@ impl KaossProgram {
             _ => None,
         }
     }
+
+    /// True when this axis name is driven by pad X and/or Y.
+    pub fn drives_param(self, name: &str) -> bool {
+        self.y_param == name || self.x_param == Some(name)
+    }
+
+    /// SPIKE 1 — Kaoss-Pad wet engage.
+    ///
+    /// FX-class programs (`note == false`) that sculpt delay / reverb / flange
+    /// need an audible wet mix while the finger is down. When XY already owns
+    /// `*_mix`, the finger position *is* the engage. When XY only owns time /
+    /// feedback / size / rate (DUB, RESO, …), the matching mix must be bumped
+    /// on touch so the pad is not a dry no-op.
+    ///
+    /// NOTE programs return empty — they play a tone; optional wet on Y is
+    /// already applied by `apply_kaoss_xy`.
+    pub fn wet_engage_mixes(self) -> &'static [&'static str] {
+        if self.note || self.midi_gesture().is_some() {
+            return &[];
+        }
+        let delay = self.drives_param("delay_mix")
+            || self.drives_param("delay_time")
+            || self.drives_param("delay_fb");
+        let reverb = self.drives_param("reverb_mix") || self.drives_param("reverb_size");
+        let flange = self.drives_param("flanger_mix")
+            || self.drives_param("flanger_rate")
+            || self.drives_param("flanger_depth")
+            || self.drives_param("flanger_fb");
+        // Static tables keep this allocation-free on the UI hot path.
+        match (
+            delay && !self.drives_param("delay_mix"),
+            reverb && !self.drives_param("reverb_mix"),
+            flange && !self.drives_param("flanger_mix"),
+        ) {
+            (true, true, true) => &["delay_mix", "reverb_mix", "flanger_mix"],
+            (true, true, false) => &["delay_mix", "reverb_mix"],
+            (true, false, true) => &["delay_mix", "flanger_mix"],
+            (false, true, true) => &["reverb_mix", "flanger_mix"],
+            (true, false, false) => &["delay_mix"],
+            (false, true, false) => &["reverb_mix"],
+            (false, false, true) => &["flanger_mix"],
+            (false, false, false) => &[],
+        }
+    }
+
+    /// True when pad XY drives Punch rack slots (destroy gestures).
+    pub fn uses_punch_destroy(self) -> bool {
+        self.drives_param("punch_slice")
+            || self.drives_param("punch_crush")
+            || self.drives_param("punch_rpt")
+            || self.drives_param("isolator")
+    }
 }
+
+/// Default instant PROG slots: playable + destroy pair + a couple staples.
+pub fn default_prog_favs() -> [u16; KAOSS_FAV_SLOTS] {
+    let mut out = [KAOSS_FAV_EMPTY; KAOSS_FAV_SLOTS];
+    for (i, id) in ["lead", "filter", "echo", "scream", "slice", "flange"]
+        .iter()
+        .enumerate()
+    {
+        if let Some(idx) = KAOSS_PROGRAMS.iter().position(|p| p.id == *id) {
+            out[i] = idx as u16;
+        }
+    }
+    out
+}
+
+pub fn fav_label(slot: usize, favs: &[u16; KAOSS_FAV_SLOTS]) -> String {
+    let slot = slot % KAOSS_FAV_SLOTS;
+    match favs[slot] {
+        KAOSS_FAV_EMPTY => format!("F{}", slot + 1),
+        idx => {
+            let prog = program(idx as usize);
+            // Short chrome: F3 SCR… — full label on status.
+            let tag = if prog.label.len() <= 5 {
+                prog.label.to_string()
+            } else {
+                format!("{}…", &prog.label[..4])
+            };
+            format!("F{} {tag}", slot + 1)
+        }
+    }
+}
+
+/// SPIKE 1 — default wet amount when touch engages a mix XY does not own.
+/// High enough to hear clearly over a playing voice / kit; panel values above
+/// this are left alone (`max(panel, ENGAGE)`).
+pub const KAOSS_WET_ENGAGE: f32 = 0.55;
+
+/// SPIKE 1 — soft FX Release length (seconds). Lift ramps wet mixes toward the
+/// pre-touch spring instead of hard-cutting, so delay/reverb tanks stay
+/// audible briefly (existing `FxUnit` tails only speak while mix > 0).
+pub const KAOSS_FX_RELEASE_SEC: f32 = 0.22;
 
 /// Full-pad Y travel maps to ± this many semitones (center Y = 0).
 pub const PITCH_BEND_RANGE_SEMIS: f32 = jambox_core::PITCH_BEND_RANGE_SEMIS;
@@ -518,21 +731,40 @@ pub fn migrate_legacy_gate_index(index: usize) -> usize {
     }
 }
 
-pub fn program_count(show_all: bool) -> usize {
-    if show_all {
-        KAOSS_PROGRAMS.len()
-    } else {
-        KAOSS_PROGRAMS.iter().filter(|p| p.curated).count()
-    }
+fn program_matches(p: &KaossProgram, show_all: bool, filter: KaossProgramFilter) -> bool {
+    (show_all || p.curated) && filter.matches(p.category())
 }
 
-pub fn program_at(show_all: bool, index: usize) -> KaossProgram {
-    if show_all {
-        program(index)
-    } else {
-        let curated: Vec<_> = KAOSS_PROGRAMS.iter().filter(|p| p.curated).collect();
-        *curated[index % curated.len()]
+pub fn program_count(show_all: bool, filter: KaossProgramFilter) -> usize {
+    KAOSS_PROGRAMS
+        .iter()
+        .filter(|p| program_matches(p, show_all, filter))
+        .count()
+}
+
+pub fn program_at(show_all: bool, filter: KaossProgramFilter, index: usize) -> KaossProgram {
+    let matched: Vec<_> = KAOSS_PROGRAMS
+        .iter()
+        .filter(|p| program_matches(p, show_all, filter))
+        .collect();
+    if matched.is_empty() {
+        return program(0);
     }
+    *matched[index % matched.len()]
+}
+
+/// Absolute table index → visible picker row under the current filter.
+pub fn program_picker_index(
+    show_all: bool,
+    filter: KaossProgramFilter,
+    abs_index: usize,
+) -> Option<usize> {
+    let abs_index = abs_index % KAOSS_PROGRAMS.len();
+    KAOSS_PROGRAMS
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| program_matches(p, show_all, filter))
+        .position(|(i, _)| i == abs_index)
 }
 
 pub fn scale_count(show_all: bool) -> usize {
@@ -572,9 +804,9 @@ pub fn scale_picker_index(show_all: bool, scale_index: u8) -> usize {
     }
 }
 
-pub fn picker_count(kind: KaossPicker, show_all: bool) -> usize {
+pub fn picker_count(kind: KaossPicker, show_all: bool, filter: KaossProgramFilter) -> usize {
     match kind {
-        KaossPicker::Program => program_count(show_all),
+        KaossPicker::Program => program_count(show_all, filter),
         KaossPicker::Scale => scale_count(show_all),
         KaossPicker::Key => 12,
         // Start C1..C8, then width 1..4 OCT.
@@ -583,9 +815,14 @@ pub fn picker_count(kind: KaossPicker, show_all: bool) -> usize {
     }
 }
 
-pub fn picker_label(kind: KaossPicker, index: usize, show_all: bool) -> String {
+pub fn picker_label(
+    kind: KaossPicker,
+    index: usize,
+    show_all: bool,
+    filter: KaossProgramFilter,
+) -> String {
     match kind {
-        KaossPicker::Program => program_at(show_all, index).label.to_string(),
+        KaossPicker::Program => program_at(show_all, filter, index).label.to_string(),
         KaossPicker::Scale => scale_at(show_all, index).label.to_string(),
         KaossPicker::Key => jambox_core::NOTE_NAMES[index % 12].to_string(),
         KaossPicker::Octave => {
@@ -604,8 +841,9 @@ pub fn picker_cell(
     kind: KaossPicker,
     index: usize,
     show_all: bool,
+    filter: KaossProgramFilter,
 ) -> crate::layout::Rect {
-    let n = picker_count(kind, show_all).max(1);
+    let n = picker_count(kind, show_all, filter).max(1);
     let cols = match kind {
         KaossPicker::Key | KaossPicker::Octave | KaossPicker::Gate => 4,
         KaossPicker::Program => 3,
@@ -667,12 +905,13 @@ mod tests {
 
     #[test]
     fn octave_picker_lists_starts_and_widths() {
-        assert_eq!(picker_count(KaossPicker::Octave, false), 12);
-        assert_eq!(picker_label(KaossPicker::Octave, 0, false), "C1");
-        assert_eq!(picker_label(KaossPicker::Octave, 2, false), "C3");
-        assert_eq!(picker_label(KaossPicker::Octave, 7, false), "C8");
-        assert_eq!(picker_label(KaossPicker::Octave, 8, false), "1 OCT");
-        assert_eq!(picker_label(KaossPicker::Octave, 11, false), "4 OCT");
+        let all = KaossProgramFilter::All;
+        assert_eq!(picker_count(KaossPicker::Octave, false, all), 12);
+        assert_eq!(picker_label(KaossPicker::Octave, 0, false, all), "C1");
+        assert_eq!(picker_label(KaossPicker::Octave, 2, false, all), "C3");
+        assert_eq!(picker_label(KaossPicker::Octave, 7, false, all), "C8");
+        assert_eq!(picker_label(KaossPicker::Octave, 8, false, all), "1 OCT");
+        assert_eq!(picker_label(KaossPicker::Octave, 11, false, all), "4 OCT");
         assert_eq!(root_octave_index(48), 2);
         assert_eq!(root_octave_index(108), 7);
         assert_eq!(midi_note_label(60), "C4");
@@ -723,6 +962,18 @@ mod tests {
         let width = KAOSS_PROGRAMS.iter().find(|p| p.id == "width").unwrap();
         assert!(width.curated && !width.note);
         assert_eq!(width.y_param, "width");
+        let scream = KAOSS_PROGRAMS.iter().find(|p| p.id == "scream").unwrap();
+        assert!(scream.curated && !scream.note && scream.uses_punch_destroy());
+        assert_eq!(scream.x_param, Some("isolator"));
+        assert_eq!(scream.y_param, "drive");
+        let slice = KAOSS_PROGRAMS.iter().find(|p| p.id == "slice").unwrap();
+        assert!(slice.curated && !slice.note && slice.uses_punch_destroy());
+        assert_eq!(slice.y_param, "punch_slice");
+        let favs = default_prog_favs();
+        assert_eq!(favs.len(), KAOSS_FAV_SLOTS);
+        assert!(favs.iter().all(|&f| f != KAOSS_FAV_EMPTY));
+        assert_eq!(program(favs[3] as usize).id, "scream");
+        assert_eq!(program(favs[4] as usize).id, "slice");
     }
 
     #[test]
@@ -773,5 +1024,70 @@ mod tests {
         assert_eq!(echo.family_tag(), "FX");
         assert_eq!(echo.picker_color(), 0xd65d0e);
         assert_ne!(lead.chrome_color(), echo.chrome_color());
+        let expr = KAOSS_PROGRAMS.iter().find(|p| p.id == "expr").unwrap();
+        assert_eq!(expr.family_tag(), "MIDI");
+        assert_eq!(expr.category(), KaossProgramCategory::Midi);
+        assert_eq!(expr.picker_color(), 0xb16286);
+    }
+
+    #[test]
+    fn program_categories_split_note_fx_midi() {
+        let by_id = |id: &str| KAOSS_PROGRAMS.iter().find(|p| p.id == id).unwrap();
+        assert_eq!(by_id("lead").category(), KaossProgramCategory::Note);
+        assert_eq!(by_id("bend").category(), KaossProgramCategory::Note);
+        assert_eq!(by_id("echo").category(), KaossProgramCategory::Fx);
+        assert_eq!(by_id("scream").category(), KaossProgramCategory::Fx);
+        // Local stereo / width — not USB CC gestures.
+        assert_eq!(by_id("sweep").category(), KaossProgramCategory::Fx);
+        assert_eq!(by_id("width").category(), KaossProgramCategory::Fx);
+        for id in ["expr", "bright", "press", "glide", "pan", "mod"] {
+            assert_eq!(
+                by_id(id).category(),
+                KaossProgramCategory::Midi,
+                "{id} should be MIDI"
+            );
+        }
+        // Every program lands in exactly one bucket; buckets partition the table.
+        let notes = program_count(true, KaossProgramFilter::Note);
+        let fx = program_count(true, KaossProgramFilter::Fx);
+        let midi = program_count(true, KaossProgramFilter::Midi);
+        assert_eq!(notes + fx + midi, KAOSS_PROGRAMS.len());
+        assert_eq!(program_count(true, KaossProgramFilter::All), KAOSS_PROGRAMS.len());
+        assert!(notes >= 8 && fx >= 8 && midi == 6);
+        // Default filter is NOTE (Kaossilator-first).
+        assert_eq!(KaossProgramFilter::default(), KaossProgramFilter::Note);
+        assert_eq!(KaossProgramFilter::from_wire("midi").wire(), "midi");
+        // Curated NOTE subset is what the picker opens onto by default.
+        assert!(program_count(false, KaossProgramFilter::Note) >= 4);
+        assert_eq!(program_at(false, KaossProgramFilter::Note, 0).id, "lead");
+        let echo_abs = KAOSS_PROGRAMS.iter().position(|p| p.id == "echo").unwrap();
+        assert!(program_picker_index(true, KaossProgramFilter::Note, echo_abs).is_none());
+        assert_eq!(
+            program_picker_index(true, KaossProgramFilter::Fx, echo_abs),
+            Some(
+                KAOSS_PROGRAMS
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, p)| p.category() == KaossProgramCategory::Fx)
+                    .position(|(i, _)| i == echo_abs)
+                    .unwrap()
+            )
+        );
+    }
+
+    /// SPIKE 1 — FX programs that own time/fb/size but not mix need wet engage.
+    #[test]
+    fn wet_engage_mixes_for_fx_without_mix_axis() {
+        let by_id = |id: &str| KAOSS_PROGRAMS.iter().find(|p| p.id == id).unwrap();
+        assert!(by_id("lead").wet_engage_mixes().is_empty(), "NOTE: no engage");
+        assert!(by_id("echo").wet_engage_mixes().is_empty(), "Y owns delay_mix");
+        assert_eq!(by_id("dub").wet_engage_mixes(), &["delay_mix"]);
+        assert_eq!(by_id("reso").wet_engage_mixes(), &["delay_mix"]);
+        assert!(by_id("wash").wet_engage_mixes().is_empty(), "Y owns reverb_mix");
+        assert!(by_id("flange_rate").wet_engage_mixes().is_empty(), "Y owns flanger_mix");
+        assert!(by_id("filter").wet_engage_mixes().is_empty(), "morph/tone only");
+        assert!(by_id("expr").wet_engage_mixes().is_empty(), "MIDI gesture");
+        assert!(KAOSS_WET_ENGAGE > 0.3 && KAOSS_WET_ENGAGE < 1.0);
+        assert!(KAOSS_FX_RELEASE_SEC > 0.05 && KAOSS_FX_RELEASE_SEC < 1.0);
     }
 }

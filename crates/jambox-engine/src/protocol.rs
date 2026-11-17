@@ -654,6 +654,8 @@ fn parse_synth_param(name: &str) -> Option<SynthParam> {
         "tone" => SynthParam::Tone,
         "level" => SynthParam::Level,
         "attack" => SynthParam::Attack,
+        "decay" => SynthParam::Decay,
+        "sustain_level" => SynthParam::SustainLevel,
         "release" => SynthParam::Release,
         "release_drift" => SynthParam::ReleaseDrift,
         "vibrato_depth" => SynthParam::VibratoDepth,

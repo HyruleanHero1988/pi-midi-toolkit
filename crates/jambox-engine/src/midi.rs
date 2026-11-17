@@ -89,6 +89,11 @@ pub struct MidiMap {
     repeat_latch: AtomicBool,
     hw_latched: [AtomicBool; DRUM_MODEL_COUNT],
     hw_note: [AtomicU8; DRUM_MODEL_COUNT],
+    /// Last drum-channel pad note (36..51). Drums-mode knobs, stick, and
+    /// channel-pressure drum destinations write that voice only — never the
+    /// whole kit — so raising snare LEVEL cannot stamp kick/clap/etc.
+    /// `0xff` = no pad has spoken yet this session.
+    last_drum_note: AtomicU8,
     /// Last absolute 0..=10000 for relative encoders (knobs 0..7, bank2 8..15).
     cc_last: [AtomicU16; 16],
 }
@@ -112,6 +117,7 @@ impl Default for MidiMap {
             repeat_latch: AtomicBool::new(false),
             hw_latched: std::array::from_fn(|_| AtomicBool::new(false)),
             hw_note: std::array::from_fn(|_| AtomicU8::new(0)),
+            last_drum_note: AtomicU8::new(0xff),
             cc_last: std::array::from_fn(|_| AtomicU16::new(0)),
         }
     }
@@ -214,6 +220,19 @@ impl MidiMap {
 
     pub fn set_pads_to_fx(&self, armed: bool) {
         self.pads_to_fx.store(armed, Ordering::Relaxed);
+    }
+
+    fn remember_drum_note(&self, note: u8) {
+        self.last_drum_note.store(note, Ordering::Relaxed);
+    }
+
+    fn last_drum_note(&self) -> Option<u8> {
+        let note = self.last_drum_note.load(Ordering::Relaxed);
+        if note == 0xff {
+            None
+        } else {
+            Some(note)
+        }
     }
 
     fn pads_to_fx(&self) -> bool {
@@ -357,6 +376,7 @@ impl MidiMap {
                     return None;
                 }
                 if channel == DRUM_CHANNEL {
+                    self.remember_drum_note(note);
                     if let Some(command) = self.interpret_drum_repeat(note, velocity, true) {
                         return Some(command);
                     }
@@ -387,7 +407,9 @@ impl MidiMap {
                 let dest = self.dest_for(MidiSource::StickX);
                 let unit = (value as f32 / 16_383.0).clamp(0.0, 1.0);
                 let semis = ((value as f32) - 8192.0) / 8192.0 * 2.0;
-                dest_command(dest, unit, Some(semis), None)
+                // Drum destinations follow the last pad so stick X cannot
+                // rewrite every voice's pitch/level at once.
+                dest_command(dest, unit, Some(semis), self.last_drum_note())
             }
             MidiEvent::ControlChange {
                 channel,
@@ -400,7 +422,10 @@ impl MidiMap {
                 pressure,
             } => self.interpret_aftertouch(profile, Some((channel, note)), pressure),
             MidiEvent::ChannelPressure { pressure, .. } => {
-                self.interpret_aftertouch(profile, None, pressure)
+                // No note on the wire — aim at the last pad so a hard hit
+                // cannot raise every drum's stored LEVEL/TONE together.
+                let pad = self.last_drum_note().map(|note| (DRUM_CHANNEL, note));
+                self.interpret_aftertouch(profile, pad, pressure)
             }
             _ => None,
         }
@@ -469,7 +494,12 @@ impl MidiMap {
     ) -> Option<Command> {
         if controller == CC_MOD {
             let unit = (value as f32 / 127.0).clamp(0.0, 1.0);
-            return dest_command(self.dest_for(MidiSource::StickY), unit, None, None);
+            return dest_command(
+                self.dest_for(MidiSource::StickY),
+                unit,
+                None,
+                self.last_drum_note(),
+            );
         }
         if controller == 64
             && profile.fader_index(64).is_none()
@@ -524,6 +554,9 @@ impl MidiMap {
             });
         }
         if mode == MODE_DRUMS {
+            // K1–K4 reshape the last-hit pad only. Kit-wide SetSynth used to
+            // make "play loud snare → every drum got louder" when a knob or
+            // residual CC landed after a pad hit. K8 stays the shared kit bus.
             let param = match knob {
                 0 => SynthParam::DrumPitch,
                 1 => SynthParam::DrumTone,
@@ -537,7 +570,7 @@ impl MidiMap {
                 }
                 _ => return None,
             };
-            return Some(Command::SetSynth { param, value: unit });
+            return drum_express(param, unit, self.last_drum_note());
         }
         if mode == MODE_FM {
             let param = match knob {
@@ -635,10 +668,9 @@ fn dest_command(
                     amount: unit,
                 })
             } else {
-                Some(Command::SetSynth {
-                    param: SynthParam::DrumTone,
-                    value: unit,
-                })
+                // No pad context: refuse kit-wide tone stomps. ALL DRUMS still
+                // reaches the engine through the UI SetSynth path.
+                None
             }
         }
         MidiDest::DrumPitch => drum_express(SynthParam::DrumPitch, unit, drum_note),
@@ -649,15 +681,14 @@ fn dest_command(
 }
 
 fn drum_express(param: SynthParam, unit: f32, drum_note: Option<u8>) -> Option<Command> {
-    if let Some(note) = drum_note {
-        Some(Command::SetDrumMacro {
-            model: drum_model_for_note(note).index() as u8,
-            param,
-            value: unit,
-        })
-    } else {
-        Some(Command::SetSynth { param, value: unit })
-    }
+    // Never fall back to kit-wide SetSynth: that is what made one pad's LEVEL
+    // appear to raise the whole kit. Hit a pad first (or use ALL DRUMS on UI).
+    let note = drum_note?;
+    Some(Command::SetDrumMacro {
+        model: drum_model_for_note(note).index() as u8,
+        param,
+        value: unit,
+    })
 }
 
 fn bank2_fx_command(index: usize, unit: f32) -> Option<Command> {
@@ -1457,21 +1488,18 @@ mod tests {
                 pressure: 127,
             }),
             Some(Command::SetDrumAftertouch {
-                model: 1,
+                model: drum_model_for_note(37).index() as u8,
                 amount: 1.0,
             })
         );
-        assert_eq!(
+        assert!(
             map.interpret(MidiEvent::PolyPressure {
                 channel: 0,
                 note: 60,
                 pressure: 90,
-            }),
-            Some(Command::SetSynth {
-                param: SynthParam::DrumTone,
-                value: 90.0 / 127.0
-            }),
-            "key aftertouch uses the same dest globally, not a pad overlay"
+            })
+            .is_none(),
+            "key aftertouch must not kit-wide stomp drum macros without a pad"
         );
     }
 
@@ -1908,6 +1936,27 @@ mod tests {
     fn drum_mode_rebinds_the_same_ccs() {
         let map = MidiMap::default();
         map.set_drums();
+        assert!(
+            map.interpret(MidiEvent::ControlChange {
+                channel: 0,
+                controller: CC_MORPH,
+                value: 64,
+            })
+            .is_none(),
+            "drums-mode knobs stay quiet until a pad names the target voice"
+        );
+        assert_eq!(
+            map.interpret(MidiEvent::NoteOn {
+                channel: 9,
+                note: 45,
+                velocity: 100,
+            }),
+            Some(Command::NoteOn {
+                channel: 9,
+                note: 45,
+                velocity: 100
+            })
+        );
         let command = map
             .interpret(MidiEvent::ControlChange {
                 channel: 0,
@@ -1916,12 +1965,68 @@ mod tests {
             })
             .unwrap();
         match command {
-            Command::SetSynth {
+            Command::SetDrumMacro {
+                model,
                 param: SynthParam::DrumPitch,
                 value,
-            } => assert!((value - 64.0 / 127.0).abs() < 0.001),
+            } => {
+                assert_eq!(model, drum_model_for_note(45).index() as u8);
+                assert!((value - 64.0 / 127.0).abs() < 0.001);
+            }
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn drum_level_expression_hits_only_the_last_pad() {
+        let map = MidiMap::default();
+        map.set_assigns(None, Some("drum_level"), Some("drum_level"));
+        assert!(
+            map.interpret(MidiEvent::ChannelPressure {
+                channel: 9,
+                pressure: 100,
+            })
+            .is_none(),
+            "channel pressure with no prior pad must not raise the whole kit"
+        );
+        assert!(map
+            .interpret(MidiEvent::NoteOn {
+                channel: 9,
+                note: 45,
+                velocity: 110,
+            })
+            .is_some());
+        assert_eq!(
+            map.interpret(MidiEvent::ChannelPressure {
+                channel: 9,
+                pressure: 100,
+            }),
+            Some(Command::SetDrumMacro {
+                model: drum_model_for_note(45).index() as u8,
+                param: SynthParam::DrumAmp,
+                value: 100.0 / 127.0,
+            })
+        );
+        assert!(map
+            .interpret(MidiEvent::NoteOn {
+                channel: 9,
+                note: 36,
+                velocity: 40,
+            })
+            .is_some());
+        assert_eq!(
+            map.interpret(MidiEvent::ControlChange {
+                channel: 0,
+                controller: CC_MOD,
+                value: 20,
+            }),
+            Some(Command::SetDrumMacro {
+                model: 0,
+                param: SynthParam::DrumAmp,
+                value: 20.0 / 127.0,
+            }),
+            "stick Y drum-level follows the last pad (kick), not the whole kit"
+        );
     }
 
     #[test]

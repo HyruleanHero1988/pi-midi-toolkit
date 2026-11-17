@@ -24,7 +24,8 @@ pub const JAM_MODES: [UiMode; 6] = [
 ];
 
 /// Home grid entries (5-col). LOG / PORTS live under Settings.
-pub const HOME_TILES: [(UiMode, &'static str, u32); 15] = [
+/// Shipping order is the default; users can reorder via Home EDIT.
+pub const HOME_TILES: [(UiMode, &'static str, u32); 16] = [
     (UiMode::Synth, "SYNTH", 0x458588),
     (UiMode::Fm, "FM", 0x8ec07c),
     (UiMode::Drums, "DRUMS", 0x98971a),
@@ -37,10 +38,76 @@ pub const HOME_TILES: [(UiMode, &'static str, u32); 15] = [
     (UiMode::Presets, "PRESETS", 0x83a598),
     (UiMode::Fx, "FX", 0xb16286),
     (UiMode::Mix, "MIX", 0xfabd2f),
+    (UiMode::Env, "ENV", 0xd3869b),
     (UiMode::Map, "MAP", 0x458588),
     (UiMode::Wave, "WAVE", 0x076678),
     (UiMode::Settings, "SETTINGS", 0x665c54),
 ];
+
+/// Default home-tile order (shipping layout).
+pub fn default_home_tile_order() -> Vec<UiMode> {
+    HOME_TILES.iter().map(|(mode, _, _)| *mode).collect()
+}
+
+/// Title + color for a home-tile mode, if it is on the launcher.
+pub fn home_tile_meta(mode: UiMode) -> Option<(&'static str, u32)> {
+    HOME_TILES
+        .iter()
+        .find(|(m, _, _)| *m == mode)
+        .map(|(_, title, color)| (*title, *color))
+}
+
+/// Session/wire name for a home tile (`"synth"`, `"settings"`, …).
+/// Derived from the tile title so new `HOME_TILES` entries work automatically.
+pub fn home_tile_wire(mode: UiMode) -> Option<String> {
+    home_tile_meta(mode).map(|(title, _)| title.to_ascii_lowercase())
+}
+
+/// Parse a saved home-tile name back to a mode.
+pub fn parse_home_tile(raw: &str) -> Option<UiMode> {
+    let key = raw.trim().to_ascii_lowercase();
+    if key.is_empty() {
+        return None;
+    }
+    HOME_TILES
+        .iter()
+        .find(|(_, title, _)| title.eq_ignore_ascii_case(&key))
+        .map(|(mode, _, _)| *mode)
+        .or_else(|| {
+            // Short chrome labels from UiMode::label.
+            match key.as_str() {
+                "syn" => Some(UiMode::Synth),
+                "kit" => Some(UiMode::Drums),
+                "pad" => Some(UiMode::Pads),
+                "kao" => Some(UiMode::Kaoss),
+                "chd" => Some(UiMode::Chords),
+                "sng" => Some(UiMode::Songs),
+                "pre" => Some(UiMode::Presets),
+                "wav" | "viz" => Some(UiMode::Wave),
+                "set" => Some(UiMode::Settings),
+                "envelope" | "adsr" => Some(UiMode::Env),
+                _ => None,
+            }
+        })
+}
+
+/// Keep saved order for known tiles; append any new shipping tiles at the end;
+/// drop unknowns so removed modes disappear.
+pub fn merge_home_tile_order(saved: &[UiMode]) -> Vec<UiMode> {
+    let defaults = default_home_tile_order();
+    let mut out = Vec::with_capacity(defaults.len());
+    for mode in saved {
+        if defaults.contains(mode) && !out.contains(mode) {
+            out.push(*mode);
+        }
+    }
+    for mode in defaults {
+        if !out.contains(&mode) {
+            out.push(mode);
+        }
+    }
+    out
+}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Hit {
@@ -70,6 +137,10 @@ pub enum Hit {
     PadsOut,
     ClipQuantize,
     HomeTile(UiMode),
+    /// Toggle home-tile layout editor (EDIT / DONE).
+    HomeEdit,
+    /// Grab a home tile in editor mode to drag-reorder.
+    HomeTileReorder(usize),
     Power,
     PowerShutdown,
     PowerReboot,
@@ -129,6 +200,8 @@ pub enum Hit {
     MapChannelDone,
     MapChannelClear,
     KaossProg,
+    /// Instant PROG favorite slot (0..KAOSS_FAV_SLOTS-1).
+    KaossFav(u8),
     KaossScale,
     KaossKey,
     KaossOct,
@@ -136,6 +209,9 @@ pub enum Hit {
     KaossOctDown,
     KaossHold,
     KaossFxHold,
+    /// Cycle KAOSS↔Punch link (OFF → RPT → … → CRUSH). Pad stays the instrument;
+    /// Punch stays the rack — right strip sculpts the linked slot.
+    KaossPunchLink,
     KaossGate,
     KaossFull,
     KaossBpmUp,
@@ -174,6 +250,8 @@ pub enum Hit {
     KaossGridWidthDown,
     KaossPicker(usize),
     KaossPickerClose,
+    /// PROG picker filter chip (NOTE / FX / MIDI / ALL).
+    KaossProgFilter(crate::kaoss_ui::KaossProgramFilter),
     SeqRec,
     SeqPlay,
     SeqKeep,
@@ -225,6 +303,8 @@ pub enum Hit {
     PunchDry,
     MixBus(usize),
     MixPad(usize),
+    /// ADSR fader on the ENV page (0=A, 1=D, 2=S, 3=R).
+    EnvSlider(usize),
     SettingsWifi,
     SettingsWifiUsb,
     SettingsUpdate,
@@ -322,6 +402,28 @@ impl Rect {
         px >= self.x && py >= self.y && px < self.x + self.w && py < self.y + self.h
     }
 
+    /// Axis-aligned intersection, or `None` if the rects do not overlap.
+    pub fn intersection(self, other: Rect) -> Option<Rect> {
+        let x0 = self.x.max(other.x);
+        let y0 = self.y.max(other.y);
+        let x1 = (self.x + self.w).min(other.x + other.w);
+        let y1 = (self.y + self.h).min(other.y + other.h);
+        if x1 > x0 && y1 > y0 {
+            Some(Rect {
+                x: x0,
+                y: y0,
+                w: x1 - x0,
+                h: y1 - y0,
+            })
+        } else {
+            None
+        }
+    }
+
+    pub fn intersects(self, other: Rect) -> bool {
+        self.intersection(other).is_some()
+    }
+
     pub fn pad_xy(self, px: i32, py: i32) -> (f32, f32) {
         let x = (px - self.x) as f32 / self.w.max(1) as f32;
         let y = 1.0 - (py - self.y) as f32 / self.h.max(1) as f32;
@@ -383,6 +485,8 @@ pub struct Layout {
     pub map_out: Rect,
     pub map_test: Rect,
     pub kaoss_prog: Rect,
+    /// Strip of instant PROG favorite slots between pad and footer.
+    pub kaoss_favs: Rect,
     pub kaoss_scale: Rect,
     pub kaoss_key: Rect,
     pub kaoss_oct: Rect,
@@ -390,6 +494,8 @@ pub struct Layout {
     pub kaoss_oct_up: Rect,
     pub kaoss_hold: Rect,
     pub kaoss_fx_hold: Rect,
+    /// Footer: link a Punch rack slot for the pad's right-edge strip.
+    pub kaoss_punch_link: Rect,
     pub kaoss_gate: Rect,
     pub kaoss_full: Rect,
     /// Single footer control that opens the tempo sheet.
@@ -569,12 +675,13 @@ impl Layout {
             },
             // Full-width Kaoss pad like Tk (drums live on SEQ / kit, not here).
             // Leave headroom above footer chrome so axis labels (drawn after
-            // button fills) never sit on PROG/KEY/GATE controls.
+            // button fills) never sit on PROG/KEY/GATE controls. Fav strip
+            // sits between pad and footer (SPIKE 4 instant PROG slots).
             kaoss: Rect {
                 x: 8,
                 y: HUD_H + 8,
                 w: SCREEN_W - 16,
-                h: content_h - 128,
+                h: content_h - 168,
             },
             drums: Rect {
                 x: 0,
@@ -595,6 +702,12 @@ impl Layout {
                 y: HUD_H + content_h - 100,
                 w: 124,
                 h: 44,
+            },
+            kaoss_favs: Rect {
+                x: 8,
+                y: HUD_H + content_h - 156,
+                w: SCREEN_W - 16,
+                h: 36,
             },
             kaoss_scale: Rect {
                 x: 136,
@@ -638,16 +751,17 @@ impl Layout {
                 w: 104,
                 h: 44,
             },
+            // Bottom row: GATE · BPM · FULL · SET · PUNCH-link (rack, not PROG).
             kaoss_gate: Rect {
                 x: 8,
                 y: HUD_H + content_h - 52,
-                w: 168,
+                w: 148,
                 h: 44,
             },
             kaoss_bpm: Rect {
-                x: 184,
+                x: 164,
                 y: HUD_H + content_h - 52,
-                w: 168,
+                w: 140,
                 h: 44,
             },
             kaoss_show_all: Rect {
@@ -681,15 +795,21 @@ impl Layout {
                 h: 0,
             },
             kaoss_full: Rect {
-                x: 360,
+                x: 312,
                 y: HUD_H + content_h - 52,
-                w: 200,
+                w: 148,
                 h: 44,
             },
             kaoss_settings_btn: Rect {
-                x: 568,
+                x: 468,
                 y: HUD_H + content_h - 52,
-                w: 224,
+                w: 180,
+                h: 44,
+            },
+            kaoss_punch_link: Rect {
+                x: 656,
+                y: HUD_H + content_h - 52,
+                w: 136,
                 h: 44,
             },
             phrase_grid: Rect {
@@ -1577,6 +1697,12 @@ impl Layout {
                 w: 0,
                 h: 0,
             };
+            self.kaoss_favs = Rect {
+                x: 0,
+                y: 0,
+                w: 0,
+                h: 0,
+            };
             self.kaoss_scale = Rect {
                 x: 0,
                 y: 0,
@@ -1614,6 +1740,12 @@ impl Layout {
                 h: 0,
             };
             self.kaoss_fx_hold = Rect {
+                x: 0,
+                y: 0,
+                w: 0,
+                h: 0,
+            };
+            self.kaoss_punch_link = Rect {
                 x: 0,
                 y: 0,
                 w: 0,
@@ -1735,20 +1867,34 @@ impl Layout {
     }
 
     pub fn home_grid(&self) -> crate::scroll::GridScroll {
+        self.home_grid_for(HOME_TILES.len())
+    }
+
+    /// Home title + EDIT row height (scrolls with the tile grid).
+    pub const HOME_HEADER_H: i32 = 36;
+
+    pub fn home_grid_for(&self, item_count: usize) -> crate::scroll::GridScroll {
         const COLS: usize = 5;
         const VISIBLE_ROWS: i32 = 3;
         let gh = (self.content.h - 40) / VISIBLE_ROWS;
         crate::scroll::GridScroll {
             cols: COLS,
             cell_h: gh,
-            item_count: HOME_TILES.len(),
+            item_count,
+            // Full content viewport so tiles remain hittable after the header scrolls away.
             viewport: Rect {
                 x: self.content.x + 12,
-                y: self.content.y + 36,
+                y: self.content.y,
                 w: self.content.w - 24,
-                h: self.content.h - 36,
+                h: self.content.h,
             },
+            top_inset: Self::HOME_HEADER_H,
         }
+    }
+
+    /// Max scroll so the header can leave the viewport and tiles fill the top.
+    pub fn home_max_scroll(&self, item_count: usize) -> i32 {
+        self.home_grid_for(item_count).max_scroll()
     }
 
     pub fn home_row_h(&self) -> i32 {
@@ -1757,6 +1903,21 @@ impl Layout {
 
     pub fn home_tile(&self, index: usize, scroll_y: i32) -> Rect {
         self.home_grid().cell_rect(index, scroll_y)
+    }
+
+    /// EDIT / DONE control on the home header (moves with scroll).
+    pub fn home_edit_btn(&self, scroll_y: i32) -> Rect {
+        Rect {
+            x: self.content.x + self.content.w - 148,
+            y: self.content.y + 4 - scroll_y,
+            w: 136,
+            h: 28,
+        }
+    }
+
+    /// Title baseline for the home header (moves with scroll).
+    pub fn home_title_y(&self, scroll_y: i32) -> i32 {
+        self.content.y + 10 - scroll_y
     }
 
     /// Scrollable KAOSS settings panel (Tk ⚙ overlay).
@@ -1887,6 +2048,7 @@ impl Layout {
                 w: self.content.w - 16,
                 h: self.content.h - 44 - 64,
             },
+            top_inset: 0,
         }
     }
 
@@ -1901,7 +2063,21 @@ impl Layout {
         Hit::SettingsPickerDone
     }
 
-    pub fn hit_kaoss_settings(&self, px: i32, py: i32, scroll: i32) -> Hit {
+    /// Press target for the KAOSS settings sheet: always a scroll area so a
+    /// drag that starts on a button can steal into scroll (smartphone-like).
+    pub fn hit_kaoss_settings(&self, px: i32, py: i32, _scroll: i32) -> Hit {
+        if self.content.contains(px, py) {
+            Hit::ScrollArea(crate::scroll::ScrollKind::KaossSettings)
+        } else {
+            Hit::None
+        }
+    }
+
+    /// Control under `(px, py)` once a scroll gesture resolves as a tap.
+    pub fn kaoss_settings_control_at(&self, px: i32, py: i32, scroll: i32) -> Hit {
+        if !self.content.contains(px, py) {
+            return Hit::None;
+        }
         if self
             .kaoss_settings_row(Self::KAOSS_SET_WIPE_Y, scroll, 48)
             .contains(px, py)
@@ -1991,9 +2167,6 @@ impl Layout {
             {
                 return Hit::KaossChannelPick(ch as u8);
             }
-        }
-        if self.content.contains(px, py) {
-            return Hit::ScrollArea(crate::scroll::ScrollKind::KaossSettings);
         }
         Hit::None
     }
@@ -2160,6 +2333,7 @@ impl Layout {
                 w: self.content.w - 32,
                 h: self.content.h - 44 - 64,
             },
+            top_inset: 0,
         }
     }
 
@@ -2409,6 +2583,34 @@ impl Layout {
     pub const FX_DRUMS_LEVEL: usize = 5;
     pub const FX_MIC_LEVEL: usize = 6;
     pub const PUNCH_PAD_COUNT: usize = 8;
+    /// Right-edge width (px) of the KAOSS↔Punch sculpt strip when a slot is linked.
+    pub const KAOSS_PUNCH_STRIP_W: i32 = 56;
+
+    /// Right strip of the Kaoss pad used to modulate a linked Punch rack slot.
+    pub fn kaoss_punch_strip(&self) -> Rect {
+        let w = Self::KAOSS_PUNCH_STRIP_W.min(self.kaoss.w.max(1) / 4);
+        Rect {
+            x: self.kaoss.x + self.kaoss.w - w,
+            y: self.kaoss.y,
+            w,
+            h: self.kaoss.h,
+        }
+    }
+
+    /// True when `(px, py)` falls in the Punch sculpt strip of the Kaoss pad.
+    pub fn in_kaoss_punch_strip(&self, px: i32, py: i32) -> bool {
+        self.kaoss.w > 0 && self.kaoss_punch_strip().contains(px, py)
+    }
+
+    /// Map strip Y to Punch amount (bottom = 0, top = 1), matching FX pads.
+    pub fn kaoss_punch_strip_amount(&self, py: i32) -> f32 {
+        let strip = self.kaoss_punch_strip();
+        if strip.h <= 1 {
+            return 0.0;
+        }
+        let t = (py - strip.y) as f32 / strip.h as f32;
+        (1.0 - t).clamp(0.0, 1.0)
+    }
 
     /// MIX page: LIVE / KIT / SEQ DRM / SEQ KEY / SEQ KSS / MIC, then 16 pad faders.
     pub const MIX_BUS_COUNT: usize = 6;
@@ -2773,6 +2975,7 @@ impl Layout {
             UiMode::Settings => self.hit_settings(px, py),
             UiMode::Fx => self.hit_fx(px, py),
             UiMode::Mix => self.hit_mix(px, py),
+            UiMode::Env => self.hit_env(px, py),
             UiMode::Log => self.hit_log(px, py),
             UiMode::Map => self.hit_map_channels(px, py),
             UiMode::Ports => self.hit_map(px, py),
@@ -2899,9 +3102,30 @@ impl Layout {
         Hit::None
     }
 
+    /// One of the six instant PROG favorite cells.
+    pub fn kaoss_fav_cell(&self, index: usize) -> Rect {
+        let n = crate::kaoss_ui::KAOSS_FAV_SLOTS.max(1) as i32;
+        let gap = 4;
+        let cell_w = (self.kaoss_favs.w - gap * (n - 1)).max(1) / n;
+        let i = (index as i32) % n;
+        Rect {
+            x: self.kaoss_favs.x + i * (cell_w + gap),
+            y: self.kaoss_favs.y,
+            w: cell_w,
+            h: self.kaoss_favs.h,
+        }
+    }
+
     fn hit_kaoss(&self, px: i32, py: i32) -> Hit {
         if self.kaoss_prog.contains(px, py) {
             return Hit::KaossProg;
+        }
+        if self.kaoss_favs.w > 0 {
+            for i in 0..crate::kaoss_ui::KAOSS_FAV_SLOTS {
+                if self.kaoss_fav_cell(i).contains(px, py) {
+                    return Hit::KaossFav(i as u8);
+                }
+            }
         }
         if self.kaoss_scale.contains(px, py) {
             return Hit::KaossScale;
@@ -2932,6 +3156,9 @@ impl Layout {
         }
         if self.kaoss_settings_btn.w > 0 && self.kaoss_settings_btn.contains(px, py) {
             return Hit::KaossSettings;
+        }
+        if self.kaoss_punch_link.w > 0 && self.kaoss_punch_link.contains(px, py) {
+            return Hit::KaossPunchLink;
         }
         if self.kaoss_full.contains(px, py) {
             return Hit::KaossFull;
@@ -2968,15 +3195,63 @@ impl Layout {
         px: i32,
         py: i32,
         show_all: bool,
+        filter: crate::kaoss_ui::KaossProgramFilter,
     ) -> Hit {
-        let n = crate::kaoss_ui::picker_count(kind, show_all);
+        if matches!(kind, crate::kaoss_ui::KaossPicker::Program) {
+            if let Some(hit) = self.hit_kaoss_prog_filter(px, py) {
+                return hit;
+            }
+        }
+        let n = crate::kaoss_ui::picker_count(kind, show_all, filter);
         for index in 0..n {
-            if crate::kaoss_ui::picker_cell(self.kaoss, kind, index, show_all).contains(px, py) {
+            if crate::kaoss_ui::picker_cell(self.kaoss, kind, index, show_all, filter)
+                .contains(px, py)
+            {
                 return Hit::KaossPicker(index);
             }
         }
         // Tap outside the pad closes the picker.
         Hit::KaossPickerClose
+    }
+
+    /// Height of the NOTE/FX/MIDI/ALL chip row on the PROG picker.
+    pub const KAOSS_PROG_FILTER_H: i32 = 36;
+    /// Hint line under the chips (or alone for non-program pickers).
+    pub const KAOSS_PICKER_HINT_H: i32 = 18;
+
+    /// Filter chip strip across the top of the pad when PROG picker is open.
+    pub fn kaoss_prog_filter_bar(&self) -> Rect {
+        Rect {
+            x: self.kaoss.x + 4,
+            y: self.kaoss.y + 2,
+            w: (self.kaoss.w - 8).max(1),
+            h: Self::KAOSS_PROG_FILTER_H,
+        }
+    }
+
+    pub fn kaoss_prog_filter_chip(&self, index: usize) -> Rect {
+        let bar = self.kaoss_prog_filter_bar();
+        let n = crate::kaoss_ui::KaossProgramFilter::ALL.len() as i32;
+        let cw = (bar.w / n).max(1);
+        let i = (index as i32).clamp(0, n - 1);
+        Rect {
+            x: bar.x + i * cw + 1,
+            y: bar.y + 2,
+            w: cw - 2,
+            h: bar.h - 4,
+        }
+    }
+
+    pub fn hit_kaoss_prog_filter(&self, px: i32, py: i32) -> Option<Hit> {
+        if !self.kaoss_prog_filter_bar().contains(px, py) {
+            return None;
+        }
+        for (i, filter) in crate::kaoss_ui::KaossProgramFilter::ALL.iter().enumerate() {
+            if self.kaoss_prog_filter_chip(i).contains(px, py) {
+                return Some(Hit::KaossProgFilter(*filter));
+            }
+        }
+        None
     }
 
     fn hit_pads(&self, px: i32, py: i32) -> Hit {
@@ -3031,9 +3306,18 @@ impl Layout {
     }
 
     fn hit_home(&self, px: i32, py: i32, scroll_y: i32) -> Hit {
-        let grid = self.home_grid();
-        if let Some(index) = grid.index_at(px, py, scroll_y) {
-            return Hit::HomeTile(HOME_TILES[index].0);
+        // Press is owned by the scroll engine (including over EDIT / tiles);
+        // this path remains for layout.hit callers that pass scroll.
+        if self.content.contains(px, py) {
+            let edit = self.home_edit_btn(scroll_y);
+            if edit.intersects(self.content) && edit.contains(px, py) {
+                return Hit::HomeEdit;
+            }
+            let grid = self.home_grid();
+            if let Some(index) = grid.index_at(px, py, scroll_y) {
+                return Hit::HomeTile(HOME_TILES[index].0);
+            }
+            return Hit::ScrollArea(crate::scroll::ScrollKind::Home);
         }
         Hit::None
     }
@@ -3308,6 +3592,7 @@ impl Layout {
             cell_h: 52,
             item_count,
             viewport: self.synth_pick_grid,
+            top_inset: 0,
         }
     }
 
@@ -3326,14 +3611,20 @@ impl Layout {
         };
         let _ = show_all;
         let mut viewport = self.kaoss;
-        // Leave a strip for the picker hint so it does not sit on the first row.
-        viewport.y += 22;
-        viewport.h = (viewport.h - 22).max(1);
+        // Program picker: filter chips + hint. Other pickers: hint only.
+        let top = if matches!(kind, crate::kaoss_ui::KaossPicker::Program) {
+            Self::KAOSS_PROG_FILTER_H + Self::KAOSS_PICKER_HINT_H + 4
+        } else {
+            22
+        };
+        viewport.y += top;
+        viewport.h = (viewport.h - top).max(1);
         crate::scroll::GridScroll {
             cols,
             cell_h: 52,
             item_count,
             viewport,
+            top_inset: 0,
         }
     }
 
@@ -3797,18 +4088,50 @@ impl Layout {
         Hit::None
     }
 
-    pub fn settings_fx_slider(&self, index: usize) -> Rect {
-        // Three rows of three so MIC can sit under LEVEL / DRUMS.
-        let i = (index % Self::FX_SLIDER_COUNT) as i32;
-        let col = i % 3;
-        let row = i / 3;
-        let w = self.settings_fx.w / 3;
-        let h = (self.settings_fx.h - 16) / 3;
+    /// Bottom mix-trim band height inside `settings_fx` (KEYS / DRUMS / MIC).
+    const FX_MIX_BAND_H: i32 = 112;
+    /// Gap between insert block and mix band (holds the divider line).
+    const FX_MIX_DIVIDER_GAP: i32 = 16;
+
+    /// Thin horizontal rule separating insert FX from global mix trims.
+    pub fn settings_fx_mix_divider(&self) -> Rect {
+        let area = self.settings_fx;
         Rect {
-            x: self.settings_fx.x + col * w + 6,
-            y: self.settings_fx.y + 22 + row * h,
-            w: w - 12,
-            h: h - 26,
+            x: area.x + 8,
+            y: area.y + area.h - Self::FX_MIX_BAND_H - Self::FX_MIX_DIVIDER_GAP / 2 - 1,
+            w: area.w - 16,
+            h: 2,
+        }
+    }
+
+    pub fn settings_fx_slider(&self, index: usize) -> Rect {
+        // Top: DRIVE / DELAY / REVERB / FLANGE (follow FxEditTarget).
+        // Bottom row: KEYS / DRUMS / MIC (global mix trims).
+        let i = index % Self::FX_SLIDER_COUNT;
+        let area = self.settings_fx;
+        let label_pad = 22;
+        if i < Self::FX_INSERT_COUNT {
+            let col = i as i32;
+            let cols = Self::FX_INSERT_COUNT as i32;
+            let w = area.w / cols;
+            let h = area.h - label_pad - Self::FX_MIX_BAND_H - Self::FX_MIX_DIVIDER_GAP;
+            Rect {
+                x: area.x + col * w + 4,
+                y: area.y + label_pad,
+                w: w - 8,
+                h: h - 8,
+            }
+        } else {
+            let mix_i = (i - Self::FX_INSERT_COUNT) as i32;
+            let cols = 3;
+            let w = area.w / cols;
+            let band_y = area.y + area.h - Self::FX_MIX_BAND_H;
+            Rect {
+                x: area.x + mix_i * w + 6,
+                y: band_y + label_pad,
+                w: w - 12,
+                h: Self::FX_MIX_BAND_H - label_pad - 8,
+            }
         }
     }
 
@@ -4092,6 +4415,44 @@ impl Layout {
         Hit::None
     }
 
+    pub const ENV_SLIDER_COUNT: usize = 4;
+
+    /// Live ADSR shape across the top of the ENV page.
+    pub fn env_plot(&self) -> Rect {
+        Rect {
+            x: self.content.x + 16,
+            y: self.content.y + 40,
+            w: self.content.w - 32,
+            h: 168,
+        }
+    }
+
+    /// Four ADSR faders under the curve plot.
+    pub fn env_slider(&self, index: usize) -> Rect {
+        let i = (index % Self::ENV_SLIDER_COUNT) as i32;
+        let w = 72;
+        let gap = 18;
+        let total = Self::ENV_SLIDER_COUNT as i32 * w + (Self::ENV_SLIDER_COUNT as i32 - 1) * gap;
+        let left = self.content.x + (self.content.w - total) / 2;
+        let plot = self.env_plot();
+        let top = plot.y + plot.h + 36;
+        Rect {
+            x: left + i * (w + gap),
+            y: top,
+            w,
+            h: (self.content.y + self.content.h - 12 - top).max(80),
+        }
+    }
+
+    fn hit_env(&self, px: i32, py: i32) -> Hit {
+        for index in 0..Self::ENV_SLIDER_COUNT {
+            if self.env_slider(index).contains(px, py) {
+                return Hit::EnvSlider(index);
+            }
+        }
+        Hit::None
+    }
+
     fn hit_seq(&self, px: i32, py: i32) -> Hit {
         if self.seq_rec.contains(px, py) {
             return Hit::SeqRec;
@@ -4182,6 +4543,11 @@ pub fn fm_name_key_label(index: usize) -> &'static str {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Surface {
     Kaoss,
+    /// Right-edge strip on the Kaoss pad while a Punch slot is linked.
+    /// Product rule: pad = gesture instrument; Punch = rack (not a PROG clone).
+    KaossPunchStrip {
+        index: usize,
+    },
     Drum {
         note: u8,
         repeat: bool,
@@ -4203,6 +4569,8 @@ pub enum Surface {
     },
     KitSlider {
         index: usize,
+        /// Model locked at finger-down. `None` means the gesture is ALL DRUMS.
+        drum: Option<u8>,
     },
     FxSlider {
         index: usize,
@@ -4222,6 +4590,9 @@ pub enum Surface {
     MixPad {
         index: usize,
     },
+    EnvSlider {
+        index: usize,
+    },
     ChordsButton {
         col: usize,
         row: usize,
@@ -4230,10 +4601,12 @@ pub enum Surface {
     ChordsPalette {
         slot: usize,
     },
-    ScrollDrag {
-        kind: crate::scroll::ScrollKind,
+    ScrollDrag(crate::scroll::ScrollGesture),
+    /// Home editor: drag a tile to a new grid slot.
+    HomeTileDrag {
+        index: usize,
+        start_px: i32,
         start_py: i32,
-        scroll_at_start: i32,
         dragging: bool,
     },
     UiTap,
@@ -4247,6 +4620,34 @@ pub enum Surface {
 mod tests {
     use super::*;
     use crate::chords;
+
+    #[test]
+    fn merge_home_tile_order_keeps_saved_and_appends_new() {
+        let saved = vec![UiMode::Kaoss, UiMode::Synth, UiMode::Settings];
+        let merged = merge_home_tile_order(&saved);
+        assert_eq!(&merged[..3], &[UiMode::Kaoss, UiMode::Synth, UiMode::Settings]);
+        assert_eq!(merged.len(), HOME_TILES.len());
+        assert!(merged.contains(&UiMode::Fm));
+        assert_eq!(
+            merge_home_tile_order(&[]),
+            default_home_tile_order()
+        );
+        // Unknown / removed modes are dropped.
+        let with_junk = merge_home_tile_order(&[UiMode::Home, UiMode::Kaoss]);
+        assert!(!with_junk.contains(&UiMode::Home));
+        assert_eq!(with_junk[0], UiMode::Kaoss);
+    }
+
+    #[test]
+    fn home_tile_wire_round_trips_shipping_tiles() {
+        for (mode, title, _) in HOME_TILES {
+            let wire = home_tile_wire(mode).expect(title);
+            assert_eq!(parse_home_tile(&wire), Some(mode));
+            assert_eq!(parse_home_tile(title), Some(mode));
+        }
+        assert_eq!(parse_home_tile("kit"), Some(UiMode::Drums));
+        assert_eq!(parse_home_tile("nope"), None);
+    }
 
     #[test]
     fn six_fm_ops_sit_inside_the_graph_without_overlap() {
@@ -4312,14 +4713,63 @@ mod tests {
     }
 
     #[test]
-    fn layout_audit_home_fits_three_rows() {
+    fn layout_audit_home_scrolls_header_with_tiles() {
         let layout = Layout::new();
-        let settings_idx = HOME_TILES.len() - 1;
-        let settings = layout.home_tile(settings_idx, 0);
-        assert_on_screen("home settings", settings);
+        let n = HOME_TILES.len();
+        let max = layout.home_max_scroll(n);
         assert!(
-            layout.home_grid().max_scroll() == 0,
-            "twelve home tiles should fit without scrolling"
+            max > Layout::HOME_HEADER_H,
+            "16 home tiles need scroll past the header"
+        );
+        // Bottom-row tiles are reachable once scrolled.
+        let settings = layout.home_tile(n - 1, max);
+        assert!(
+            settings.intersects(layout.content),
+            "last home tile must enter the viewport at max scroll"
+        );
+        let edit0 = layout.home_edit_btn(0);
+        let edit_scrolled = layout.home_edit_btn(Layout::HOME_HEADER_H);
+        assert_eq!(edit0.y - edit_scrolled.y, Layout::HOME_HEADER_H);
+        assert_eq!(
+            layout.home_title_y(0) - layout.home_title_y(20),
+            20,
+            "title tracks scroll with the tiles"
+        );
+        // After scrolling the header away, top-row tiles sit at the content top.
+        let top = layout.home_grid_for(n).cell_rect(0, Layout::HOME_HEADER_H);
+        assert!(
+            (top.y - layout.content.y).abs() <= 8,
+            "tiles fill the top once the header has scrolled off"
+        );
+        assert!(
+            layout
+                .home_grid_for(n)
+                .index_at(top.x + 4, top.y + 4, Layout::HOME_HEADER_H)
+                .is_some(),
+            "scrolled tiles stay hittable in the former header band"
+        );
+    }
+
+    #[test]
+    fn layout_audit_kaoss_favs_between_pad_and_footer() {
+        let layout = Layout::new();
+        assert!(layout.kaoss_favs.w > 0 && layout.kaoss_favs.h >= 32);
+        assert!(
+            gap_below(layout.kaoss, layout.kaoss_favs) >= 0,
+            "favs must sit below the pad"
+        );
+        assert!(
+            gap_below(layout.kaoss_favs, layout.kaoss_prog) >= 8,
+            "favs must clear PROG footer"
+        );
+        assert_on_screen("kaoss favs", layout.kaoss_favs);
+        let f0 = layout.kaoss_fav_cell(0);
+        let f5 = layout.kaoss_fav_cell(5);
+        assert!(f0.w > 0 && f5.w > 0);
+        assert!(f0.x + f0.w <= f5.x || f0.x < f5.x);
+        assert_eq!(
+            layout.hit(crate::mode::UiMode::Kaoss, f0.x + 4, f0.y + 4),
+            Hit::KaossFav(0)
         );
     }
 
@@ -4404,10 +4854,27 @@ mod tests {
         let layout = Layout::new();
         let grid = layout.kaoss_picker_grid(crate::kaoss_ui::KaossPicker::Program, 9, false);
         let cell = grid.cell_rect(0, 0);
+        let top = Layout::KAOSS_PROG_FILTER_H + Layout::KAOSS_PICKER_HINT_H + 4;
         assert!(
-            cell.y >= layout.kaoss.y + 22,
-            "picker tiles must start below the hint line"
+            cell.y >= layout.kaoss.y + top,
+            "picker tiles must start below filter chips + hint"
         );
+        let note = layout.kaoss_prog_filter_chip(0);
+        let all = layout.kaoss_prog_filter_chip(3);
+        assert!(note.w > 20 && note.h > 20);
+        assert!(all.x > note.x);
+        assert_eq!(
+            layout.hit_kaoss_prog_filter(note.x + 2, note.y + 2),
+            Some(Hit::KaossProgFilter(crate::kaoss_ui::KaossProgramFilter::Note))
+        );
+        assert_eq!(
+            layout.hit_kaoss_prog_filter(all.x + 2, all.y + 2),
+            Some(Hit::KaossProgFilter(crate::kaoss_ui::KaossProgramFilter::All))
+        );
+        // Scale picker still uses the short hint inset.
+        let scale = layout.kaoss_picker_grid(crate::kaoss_ui::KaossPicker::Scale, 8, false);
+        assert!(scale.cell_rect(0, 0).y >= layout.kaoss.y + 22);
+        assert!(scale.cell_rect(0, 0).y < layout.kaoss.y + top);
     }
 
     #[test]
@@ -4488,28 +4955,33 @@ mod tests {
     }
 
     #[test]
-    fn snare_and_rimshot_trade_screen_cells() {
+    fn a6_and_b6_keep_positions_but_swap_noise() {
         let layout = Layout::new();
-        let snare = layout.kit_pad_cell(13);
-        let rimshot = layout.kit_pad_cell(5);
-        match layout.hit(UiMode::Drums, snare.x + 4, snare.y + 4) {
+        let a6 = layout.kit_pad_cell(5);
+        let b6 = layout.kit_pad_cell(13);
+        assert_eq!(crate::phrases::pad_label(crate::phrases::PHRASE_GRID_CELLS[5]), "A6");
+        assert_eq!(crate::phrases::pad_label(crate::phrases::PHRASE_GRID_CELLS[13]), "B6");
+        match layout.hit(UiMode::Drums, a6.x + 4, a6.y + 4) {
             Hit::Drum {
-                index: 13,
+                index: 5,
                 note: 37,
             } => {}
-            other => panic!("snare should sit on the old rimshot cell, got {other:?}"),
+            other => panic!("A6 should stay on note 37, got {other:?}"),
         }
-        match layout.hit(UiMode::Drums, rimshot.x + 4, rimshot.y + 4) {
-            Hit::Drum { index: 5, note: 45 } => {}
-            other => panic!("rimshot should sit on the old snare cell, got {other:?}"),
+        match layout.hit(UiMode::Drums, b6.x + 4, b6.y + 4) {
+            Hit::Drum {
+                index: 13,
+                note: 45,
+            } => {}
+            other => panic!("B6 should stay on note 45, got {other:?}"),
         }
         assert_eq!(
             jambox_core::drum_model_for_note(37),
-            jambox_core::DrumModel::Snare
+            jambox_core::DrumModel::Rimshot
         );
         assert_eq!(
             jambox_core::drum_model_for_note(45),
-            jambox_core::DrumModel::Rimshot
+            jambox_core::DrumModel::Snare
         );
     }
 
@@ -4956,27 +5428,49 @@ mod tests {
     fn layout_audit_fx_mix_sliders_fit() {
         let layout = Layout::new();
         let first = layout.settings_fx_slider(0);
-        let last = layout.settings_fx_slider(Layout::FX_SLIDER_COUNT - 1);
+        let flange = layout.settings_fx_slider(Layout::FX_INSERT_COUNT - 1);
+        let keys = layout.settings_fx_slider(Layout::FX_KEYS_LEVEL);
+        let drums = layout.settings_fx_slider(Layout::FX_DRUMS_LEVEL);
+        let mic = layout.settings_fx_slider(Layout::FX_MIC_LEVEL);
+        let divider = layout.settings_fx_mix_divider();
         assert!(first.x >= layout.settings_fx.x);
-        assert!(last.x + last.w <= layout.settings_fx.x + layout.settings_fx.w);
+        assert!(flange.x + flange.w <= layout.settings_fx.x + layout.settings_fx.w);
+        assert!(mic.x + mic.w <= layout.settings_fx.x + layout.settings_fx.w);
+        assert_eq!(first.y, flange.y, "insert FX share one top row");
+        assert_eq!(keys.y, drums.y, "KEYS/DRUMS share the mix row");
+        assert_eq!(drums.y, mic.y, "DRUMS/MIC share the mix row");
         assert!(
-            last.y > first.y,
-            "MIC / DRUMS should sit below the first insert row"
+            keys.y > flange.y + flange.h,
+            "mix trims sit below the insert block"
         );
-        match layout.hit(UiMode::Fx, last.x + 4, last.y + last.h / 2) {
+        assert!(
+            divider.y > flange.y + flange.h && divider.y + divider.h < keys.y - 12,
+            "divider sits between insert FX and mix trims"
+        );
+        match layout.hit(UiMode::Fx, mic.x + 4, mic.y + mic.h / 2) {
             Hit::FxSlider(i) if i == Layout::FX_MIC_LEVEL => {}
             other => panic!("expected mic level slider, got {other:?}"),
         }
-        let drums = layout.settings_fx_slider(Layout::FX_DRUMS_LEVEL);
         match layout.hit(UiMode::Fx, drums.x + 4, drums.y + drums.h / 2) {
             Hit::FxSlider(i) if i == Layout::FX_DRUMS_LEVEL => {}
             other => panic!("expected drums level slider, got {other:?}"),
+        }
+        match layout.hit(UiMode::Fx, keys.x + 4, keys.y + keys.h / 2) {
+            Hit::FxSlider(i) if i == Layout::FX_KEYS_LEVEL => {}
+            other => panic!("expected keys level slider, got {other:?}"),
+        }
+        for index in 0..Layout::FX_INSERT_COUNT {
+            let track = layout.settings_fx_slider(index);
+            match layout.hit(UiMode::Fx, track.x + 4, track.y + track.h / 2) {
+                Hit::FxSlider(i) if i == index => {}
+                other => panic!("expected insert slider {index}, got {other:?}"),
+            }
         }
         let rpt = layout.punch_pad_cell(0);
         let crush = layout.punch_pad_cell(7);
         assert_on_screen("punch rpt", rpt);
         assert_on_screen("punch crush", crush);
-        assert!(rpt.x > last.x + last.w, "punch pads sit right of inserts");
+        assert!(rpt.x > flange.x + flange.w, "punch pads sit right of inserts");
         assert_eq!(
             layout.hit(UiMode::Fx, rpt.x + 8, rpt.y + 8),
             Hit::PunchPad(0)
@@ -5023,6 +5517,28 @@ mod tests {
         );
         let set = layout.punch_set();
         assert_eq!(layout.hit(UiMode::Fx, set.x + 8, set.y + 8), Hit::PunchSet);
+    }
+
+    #[test]
+    fn layout_audit_env_sliders_on_screen() {
+        let layout = Layout::new();
+        let plot = layout.env_plot();
+        assert_on_screen("env plot", plot);
+        assert!(plot.h >= 120, "curve needs vertical room on 480p");
+        for i in 0..Layout::ENV_SLIDER_COUNT {
+            let r = layout.env_slider(i);
+            assert_on_screen(&format!("env slider {i}"), r);
+            assert!(
+                r.y >= plot.y + plot.h,
+                "fader {i} must sit under the ADSR plot"
+            );
+            assert_eq!(
+                layout.hit(UiMode::Env, r.x + r.w / 2, r.y + r.h / 2),
+                Hit::EnvSlider(i)
+            );
+        }
+        assert!(home_tile_meta(UiMode::Env).is_some());
+        assert!(default_home_tile_order().contains(&UiMode::Env));
     }
 
     #[test]

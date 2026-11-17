@@ -29,6 +29,8 @@ struct Voice {
     amp: f32,
     target_amp: f32,
     releasing: bool,
+    /// True once attack has reached the peak (ADSR decay/sustain may run).
+    env_peaked: bool,
     age: u64,
     /// Extra semitones on this voice only (Kaoss Y bend on a recorded take,
     /// or the wheel value latched when a live note is released).
@@ -58,6 +60,7 @@ impl Voice {
             amp: 0.0,
             target_amp: 0.0,
             releasing: false,
+            env_peaked: false,
             age: 0,
             bend_semis: 0.0,
             bend_target_semis: 0.0,
@@ -69,6 +72,12 @@ impl Voice {
 }
 
 /// Per-block modulation shared by every voice.
+///
+/// ADSR here is **global** for the wavetable pool (all live + clip keys share
+/// one envelope). Future extension point: route by [`crate::mix::MixSource`]
+/// or a bass-vs-melody target so bass lines can keep a short envelope while
+/// pads swell — keep the stage math in [`advance_adsr`] and swap which
+/// `VoiceContext` (or per-voice override) each note samples.
 #[derive(Debug, Clone, Copy)]
 pub struct VoiceContext {
     pub sample_rate: f32,
@@ -82,6 +91,10 @@ pub struct VoiceContext {
     /// Seconds in this render span — used to slew per-voice Kaoss bend.
     pub bend_slew_dt: f32,
     pub attack_sec: f32,
+    /// Time from peak down to the sustain level while the key is held.
+    pub decay_sec: f32,
+    /// 0..1 level held after decay (1 = classic attack/release, no dip).
+    pub sustain_level: f32,
     pub release_sec: f32,
     /// Live-keys MIX trim. Clip voices use `clip_gains`.
     pub live_gain: f32,
@@ -214,6 +227,7 @@ impl VoicePool {
             v.amp = 0.0;
             v.target_amp = target;
             v.releasing = false;
+            v.env_peaked = false;
             v.age = self.serial;
             v.bend_semis = 0.0;
             v.bend_target_semis = 0.0;
@@ -238,6 +252,7 @@ impl VoicePool {
             amp: 0.0,
             target_amp: target,
             releasing: false,
+            env_peaked: false,
             age: self.serial,
             bend_semis: 0.0,
             bend_target_semis: 0.0,
@@ -481,6 +496,7 @@ impl VoicePool {
     ) -> bool {
         let mut audible = false;
         let attack_step = linear_env_step(ctx.attack_sec, ctx.sample_rate);
+        let decay_step = linear_env_step(ctx.decay_sec, ctx.sample_rate);
         let release_step = linear_env_step(ctx.release_sec, ctx.sample_rate);
         let n = dest_l.len().min(dest_r.len());
         if n == 0 {
@@ -523,16 +539,16 @@ impl VoicePool {
             let (gl, gr) = crate::mix::width_gains(v.note, ctx.stereo_width);
 
             for i in 0..n {
-                if v.target_amp > v.amp {
-                    v.amp = (v.amp + attack_step * v.target_amp.max(0.05)).min(v.target_amp);
-                } else {
-                    let ref_amp = if v.releasing {
-                        v.amp.max(1e-4)
-                    } else {
-                        v.amp.max(0.05)
-                    };
-                    v.amp = (v.amp - release_step * ref_amp).max(v.target_amp);
-                }
+                v.amp = advance_adsr(
+                    v.amp,
+                    v.target_amp,
+                    v.releasing,
+                    &mut v.env_peaked,
+                    attack_step,
+                    decay_step,
+                    release_step,
+                    ctx.sustain_level,
+                );
 
                 let i0 = v.phase as usize & TABLE_MASK;
                 let i1 = (i0 + 1) & TABLE_MASK;
@@ -598,6 +614,7 @@ impl VoicePool {
     ) -> bool {
         let mut audible = false;
         let attack_step = linear_env_step(ctx.attack_sec, ctx.sample_rate);
+        let decay_step = linear_env_step(ctx.decay_sec, ctx.sample_rate);
         let release_step = linear_env_step(ctx.release_sec, ctx.sample_rate);
         let n = live.len();
 
@@ -643,16 +660,16 @@ impl VoicePool {
                 * crate::mix::note_presence(v.note);
 
             for sample in dest.iter_mut() {
-                if v.target_amp > v.amp {
-                    v.amp = (v.amp + attack_step * v.target_amp.max(0.05)).min(v.target_amp);
-                } else {
-                    let ref_amp = if v.releasing {
-                        v.amp.max(1e-4)
-                    } else {
-                        v.amp.max(0.05)
-                    };
-                    v.amp = (v.amp - release_step * ref_amp).max(v.target_amp);
-                }
+                v.amp = advance_adsr(
+                    v.amp,
+                    v.target_amp,
+                    v.releasing,
+                    &mut v.env_peaked,
+                    attack_step,
+                    decay_step,
+                    release_step,
+                    ctx.sustain_level,
+                );
 
                 let i0 = v.phase as usize & TABLE_MASK;
                 let i1 = (i0 + 1) & TABLE_MASK;
@@ -724,6 +741,7 @@ impl VoicePool {
     ) -> bool {
         let mut audible = false;
         let attack_step = linear_env_step(ctx.attack_sec, ctx.sample_rate);
+        let decay_step = linear_env_step(ctx.decay_sec, ctx.sample_rate);
         let release_step = linear_env_step(ctx.release_sec, ctx.sample_rate);
         let n = live.len();
 
@@ -765,16 +783,16 @@ impl VoicePool {
                 * crate::mix::note_presence(v.note);
 
             for sample in dest.iter_mut() {
-                if v.target_amp > v.amp {
-                    v.amp = (v.amp + attack_step * v.target_amp.max(0.05)).min(v.target_amp);
-                } else {
-                    let ref_amp = if v.releasing {
-                        v.amp.max(1e-4)
-                    } else {
-                        v.amp.max(0.05)
-                    };
-                    v.amp = (v.amp - release_step * ref_amp).max(v.target_amp);
-                }
+                v.amp = advance_adsr(
+                    v.amp,
+                    v.target_amp,
+                    v.releasing,
+                    &mut v.env_peaked,
+                    attack_step,
+                    decay_step,
+                    release_step,
+                    ctx.sustain_level,
+                );
 
                 let i0 = v.phase as usize & TABLE_MASK;
                 let i1 = (i0 + 1) & TABLE_MASK;
@@ -846,6 +864,42 @@ pub(crate) fn tone_svf_sample(
 #[inline]
 fn linear_env_step(seconds: f32, sample_rate: f32) -> f32 {
     1.0 / (seconds.max(0.0005) * sample_rate).max(1.0)
+}
+
+/// One sample of the global wavetable ADSR.
+///
+/// `peak` is velocity×voice amp. Sustain level 1.0 keeps the classic
+/// attack→hold→release shape (decay is a no-op).
+#[inline]
+fn advance_adsr(
+    amp: f32,
+    peak: f32,
+    releasing: bool,
+    env_peaked: &mut bool,
+    attack_step: f32,
+    decay_step: f32,
+    release_step: f32,
+    sustain_level: f32,
+) -> f32 {
+    if releasing {
+        *env_peaked = false;
+        return (amp - release_step * amp.max(1e-4)).max(0.0);
+    }
+    if !*env_peaked {
+        let next = (amp + attack_step * peak.max(0.05)).min(peak);
+        if next >= peak * 0.98 {
+            *env_peaked = true;
+        }
+        return next;
+    }
+    let sus = peak * sustain_level.clamp(0.0, 1.0);
+    if amp > sus + 1e-5 {
+        (amp - decay_step * amp.max(0.05)).max(sus)
+    } else if amp < sus - 1e-5 {
+        (amp + attack_step * sus.max(0.05)).min(sus)
+    } else {
+        sus
+    }
 }
 
 /// Frequency ratio for a semitone offset. Unison is 1.
@@ -940,6 +994,8 @@ mod tests {
             release_drift_semis: 0.0,
             bend_slew_dt: 0.0,
             attack_sec: 0.002,
+            decay_sec: 0.050,
+            sustain_level: 1.0,
             release_sec: 0.010,
             live_gain: 1.0,
             clip_gains: [1.0; MAX_CLIPS],
@@ -950,6 +1006,32 @@ mod tests {
             stereo_width: 0.0,
             morph: 0.0,
         }
+    }
+
+    #[test]
+    fn adsr_decays_to_sustain_while_held() {
+        let bank = WaveBank::with_builtins();
+        let mut pool = VoicePool::new();
+        pool.note_on(0, 60, 127, 0);
+        let mut ctx = ctx();
+        ctx.attack_sec = 0.001;
+        ctx.decay_sec = 0.050;
+        ctx.sustain_level = 0.25;
+        ctx.release_sec = 0.5;
+        let mut buf = vec![0.0f32; 256];
+        // Warm through attack into sustain.
+        for _ in 0..40 {
+            buf.iter_mut().for_each(|v| *v = 0.0);
+            pool.render_group(0, bank.table(0), &mut buf, ctx);
+        }
+        let held = pool.held_count();
+        assert_eq!(held, 1);
+        let peak = buf.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+        // Full velocity peak is ~0.48; sustain 0.25 → ~0.12 before presence/gain.
+        assert!(
+            peak > 0.01 && peak < 0.22,
+            "held note should sit near sustain, peak={peak}"
+        );
     }
 
     #[test]
