@@ -14,6 +14,8 @@ pub enum ScrollKind {
     Log,
     Home,
     FmPatches,
+    /// Settings page option sheets (scale, Y bend, Y vel).
+    SettingsPicker,
 }
 
 /// Fixed-row grid inside a viewport (voice grids, kaoss program picker, …).

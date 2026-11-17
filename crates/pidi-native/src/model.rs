@@ -37,6 +37,25 @@ pub const LED_ROWS: usize = 7;
 /// Same whole-BPM window the Kaoss ± buttons already used.
 pub const KAOSS_BPM_MIN: f32 = 40.0;
 pub const KAOSS_BPM_MAX: f32 = 240.0;
+
+/// Full-screen option sheet for lists with 4+ choices.
+/// Short lists (≤3) stay press-to-cycle on the button itself.
+/// Named `SettingsPicker` for the Settings page origins; also used on FX / Pads / ARP / PORTS.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingsPicker {
+    Scale,
+    KaossYBend,
+    KaossYVel,
+    PunchPrio,
+    PadsChannel,
+    ArpDivision,
+    ArpGate,
+    MapIn,
+    MapOut,
+}
+
+const KAOSS_Y_BEND_STEPS: [u8; 5] = [12, 7, 5, 2, 1];
+const KAOSS_Y_VEL_SPANS: [(u8, u8); 5] = [(72, 127), (1, 127), (40, 127), (100, 127), (127, 127)];
 #[allow(dead_code)]
 pub const KICK_NOTE: u8 = 36;
 pub const DRUM_CHANNEL: u8 = 9;
@@ -180,6 +199,18 @@ pub enum FxEditTarget {
     Bus,
     Voice,
     DrumGroup,
+}
+
+impl FxEditTarget {
+    pub const ALL: [Self; 3] = [Self::Bus, Self::Voice, Self::DrumGroup];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Bus => "BUS",
+            Self::Voice => "VOICE",
+            Self::DrumGroup => "DRUMS",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -560,12 +591,15 @@ pub struct NativeModel {
     pub power_warn: bool,
     /// SET→FULL VEL: rewrite keyboard note-ons to 127. On by default for MPK.
     pub full_vel: bool,
-    /// SET→SCALE: `KAOSS_SCALES` index the keybed snaps to (0 = OFF).
+    /// SET→SCALE: `KAOSS_SCALES` index the keybed maps onto (0 = OFF).
     pub scale_lock: u8,
     /// SET→Y BEND: Kaoss pad Y bend range, ± semitones.
     pub kaoss_y_bend: u8,
     /// SET→Y VEL: Kaoss pad Y velocity span (bottom, top).
     pub kaoss_y_vel: (u8, u8),
+    /// Settings option sheet (scale / Y bend / Y vel).
+    pub settings_picker: Option<SettingsPicker>,
+    pub settings_picker_scroll: i32,
     /// SET→MIDI controller assignment sheet.
     pub midi_panel_open: bool,
     pub midi_assign_pick: usize,
@@ -906,6 +940,8 @@ impl NativeModel {
             scale_lock: 0,
             kaoss_y_bend: jambox_core::DEFAULT_Y_BEND_SEMIS,
             kaoss_y_vel: (jambox_core::DEFAULT_Y_VEL_MIN, jambox_core::DEFAULT_Y_VEL_MAX),
+            settings_picker: None,
+            settings_picker_scroll: 0,
             midi_panel_open: false,
             midi_assign_pick: 1,
             midi_stick_x: midi_core::MidiDest::default_for(midi_core::MidiSource::StickX),
@@ -1014,6 +1050,8 @@ impl NativeModel {
         self.update_busy = false;
         self.update_confirming = false;
         self.midi_panel_open = false;
+        self.settings_picker = None;
+        self.settings_picker_scroll = 0;
         self.wifi_panel_open = false;
         self.wifi_kb_open = false;
         self.wifi_job = None;
@@ -1176,6 +1214,9 @@ impl NativeModel {
         }
         if self.midi_panel_open {
             return Some("midi");
+        }
+        if self.settings_picker.is_some() {
+            return Some("settings_picker");
         }
         if self.wifi_kb_open {
             return Some("wifi_kb");
@@ -1437,6 +1478,299 @@ impl NativeModel {
         self.status_line = "KAOSS settings".into();
     }
 
+    fn open_settings_picker(&mut self, kind: SettingsPicker) {
+        if kind == SettingsPicker::PadsChannel && !self.pads_edit {
+            self.status_line = "switch to EDIT first".into();
+            self.mark_dirty();
+            return;
+        }
+        self.midi_panel_open = false;
+        self.settings_picker = Some(kind);
+        self.settings_picker_scroll = 0;
+        self.status_line = match kind {
+            SettingsPicker::Scale => "pick scale".into(),
+            SettingsPicker::KaossYBend => "pick Y bend".into(),
+            SettingsPicker::KaossYVel => "pick Y vel".into(),
+            SettingsPicker::PunchPrio => "pick buffer prio".into(),
+            SettingsPicker::PadsChannel => "pick pad channel".into(),
+            SettingsPicker::ArpDivision => "pick ARP division".into(),
+            SettingsPicker::ArpGate => "pick ARP gate".into(),
+            SettingsPicker::MapIn => "pick MIDI in".into(),
+            SettingsPicker::MapOut => "pick MIDI out".into(),
+        };
+        self.mark_dirty();
+    }
+
+    fn close_settings_picker(&mut self) {
+        self.settings_picker = None;
+        self.settings_picker_scroll = 0;
+        self.status_line.clear();
+        self.mark_dirty();
+    }
+
+    fn map_picker_ports(names: &[String]) -> Vec<&String> {
+        let hardware: Vec<&String> = names
+            .iter()
+            .filter(|n| !midi_core::is_virtual_port_name(n))
+            .collect();
+        if hardware.is_empty() {
+            names.iter().collect()
+        } else {
+            hardware
+        }
+    }
+
+    pub fn settings_picker_count(&self, kind: SettingsPicker) -> usize {
+        match kind {
+            SettingsPicker::Scale => jambox_core::KAOSS_SCALES.len(),
+            SettingsPicker::KaossYBend => KAOSS_Y_BEND_STEPS.len(),
+            SettingsPicker::KaossYVel => KAOSS_Y_VEL_SPANS.len(),
+            SettingsPicker::PunchPrio => jambox_core::PunchBufferPrio::ALL.len(),
+            SettingsPicker::PadsChannel => 17, // rec + CH1..CH16
+            SettingsPicker::ArpDivision => jambox_core::ArpDivision::ALL.len(),
+            SettingsPicker::ArpGate => crate::arp::GATE_PRESETS.len(),
+            SettingsPicker::MapIn => 1 + Self::map_picker_ports(&self.midi_inputs).len(),
+            SettingsPicker::MapOut => 1 + Self::map_picker_ports(&self.midi_outputs).len(),
+        }
+    }
+
+    pub fn settings_picker_title(kind: SettingsPicker) -> &'static str {
+        match kind {
+            SettingsPicker::Scale => "SCALE",
+            SettingsPicker::KaossYBend => "Y BEND",
+            SettingsPicker::KaossYVel => "Y VEL",
+            SettingsPicker::PunchPrio => "PRIO",
+            SettingsPicker::PadsChannel => "PAD CH",
+            SettingsPicker::ArpDivision => "ARP DIV",
+            SettingsPicker::ArpGate => "ARP GATE",
+            SettingsPicker::MapIn => "MIDI IN",
+            SettingsPicker::MapOut => "MIDI OUT",
+        }
+    }
+
+    pub fn settings_picker_hint(kind: SettingsPicker) -> &'static str {
+        match kind {
+            SettingsPicker::Scale => "keybed maps each key to the next scale degree",
+            SettingsPicker::KaossYBend => "pad Y pitch bend range",
+            SettingsPicker::KaossYVel => "pad Y velocity span",
+            SettingsPicker::PunchPrio => "who wins when buffer FX overlap",
+            SettingsPicker::PadsChannel => "MIDI out channel for this pad",
+            SettingsPicker::ArpDivision => "step rate",
+            SettingsPicker::ArpGate => "note length as % of the step",
+            SettingsPicker::MapIn => "ALL = every hardware USB MIDI in",
+            SettingsPicker::MapOut => "AUTO = first non-keybed out",
+        }
+    }
+
+    pub fn settings_picker_label(&self, kind: SettingsPicker, index: usize) -> String {
+        match kind {
+            SettingsPicker::Scale => jambox_core::kaoss_scale(index).label.to_string(),
+            SettingsPicker::KaossYBend => {
+                format!("±{}", KAOSS_Y_BEND_STEPS[index % KAOSS_Y_BEND_STEPS.len()])
+            }
+            SettingsPicker::KaossYVel => {
+                let (lo, hi) = KAOSS_Y_VEL_SPANS[index % KAOSS_Y_VEL_SPANS.len()];
+                format!("{lo}-{hi}")
+            }
+            SettingsPicker::PunchPrio => jambox_core::PunchBufferPrio::ALL
+                [index % jambox_core::PunchBufferPrio::ALL.len()]
+            .label()
+            .to_string(),
+            SettingsPicker::PadsChannel => {
+                if index == 0 {
+                    "REC".into()
+                } else {
+                    format!("CH{}", (index - 1) % 16 + 1)
+                }
+            }
+            SettingsPicker::ArpDivision => jambox_core::ArpDivision::ALL
+                [index % jambox_core::ArpDivision::ALL.len()]
+            .label()
+            .to_string(),
+            SettingsPicker::ArpGate => {
+                let g = crate::arp::GATE_PRESETS[index % crate::arp::GATE_PRESETS.len()];
+                format!("{}%", (u16::from(g) * 100 / 127).max(1))
+            }
+            SettingsPicker::MapIn => {
+                if index == 0 {
+                    "ALL".into()
+                } else {
+                    let ports = Self::map_picker_ports(&self.midi_inputs);
+                    ports
+                        .get(index - 1)
+                        .map(|n| midi_core::short_port_label(n).to_string())
+                        .unwrap_or_else(|| "—".into())
+                }
+            }
+            SettingsPicker::MapOut => {
+                if index == 0 {
+                    "AUTO".into()
+                } else {
+                    let ports = Self::map_picker_ports(&self.midi_outputs);
+                    ports
+                        .get(index - 1)
+                        .map(|n| midi_core::short_port_label(n).to_string())
+                        .unwrap_or_else(|| "—".into())
+                }
+            }
+        }
+    }
+
+    pub fn settings_picker_selected(&self, kind: SettingsPicker) -> usize {
+        match kind {
+            SettingsPicker::Scale => {
+                (self.scale_lock as usize) % jambox_core::KAOSS_SCALES.len()
+            }
+            SettingsPicker::KaossYBend => KAOSS_Y_BEND_STEPS
+                .iter()
+                .position(|&s| s == self.kaoss_y_bend)
+                .unwrap_or(0),
+            SettingsPicker::KaossYVel => KAOSS_Y_VEL_SPANS
+                .iter()
+                .position(|&s| s == self.kaoss_y_vel)
+                .unwrap_or(0),
+            SettingsPicker::PunchPrio => jambox_core::PunchBufferPrio::ALL
+                .iter()
+                .position(|&p| p == self.punch_buffer_prio)
+                .unwrap_or(0),
+            SettingsPicker::PadsChannel => {
+                let ch = self.phrases[self.pads_selected.min(15)].out_channel;
+                if ch < 0 {
+                    0
+                } else {
+                    (ch as usize).min(15) + 1
+                }
+            }
+            SettingsPicker::ArpDivision => jambox_core::ArpDivision::ALL
+                .iter()
+                .position(|&d| d == self.arp.division)
+                .unwrap_or(0),
+            SettingsPicker::ArpGate => crate::arp::GATE_PRESETS
+                .iter()
+                .position(|&g| g == self.arp.gate)
+                .unwrap_or(0),
+            SettingsPicker::MapIn => {
+                if self.midi_in_filter.trim().is_empty() {
+                    0
+                } else {
+                    let ports = Self::map_picker_ports(&self.midi_inputs);
+                    let cur = self.midi_in_filter.trim().to_ascii_lowercase();
+                    ports
+                        .iter()
+                        .position(|n| n.to_ascii_lowercase().contains(&cur))
+                        .map(|i| i + 1)
+                        .unwrap_or(0)
+                }
+            }
+            SettingsPicker::MapOut => {
+                if self.midi_out_filter.trim().is_empty() {
+                    0
+                } else {
+                    let ports = Self::map_picker_ports(&self.midi_outputs);
+                    let cur = self.midi_out_filter.trim().to_ascii_lowercase();
+                    ports
+                        .iter()
+                        .position(|n| n.to_ascii_lowercase().contains(&cur))
+                        .map(|i| i + 1)
+                        .unwrap_or(0)
+                }
+            }
+        }
+    }
+
+    fn apply_settings_picker(&mut self, index: usize, outbox: &mut Outbox) {
+        let Some(kind) = self.settings_picker else {
+            return;
+        };
+        match kind {
+            SettingsPicker::Scale => {
+                self.scale_lock = (index % jambox_core::KAOSS_SCALES.len()) as u8;
+                self.push_scale_lock(outbox);
+                self.status_line = self.scale_lock_label();
+            }
+            SettingsPicker::KaossYBend => {
+                self.kaoss_y_bend = KAOSS_Y_BEND_STEPS[index % KAOSS_Y_BEND_STEPS.len()];
+                self.push_kaoss_y_range(outbox);
+                self.status_line = self.kaoss_y_bend_label();
+            }
+            SettingsPicker::KaossYVel => {
+                self.kaoss_y_vel = KAOSS_Y_VEL_SPANS[index % KAOSS_Y_VEL_SPANS.len()];
+                self.push_kaoss_y_range(outbox);
+                self.status_line = self.kaoss_y_vel_label();
+            }
+            SettingsPicker::PunchPrio => {
+                self.punch_buffer_prio =
+                    jambox_core::PunchBufferPrio::ALL[index % jambox_core::PunchBufferPrio::ALL.len()];
+                outbox.punch_buffer_prio(self.punch_buffer_prio.as_u8());
+                self.status_line = format!(
+                    "buffer prio {} — {}",
+                    self.punch_buffer_prio.label(),
+                    match self.punch_buffer_prio {
+                        jambox_core::PunchBufferPrio::TapeRptDrop => "TAPE wins (bounce)",
+                        jambox_core::PunchBufferPrio::RptTapeDrop => "RPT wins, keeps the drop pitch",
+                        jambox_core::PunchBufferPrio::DropTapeRpt => "DROP wins",
+                        jambox_core::PunchBufferPrio::RptOnTape => "repeat on tape",
+                        jambox_core::PunchBufferPrio::Engage => "first effect keeps its pitch",
+                    }
+                );
+            }
+            SettingsPicker::PadsChannel => {
+                if !self.pads_edit {
+                    self.status_line = "switch to EDIT first".into();
+                    return;
+                }
+                let pad = self.pads_selected.min(15);
+                let next = if index == 0 {
+                    -1
+                } else {
+                    ((index - 1) % 16) as i8
+                };
+                self.phrases[pad].out_channel = next;
+                let dir = phrases::phrases_dir_from_env();
+                let _ = phrases::save_pad(&dir, pad, &self.phrases[pad], self.bpm);
+                self.status_line = if next < 0 {
+                    format!("{} OUT:rec", phrases::pad_label(pad))
+                } else {
+                    format!("{} OUT:CH{}", phrases::pad_label(pad), next + 1)
+                };
+            }
+            SettingsPicker::ArpDivision => {
+                self.arp.division =
+                    jambox_core::ArpDivision::ALL[index % jambox_core::ArpDivision::ALL.len()];
+                self.push_arp_config(outbox);
+                self.status_line = format!("ARP {}", self.arp.division.label());
+            }
+            SettingsPicker::ArpGate => {
+                self.arp.gate = crate::arp::GATE_PRESETS[index % crate::arp::GATE_PRESETS.len()];
+                self.push_arp_config(outbox);
+                self.status_line = format!("ARP gate {}", self.arp.gate_label());
+            }
+            SettingsPicker::MapIn => {
+                if index == 0 {
+                    self.midi_in_filter.clear();
+                } else {
+                    let ports = Self::map_picker_ports(&self.midi_inputs);
+                    if let Some(name) = ports.get(index - 1) {
+                        self.midi_in_filter = (*name).clone();
+                    }
+                }
+                self.apply_midi_select(outbox);
+            }
+            SettingsPicker::MapOut => {
+                if index == 0 {
+                    self.midi_out_filter.clear();
+                } else {
+                    let ports = Self::map_picker_ports(&self.midi_outputs);
+                    if let Some(name) = ports.get(index - 1) {
+                        self.midi_out_filter = (*name).clone();
+                    }
+                }
+                self.apply_midi_select(outbox);
+            }
+        }
+        self.mark_dirty();
+    }
+
     fn nav_back(&mut self, outbox: &mut Outbox) {
         if !self.can_nav_back() {
             return;
@@ -1445,6 +1779,7 @@ impl NativeModel {
             Some("power") => self.close_power_menu(true),
             Some("update") => self.close_update_panel(),
             Some("midi") => self.close_midi_panel(),
+            Some("settings_picker") => self.close_settings_picker(),
             Some("wifi_kb") => self.close_wifi_keyboard(),
             Some("wifi") => self.close_wifi_panel(),
             Some("kaoss_color") => self.close_kaoss_color_picker(),
@@ -1842,6 +2177,8 @@ impl NativeModel {
         self.update_panel_open = false;
         self.update_job = None;
         self.midi_panel_open = false;
+        self.settings_picker = None;
+        self.settings_picker_scroll = 0;
         self.wifi_panel_open = false;
         self.wifi_kb_open = false;
         self.wifi_job = None;
@@ -1890,6 +2227,8 @@ impl NativeModel {
         self.update_panel_open = false;
         self.wifi_panel_open = false;
         self.wifi_kb_open = false;
+        self.settings_picker = None;
+        self.settings_picker_scroll = 0;
         self.midi_panel_open = true;
         self.status_line = format!(
             "{} → {}",
@@ -2936,16 +3275,6 @@ impl NativeModel {
         self.push_log(self.status_line.clone());
     }
 
-    fn cycle_midi_in(&mut self, outbox: &mut Outbox) {
-        self.midi_in_filter = midi_core::cycle_port_filter(&self.midi_in_filter, &self.midi_inputs);
-        self.apply_midi_select(outbox);
-    }
-
-    fn cycle_midi_out(&mut self, outbox: &mut Outbox) {
-        self.midi_out_filter =
-            midi_core::cycle_port_filter(&self.midi_out_filter, &self.midi_outputs);
-        self.apply_midi_select(outbox);
-    }
 
     fn pick_midi_in_row(&mut self, index: usize, outbox: &mut Outbox) {
         let Some(name) = self.midi_inputs.get(index).cloned() else {
@@ -3037,48 +3366,12 @@ impl NativeModel {
         outbox.kaoss_y_range(self.kaoss_y_bend, lo, hi);
     }
 
-    /// SET→Y BEND tap: ±12 → 7 → 5 → 2 → 1 → ±12 semitones.
-    fn cycle_kaoss_y_bend(&mut self, outbox: &mut Outbox) {
-        const STEPS: [u8; 5] = [12, 7, 5, 2, 1];
-        let i = STEPS.iter().position(|&s| s == self.kaoss_y_bend).map_or(0, |i| i + 1);
-        self.kaoss_y_bend = STEPS[i % STEPS.len()];
-        self.push_kaoss_y_range(outbox);
-        self.status_line = self.kaoss_y_bend_label();
-        self.mark_dirty();
-    }
-
-    /// SET→Y VEL tap: cycle velocity spans for pad bottom→top.
-    fn cycle_kaoss_y_vel(&mut self, outbox: &mut Outbox) {
-        const SPANS: [(u8, u8); 5] = [(72, 127), (1, 127), (40, 127), (100, 127), (127, 127)];
-        let i = SPANS.iter().position(|&s| s == self.kaoss_y_vel).map_or(0, |i| i + 1);
-        self.kaoss_y_vel = SPANS[i % SPANS.len()];
-        self.push_kaoss_y_range(outbox);
-        self.status_line = self.kaoss_y_vel_label();
-        self.mark_dirty();
-    }
-
     pub fn kaoss_y_bend_label(&self) -> String {
         format!("Y BEND ±{}", self.kaoss_y_bend)
     }
 
     pub fn kaoss_y_vel_label(&self) -> String {
         format!("Y VEL {}-{}", self.kaoss_y_vel.0, self.kaoss_y_vel.1)
-    }
-
-    /// SET→SCALE tap: OFF → each curated scale (not chromatic) → OFF.
-    fn cycle_scale_lock(&mut self, outbox: &mut Outbox) {
-        let scales = jambox_core::KAOSS_SCALES;
-        let n = scales.len();
-        let mut i = self.scale_lock as usize;
-        self.scale_lock = loop {
-            i = (i + 1) % n;
-            if i == 0 || (scales[i].curated && scales[i].id != "chromatic") {
-                break i as u8;
-            }
-        };
-        self.push_scale_lock(outbox);
-        self.status_line = self.scale_lock_label();
-        self.mark_dirty();
     }
 
     pub fn scale_lock_label(&self) -> String {
@@ -3178,6 +3471,19 @@ impl NativeModel {
         // used to eat those taps, so VIB / settings could not be left.
         let hit = if self.layout.nav.contains(px, py) {
             self.layout.hit(self.mode, px, py)
+        } else if self.settings_picker.is_some() {
+            let base = self.layout.hit(self.mode, px, py);
+            if matches!(
+                base,
+                Hit::Nav(_) | Hit::NavBack | Hit::Power | Hit::HomeTile(_)
+            ) {
+                base
+            } else if self.layout.content.contains(px, py) {
+                let n = self.settings_picker_count(self.settings_picker.unwrap());
+                self.layout.hit_settings_picker(px, py, n)
+            } else {
+                base
+            }
         } else if self.kaoss_color_picker_open {
             let base = self.layout.hit(self.mode, px, py);
             if matches!(
@@ -3612,7 +3918,7 @@ impl NativeModel {
             }
             Hit::PadsChannel => {
                 self.tap_ui(slot, id, gesture, px, py);
-                self.cycle_pads_channel();
+                self.open_settings_picker(SettingsPicker::PadsChannel);
             }
             Hit::PadsSynth => {
                 self.tap_ui(slot, id, gesture, px, py);
@@ -4110,11 +4416,7 @@ impl NativeModel {
             }
             Hit::KaossOutPick(index) => {
                 self.tap_ui(slot, id, gesture, px, py);
-                self.kaoss_out = match index {
-                    0 => OutMode::Local,
-                    1 => OutMode::Usb,
-                    _ => OutMode::Both,
-                };
+                self.kaoss_out = OutMode::ALL[index % OutMode::ALL.len()];
                 outbox.emit_mode("kaoss", self.kaoss_out.wire());
                 self.status_line = self.kaoss_out.label().into();
                 self.push_log(format!("kaoss {}", self.kaoss_out.label()));
@@ -4505,15 +4807,23 @@ impl NativeModel {
             }
             Hit::SettingsKaossYBend => {
                 self.tap_ui(slot, id, gesture, px, py);
-                self.cycle_kaoss_y_bend(outbox);
+                self.open_settings_picker(SettingsPicker::KaossYBend);
             }
             Hit::SettingsKaossYVel => {
                 self.tap_ui(slot, id, gesture, px, py);
-                self.cycle_kaoss_y_vel(outbox);
+                self.open_settings_picker(SettingsPicker::KaossYVel);
             }
             Hit::SettingsScale => {
                 self.tap_ui(slot, id, gesture, px, py);
-                self.cycle_scale_lock(outbox);
+                self.open_settings_picker(SettingsPicker::Scale);
+            }
+            Hit::SettingsPickerPick(index) => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.apply_settings_picker(index, outbox);
+            }
+            Hit::SettingsPickerDone => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.close_settings_picker();
             }
             Hit::SettingsMidi => {
                 self.tap_ui(slot, id, gesture, px, py);
@@ -4634,7 +4944,7 @@ impl NativeModel {
             }
             Hit::PunchPrio => {
                 self.tap_ui(slot, id, gesture, px, py);
-                self.cycle_punch_buffer_prio(outbox);
+                self.open_settings_picker(SettingsPicker::PunchPrio);
             }
             Hit::PunchRptMode => {
                 self.tap_ui(slot, id, gesture, px, py);
@@ -4837,11 +5147,11 @@ impl NativeModel {
             }
             Hit::MapIn => {
                 self.tap_ui(slot, id, gesture, px, py);
-                self.cycle_midi_in(outbox);
+                self.open_settings_picker(SettingsPicker::MapIn);
             }
             Hit::MapOut => {
                 self.tap_ui(slot, id, gesture, px, py);
-                self.cycle_midi_out(outbox);
+                self.open_settings_picker(SettingsPicker::MapOut);
             }
             Hit::MapTest => {
                 self.tap_ui(slot, id, gesture, px, py);
@@ -4955,27 +5265,29 @@ impl NativeModel {
             }
             Hit::ArpDivision => {
                 self.tap_ui(slot, id, gesture, px, py);
-                self.arp.cycle_division();
-                self.push_arp_config(outbox);
-                self.status_line = format!("ARP {}", self.arp.division.label());
+                self.open_settings_picker(SettingsPicker::ArpDivision);
             }
             Hit::ArpOctDown => {
                 self.tap_ui(slot, id, gesture, px, py);
                 self.arp.bump_octaves(-1);
                 self.push_arp_config(outbox);
-                self.status_line = format!("ARP octaves {}", self.arp.octaves);
+                self.status_line = format!(
+                    "ARP octaves {}",
+                    crate::arp::ArpUi::octaves_display(self.arp.octaves)
+                );
             }
             Hit::ArpOctUp => {
                 self.tap_ui(slot, id, gesture, px, py);
                 self.arp.bump_octaves(1);
                 self.push_arp_config(outbox);
-                self.status_line = format!("ARP octaves {}", self.arp.octaves);
+                self.status_line = format!(
+                    "ARP octaves {}",
+                    crate::arp::ArpUi::octaves_display(self.arp.octaves)
+                );
             }
             Hit::ArpGate => {
                 self.tap_ui(slot, id, gesture, px, py);
-                self.arp.cycle_gate();
-                self.push_arp_config(outbox);
-                self.status_line = format!("ARP gate {}", self.arp.gate_label());
+                self.open_settings_picker(SettingsPicker::ArpGate);
             }
             Hit::ArpOut => {
                 self.tap_ui(slot, id, gesture, px, py);
@@ -6716,46 +7028,6 @@ impl NativeModel {
         self.punch_locked || self.punch_grabbing || self.punch_armed.iter().any(|on| *on)
     }
 
-    fn cycle_punch_buffer_prio(&mut self, outbox: &mut Outbox) {
-        self.punch_buffer_prio = self.punch_buffer_prio.next();
-        outbox.punch_buffer_prio(self.punch_buffer_prio.as_u8());
-        self.status_line = format!(
-            "buffer prio {} — {}",
-            self.punch_buffer_prio.label(),
-            match self.punch_buffer_prio {
-                jambox_core::PunchBufferPrio::TapeRptDrop => "TAPE wins (bounce)",
-                jambox_core::PunchBufferPrio::RptTapeDrop => "RPT wins, keeps the drop pitch",
-                jambox_core::PunchBufferPrio::DropTapeRpt => "DROP wins",
-                jambox_core::PunchBufferPrio::RptOnTape => "repeat on tape",
-                jambox_core::PunchBufferPrio::Engage => "first effect keeps its pitch",
-            }
-        );
-        self.mark_dirty();
-    }
-
-    fn cycle_punch_rpt_mode(&mut self, outbox: &mut Outbox) {
-        self.punch_rpt_mode = self.punch_rpt_mode.next();
-        outbox.punch_rpt_mode(self.punch_rpt_mode.as_u8());
-        self.status_line = match self.punch_rpt_mode {
-            jambox_core::PunchRptMode::Refresh => {
-                "RPT↻ — each hit loops what you just heard".into()
-            }
-            jambox_core::PunchRptMode::Hold => "RPTH — keeps that loop until CLEAR".into(),
-        };
-        self.mark_dirty();
-    }
-
-    fn cycle_punch_grid(&mut self, outbox: &mut Outbox) {
-        self.punch_grid_mode = self.punch_grid_mode.next();
-        outbox.punch_grid(self.punch_grid_mode.as_u8());
-        self.status_line = match self.punch_grid_mode {
-            jambox_core::PunchGridMode::Beat => "BEAT — 1/4 1/8 1/16 1/32".into(),
-            jambox_core::PunchGridMode::Smooth => {
-                "SMOOTH — full capture at the bottom, shorter toward the top".into()
-            }
-        };
-        self.mark_dirty();
-    }
 
     fn clear_punch(&mut self, outbox: &mut Outbox) {
         for i in 0..Layout::PUNCH_PAD_COUNT {
@@ -6899,11 +7171,9 @@ impl NativeModel {
         );
     }
 
-    fn cycle_punch_source(&mut self) {
+    fn set_punch_source(&mut self, source: u8) {
         self.sync_punch_bank();
-        self.punch_source = jambox_core::PunchSource::from_u8(self.punch_source)
-            .next()
-            .as_u8();
+        self.punch_source = jambox_core::PunchSource::from_u8(source).as_u8();
         let s = self.punch_source as usize;
         self.punch_amount = self.punch_bank[s];
         self.punch_armed = self.punch_armed_bank[s];
@@ -6913,6 +7183,52 @@ impl NativeModel {
             "punch buffer {}",
             jambox_core::PunchSource::from_u8(self.punch_source).label()
         );
+        self.mark_dirty();
+    }
+
+    fn cycle_punch_source(&mut self) {
+        self.set_punch_source(
+            jambox_core::PunchSource::from_u8(self.punch_source)
+                .next()
+                .as_u8(),
+        );
+    }
+
+    fn cycle_punch_rpt_mode(&mut self, outbox: &mut Outbox) {
+        self.punch_rpt_mode = self.punch_rpt_mode.next();
+        outbox.punch_rpt_mode(self.punch_rpt_mode.as_u8());
+        self.status_line = match self.punch_rpt_mode {
+            jambox_core::PunchRptMode::Refresh => {
+                "RPT↻ — each hit loops what you just heard".into()
+            }
+            jambox_core::PunchRptMode::Hold => "RPTH — keeps that loop until CLEAR".into(),
+        };
+        self.mark_dirty();
+    }
+
+    fn cycle_punch_grid(&mut self, outbox: &mut Outbox) {
+        self.punch_grid_mode = self.punch_grid_mode.next();
+        outbox.punch_grid(self.punch_grid_mode.as_u8());
+        self.status_line = match self.punch_grid_mode {
+            jambox_core::PunchGridMode::Beat => "BEAT — 1/4 1/8 1/16 1/32".into(),
+            jambox_core::PunchGridMode::Smooth => {
+                "SMOOTH — full capture at the bottom, shorter toward the top".into()
+            }
+        };
+        self.mark_dirty();
+    }
+
+    fn cycle_fx_target(&mut self) {
+        self.fx_target = match self.fx_target {
+            FxEditTarget::Bus => FxEditTarget::Voice,
+            FxEditTarget::Voice => FxEditTarget::DrumGroup,
+            FxEditTarget::DrumGroup => FxEditTarget::Bus,
+        };
+        self.status_line = match self.fx_target {
+            FxEditTarget::Bus => "FX target: BUS".into(),
+            FxEditTarget::Voice => "FX target: VOICE 0".into(),
+            FxEditTarget::DrumGroup => "FX target: DRUM GROUP".into(),
+        };
         self.mark_dirty();
     }
 
@@ -7017,19 +7333,6 @@ impl NativeModel {
         }
     }
 
-    fn cycle_fx_target(&mut self) {
-        self.fx_target = match self.fx_target {
-            FxEditTarget::Bus => FxEditTarget::Voice,
-            FxEditTarget::Voice => FxEditTarget::DrumGroup,
-            FxEditTarget::DrumGroup => FxEditTarget::Bus,
-        };
-        self.status_line = match self.fx_target {
-            FxEditTarget::Bus => "FX target: BUS".into(),
-            FxEditTarget::Voice => "FX target: VOICE 0".into(),
-            FxEditTarget::DrumGroup => "FX target: DRUM GROUP".into(),
-        };
-        self.mark_dirty();
-    }
 
     fn nudge_vibrato_depth(&mut self, delta_semis: f32, outbox: &mut Outbox) {
         self.vibrato_depth = (self.vibrato_depth + delta_semis).clamp(0.0, 2.0);
@@ -8555,6 +8858,7 @@ impl NativeModel {
             ScrollKind::SongList => self.song_scroll as i32,
             ScrollKind::Log => self.log_scroll as i32,
             ScrollKind::FmPatches => self.fm_patch_scroll,
+            ScrollKind::SettingsPicker => self.settings_picker_scroll,
         }
     }
 
@@ -8592,6 +8896,13 @@ impl NativeModel {
                 let grid = self.layout.fm_patch_grid(n);
                 self.fm_patch_scroll = grid.clamp_scroll(value);
             }
+            ScrollKind::SettingsPicker => {
+                if let Some(kind) = self.settings_picker {
+                    let n = self.settings_picker_count(kind);
+                    let grid = self.layout.settings_picker_grid(n);
+                    self.settings_picker_scroll = grid.clamp_scroll(value);
+                }
+            }
         }
         self.mark_dirty();
     }
@@ -8608,7 +8919,8 @@ impl NativeModel {
             | ScrollKind::KaossPicker
             | ScrollKind::KaossSettings
             | ScrollKind::Home
-            | ScrollKind::FmPatches => {
+            | ScrollKind::FmPatches
+            | ScrollKind::SettingsPicker => {
                 let delta = start_py - py;
                 self.set_scroll_offset(kind, scroll_at_start + delta);
             }
@@ -8689,6 +9001,15 @@ impl NativeModel {
                 let grid = self.layout.fm_patch_grid(n);
                 if let Some(index) = grid.index_at(px, py, self.fm_patch_scroll) {
                     self.load_fm_patch_index(index, outbox);
+                }
+            }
+            ScrollKind::SettingsPicker => {
+                if let Some(kind) = self.settings_picker {
+                    let n = self.settings_picker_count(kind);
+                    let grid = self.layout.settings_picker_grid(n);
+                    if let Some(index) = grid.index_at(px, py, self.settings_picker_scroll) {
+                        self.apply_settings_picker(index, outbox);
+                    }
                 }
             }
         }
@@ -9463,29 +9784,6 @@ impl NativeModel {
         self.emit_gesture_pressure(0, outbox);
     }
 
-    fn cycle_pads_channel(&mut self) {
-        if !self.pads_edit {
-            self.status_line = "switch to EDIT first".into();
-            return;
-        }
-        let index = self.pads_selected.min(15);
-        let cur = self.phrases[index].out_channel;
-        let next = if cur < 0 {
-            0
-        } else if cur >= 15 {
-            -1
-        } else {
-            cur + 1
-        };
-        self.phrases[index].out_channel = next;
-        let dir = phrases::phrases_dir_from_env();
-        let _ = phrases::save_pad(&dir, index, &self.phrases[index], self.bpm);
-        self.status_line = if next < 0 {
-            format!("{} OUT:rec", phrases::pad_label(index))
-        } else {
-            format!("{} OUT:CH{}", phrases::pad_label(index), next + 1)
-        };
-    }
 
     fn save_seq_as_song(&mut self) {
         let Some((events, length_ticks, _)) = self.seq.snapshot() else {
@@ -10968,6 +11266,7 @@ mod tests {
         model.finger_up(1, &mut out);
         out.take();
         assert_eq!(model.clip_quantize, ClipQuantize::Beat);
+        assert!(model.settings_picker.is_none());
         model.toggle_phrase(0, &mut out);
         assert!(out.take().iter().any(|r| matches!(
             r,
@@ -13315,12 +13614,26 @@ mod tests {
     }
 
     #[test]
-    fn settings_scale_cycles_and_sends_scale_lock() {
+    fn settings_scale_picker_open_select_close_and_sends_scale_lock() {
         let mut model = NativeModel::new();
         let mut out = Outbox::new();
+        model.set_mode(UiMode::Settings);
         assert_eq!(model.scale_lock, 0);
-        model.cycle_scale_lock(&mut out);
-        assert_ne!(model.scale_lock, 0);
+        assert!(model.settings_picker.is_none());
+
+        let btn = model.layout.settings_scale;
+        model.finger_down(1, btn.x + 4, btn.y + 4, &mut out);
+        model.finger_up(1, &mut out);
+        assert_eq!(model.settings_picker, Some(SettingsPicker::Scale));
+
+        let ionian = jambox_core::kaoss_scale_index_by_id("ionian") as usize;
+        let grid = model
+            .layout
+            .settings_picker_grid(model.settings_picker_count(SettingsPicker::Scale));
+        let cell = grid.cell_rect(ionian, 0);
+        model.finger_down(2, cell.x + 4, cell.y + 4, &mut out);
+        model.finger_up(2, &mut out);
+        assert_eq!(model.scale_lock, ionian as u8);
         let batch = out.take();
         assert!(
             batch
@@ -13328,31 +13641,69 @@ mod tests {
                 .any(|r| matches!(r, Request::ScaleLock { on: true, root: 0, .. })),
             "got {batch:?}"
         );
-        let mut guard = 0;
-        while model.scale_lock != 0 {
-            model.cycle_scale_lock(&mut out);
-            guard += 1;
-            assert!(guard < 64);
-        }
+
+        let done = model.layout.settings_picker_done();
+        model.finger_down(3, done.x + 4, done.y + 4, &mut out);
+        model.finger_up(3, &mut out);
+        assert!(model.settings_picker.is_none());
+
+        // OFF via picker + session round trip.
+        model.open_settings_picker(SettingsPicker::Scale);
+        model.apply_settings_picker(0, &mut out);
+        assert_eq!(model.scale_lock, 0);
         assert!(out
             .take()
             .iter()
             .any(|r| matches!(r, Request::ScaleLock { on: false, .. })));
-        // Session round trip.
         model.scale_lock = 3;
         let s = model.capture_session();
         assert_eq!(s.scale_lock, 3);
     }
 
     #[test]
-    fn settings_kaoss_y_range_cycles_sends_and_persists() {
+    fn settings_scale_picker_back_closes() {
         let mut model = NativeModel::new();
         let mut out = Outbox::new();
+        model.set_mode(UiMode::Settings);
+        model.open_settings_picker(SettingsPicker::Scale);
+        assert!(model.can_nav_back());
+        model.nav_back(&mut out);
+        assert!(model.settings_picker.is_none());
+    }
+
+    #[test]
+    fn settings_kaoss_y_range_picker_sends_and_persists() {
+        let mut model = NativeModel::new();
+        let mut out = Outbox::new();
+        model.set_mode(UiMode::Settings);
         assert_eq!(model.kaoss_y_bend, 12);
         assert_eq!(model.kaoss_y_vel, (72, 127));
-        model.cycle_kaoss_y_bend(&mut out);
-        model.cycle_kaoss_y_vel(&mut out);
+
+        let bend_btn = model.layout.settings_kaoss_y_bend;
+        model.finger_down(1, bend_btn.x + 4, bend_btn.y + 4, &mut out);
+        model.finger_up(1, &mut out);
+        assert_eq!(model.settings_picker, Some(SettingsPicker::KaossYBend));
+        let grid = model
+            .layout
+            .settings_picker_grid(model.settings_picker_count(SettingsPicker::KaossYBend));
+        // index 1 = ±7
+        let cell = grid.cell_rect(1, 0);
+        model.finger_down(2, cell.x + 4, cell.y + 4, &mut out);
+        model.finger_up(2, &mut out);
         assert_eq!(model.kaoss_y_bend, 7);
+        model.close_settings_picker();
+
+        let vel_btn = model.layout.settings_kaoss_y_vel;
+        model.finger_down(3, vel_btn.x + 4, vel_btn.y + 4, &mut out);
+        model.finger_up(3, &mut out);
+        assert_eq!(model.settings_picker, Some(SettingsPicker::KaossYVel));
+        let grid = model
+            .layout
+            .settings_picker_grid(model.settings_picker_count(SettingsPicker::KaossYVel));
+        // index 1 = 1-127
+        let cell = grid.cell_rect(1, 0);
+        model.finger_down(4, cell.x + 4, cell.y + 4, &mut out);
+        model.finger_up(4, &mut out);
         assert_eq!(model.kaoss_y_vel, (1, 127));
         assert!(out.take().iter().any(|r| matches!(
             r,
@@ -13595,7 +13946,7 @@ mod tests {
     }
 
     #[test]
-    fn punch_prio_cycles_and_sends() {
+    fn punch_prio_picker_opens_selects_and_sends() {
         let mut model = NativeModel::new();
         model.set_mode(UiMode::Fx);
         assert_eq!(
@@ -13607,6 +13958,14 @@ mod tests {
         model.fx_settings_open = true;
         model.finger_down(1, prio.x + 8, prio.y + 8, &mut out);
         model.finger_up(1, &mut out);
+        assert_eq!(model.settings_picker, Some(SettingsPicker::PunchPrio));
+        // ALL index 1 = Engage
+        let grid = model
+            .layout
+            .settings_picker_grid(model.settings_picker_count(SettingsPicker::PunchPrio));
+        let cell = grid.cell_rect(1, 0);
+        model.finger_down(2, cell.x + 4, cell.y + 4, &mut out);
+        model.finger_up(2, &mut out);
         assert_eq!(
             model.punch_buffer_prio,
             jambox_core::PunchBufferPrio::Engage
@@ -13617,6 +13976,152 @@ mod tests {
                 .any(|r| matches!(r, Request::PunchBufferPrio { mode: 4 })),
             "PRIO must send punch_buffer_prio"
         );
+    }
+
+    #[test]
+    fn punch_rpt_grid_source_and_fx_target_cycle() {
+        let mut model = NativeModel::new();
+        let mut out = Outbox::new();
+        model.set_mode(UiMode::Fx);
+        model.fx_settings_open = true;
+
+        let rpt = model.layout.punch_rpt_mode();
+        model.finger_down(1, rpt.x + 8, rpt.y + 8, &mut out);
+        model.finger_up(1, &mut out);
+        assert!(model.settings_picker.is_none());
+        assert_eq!(model.punch_rpt_mode, jambox_core::PunchRptMode::Hold);
+        assert!(out
+            .take()
+            .iter()
+            .any(|r| matches!(r, Request::PunchRptMode { mode: 1 })));
+
+        let grid = model.layout.punch_grid_mode();
+        model.finger_down(2, grid.x + 8, grid.y + 8, &mut out);
+        model.finger_up(2, &mut out);
+        assert_eq!(model.punch_grid_mode, jambox_core::PunchGridMode::Smooth);
+        assert!(out
+            .take()
+            .iter()
+            .any(|r| matches!(r, Request::PunchGrid { mode: 1 })));
+
+        model.fx_settings_open = false;
+        let source = model.layout.punch_source();
+        model.finger_down(3, source.x + 8, source.y + 8, &mut out);
+        model.finger_up(3, &mut out);
+        assert_eq!(model.punch_source, jambox_core::PunchSource::Drums.as_u8());
+
+        let target = model.layout.settings_fx_target;
+        model.finger_down(4, target.x + 8, target.y + 8, &mut out);
+        model.finger_up(4, &mut out);
+        assert_eq!(model.fx_target, FxEditTarget::Voice);
+        model.finger_down(5, target.x + 8, target.y + 8, &mut out);
+        model.finger_up(5, &mut out);
+        assert_eq!(model.fx_target, FxEditTarget::DrumGroup);
+    }
+
+    #[test]
+    fn pads_channel_and_arp_pickers_select() {
+        let mut model = NativeModel::new();
+        let mut out = Outbox::new();
+        model.set_mode(UiMode::Pads);
+        model.pads_edit = true;
+        model.show_pads_edit_chrome();
+        let ch = model.layout.pads_channel;
+        model.finger_down(1, ch.x + 4, ch.y + 4, &mut out);
+        model.finger_up(1, &mut out);
+        assert_eq!(model.settings_picker, Some(SettingsPicker::PadsChannel));
+        model.apply_settings_picker(5, &mut out); // CH5
+        assert_eq!(model.phrases[model.pads_selected.min(15)].out_channel, 4);
+        model.close_settings_picker();
+
+        model.set_mode(UiMode::Arp);
+        let div = model.layout.arp_tool(1);
+        model.finger_down(2, div.x + 4, div.y + 4, &mut out);
+        model.finger_up(2, &mut out);
+        assert_eq!(model.settings_picker, Some(SettingsPicker::ArpDivision));
+        model.apply_settings_picker(0, &mut out);
+        assert_eq!(model.arp.division, jambox_core::ArpDivision::Quarter);
+        model.close_settings_picker();
+
+        let gate = model.layout.arp_tool(5);
+        model.finger_down(3, gate.x + 4, gate.y + 4, &mut out);
+        model.finger_up(3, &mut out);
+        assert_eq!(model.settings_picker, Some(SettingsPicker::ArpGate));
+        model.apply_settings_picker(0, &mut out);
+        assert_eq!(model.arp.gate, 50);
+        model.close_settings_picker();
+
+        let arp_out = model.layout.arp_tool(6);
+        // Default ARP out is Both → cycle to Local.
+        assert_eq!(model.arp.out, OutMode::Both);
+        model.finger_down(4, arp_out.x + 4, arp_out.y + 4, &mut out);
+        model.finger_up(4, &mut out);
+        assert!(model.settings_picker.is_none());
+        assert_eq!(model.arp.out, OutMode::Local);
+    }
+
+    #[test]
+    fn pads_chords_song_out_and_qnt_cycle() {
+        let mut model = NativeModel::new();
+        let mut out = Outbox::new();
+
+        model.set_mode(UiMode::Pads);
+        model.hide_pads_edit_chrome();
+        let pads_out = model.layout.pads_out;
+        assert!(pads_out.w > 0);
+        // Default pads out is Both → Local.
+        assert_eq!(model.pads_out, OutMode::Both);
+        model.finger_down(1, pads_out.x + 4, pads_out.y + 4, &mut out);
+        model.finger_up(1, &mut out);
+        assert!(model.settings_picker.is_none());
+        assert_eq!(model.pads_out, OutMode::Local);
+        assert!(out.take().iter().any(|r| matches!(
+            r,
+            Request::EmitMode { target, mode } if target == "clips" && mode == "local"
+        )));
+
+        let qnt = model.layout.pads_qnt;
+        // Default Bar → Beat → Off.
+        assert_eq!(model.clip_quantize, ClipQuantize::Bar);
+        model.finger_down(2, qnt.x + 4, qnt.y + 4, &mut out);
+        model.finger_up(2, &mut out);
+        assert_eq!(model.clip_quantize, ClipQuantize::Beat);
+        model.finger_down(2, qnt.x + 4, qnt.y + 4, &mut out);
+        model.finger_up(2, &mut out);
+        assert_eq!(model.clip_quantize, ClipQuantize::Off);
+
+        model.set_mode(UiMode::Chords);
+        let chords_out = model.layout.chords_tool(0);
+        // Default Both → Local → Usb.
+        assert_eq!(model.chords_out, OutMode::Both);
+        model.finger_down(3, chords_out.x + 4, chords_out.y + 4, &mut out);
+        model.finger_up(3, &mut out);
+        assert_eq!(model.chords_out, OutMode::Local);
+        model.finger_down(3, chords_out.x + 4, chords_out.y + 4, &mut out);
+        model.finger_up(3, &mut out);
+        assert_eq!(model.chords_out, OutMode::Usb);
+
+        model.set_mode(UiMode::Songs);
+        let song_out = model.layout.song_out;
+        assert_eq!(model.song_out, OutMode::Both);
+        model.finger_down(4, song_out.x + 4, song_out.y + 4, &mut out);
+        model.finger_up(4, &mut out);
+        assert_eq!(model.song_out, OutMode::Local);
+        assert!(out.take().iter().any(|r| matches!(
+            r,
+            Request::EmitMode { target, mode } if target == "clips" && mode == "local"
+        )));
+
+        // KAOSS OUT stays an inline 3-way row in settings (≤3 → not SettingsPicker).
+        assert_eq!(model.kaoss_out, OutMode::Local);
+        assert_eq!(model.kaoss_out.cycle(), OutMode::Usb);
+        assert_eq!(model.kaoss_out.cycle().cycle(), OutMode::Both);
+        model.kaoss_out = OutMode::Both;
+        out.emit_mode("kaoss", model.kaoss_out.wire());
+        assert!(out.take().iter().any(|r| matches!(
+            r,
+            Request::EmitMode { target, mode } if target == "kaoss" && mode == "both"
+        )));
     }
 
     #[test]
@@ -15202,7 +15707,7 @@ mod tests {
     }
 
     #[test]
-    fn map_in_cycles_usb_ports_and_selects_them() {
+    fn map_in_opens_picker_and_row_still_selects() {
         let mut model = NativeModel::new();
         let mut out = Outbox::new();
         model.midi_inputs = vec![
@@ -15215,6 +15720,9 @@ mod tests {
         let inn = model.layout.map_in;
         model.finger_down(1, inn.x + 8, inn.y + 8, &mut out);
         model.finger_up(1, &mut out);
+        assert_eq!(model.settings_picker, Some(SettingsPicker::MapIn));
+        // index 0 = ALL, then hardware ports (Through skipped): U2MIDI, MPK
+        model.apply_settings_picker(1, &mut out);
         assert!(model.midi_in_filter.contains("U2MIDI"));
         let batch = out.take();
         assert!(batch.iter().any(|r| matches!(
@@ -15224,6 +15732,7 @@ mod tests {
                 ..
             } if s.contains("U2MIDI")
         )));
+        model.close_settings_picker();
         let row = model.layout.map_in_row(2);
         model.finger_down(2, row.x + 8, row.y + 8, &mut out);
         model.finger_up(2, &mut out);
@@ -15319,6 +15828,13 @@ mod tests {
         model.finger_down(3, oct_plus.x + 4, oct_plus.y + 4, &mut out);
         model.finger_up(3, &mut out);
         assert_eq!(model.arp.octaves, before + 1);
+        assert_eq!(
+            model.status_line,
+            format!(
+                "ARP octaves {}",
+                crate::arp::ArpUi::octaves_display(model.arp.octaves)
+            )
+        );
         let empty = model.layout.arp_step(8, 16);
         let len = model.arp.len;
         model.finger_down(4, empty.x + 4, empty.y + 4, &mut out);

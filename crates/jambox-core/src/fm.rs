@@ -802,7 +802,10 @@ impl FmSynth {
                         sample_rate,
                     );
                 }
-                let out = mix * VOICE_AMP * if v.recorded { 1.0 } else { ctx.live_gain };
+                let out = mix
+                    * VOICE_AMP
+                    * crate::mix::note_presence(v.note)
+                    * if v.recorded { 1.0 } else { ctx.live_gain };
                 if stereo {
                     *sample += out * gl;
                     live_r[idx] += out * gr;

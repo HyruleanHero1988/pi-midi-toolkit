@@ -237,6 +237,9 @@ pub enum Hit {
     SettingsScale,
     SettingsKaossYBend,
     SettingsKaossYVel,
+    /// Cell inside a Settings option sheet (scale / Y bend / Y vel).
+    SettingsPickerPick(usize),
+    SettingsPickerDone,
     SettingsMidi,
     MidiClose,
     MidiSource(usize),
@@ -1863,6 +1866,41 @@ impl Layout {
         Hit::KaossColorDone
     }
 
+    /// Shared DONE bar for Settings option sheets (scale / Y bend / Y vel).
+    pub fn settings_picker_done(&self) -> Rect {
+        Rect {
+            x: self.content.x + 8,
+            y: self.content.y + self.content.h - 56,
+            w: self.content.w - 16,
+            h: 48,
+        }
+    }
+
+    pub fn settings_picker_grid(&self, item_count: usize) -> crate::scroll::GridScroll {
+        crate::scroll::GridScroll {
+            cols: 4,
+            cell_h: 64,
+            item_count,
+            viewport: Rect {
+                x: self.content.x + 8,
+                y: self.content.y + 44,
+                w: self.content.w - 16,
+                h: self.content.h - 44 - 64,
+            },
+        }
+    }
+
+    pub fn hit_settings_picker(&self, px: i32, py: i32, item_count: usize) -> Hit {
+        if self.settings_picker_done().contains(px, py) {
+            return Hit::SettingsPickerDone;
+        }
+        let grid = self.settings_picker_grid(item_count);
+        if grid.viewport.contains(px, py) {
+            return Hit::ScrollArea(crate::scroll::ScrollKind::SettingsPicker);
+        }
+        Hit::SettingsPickerDone
+    }
+
     pub fn hit_kaoss_settings(&self, px: i32, py: i32, scroll: i32) -> Hit {
         if self
             .kaoss_settings_row(Self::KAOSS_SET_WIPE_Y, scroll, 48)
@@ -2501,8 +2539,17 @@ impl Layout {
         }
     }
 
+    /// Edit row: − + ADD DEL, plus KEY− KEY+ only when the on-screen keyboard is shown.
+    pub fn arp_edit_count(&self) -> usize {
+        if self.show_on_screen_keys {
+            6
+        } else {
+            4
+        }
+    }
+
     pub fn arp_edit(&self, index: usize) -> Rect {
-        let n = 6i32;
+        let n = self.arp_edit_count() as i32;
         let y = self.arp_step(0, 1).y + self.arp_step(0, 1).h + 6;
         let w = (self.content.w - 16) / n;
         Rect {
@@ -3736,14 +3783,16 @@ impl Layout {
         if self.arp_edit(3).contains(px, py) {
             return Hit::ArpDel;
         }
-        if self.arp_edit(4).contains(px, py) {
-            return Hit::ArpKeyOctDown;
-        }
-        if self.arp_edit(5).contains(px, py) {
-            return Hit::ArpKeyOctUp;
-        }
-        if let Some(note) = self.arp_keyboard_note_at(px, py) {
-            return Hit::SynthKey { note };
+        if self.show_on_screen_keys {
+            if self.arp_edit(4).contains(px, py) {
+                return Hit::ArpKeyOctDown;
+            }
+            if self.arp_edit(5).contains(px, py) {
+                return Hit::ArpKeyOctUp;
+            }
+            if let Some(note) = self.arp_keyboard_note_at(px, py) {
+                return Hit::SynthKey { note };
+            }
         }
         Hit::None
     }
@@ -4676,6 +4725,52 @@ mod tests {
     }
 
     #[test]
+    fn arp_key_octave_buttons_follow_on_screen_keyboard() {
+        let mut layout = Layout::new();
+        assert!(layout.show_on_screen_keys);
+        assert_eq!(layout.arp_edit_count(), 6);
+        let key_down = layout.arp_edit(4);
+        let key_up = layout.arp_edit(5);
+        assert_eq!(
+            layout.hit(UiMode::Arp, key_down.x + 4, key_down.y + 4),
+            Hit::ArpKeyOctDown
+        );
+        assert_eq!(
+            layout.hit(UiMode::Arp, key_up.x + 4, key_up.y + 4),
+            Hit::ArpKeyOctUp
+        );
+        let six_col_w = key_down.w;
+
+        layout.show_on_screen_keys = false;
+        assert_eq!(layout.arp_edit_count(), 4);
+        let row = layout.arp_edit(0);
+        let del = layout.arp_edit(3);
+        assert_eq!(
+            layout.hit(UiMode::Arp, del.x + 4, del.y + 4),
+            Hit::ArpDel,
+            "DEL should still hit when KEY buttons are hidden"
+        );
+        // Entire reflowed edit row: − + ADD DEL only — never KEY octave hits.
+        let right = layout.content.x + layout.content.w - 8;
+        let mut x = row.x;
+        while x < right {
+            let hit = layout.hit(UiMode::Arp, x, row.y + 4);
+            assert!(
+                !matches!(hit, Hit::ArpKeyOctDown | Hit::ArpKeyOctUp),
+                "KEY−/KEY+ must not hit-test when keyboard is hidden (x={x}, hit={hit:?})"
+            );
+            x += 4;
+        }
+        assert!(
+            del.w > six_col_w,
+            "edit row should reflow wider without KEY−/KEY+, del.w={} six_col_w={six_col_w}",
+            del.w
+        );
+        let keys = layout.arp_keys();
+        assert_eq!(layout.arp_keyboard_note_at(keys.x + 8, keys.y + 8), None);
+    }
+
+    #[test]
     fn chords_oct_and_strum_hits() {
         let layout = Layout::new();
         let down = layout.chords_oct_down();
@@ -4711,6 +4806,25 @@ mod tests {
             Hit::ChordsStrum { .. } => {}
             other => panic!("expected strum on octave label, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn settings_picker_done_and_grid_hit() {
+        let layout = Layout::new();
+        let n = jambox_core::KAOSS_SCALES.len();
+        let done = layout.settings_picker_done();
+        assert_eq!(
+            layout.hit_settings_picker(done.x + 4, done.y + 4, n),
+            Hit::SettingsPickerDone
+        );
+        let grid = layout.settings_picker_grid(n);
+        let cell = grid.cell_rect(0, 0);
+        assert_eq!(
+            layout.hit_settings_picker(cell.x + 4, cell.y + 4, n),
+            Hit::ScrollArea(crate::scroll::ScrollKind::SettingsPicker)
+        );
+        assert!(grid.viewport.h > 0);
+        assert!(done.y + done.h <= layout.content.y + layout.content.h);
     }
 
     #[test]

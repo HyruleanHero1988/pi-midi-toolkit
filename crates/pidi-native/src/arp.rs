@@ -4,7 +4,7 @@ use jambox_core::{ArpDivision, ArpOrder, MAX_ARP_OCTAVES, MAX_ARP_STEPS};
 
 use crate::session::OutMode;
 
-const GATE_PRESETS: [u8; 4] = [50, 70, 90, 127];
+pub(crate) const GATE_PRESETS: [u8; 4] = [50, 70, 90, 127];
 
 #[derive(Debug, Clone)]
 pub struct ArpUi {
@@ -64,30 +64,18 @@ impl ArpUi {
         format!("{}%", (u16::from(self.gate) * 100 / 127).max(1))
     }
 
-    pub fn cycle_order(&mut self) {
-        let i = ArpOrder::ALL
-            .iter()
-            .position(|o| *o == self.order)
-            .unwrap_or(0);
-        self.order = ArpOrder::ALL[(i + 1) % ArpOrder::ALL.len()];
-    }
-
-    pub fn cycle_division(&mut self) {
-        let i = ArpDivision::ALL
-            .iter()
-            .position(|d| *d == self.division)
-            .unwrap_or(0);
-        self.division = ArpDivision::ALL[(i + 1) % ArpDivision::ALL.len()];
-    }
-
-    pub fn cycle_gate(&mut self) {
-        let i = GATE_PRESETS.iter().position(|g| *g == self.gate).unwrap_or(0);
-        self.gate = GATE_PRESETS[(i + 1) % GATE_PRESETS.len()];
-    }
-
     pub fn bump_octaves(&mut self, delta: i8) {
         let next = i16::from(self.octaves) + i16::from(delta);
         self.octaves = next.clamp(0, i16::from(MAX_ARP_OCTAVES)) as u8;
+    }
+
+    /// Human-facing octave span (1..=4). Engine storage stays MPK-style 0..=3.
+    pub fn octaves_display(octaves: u8) -> u8 {
+        octaves.min(MAX_ARP_OCTAVES).saturating_add(1)
+    }
+
+    pub fn octaves_label(&self) -> String {
+        format!("{}", Self::octaves_display(self.octaves))
     }
 
     pub fn bump_interval(&mut self, delta: i8) {
@@ -155,6 +143,17 @@ mod tests {
     }
 
     #[test]
+    fn octave_labels_are_one_based() {
+        assert_eq!(ArpUi::octaves_display(0), 1);
+        assert_eq!(ArpUi::octaves_display(3), 4);
+        let mut arp = ArpUi::new();
+        arp.octaves = 0;
+        assert_eq!(arp.octaves_label(), "1");
+        arp.octaves = 2;
+        assert_eq!(arp.octaves_label(), "3");
+    }
+
+    #[test]
     fn chrome_labels_fit_retro_font() {
         let arp = ArpUi::new();
         let labels = [
@@ -166,6 +165,7 @@ mod tests {
             ArpUi::interval_label(12),
             "OCT-".into(),
             "OCT+".into(),
+            arp.octaves_label(),
             "-".into(),
             "+".into(),
             "ADD".into(),

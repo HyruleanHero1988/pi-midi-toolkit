@@ -46,6 +46,7 @@ pub enum PunchSource {
 
 impl PunchSource {
     pub const COUNT: usize = 3;
+    pub const ALL: [Self; 3] = [Self::Keys, Self::Drums, Self::Mic];
 
     pub fn from_u8(v: u8) -> Self {
         match v {
@@ -96,7 +97,7 @@ pub fn punch_grid_label(amount: f32) -> &'static str {
     PUNCH_GRID_LABELS[punch_grid_index(amount)]
 }
 
-/// Who wins when several buffer pads are armed. Cycles on the FX page.
+/// Who wins when several buffer pads are armed. Picked on the FX SET page.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[repr(u8)]
 pub enum PunchBufferPrio {
@@ -172,6 +173,8 @@ pub enum PunchGridMode {
 }
 
 impl PunchGridMode {
+    pub const ALL: [Self; 2] = [Self::Beat, Self::Smooth];
+
     pub fn from_u8(v: u8) -> Self {
         match v {
             1 => Self::Smooth,

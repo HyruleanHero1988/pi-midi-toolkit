@@ -518,7 +518,8 @@ impl VoicePool {
             let mut lfo_phase = ctx.tone_lfo_phase;
             let lfo_inc = std::f64::consts::TAU * ctx.tone_lfo_rate_hz.max(0.01) as f64
                 / ctx.sample_rate.max(8000.0) as f64;
-            let g = v.mix.gain(ctx.live_gain, &ctx.clip_gains);
+            let g = v.mix.gain(ctx.live_gain, &ctx.clip_gains)
+                * crate::mix::note_presence(v.note);
             let (gl, gr) = crate::mix::width_gains(v.note, ctx.stereo_width);
 
             for i in 0..n {
@@ -638,7 +639,8 @@ impl VoicePool {
             let mut lfo_phase = ctx.tone_lfo_phase;
             let lfo_inc = std::f64::consts::TAU * ctx.tone_lfo_rate_hz.max(0.01) as f64
                 / ctx.sample_rate.max(8000.0) as f64;
-            let g = v.mix.gain(ctx.live_gain, &ctx.clip_gains);
+            let g = v.mix.gain(ctx.live_gain, &ctx.clip_gains)
+                * crate::mix::note_presence(v.note);
 
             for sample in dest.iter_mut() {
                 if v.target_amp > v.amp {
@@ -759,7 +761,8 @@ impl VoicePool {
             let mut lfo_phase = ctx.tone_lfo_phase;
             let lfo_inc = std::f64::consts::TAU * ctx.tone_lfo_rate_hz.max(0.01) as f64
                 / ctx.sample_rate.max(8000.0) as f64;
-            let g = v.mix.gain(ctx.live_gain, &ctx.clip_gains);
+            let g = v.mix.gain(ctx.live_gain, &ctx.clip_gains)
+                * crate::mix::note_presence(v.note);
 
             for sample in dest.iter_mut() {
                 if v.target_amp > v.amp {
@@ -967,6 +970,36 @@ mod tests {
             pool.render_group(0, bank.table(0), &mut buf, ctx());
         }
         assert_eq!(pool.active_count(), 0, "released voice should be reclaimed");
+    }
+
+    #[test]
+    fn high_notes_render_louder_than_low_notes_at_same_velocity() {
+        let bank = WaveBank::with_builtins();
+        let mut ctx = ctx();
+        ctx.attack_sec = 0.001;
+        let peak_of = |note: u8| {
+            let mut pool = VoicePool::new();
+            pool.note_on(0, note, 127, 0);
+            let mut buf = vec![0.0f32; 2048];
+            // Warm past attack so amp is at target.
+            pool.render_group(0, bank.table(0), &mut buf, ctx);
+            buf.fill(0.0);
+            pool.render_group(0, bank.table(0), &mut buf, ctx);
+            buf.iter().fold(0.0f32, |m, v| m.max(v.abs()))
+        };
+        let low = peak_of(36);
+        let mid = peak_of(60);
+        let high = peak_of(84);
+        assert!(low > 0.01 && mid > 0.01 && high > 0.01);
+        assert!(
+            high > mid && mid > low,
+            "presence tilt should rise with pitch: C2={low:.4} C4={mid:.4} C6={high:.4}"
+        );
+        assert!(
+            high / low > 1.5,
+            "C6 should be clearly louder than C2 at equal velocity, ratio={}",
+            high / low
+        );
     }
 
     #[test]

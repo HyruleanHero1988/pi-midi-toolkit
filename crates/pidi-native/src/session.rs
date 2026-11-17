@@ -19,6 +19,8 @@ pub enum OutMode {
 }
 
 impl OutMode {
+    pub const ALL: [Self; 3] = [Self::Local, Self::Usb, Self::Both];
+
     pub fn cycle(self) -> Self {
         match self {
             Self::Local => Self::Usb,
@@ -80,6 +82,8 @@ pub enum ClipQuantize {
 }
 
 impl ClipQuantize {
+    pub const ALL: [Self; 3] = [Self::Bar, Self::Beat, Self::Off];
+
     pub fn cycle(self) -> Self {
         match self {
             Self::Bar => Self::Beat,

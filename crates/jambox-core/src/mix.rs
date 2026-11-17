@@ -78,6 +78,18 @@ pub fn width_gains(note: u8, width: f32) -> (f32, f32) {
     sweep_gains(pan)
 }
 
+/// Mild high-note presence so melodies cut through bass chords.
+///
+/// Unity at MIDI 60 (C4). About −2.5 dB at C2 and +2.5 dB at C6 — enough relative
+/// lift for a high line over a held low chord without making solo highs harsh.
+/// Always on: LEVEL / TONE stay the user-facing loudness and brightness knobs.
+pub fn note_presence(note: u8) -> f32 {
+    // 1.25 dB/octave → ±2.5 dB across ±2 octaves around C4.
+    const DB_PER_OCTAVE: f32 = 1.25;
+    let semis = (note as f32 - 60.0).clamp(-36.0, 36.0);
+    10f32.powf(semis * (DB_PER_OCTAVE / 12.0) / 20.0)
+}
+
 /// Wavetable A vs B stereo. Morph 0 and 1 stay dual-mono; 0.5 is the widest.
 pub fn morph_side(a: f32, b: f32, morph: f32, width: f32) -> f32 {
     let m = morph.clamp(0.0, 1.0);
@@ -143,5 +155,18 @@ mod tests {
         let wide = morph_side(1.0, -1.0, 0.5, 1.0);
         assert!((wide - 1.0).abs() < 1e-5);
         assert!(morph_side(1.0, -1.0, 0.5, 0.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn note_presence_is_unity_at_c4_and_tilts_mildly() {
+        assert!((note_presence(60) - 1.0).abs() < 1e-5);
+        let low = note_presence(36); // C2
+        let high = note_presence(84); // C6
+        assert!(low < 0.80 && low > 0.70); // ≈ −2.5 dB
+        assert!(high > 1.25 && high < 1.40); // ≈ +2.5 dB
+        assert!(high / low > 1.6); // ~5 dB relative
+        // Solo extremes stay gentle.
+        assert!(note_presence(96) < 1.55);
+        assert!(note_presence(24) > 0.60);
     }
 }

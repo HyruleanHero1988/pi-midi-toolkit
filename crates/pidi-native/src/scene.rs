@@ -466,6 +466,8 @@ pub fn build(model: &NativeModel) -> Scene {
         draw_power_menu(&mut scene, model);
     } else if model.update_panel_open {
         draw_update_panel(&mut scene, model);
+    } else if let Some(kind) = model.settings_picker {
+        draw_settings_picker(&mut scene, model, kind);
     } else if model.midi_panel_open {
         draw_midi_panel(&mut scene, model);
     } else if model.wifi_kb_open {
@@ -2107,7 +2109,7 @@ fn draw_arp(scene: &mut Scene, model: &NativeModel) {
         scene.text_centered(cell, order.label(), 0xfbf1c7, 1);
     }
 
-    let oct_label = format!("{}", model.arp.octaves);
+    let oct_label = model.arp.octaves_label();
     let gate_label = model.arp.gate_label();
     let tools = [
         if model.arp.latch { "LATCH" } else { "HOLD" },
@@ -2164,7 +2166,11 @@ fn draw_arp(scene: &mut Scene, model: &NativeModel) {
         }
     }
 
-    let edits = ["-", "+", "ADD", "DEL", "KEY-", "KEY+"];
+    let edits: &[&str] = if layout.show_on_screen_keys {
+        &["-", "+", "ADD", "DEL", "KEY-", "KEY+"]
+    } else {
+        &["-", "+", "ADD", "DEL"]
+    };
     for (i, label) in edits.iter().enumerate() {
         let cell = layout.arp_edit(i);
         scene.button(cell, 0x3c3836);
@@ -4067,6 +4073,32 @@ fn draw_wave_slider(
     scene.fill_rect(track, 0x282828);
     let w = (track.w as f32 * unit.clamp(0.0, 1.0)).max(2.0);
     scene.fill(track.x as f32, track.y as f32, w, track.h as f32, color);
+}
+
+fn draw_settings_picker(scene: &mut Scene, model: &NativeModel, kind: crate::model::SettingsPicker) {
+    let layout = model.layout;
+    let c = layout.content;
+    scene.fill_rect(c, 0x111111);
+    let title = NativeModel::settings_picker_title(kind);
+    let hint = NativeModel::settings_picker_hint(kind);
+    scene.text(c.x + 8, c.y + 12, title, 0xfbf1c7);
+    scene.text(c.x + 8, c.y + 32, hint, 0xa89984);
+    let n = model.settings_picker_count(kind);
+    let selected = model.settings_picker_selected(kind);
+    let grid = layout.settings_picker_grid(n);
+    for index in grid.visible_range(model.settings_picker_scroll) {
+        let cell = grid.cell_rect(index, model.settings_picker_scroll);
+        if cell.y + cell.h < grid.viewport.y || cell.y > grid.viewport.y + grid.viewport.h {
+            continue;
+        }
+        let on = index == selected;
+        scene.button(cell, if on { 0x458588 } else { 0x3c3836 });
+        let label = model.settings_picker_label(kind, index);
+        scene.text_centered(cell, &label, 0xffffff, 2);
+    }
+    let done = layout.settings_picker_done();
+    scene.button(done, 0x458588);
+    scene.text_centered(done, "DONE", 0xffffff, 2);
 }
 
 fn draw_settings(scene: &mut Scene, model: &NativeModel) {

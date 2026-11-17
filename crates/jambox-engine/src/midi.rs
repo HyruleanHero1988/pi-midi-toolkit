@@ -159,8 +159,8 @@ impl MidiMap {
         )
     }
 
-    /// Scale mode: move keybed notes onto the scale. Drum channel and the
-    /// controller's transport notes pass through untouched.
+    /// Scale mode: remap keybed notes onto unique scale degrees. Drum channel
+    /// and the controller's transport notes pass through untouched.
     pub fn apply_scale(&self, event: MidiEvent, profile: &ControllerProfile) -> MidiEvent {
         let (on, root, mask) = self.scale_lock();
         let lookup = |channel: u8, note: u8| (channel as usize & 0x0f) * 128 + (note as usize & 0x7f);
@@ -346,7 +346,11 @@ impl MidiMap {
                 if profile.is_transport_note(note) {
                     return None;
                 }
-                if self.mode.load(Ordering::Relaxed) == MODE_PUNCH
+                // Pads→FX only steals the drum-channel pad notes. Keybed pitches
+                // that share those note numbers (e.g. C2–G2 = 36–43) must still
+                // sound on the FX page.
+                if channel == DRUM_CHANNEL
+                    && self.mode.load(Ordering::Relaxed) == MODE_PUNCH
                     && self.pads_to_fx()
                     && profile.punch_index_for_pad(note).is_some()
                 {
@@ -367,7 +371,8 @@ impl MidiMap {
                 if profile.is_transport_note(note) {
                     return None;
                 }
-                if self.mode.load(Ordering::Relaxed) == MODE_PUNCH
+                if channel == DRUM_CHANNEL
+                    && self.mode.load(Ordering::Relaxed) == MODE_PUNCH
                     && self.pads_to_fx()
                     && profile.punch_index_for_pad(note).is_some()
                 {
@@ -411,7 +416,8 @@ impl MidiMap {
             if profile.is_transport_note(note) {
                 return None;
             }
-            if self.mode.load(Ordering::Relaxed) == MODE_PUNCH
+            if channel == DRUM_CHANNEL
+                && self.mode.load(Ordering::Relaxed) == MODE_PUNCH
                 && self.pads_to_fx()
                 && profile.punch_index_for_pad(note).is_some()
             {
@@ -703,27 +709,42 @@ fn mix_fader_command(index: usize, unit: f32) -> Option<Command> {
     }
 }
 
-/// Nearest note whose pitch class is in `mask` (bit i = `root + i`).
-/// Ties go down. An empty mask leaves the note alone.
+/// Remap a chromatic MIDI note onto the scale in `mask` (bit i = `root + i`).
+///
+/// Each successive physical key walks the next scale degree, so adjacent keys
+/// never share a pitch when the scale has fewer than 12 tones. Root keys
+/// (`note % 12 == root`) keep their octave (C4 stays C4 in C major). An empty
+/// or chromatic mask leaves the note alone.
+///
+/// Nearest-pitch snapping is intentionally *not* used: it maps several
+/// chromatics onto one degree (C and C♯ → C), which sounded like duplicate
+/// notes in a row on the keybed.
 pub fn snap_to_scale(note: u8, root: u8, mask: u16) -> u8 {
     let mask = mask & 0x0fff;
-    if mask == 0 {
+    if mask == 0 || mask == 0x0fff {
         return note;
     }
-    let in_scale = |n: i16| {
-        let rel = (n - root as i16).rem_euclid(12);
-        mask & (1 << rel) != 0
-    };
-    let n = note as i16;
-    for d in 0..12i16 {
-        if n - d >= 0 && in_scale(n - d) {
-            return (n - d) as u8;
-        }
-        if n + d <= 127 && in_scale(n + d) {
-            return (n + d) as u8;
+    let mut deg = [0u8; 12];
+    let mut n_deg = 0usize;
+    for i in 0..12u8 {
+        if mask & (1 << i) != 0 {
+            deg[n_deg] = i;
+            n_deg += 1;
         }
     }
-    note
+    if n_deg == 0 || n_deg == 12 {
+        return note;
+    }
+    let root = (root % 12) as i32;
+    let rel = note as i32 - root;
+    let kb_oct = rel.div_euclid(12);
+    let local = rel.rem_euclid(12);
+    let global_idx = kb_oct * n_deg as i32 + local;
+    let n = n_deg as i32;
+    let oct = global_idx.div_euclid(n);
+    let di = global_idx.rem_euclid(n) as usize;
+    let out = root + deg[di] as i32 + 12 * oct;
+    out.clamp(0, 127) as u8
 }
 
 /// Push a MIDI event into DSP and to every UI client except `origin`
@@ -1229,17 +1250,58 @@ mod tests {
     }
 
     #[test]
-    fn snap_to_scale_picks_nearest_and_ties_down() {
+    fn snap_to_scale_walks_unique_degrees() {
         let major = jambox_protocol::default_scale_mask();
-        assert_eq!(snap_to_scale(60, 0, major), 60);
-        assert_eq!(snap_to_scale(61, 0, major), 60); // C# → C (tie, down)
-        assert_eq!(snap_to_scale(66, 0, major), 65); // F# → F
+        // C major from C4: successive keys climb the scale (no C♯→C duplicate).
+        assert_eq!(snap_to_scale(60, 0, major), 60); // C4
+        assert_eq!(snap_to_scale(61, 0, major), 62); // → D4
+        assert_eq!(snap_to_scale(62, 0, major), 64); // → E4
+        assert_eq!(snap_to_scale(66, 0, major), 71); // → B4
+        assert_eq!(snap_to_scale(67, 0, major), 72); // → C5
         // A minor pentatonic (A C D E G) rooted at A.
         let pent: u16 = 1 | 1 << 3 | 1 << 5 | 1 << 7 | 1 << 10;
-        assert_eq!(snap_to_scale(59, 9, pent), 60); // B → C
-        assert_eq!(snap_to_scale(65, 9, pent), 64); // F → E (tie, down)
+        assert_eq!(snap_to_scale(57, 9, pent), 57); // A3
+        assert_eq!(snap_to_scale(58, 9, pent), 60); // → C4
         assert_eq!(snap_to_scale(61, 0, 0), 61);
+        assert_eq!(snap_to_scale(61, 0, 0x0fff), 61);
         assert_eq!(snap_to_scale(127, 0, major), 127);
+    }
+
+    #[test]
+    fn snap_to_scale_adjacent_keys_are_distinct_for_common_scales() {
+        let ids = [
+            "ionian",
+            "dorian",
+            "aeolian",
+            "major_pent",
+            "minor_pent",
+            "blues",
+            "whole",
+            "harmonic",
+            "ryukyu",
+        ];
+        for id in ids {
+            let scale = jambox_core::kaoss_scale(jambox_core::kaoss_scale_index_by_id(id) as usize);
+            let mask = scale
+                .degrees
+                .iter()
+                .fold(0u16, |m, d| m | 1 << (d % 12));
+            assert!(mask != 0 && mask != 0x0fff, "{id} should be a proper subset");
+            for root in 0..12u8 {
+                let mut prev = None;
+                // Stay clear of MIDI 0/127 clamp saturation at the extremes.
+                for note in 24u8..=100 {
+                    let mapped = snap_to_scale(note, root, mask);
+                    if let Some(p) = prev {
+                        assert_ne!(
+                            mapped, p,
+                            "{id} root={root}: MIDI {note} mapped to {mapped}, same as previous key"
+                        );
+                    }
+                    prev = Some(mapped);
+                }
+            }
+        }
     }
 
     #[test]
@@ -1251,13 +1313,14 @@ mod tests {
         map.set_scale_lock(true, 0, jambox_protocol::default_scale_mask());
         assert_eq!(
             map.apply_scale(on, &profile),
-            MidiEvent::NoteOn { channel: 0, note: 60, velocity: 100 }
+            MidiEvent::NoteOn { channel: 0, note: 62, velocity: 100 },
+            "C♯4 walks to D4 in C major"
         );
-        // Scale changes while held: the note-off still releases C.
+        // Scale changes while held: the note-off still releases what note-on played.
         map.set_scale_lock(true, 1, 0b1);
         assert_eq!(
             map.apply_scale(MidiEvent::NoteOff { channel: 0, note: 61, velocity: 0 }, &profile),
-            MidiEvent::NoteOff { channel: 0, note: 60, velocity: 0 }
+            MidiEvent::NoteOff { channel: 0, note: 62, velocity: 0 }
         );
         // Drum pads pass through.
         let pad = MidiEvent::NoteOn { channel: 9, note: 37, velocity: 100 };
@@ -1921,6 +1984,56 @@ mod tests {
                 velocity: 100,
             })
             .is_some());
+    }
+
+    #[test]
+    fn punch_mode_keeps_keybed_notes_that_overlap_pad_numbers() {
+        // MPK punch pads are MIDI 36–43 on ch10. Without a channel gate those
+        // same pitches on the keybed went silent on the FX page.
+        let map = MidiMap::default();
+        map.set_punch();
+        assert!(map.pads_to_fx());
+        let profile = ControllerProfile::mpk_mini();
+        for note in 36u8..=43 {
+            assert!(
+                profile.punch_index_for_pad(note).is_some(),
+                "fixture expects pad note {note}"
+            );
+            assert_eq!(
+                map.interpret(MidiEvent::NoteOn {
+                    channel: 0,
+                    note,
+                    velocity: 100,
+                }),
+                Some(Command::NoteOn {
+                    channel: 0,
+                    note,
+                    velocity: 100
+                }),
+                "FX page must still play keybed MIDI {note}"
+            );
+            assert_eq!(
+                map.interpret(MidiEvent::NoteOff {
+                    channel: 0,
+                    note,
+                    velocity: 0,
+                }),
+                Some(Command::NoteOff {
+                    channel: 0,
+                    note
+                }),
+                "FX page must release keybed MIDI {note}"
+            );
+            assert!(
+                map.interpret(MidiEvent::NoteOn {
+                    channel: 9,
+                    note,
+                    velocity: 100,
+                })
+                .is_none(),
+                "drum-channel pad {note} still belongs to FX"
+            );
+        }
     }
 
     #[test]
