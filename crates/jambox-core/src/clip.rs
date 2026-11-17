@@ -22,6 +22,8 @@ pub const SEQ_KAOSS_MIX_SLOT: u8 = 18;
 const MAX_SLOT_NOTES: usize = 24;
 /// Kaoss contacts one clip may hold open (matches `MAX_TOUCH_VOICES`).
 const MAX_SLOT_TOUCHES: usize = 5;
+/// Most releases [`Sequencer::release_held`] can emit for one slot.
+pub const MAX_SLOT_RELEASES: usize = MAX_SLOT_NOTES + MAX_SLOT_TOUCHES;
 
 /// What a clip event does. Kept `Copy` so scheduling never allocates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -219,8 +221,14 @@ impl ClipSlot {
         self.mode = mode;
     }
 
+    /// Release drift this pad plays with. Only a LOCKED pad pins its recorded
+    /// drift; a FOLLOW pad tracks the live DRIFT slider like live keys do.
     pub fn playback_drift(&self) -> Option<f32> {
-        self.voice.release_drift
+        if self.voice.locked {
+            self.voice.release_drift
+        } else {
+            None
+        }
     }
 
     pub fn playback_tone(&self) -> f32 {
@@ -377,6 +385,15 @@ impl Sequencer {
             self.slots[index].state = SlotState::Idle;
         }
         n
+    }
+
+    /// Note-offs / touch-ups for everything `index` still holds open. Call before
+    /// replacing or dropping a playing clip, or its notes ring forever.
+    pub fn release_held(&mut self, index: usize, out: &mut [SeqEvent]) -> usize {
+        if index >= self.slots.len() {
+            return 0;
+        }
+        self.flush_held(index, 0, out)
     }
 
     fn flush_held(&mut self, index: usize, frame: u32, out: &mut [SeqEvent]) -> usize {
@@ -625,6 +642,54 @@ mod tests {
         assert_eq!(hits.len() as u64, 4 * cycles);
         // The last downbeat must be exactly on the grid — no accumulated error.
         assert_eq!(*hits.last().unwrap(), bar * (cycles - 1) + beat * 3);
+    }
+
+    /// Kick on 1, snare on 3, and a hat one tick before the loop end.
+    fn drum_take() -> Clip {
+        let hit = |tick: u32, note: u8| ClipEvent {
+            tick,
+            kind: ClipEventKind::NoteOn {
+                channel: 9,
+                note,
+                velocity: 100,
+            },
+        };
+        Clip::new(
+            vec![
+                hit(0, 36),
+                hit(PPQ * 2, 38),
+                hit(PPQ * 4 - 1, 42),
+            ],
+            PPQ * 4,
+        )
+    }
+
+    #[test]
+    fn looped_drum_take_plays_each_hit_once_per_pass_under_every_quantize() {
+        let t = transport();
+        let bar = t.samples_per_beat() as u64 * 4;
+        for q in [Quantize::Off, Quantize::Beat, Quantize::Bar] {
+            let mut seq = Sequencer::new();
+            seq.slot_mut(0).unwrap().set_clip(Some(drum_take()));
+            seq.launch(0, 777, q, &t);
+            let start = t.next_boundary(777, q);
+            let passes = 4u64;
+            let hits = run(&mut seq, &t, start + bar * passes, 128);
+            assert_eq!(
+                hits.len() as u64,
+                3 * passes,
+                "{q:?}: no extra or missing hits over {passes} passes, got {hits:?}"
+            );
+            let pass_start = |n: u64| start + bar * n;
+            for n in 0..passes {
+                let in_pass = hits
+                    .iter()
+                    .filter(|h| **h >= pass_start(n) && **h < pass_start(n + 1))
+                    .count();
+                assert_eq!(in_pass, 3, "{q:?}: pass {n} has exactly its three hits");
+            }
+            assert_eq!(hits[0], start, "{q:?}: first hit lands on the launch grid");
+        }
     }
 
     #[test]

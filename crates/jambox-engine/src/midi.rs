@@ -726,12 +726,14 @@ pub fn snap_to_scale(note: u8, root: u8, mask: u16) -> u8 {
     note
 }
 
-/// Push a MIDI event into DSP and to every UI client.
+/// Push a MIDI event into DSP and to every UI client except `origin`
+/// (the control session that sent it, if it did not come from hardware).
 ///
 /// `dest_mask` is the live channel-map bitmask (`bit j` = emit on channel `j`).
 pub fn ingest(
     event: MidiEvent,
     dest_mask: u16,
+    origin: Option<u32>,
     hub: &crate::ipc::ClientHub,
     map: &MidiMap,
     profile: &ControllerProfile,
@@ -745,7 +747,7 @@ pub fn ingest(
             continue;
         }
         let mapped = event.with_channel(dest);
-        hub.broadcast_midi(mapped, Some(profile.id.as_str()));
+        hub.broadcast_midi_from(origin, mapped, Some(profile.id.as_str()));
         if let Some(command) = map.interpret_with(profile, mapped) {
             let _ = send(command);
         }
@@ -990,7 +992,7 @@ fn try_connect(
                 if let Some(event) = MidiEvent::parse(bytes) {
                     let dest_mask = io.dest_mask(event.channel());
                     let mut guard = side.lock().unwrap_or_else(|p| p.into_inner());
-                    ingest(event, dest_mask, &hub, &map, &profile, |c| guard.send(c));
+                    ingest(event, dest_mask, None, &hub, &map, &profile, |c| guard.send(c));
                 }
             },
             (),

@@ -376,38 +376,54 @@ impl Scene {
         *x = pen_x.round() as i32;
     }
 
+    /// Pixel size `(w, h)` that `text_scaled(.., scale)` will occupy in the active font.
+    pub fn measure_text(&self, s: &str, scale: i32) -> (i32, i32) {
+        let scale = scale.max(1);
+        let retro = || {
+            (
+                (s.chars().count() as i32) * GLYPH_STRIDE * scale,
+                GLYPH_H * scale,
+            )
+        };
+        match self.font_style.resolved() {
+            FontStyle::Retro => retro(),
+            FontStyle::Smooth => match font::smooth_atlas() {
+                Some(atlas) => atlas.measure(s, scale),
+                None => retro(),
+            },
+        }
+    }
+
+    /// Largest scale `<= max_scale` (never below 1) at which every string fits `max_w`.
+    pub fn fit_scale(&self, labels: &[&str], max_w: i32, max_scale: i32) -> i32 {
+        let mut scale = max_scale.max(1);
+        while scale > 1
+            && labels
+                .iter()
+                .any(|l| self.measure_text(l, scale).0 > max_w)
+        {
+            scale -= 1;
+        }
+        scale
+    }
+
     pub fn text_centered(&mut self, rect: Rect, s: &str, color: u32, scale: i32) {
-        let style = self.font_style.resolved();
         let max_w = (rect.w - 4).max(1);
         let max_h = (rect.h - 4).max(1);
-        let measure = |text: &str, scale: i32| -> (i32, i32) {
-            match style {
-                FontStyle::Retro => (
-                    (text.chars().count() as i32) * GLYPH_STRIDE * scale,
-                    GLYPH_H * scale,
-                ),
-                FontStyle::Smooth => match font::smooth_atlas() {
-                    Some(atlas) => atlas.measure(text, scale),
-                    None => (
-                        (text.chars().count() as i32) * GLYPH_STRIDE * scale,
-                        GLYPH_H * scale,
-                    ),
-                },
-            }
-        };
+        let measure = |scene: &Scene, text: &str, scale: i32| scene.measure_text(text, scale);
 
         let mut scale = scale.max(1);
         let mut draw = s.to_string();
-        let (mut w, mut h) = measure(&draw, scale);
+        let (mut w, mut h) = measure(self, &draw, scale);
         while scale > 1 && (w > max_w || h > max_h) {
             scale -= 1;
-            let m = measure(&draw, scale);
+            let m = measure(self, &draw, scale);
             w = m.0;
             h = m.1;
         }
         while w > max_w && draw.chars().count() > 1 {
             draw.pop();
-            let m = measure(&draw, scale);
+            let m = measure(self, &draw, scale);
             w = m.0;
             h = m.1;
         }
@@ -809,7 +825,7 @@ fn draw_chrome(scene: &mut Scene, model: &NativeModel) {
     let layout = model.layout;
     // Tk top bar: warm charcoal, cyan brand, ← BACK / HOME / POWER, jam tabs.
     scene.fill_rect(layout.nav, 0x1d2021);
-    scene.text_scaled(10, 16, "PiDI", 0x00d4ff, 3);
+    scene.text_scaled(10, 16, crate::font::BRAND, 0x00d4ff, 3);
 
     let back = layout.nav_back();
     scene.button(
@@ -2679,10 +2695,17 @@ fn draw_fm(scene: &mut Scene, model: &NativeModel) {
     draw_fm_scope(scene, model);
 
     const LABELS: [&str; Layout::FM_SLIDER_COUNT] = ["RATIO", "OUT", "FOLD", "ENV", "WIDE"];
+    // One scale for the whole row so the labels read as a set.
+    let label_scale = scene.fit_scale(&LABELS, layout.fm_slider_label(0).w - 2, 2);
     for index in 0..Layout::FM_SLIDER_COUNT {
         let track = layout.fm_slider(index);
         scene.fill_rect(track, 0x20202c);
-        scene.text(track.x, track.y - 16, LABELS[index], 0xc0c0d0);
+        scene.text_centered(
+            layout.fm_slider_label(index),
+            LABELS[index],
+            0xc0c0d0,
+            label_scale,
+        );
         let value = if index == 4 { model.fm_width } else { model.fm_params[index] };
         let fill_h = (track.h as f32 * value) as i32;
         let fill = Rect {
@@ -2700,11 +2723,11 @@ fn draw_fm(scene: &mut Scene, model: &NativeModel) {
             },
         );
     }
-    scene.text(
-        layout.fm_slider(0).x,
-        layout.fm_slider(0).y + layout.fm_slider(0).h + 4,
+    scene.text_centered(
+        layout.fm_ratio_readout(),
         jambox_core::clang_label(model.fm_params[0]),
         0xa89984,
+        label_scale,
     );
 
     draw_on_screen_keyboard(scene, &layout, model);
@@ -2715,6 +2738,7 @@ fn draw_fm_graph(scene: &mut Scene, model: &NativeModel) {
     scene.fill_rect(rect, 0x1a1a12);
 
     let r = Layout::FM_OP_RADIUS as f32;
+    let extent = model.layout.fm_op_extent();
     for src in 0..jambox_core::FM_OP_COUNT {
         for dst in 0..jambox_core::FM_OP_COUNT {
             let amount = model.fm_matrix[src][dst];
@@ -2727,7 +2751,7 @@ fn draw_fm_graph(scene: &mut Scene, model: &NativeModel) {
                 scene.stroke_disc(
                     cx as f32,
                     cy as f32,
-                    r + 6.0 + amount * 10.0,
+                    (r + 6.0 + amount * 10.0).min(extent),
                     3.0,
                     color,
                     0x1a1a12,
@@ -2760,7 +2784,7 @@ fn draw_fm_graph(scene: &mut Scene, model: &NativeModel) {
         let op = model.fm_ops[index];
         let heard = op.audio > 0.05;
         let selected = index == model.fm_selected;
-        let radius = r + if selected { 4.0 } else { 0.0 } + op.fold * 4.0;
+        let radius = (r + if selected { 4.0 } else { 0.0 } + op.fold * 4.0).min(extent - 5.0);
         let color = jambox_core::OP_COLORS[index];
         if selected {
             scene.fill_disc(cx as f32, cy as f32, radius + 5.0, 0xfbf1c7);
@@ -4302,25 +4326,25 @@ fn draw_fx(scene: &mut Scene, model: &NativeModel) {
             },
             0x1d2021,
         );
-        let fill_h = ((cell.h - 10) as f32 * amount) as i32;
+        let track = layout.punch_pad_track(index);
+        let fill_top = layout.punch_y_for_amount(index, amount).round() as i32;
         scene.fill_rect(
             Rect {
-                x: cell.x + 6,
-                y: cell.y + cell.h - fill_h - 5,
-                w: cell.w - 12,
-                h: fill_h,
+                x: track.x,
+                y: fill_top,
+                w: track.w,
+                h: track.y + track.h - fill_top,
             },
             if armed { PUNCH_COLOR[index] } else { 0x3c3836 },
         );
         if model.punch_grid_mode == jambox_core::PunchGridMode::Beat
             && jambox_core::punch_slot_has_grid(index)
         {
-            let inner_h = (cell.h - 28) as f32;
-            let inner_top = (cell.y + 22) as f32;
             let line_color = if armed { 0xfbf1c7 } else { 0x7c6f64 };
             let label_color = if armed { 0xfbf1c7 } else { 0xa89984 };
             for tick in jambox_core::PUNCH_GRID_TICKS {
-                let y = (inner_top + inner_h * (1.0 - tick)).round() as i32;
+                // Two pixels centered on the exact divider row.
+                let y = layout.punch_y_for_amount(index, tick).round() as i32 - 1;
                 scene.fill_rect(
                     Rect {
                         x: cell.x + 8,
@@ -4331,9 +4355,10 @@ fn draw_fx(scene: &mut Scene, model: &NativeModel) {
                     line_color,
                 );
             }
-            const BAND_MIDS: [f32; 4] = [0.125, 0.375, 0.625, 0.875];
-            for (label, mid) in jambox_core::PUNCH_GRID_LABELS.iter().zip(BAND_MIDS.iter()) {
-                let y = (inner_top + inner_h * (1.0 - mid) - 6.0).round() as i32;
+            for (band, label) in jambox_core::PUNCH_GRID_LABELS.iter().enumerate() {
+                let (low, high) = jambox_core::punch_grid_band(band);
+                let mid_y = layout.punch_y_for_amount(index, 0.5 * (low + high));
+                let y = (mid_y - 4.0).round() as i32;
                 scene.text_scaled(cell.x + 10, y, label, label_color, 1);
             }
         }
@@ -4546,6 +4571,296 @@ mod tests {
     use super::*;
     use crate::client::Outbox;
     use crate::model::NativeModel;
+
+    fn glyph_box(g: &GlyphQuad) -> (f32, f32, f32, f32) {
+        (g.x, g.y, g.x + g.w, g.y + g.h)
+    }
+
+    fn inside(g: &GlyphQuad, r: Rect) -> bool {
+        let (x0, y0, x1, y1) = glyph_box(g);
+        x0 >= r.x as f32 - 0.5
+            && y0 >= r.y as f32 - 0.5
+            && x1 <= (r.x + r.w) as f32 + 0.5
+            && y1 <= (r.y + r.h) as f32 + 0.5
+    }
+
+    fn center_in(g: &GlyphQuad, r: Rect) -> bool {
+        let (x0, y0, x1, y1) = glyph_box(g);
+        let (cx, cy) = ((x0 + x1) * 0.5, (y0 + y1) * 0.5);
+        cx >= r.x as f32 && cx < (r.x + r.w) as f32 && cy >= r.y as f32 && cy < (r.y + r.h) as f32
+    }
+
+    fn fm_model(style: FontStyle, extreme: bool, keys: bool) -> NativeModel {
+        let mut m = NativeModel::new();
+        m.font_style = style;
+        m.set_mode(UiMode::Fm);
+        m.layout.show_on_screen_keys = keys;
+        if !keys {
+            m.midi_in_connected = "MPK mini".into();
+        }
+        if extreme {
+            // Longer than the 12-char editor limit: a session file can hold more.
+            m.fm_patch_name = "WWWWWWWWWWWWWWWWWWWWWWWWWWWWWW".into();
+            m.fm_params = [1.0, 1.0, 1.0, 1.0];
+            m.fm_width = 1.0;
+            m.fm_selected = 5;
+            for op in m.fm_ops.iter_mut() {
+                op.fold = 1.0;
+                op.audio = 1.0;
+            }
+        }
+        m
+    }
+
+    #[test]
+    fn fm_screen_text_stays_in_its_box_and_never_overlaps() {
+        let labels = ["RATIO", "OUT", "FOLD", "ENV", "WIDE"];
+        for style in [FontStyle::Retro, FontStyle::Smooth] {
+            for (extreme, keys) in [(false, true), (true, true), (true, false), (false, false)] {
+                for clang in [0.0f32, 0.35, 0.75, 1.0] {
+                    let mut model = fm_model(style, extreme, keys);
+                    model.fm_params[0] = clang;
+                    let layout = model.layout;
+                    let scene = build(&model);
+                    let tag = format!("{style:?} extreme={extreme} keys={keys} clang={clang}");
+
+                    let body: Vec<&GlyphQuad> = scene
+                        .glyphs
+                        .iter()
+                        .filter(|g| g.y >= HUD_H as f32)
+                        .collect();
+                    assert!(!body.is_empty());
+                    for g in &body {
+                        assert!(
+                            g.x >= 0.0 && g.x + g.w <= SCREEN_W as f32 && g.y + g.h <= SCREEN_H as f32,
+                            "{tag}: glyph off screen {:?}",
+                            glyph_box(g)
+                        );
+                    }
+
+                    // No two glyphs may overlap (ignores 1px antialias touching).
+                    for (i, a) in body.iter().enumerate() {
+                        let (ax0, ay0, ax1, ay1) = glyph_box(a);
+                        for b in &body[i + 1..] {
+                            let (bx0, by0, bx1, by1) = glyph_box(b);
+                            let ow = ax1.min(bx1) - ax0.max(bx0);
+                            let oh = ay1.min(by1) - ay0.max(by0);
+                            assert!(
+                                !(ow > 1.5 && oh > 1.5),
+                                "{tag}: glyphs overlap at {:?} / {:?}",
+                                glyph_box(a),
+                                glyph_box(b)
+                            );
+                        }
+                    }
+
+                    // Every control's text stays inside the control.
+                    let controls = [
+                        layout.fm_patch_button(),
+                        layout.fm_undo(),
+                        layout.fm_save(),
+                        layout.fm_clear(),
+                        layout.fm_oct_down(),
+                        layout.fm_oct_up(),
+                    ];
+                    for rect in controls {
+                        let owned: Vec<_> = body.iter().filter(|g| center_in(g, rect)).collect();
+                        assert!(!owned.is_empty(), "{tag}: control {rect:?} has no text");
+                        for g in owned {
+                            assert!(inside(g, rect), "{tag}: text spills out of {rect:?}");
+                        }
+                    }
+
+                    // Slider names: inside their own column, never touching a neighbour.
+                    let mut spans = Vec::new();
+                    for index in 0..Layout::FM_SLIDER_COUNT {
+                        let cell = layout.fm_slider_label(index);
+                        let owned: Vec<_> = body.iter().filter(|g| center_in(g, cell)).collect();
+                        assert_eq!(
+                            owned.len(),
+                            labels[index].chars().count(),
+                            "{tag}: {} must be drawn in full, not truncated",
+                            labels[index]
+                        );
+                        for g in &owned {
+                            assert!(inside(g, cell), "{tag}: {} spills out of its column", labels[index]);
+                        }
+                        let left = owned.iter().map(|g| g.x).fold(f32::MAX, f32::min);
+                        let right = owned.iter().map(|g| g.x + g.w).fold(0.0, f32::max);
+                        spans.push((left, right));
+                    }
+                    for pair in spans.windows(2) {
+                        assert!(pair[0].1 + 2.0 <= pair[1].0, "{tag}: slider names touch: {pair:?}");
+                    }
+                    assert!(
+                        spans.last().unwrap().1 <= SCREEN_W as f32 - 8.0,
+                        "{tag}: WIDE runs into the screen edge"
+                    );
+
+                    // Ratio readout sits under RATIO, inside its column and clear of the keys.
+                    let readout = layout.fm_ratio_readout();
+                    let owned: Vec<_> = body.iter().filter(|g| center_in(g, readout)).collect();
+                    assert!(!owned.is_empty(), "{tag}: ratio readout missing");
+                    assert!(owned.iter().all(|g| inside(g, readout)), "{tag}: readout spills");
+                    if keys {
+                        assert!(readout.y + readout.h <= layout.synth_keys.y, "{tag}: readout hits keys");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn fm_patch_list_and_name_entry_keep_text_inside_their_boxes() {
+        for style in [FontStyle::Retro, FontStyle::Smooth] {
+            let mut model = fm_model(style, false, true);
+            let long = "W".repeat(40);
+            let patch = crate::session::FmUserPatch::from_six([[0.0; 5]; 6], [[0.0; 6]; 6]);
+            model.fm_patches = vec![
+                crate::session::FmNamedPatch { name: long.clone(), patch },
+                crate::session::FmNamedPatch { name: "W".into(), patch },
+            ];
+            model.fm_patches_open = true;
+            let scene = build(&model);
+            let n = jambox_core::FM_RECIPE_COUNT + model.fm_patches.len();
+            let grid = model.layout.fm_patch_grid(n);
+            for index in grid.visible_range(model.fm_patch_scroll) {
+                let cell = grid.cell_rect(index, model.fm_patch_scroll);
+                if cell.y < grid.viewport.y || cell.y + cell.h > grid.viewport.y + grid.viewport.h {
+                    continue;
+                }
+                for g in scene.glyphs.iter().filter(|g| center_in(g, cell)) {
+                    assert!(inside(g, cell), "{style:?}: patch {index} label spills out of its cell");
+                }
+            }
+
+            model.fm_patches_open = false;
+            model.fm_name_open = true;
+            model.fm_name_buf = "WWWWWWWWWWWW".into();
+            let scene = build(&model);
+            let entry = model.layout.fm_name_entry();
+            let owned: Vec<_> = scene.glyphs.iter().filter(|g| center_in(g, entry)).collect();
+            assert_eq!(owned.len(), 12);
+            assert!(owned.iter().all(|g| inside(g, entry)), "{style:?}: name spills out of the entry box");
+        }
+    }
+
+    #[test]
+    fn fm_layout_columns_do_not_collide() {
+        let layout = NativeModel::new().layout;
+        let graph = layout.fm_graph();
+        let scope = layout.fm_scope();
+        assert!(graph.x + graph.w < scope.x, "graph and scope touch");
+        let first = layout.fm_slider_label(0);
+        assert!(scope.x + scope.w < first.x, "scope runs into the sliders");
+        let last = layout.fm_slider_label(Layout::FM_SLIDER_COUNT - 1);
+        assert!(last.x + last.w <= crate::layout::SCREEN_W - 8);
+        for i in 1..Layout::FM_SLIDER_COUNT {
+            let (a, b) = (layout.fm_slider_label(i - 1), layout.fm_slider_label(i));
+            assert!(a.x + a.w <= b.x, "label columns {i} overlap");
+        }
+        // Operator decoration never reaches a neighbouring operator.
+        let reach = layout.fm_op_extent();
+        for a in 0..jambox_core::FM_OP_COUNT {
+            for b in (a + 1)..jambox_core::FM_OP_COUNT {
+                let (ax, ay) = layout.fm_op_center(a);
+                let (bx, by) = layout.fm_op_center(b);
+                let d = (((ax - bx).pow(2) + (ay - by).pow(2)) as f32).sqrt();
+                assert!(d >= 2.0 * reach, "ops {a}/{b} can overlap: d={d} reach={reach}");
+            }
+        }
+    }
+
+    #[test]
+    fn nav_brand_reads_pidi_with_lowercase_i_and_fits_before_back() {
+        for style in [FontStyle::Retro, FontStyle::Smooth] {
+            let mut model = NativeModel::new();
+            model.font_style = style;
+            let scene = build(&model);
+            let brand: Vec<&GlyphQuad> = scene
+                .glyphs
+                .iter()
+                .filter(|g| g.color == 0x00d4ff && g.y < model.layout.nav.h as f32)
+                .collect();
+            assert_eq!(brand.len(), 4, "{style:?}: P i D I");
+            let i_quad = brand[1];
+            let cap_i = brand[3];
+            assert_ne!(
+                (i_quad.u0, i_quad.v0),
+                (cap_i.u0, cap_i.v0),
+                "{style:?}: second glyph must be the lowercase i, not a capital I"
+            );
+            let right = brand.iter().map(|g| g.x + g.w).fold(0.0f32, f32::max);
+            assert!(
+                right < model.layout.nav_back().x as f32 - 4.0,
+                "{style:?}: brand must clear the back button, right edge {right}"
+            );
+        }
+    }
+
+    #[test]
+    fn punch_grid_division_flips_exactly_at_the_drawn_dividers() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Fx);
+        let scene = build(&model);
+        for pad in [0usize, 5] {
+            let cell = model.layout.punch_pad_cell(pad);
+            let mut dividers: Vec<&ColorQuad> = scene
+                .color
+                .iter()
+                .filter(|q| {
+                    q.color == 0x7c6f64
+                        && q.h <= 2.5
+                        && q.w > 20.0
+                        && q.x >= cell.x as f32 - 0.5
+                        && q.x + q.w <= (cell.x + cell.w) as f32 + 1.0
+                        && q.y > cell.y as f32
+                        && q.y < (cell.y + cell.h) as f32
+                })
+                .collect();
+            dividers.sort_by(|a, b| a.y.total_cmp(&b.y));
+            assert_eq!(dividers.len(), jambox_core::PUNCH_GRID_TICKS.len());
+            // Top divider separates the last two divisions, and so on down.
+            for (k, quad) in dividers.iter().enumerate() {
+                let upper = jambox_core::PUNCH_GRID_LABELS.len() - 1 - k;
+                let top_row = quad.y as i32;
+                let at = |py: i32| {
+                    jambox_core::punch_grid_index(model.layout.punch_amount_at(pad, py))
+                };
+                assert_eq!(at(top_row), upper, "pad {pad}: row above divider {k}");
+                assert_eq!(at(top_row + 1), upper - 1, "pad {pad}: row below divider {k}");
+                assert_eq!(at(top_row - 6), upper, "pad {pad}: well above divider {k}");
+                assert_eq!(at(top_row + 7), upper - 1, "pad {pad}: well below divider {k}");
+            }
+            // Slider ends clamp to the first and last division.
+            let track = model.layout.punch_pad_track(pad);
+            assert_eq!(
+                jambox_core::punch_grid_index(model.layout.punch_amount_at(pad, track.y + track.h + 20)),
+                0
+            );
+            assert_eq!(
+                jambox_core::punch_grid_index(model.layout.punch_amount_at(pad, cell.y)),
+                3
+            );
+        }
+    }
+
+    #[test]
+    fn punch_fill_top_matches_touch_position() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Fx);
+        model.punch_amount[2] = 0.6;
+        let scene = build(&model);
+        let track = model.layout.punch_pad_track(2);
+        let fill = scene
+            .color
+            .iter()
+            .find(|q| q.color == 0x3c3836 && q.x == track.x as f32 && q.w == track.w as f32 && q.y > track.y as f32)
+            .expect("fill quad");
+        let amount_at_top = model.layout.punch_amount_at(2, fill.y as i32);
+        assert!((amount_at_top - 0.6).abs() < 0.02, "fill edge reads {amount_at_top}");
+        assert_eq!(fill.y + fill.h, (track.y + track.h) as f32);
+    }
 
     #[test]
     fn punch_rpt_and_slice_draw_grid_ticks() {

@@ -70,8 +70,26 @@ impl PunchSource {
 /// RPT / SLICE beat lengths as amount rises: 1/4, 1/8, 1/16, 1/32.
 pub const PUNCH_GRID_BEATS: [f32; 4] = [1.0, 0.5, 0.25, 0.125];
 /// Slider marks at the 1/8, 1/16, and 1/32 boundaries (1/4 is the bottom band).
+///
+/// Single source of truth for the beat grid: the UI draws a divider at each
+/// value and [`punch_grid_index`] counts how many of them the amount has
+/// reached, so a division changes exactly where its divider is drawn.
 pub const PUNCH_GRID_TICKS: [f32; 3] = [0.25, 0.50, 0.75];
 pub const PUNCH_GRID_LABELS: [&str; 4] = ["1/4", "1/8", "1/16", "1/32"];
+
+/// Amount range `(low, high)` owned by grid division `index` (0 = 1/4 … 3 = 1/32),
+/// bounded by the slider ends and [`PUNCH_GRID_TICKS`].
+pub fn punch_grid_band(index: usize) -> (f32, f32) {
+    let i = index.min(PUNCH_GRID_TICKS.len());
+    let low = if i == 0 { 0.0 } else { PUNCH_GRID_TICKS[i - 1] };
+    let high = PUNCH_GRID_TICKS.get(i).copied().unwrap_or(1.0);
+    (low, high)
+}
+
+/// Division label for `amount` (`"1/4"` … `"1/32"`).
+pub fn punch_grid_label(amount: f32) -> &'static str {
+    PUNCH_GRID_LABELS[punch_grid_index(amount)]
+}
 
 /// Who wins when several buffer pads are armed. Cycles on the FX page.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -327,8 +345,10 @@ pub fn punch_slot_has_grid(index: usize) -> bool {
     index == PUNCH_RPT as usize || index == PUNCH_SLICE as usize
 }
 
+/// Division selected by `amount`: a division starts exactly at its divider.
 pub fn punch_grid_index(amount: f32) -> usize {
-    (amount.clamp(0.0, 1.0) * 3.999).floor() as usize
+    let amount = amount.clamp(0.0, 1.0);
+    PUNCH_GRID_TICKS.iter().filter(|tick| amount >= **tick).count()
 }
 
 pub fn punch_index_for_knob_cc(controller: u8) -> Option<usize> {
@@ -339,7 +359,39 @@ pub fn punch_index_for_pad_note(note: u8) -> Option<usize> {
     PUNCH_PAD_NOTES.iter().position(|n| *n == note)
 }
 
-/// Master-bus punch-in processor. Sized in [`PunchRack::new`].
+/// Where one output sample comes from. Playheads are shared by both channels,
+/// so L and R always read the same position (beat-synced effects stay aligned).
+#[derive(Clone, Copy)]
+enum Tap {
+    Live,
+    Lock(f32),
+    Ring(f32),
+    Window { start: usize, len: usize, pos: f32 },
+}
+
+/// Per-channel storage the playheads read from.
+struct TapBuffers<'a> {
+    ring: &'a [f32],
+    lock: &'a [f32],
+    lock_n: usize,
+    hold: &'a [f32],
+}
+
+impl Tap {
+    #[inline]
+    fn read(self, b: &TapBuffers<'_>, live: f32) -> f32 {
+        match self {
+            Tap::Live => live,
+            Tap::Lock(pos) => read_ring_n(b.lock, b.lock_n, pos),
+            Tap::Ring(pos) => read_ring(b.ring, pos),
+            Tap::Window { start, len, pos } => read_window(b.hold, start, len, pos),
+        }
+    }
+}
+
+/// Master-bus punch-in processor. Sized in [`PunchRack::new`] (mono) or
+/// [`PunchRack::new_stereo`] (adds a right-channel ring / freeze / filter set
+/// that follows the same playheads).
 pub struct PunchRack {
     sample_rate: f32,
     amount: [f32; PUNCH_PAD_COUNT],
@@ -352,6 +404,11 @@ pub struct PunchRack {
     ring: Vec<f32>,
     /// What actually left this processor (drop pitch included), same index as `ring`.
     heard: Vec<f32>,
+    /// Right-channel twins of the buffers above. Empty on a mono rack.
+    ring_r: Vec<f32>,
+    heard_r: Vec<f32>,
+    lock_buf_r: Vec<f32>,
+    rpt_hold_buf_r: Vec<f32>,
     write: usize,
     /// How many samples of valid history are in `ring` (caps at ring len).
     filled: usize,
@@ -384,8 +441,13 @@ pub struct PunchRack {
     lp_b: f32,
     hp_l: f32,
     hp_b: f32,
+    lp_l_r: f32,
+    lp_b_r: f32,
+    hp_l_r: f32,
+    hp_b_r: f32,
     slice_phase: f32,
     crush_hold: f32,
+    crush_hold_r: f32,
     crush_left: u32,
     /// Idle history. Off skips the ring until a buffer effect, LOCK, or GRAB needs it.
     history: bool,
@@ -393,9 +455,24 @@ pub struct PunchRack {
 
 impl PunchRack {
     pub fn new(sample_rate: f32) -> Self {
+        Self::build(sample_rate, false)
+    }
+
+    /// Stereo rack: [`Self::process_stereo`] keeps independent audio and filter
+    /// state per channel while sharing every playhead and gate.
+    pub fn new_stereo(sample_rate: f32) -> Self {
+        Self::build(sample_rate, true)
+    }
+
+    pub fn is_stereo(&self) -> bool {
+        !self.ring_r.is_empty()
+    }
+
+    fn build(sample_rate: f32, stereo: bool) -> Self {
         let sample_rate = sample_rate.max(8000.0);
         let n = (sample_rate * RING_SEC) as usize + 64;
         let n = n.max(64);
+        let right = |on: bool| if on { vec![0.0; n] } else { Vec::new() };
         Self {
             sample_rate,
             amount: [0.0; PUNCH_PAD_COUNT],
@@ -406,6 +483,10 @@ impl PunchRack {
             grid_mode: PunchGridMode::Beat,
             ring: vec![0.0; n],
             heard: vec![0.0; n],
+            ring_r: right(stereo),
+            heard_r: right(stereo),
+            lock_buf_r: right(stereo),
+            rpt_hold_buf_r: right(stereo),
             write: 0,
             filled: 0,
             locked: false,
@@ -431,8 +512,13 @@ impl PunchRack {
             lp_b: 0.0,
             hp_l: 0.0,
             hp_b: 0.0,
+            lp_l_r: 0.0,
+            lp_b_r: 0.0,
+            hp_l_r: 0.0,
+            hp_b_r: 0.0,
             slice_phase: 0.0,
             crush_hold: 0.0,
+            crush_hold_r: 0.0,
             crush_left: 0,
             history: true,
         }
@@ -488,6 +574,9 @@ impl PunchRack {
                 i
             };
             self.rpt_hold_buf[i] = self.heard[src];
+            if !self.heard_r.is_empty() {
+                self.rpt_hold_buf_r[i] = self.heard_r[src];
+            }
         }
         self.rpt_capture_len = n;
         self.rpt_hold_len = n;
@@ -589,6 +678,9 @@ impl PunchRack {
         for i in 0..len {
             let src = (self.write + nring - len + i) % nring;
             self.lock_buf[i] = self.ring[src];
+            if !self.ring_r.is_empty() {
+                self.lock_buf_r[i] = self.ring_r[src];
+            }
         }
         self.lock_len = len;
         self.lock_read = 0.0;
@@ -665,6 +757,14 @@ impl PunchRack {
         self.heard.iter_mut().for_each(|s| *s = 0.0);
         self.lock_buf.iter_mut().for_each(|s| *s = 0.0);
         self.rpt_hold_buf.iter_mut().for_each(|s| *s = 0.0);
+        for buf in [
+            &mut self.ring_r,
+            &mut self.heard_r,
+            &mut self.lock_buf_r,
+            &mut self.rpt_hold_buf_r,
+        ] {
+            buf.iter_mut().for_each(|s| *s = 0.0);
+        }
         self.write = 0;
         self.filled = 0;
         self.rpt_read = 0.0;
@@ -674,7 +774,12 @@ impl PunchRack {
         self.lp_b = 0.0;
         self.hp_l = 0.0;
         self.hp_b = 0.0;
+        self.lp_l_r = 0.0;
+        self.lp_b_r = 0.0;
+        self.hp_l_r = 0.0;
+        self.hp_b_r = 0.0;
         self.crush_hold = 0.0;
+        self.crush_hold_r = 0.0;
     }
 
     pub fn is_idle(&self) -> bool {
@@ -687,6 +792,23 @@ impl PunchRack {
 
     /// Process in place. `bpm` drives repeat / slice grid. Allocation-free.
     pub fn process(&mut self, buf: &mut [f32], bpm: f32) {
+        self.process_inner(buf, None, bpm);
+    }
+
+    /// Process L and R with one set of gates and playheads but separate audio
+    /// history and filter state. On a mono rack the right channel is a copy of
+    /// the processed left (use [`Self::new_stereo`] for true stereo).
+    pub fn process_stereo(&mut self, left: &mut [f32], right: &mut [f32], bpm: f32) {
+        let n = left.len().min(right.len());
+        if !self.is_stereo() {
+            self.process_inner(&mut left[..n], None, bpm);
+            right[..n].copy_from_slice(&left[..n]);
+            return;
+        }
+        self.process_inner(&mut left[..n], Some(&mut right[..n]), bpm);
+    }
+
+    fn process_inner(&mut self, buf: &mut [f32], mut right: Option<&mut [f32]>, bpm: f32) {
         if buf.is_empty() {
             return;
         }
@@ -783,111 +905,151 @@ impl PunchRack {
         let record = self.history || tape_want || rpt_want || drop_want || self.locked || self.grabbing;
 
         if record {
-        for s in buf.iter_mut() {
-            let idx = self.write;
-            self.ring[idx] = *s;
-            let live = *s;
-            self.write = (self.write + 1) % nring;
-            if self.filled < nring {
-                self.filled += 1;
-            }
+            for i in 0..buf.len() {
+                let live = buf[i];
+                let idx = self.write;
+                self.ring[idx] = live;
+                let live_r = match right.as_deref() {
+                    Some(r) => {
+                        let v = r[i];
+                        self.ring_r[idx] = v;
+                        v
+                    }
+                    None => 0.0,
+                };
+                self.write = (self.write + 1) % nring;
+                if self.filled < nring {
+                    self.filled += 1;
+                }
 
-            let wet = match voice {
-                BufferVoice::Live if locked => {
-                    let sample = read_ring_n(&self.lock_buf, lock_n, self.lock_read);
-                    self.lock_read = (self.lock_read + 1.0).rem_euclid(lock_n as f32);
-                    sample
-                }
-                BufferVoice::Live => live,
-                BufferVoice::Tape => {
-                    self.tape_rate += (tape_target - self.tape_rate) * tape_slew;
-                    let (sample, next) = if locked {
-                        let sample = read_ring_n(&self.lock_buf, lock_n, self.tape_read);
-                        let next =
-                            (self.tape_read + self.tape_rate).rem_euclid(lock_n as f32);
-                        self.lock_read = next;
-                        (sample, next)
-                    } else {
-                        let sample = read_ring(&self.ring, self.tape_read);
-                        let next =
-                            (self.tape_read + self.tape_rate).rem_euclid(nring as f32);
-                        (sample, next)
-                    };
-                    self.tape_read = next;
-                    sample
-                }
-                BufferVoice::Rpt | BufferVoice::RptAtTape | BufferVoice::RptAtDrop => {
-                    if matches!(voice, BufferVoice::RptAtTape) {
+                let tap = match voice {
+                    BufferVoice::Live if locked => {
+                        let pos = self.lock_read;
+                        self.lock_read = (self.lock_read + 1.0).rem_euclid(lock_n as f32);
+                        Tap::Lock(pos)
+                    }
+                    BufferVoice::Live => Tap::Live,
+                    BufferVoice::Tape => {
                         self.tape_rate += (tape_target - self.tape_rate) * tape_slew;
+                        let pos = self.tape_read;
+                        let tap = if locked {
+                            let next = (pos + self.tape_rate).rem_euclid(lock_n as f32);
+                            self.lock_read = next;
+                            self.tape_read = next;
+                            Tap::Lock(pos)
+                        } else {
+                            self.tape_read = (pos + self.tape_rate).rem_euclid(nring as f32);
+                            Tap::Ring(pos)
+                        };
+                        tap
                     }
-                    let step = match voice {
-                        BufferVoice::RptAtTape => self.tape_rate,
-                        BufferVoice::RptAtDrop => drop_rate,
-                        _ => 1.0,
-                    };
-                    let sample = if self.rpt_capture_len >= 32 && !locked {
-                        let cap = self.rpt_capture_len;
-                        let len = self.rpt_len.clamp(1, cap);
-                        let start = cap - len;
-                        read_window(&self.rpt_hold_buf, start, len, self.rpt_read)
-                    } else if locked {
-                        read_ring_n(
-                            &self.lock_buf,
+                    BufferVoice::Rpt | BufferVoice::RptAtTape | BufferVoice::RptAtDrop => {
+                        if matches!(voice, BufferVoice::RptAtTape) {
+                            self.tape_rate += (tape_target - self.tape_rate) * tape_slew;
+                        }
+                        let step = match voice {
+                            BufferVoice::RptAtTape => self.tape_rate,
+                            BufferVoice::RptAtDrop => drop_rate,
+                            _ => 1.0,
+                        };
+                        let tap = if self.rpt_capture_len >= 32 && !locked {
+                            let cap = self.rpt_capture_len;
+                            let len = self.rpt_len.clamp(1, cap);
+                            Tap::Window {
+                                start: cap - len,
+                                len,
+                                pos: self.rpt_read,
+                            }
+                        } else if locked {
+                            Tap::Lock(self.rpt_start as f32 + self.rpt_read)
+                        } else {
+                            Tap::Ring(self.rpt_start as f32 + self.rpt_read)
+                        };
+                        self.rpt_read += step;
+                        let span = self.rpt_len.max(1) as f32;
+                        while self.rpt_read >= span {
+                            self.rpt_read -= span;
+                        }
+                        tap
+                    }
+                    BufferVoice::Drop => {
+                        let pos = self.drop_read;
+                        if locked {
+                            let next = (pos + drop_rate).rem_euclid(lock_n as f32);
+                            self.lock_read = next;
+                            self.drop_read = next;
+                            Tap::Lock(pos)
+                        } else {
+                            self.drop_read = (pos + drop_rate).rem_euclid(nring as f32);
+                            Tap::Ring(pos)
+                        }
+                    }
+                };
+                let wet = tap.read(
+                    &TapBuffers {
+                        ring: &self.ring,
+                        lock: &self.lock_buf,
+                        lock_n,
+                        hold: &self.rpt_hold_buf,
+                    },
+                    live,
+                );
+                self.heard[idx] = wet;
+                buf[i] = wet;
+                let wet_r = if let Some(r) = right.as_deref_mut() {
+                    let w = tap.read(
+                        &TapBuffers {
+                            ring: &self.ring_r,
+                            lock: &self.lock_buf_r,
                             lock_n,
-                            self.rpt_start as f32 + self.rpt_read,
-                        )
-                    } else {
-                        read_ring(&self.ring, self.rpt_start as f32 + self.rpt_read)
-                    };
-                    self.rpt_read += step;
-                    let span = self.rpt_len.max(1) as f32;
-                    while self.rpt_read >= span {
-                        self.rpt_read -= span;
+                            hold: &self.rpt_hold_buf_r,
+                        },
+                        live_r,
+                    );
+                    self.heard_r[idx] = w;
+                    r[i] = w;
+                    Some(w)
+                } else {
+                    None
+                };
+                // Record what just came out. A tape already in that sound must not
+                // be slowed again when the loop starts.
+                if self.grabbing {
+                    let cap = self.lock_buf.len();
+                    if self.lock_len < cap {
+                        self.lock_buf[self.lock_len] = wet;
+                        if let Some(w) = wet_r {
+                            self.lock_buf_r[self.lock_len] = w;
+                        }
+                        self.lock_len += 1;
                     }
-                    sample
-                }
-                BufferVoice::Drop => {
-                    let (sample, next) = if locked {
-                        let sample = read_ring_n(&self.lock_buf, lock_n, self.drop_read);
-                        let next =
-                            (self.drop_read + drop_rate).rem_euclid(lock_n as f32);
-                        self.lock_read = next;
-                        (sample, next)
-                    } else {
-                        let sample = read_ring(&self.ring, self.drop_read);
-                        let next =
-                            (self.drop_read + drop_rate).rem_euclid(nring as f32);
-                        (sample, next)
-                    };
-                    self.drop_read = next;
-                    sample
-                }
-            };
-            self.heard[idx] = wet;
-            // Record what just came out. A tape already in that sound must not
-            // be slowed again when the loop starts.
-            if self.grabbing {
-                let cap = self.lock_buf.len();
-                if self.lock_len < cap {
-                    self.lock_buf[self.lock_len] = wet;
-                    self.lock_len += 1;
                 }
             }
-            *s = wet;
-        }
         }
 
         let lpf = self.amount[PUNCH_LPF as usize];
         if lpf > ENGAGE {
-            apply_svf_lowpass(buf, 1.0 - lpf * 0.92, &mut self.lp_l, &mut self.lp_b, sr);
+            let tone = 1.0 - lpf * 0.92;
+            apply_svf_lowpass(buf, tone, &mut self.lp_l, &mut self.lp_b, sr);
+            if let Some(r) = right.as_deref_mut() {
+                apply_svf_lowpass(r, tone, &mut self.lp_l_r, &mut self.lp_b_r, sr);
+            }
         }
         let hpf = self.amount[PUNCH_HPF as usize];
         if hpf > ENGAGE {
             apply_svf_highpass(buf, hpf, &mut self.hp_l, &mut self.hp_b, sr);
+            if let Some(r) = right.as_deref_mut() {
+                apply_svf_highpass(r, hpf, &mut self.hp_l_r, &mut self.hp_b_r, sr);
+            }
         }
         let crush = self.amount[PUNCH_CRUSH as usize];
         if crush > ENGAGE {
+            let left_at_start = self.crush_left;
             apply_crush(buf, crush, &mut self.crush_hold, &mut self.crush_left);
+            if let Some(r) = right.as_deref_mut() {
+                let mut left_r = left_at_start;
+                apply_crush(r, crush, &mut self.crush_hold_r, &mut left_r);
+            }
         }
         let slice = self.amount[PUNCH_SLICE as usize];
         if slice > ENGAGE {
@@ -897,7 +1059,12 @@ impl PunchRack {
                 self.filled.max(32)
             };
             let period = self.span_samples(slice, bpm, available).max(8) as f32;
+            let phase_at_start = self.slice_phase;
             apply_slice(buf, period, &mut self.slice_phase);
+            if let Some(r) = right.as_deref_mut() {
+                let mut phase_r = phase_at_start;
+                apply_slice(r, period, &mut phase_r);
+            }
         }
     }
 }
@@ -1059,11 +1226,40 @@ mod tests {
         assert_eq!(punch_grid_index(0.51), 2);
         assert_eq!(punch_grid_index(0.76), 3);
         assert_eq!(punch_grid_index(1.0), 3);
+        assert_eq!(punch_grid_index(f32::NAN), 0);
         assert!(punch_slot_has_grid(PUNCH_RPT as usize));
         assert!(punch_slot_has_grid(PUNCH_SLICE as usize));
         assert!(!punch_slot_has_grid(PUNCH_TAPE as usize));
         assert_eq!(PUNCH_GRID_LABELS[punch_grid_index(0.1)], "1/4");
         assert_eq!(PUNCH_GRID_LABELS[punch_grid_index(0.4)], "1/8");
+    }
+
+    #[test]
+    fn grid_division_changes_exactly_at_each_divider() {
+        for (i, tick) in PUNCH_GRID_TICKS.iter().enumerate() {
+            assert_eq!(punch_grid_index(*tick - 1e-4), i, "just below divider {i}");
+            assert_eq!(punch_grid_index(*tick), i + 1, "at divider {i}");
+            assert_eq!(punch_grid_index(*tick + 1e-4), i + 1, "just above divider {i}");
+        }
+        assert_eq!(punch_grid_index(0.0), 0);
+        assert_eq!(punch_grid_index(1.0), PUNCH_GRID_LABELS.len() - 1);
+        assert_eq!(PUNCH_GRID_TICKS.len() + 1, PUNCH_GRID_LABELS.len());
+        assert_eq!(PUNCH_GRID_LABELS.len(), PUNCH_GRID_BEATS.len());
+    }
+
+    #[test]
+    fn grid_bands_tile_the_slider_and_agree_with_the_index() {
+        let mut prev_high = 0.0;
+        for i in 0..PUNCH_GRID_LABELS.len() {
+            let (low, high) = punch_grid_band(i);
+            assert_eq!(low, prev_high, "band {i} must start where the last ended");
+            assert!(high > low);
+            let mid = 0.5 * (low + high);
+            assert_eq!(punch_grid_index(mid), i);
+            assert_eq!(punch_grid_label(mid), PUNCH_GRID_LABELS[i]);
+            prev_high = high;
+        }
+        assert_eq!(prev_high, 1.0);
     }
 
     #[test]
@@ -1409,5 +1605,205 @@ mod tests {
             "repeat must loop, not keep pitching, range={}",
             max - min
         );
+    }
+
+    fn distinct_lr(len: usize, offset: usize) -> (Vec<f32>, Vec<f32>) {
+        let l = (0..len)
+            .map(|i| 0.6 * ((i + offset) as f32 * 0.071).sin() + 0.2 * (((i + offset) % 37) as f32 / 37.0 - 0.5))
+            .collect();
+        let r = (0..len)
+            .map(|i| 0.5 * (((i + offset) % 91) as f32 / 91.0 - 0.5) + 0.3 * ((i + offset) as f32 * 0.23).cos())
+            .collect();
+        (l, r)
+    }
+
+    fn max_diff(a: &[f32], b: &[f32]) -> f32 {
+        a.iter().zip(b).fold(0.0f32, |m, (x, y)| m.max((x - y).abs()))
+    }
+
+    /// Run a stereo rack and two independent mono racks on the same L / R
+    /// signals, through a prime phase, an arm phase, and a release phase.
+    /// Returns (stereo L, stereo R, mono L, mono R, dry L, dry R) for the arm phase.
+    fn run_pair(
+        setup: impl Fn(&mut PunchRack),
+        arm: impl Fn(&mut PunchRack),
+    ) -> (Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>) {
+        let mut st = PunchRack::new_stereo(48_000.0);
+        let mut ml = PunchRack::new(48_000.0);
+        let mut mr = PunchRack::new(48_000.0);
+        for rack in [&mut st, &mut ml, &mut mr] {
+            setup(rack);
+        }
+        let block = 256;
+        let mut off = 0;
+        let mut feed = |st: &mut PunchRack, ml: &mut PunchRack, mr: &mut PunchRack, blocks: usize| {
+            let mut out = (vec![], vec![], vec![], vec![], vec![], vec![]);
+            for _ in 0..blocks {
+                let (l, r) = distinct_lr(block, off);
+                off += block;
+                let (mut sl, mut sr) = (l.clone(), r.clone());
+                let (mut a, mut b) = (l.clone(), r.clone());
+                st.process_stereo(&mut sl, &mut sr, 120.0);
+                ml.process(&mut a, 120.0);
+                mr.process(&mut b, 120.0);
+                out.0.extend(sl);
+                out.1.extend(sr);
+                out.2.extend(a);
+                out.3.extend(b);
+                out.4.extend(l);
+                out.5.extend(r);
+            }
+            out
+        };
+        feed(&mut st, &mut ml, &mut mr, 40);
+        for rack in [&mut st, &mut ml, &mut mr] {
+            arm(rack);
+        }
+        feed(&mut st, &mut ml, &mut mr, 60)
+    }
+
+    fn assert_both_wet_and_independent(name: &str, f: impl Fn(&mut PunchRack), prime: impl Fn(&mut PunchRack)) {
+        let (sl, sr, ml, mr, dl, dr) = run_pair(prime, f);
+        assert!(max_diff(&sl, &dl) > 0.02, "{name}: left must be wet");
+        assert!(max_diff(&sr, &dr) > 0.02, "{name}: right must be wet");
+        assert!(max_diff(&sl, &sr) > 0.02, "{name}: L and R must stay distinct");
+        assert!(max_diff(&sl, &ml) < 1e-6, "{name}: stereo L must equal a mono rack on L");
+        assert!(max_diff(&sr, &mr) < 1e-6, "{name}: stereo R must equal a mono rack on R");
+    }
+
+    #[test]
+    fn stereo_filters_process_both_channels_with_own_state() {
+        assert_both_wet_and_independent("LPF", |p| p.set_amount(PUNCH_LPF, 0.9), |_| {});
+        assert_both_wet_and_independent("HPF", |p| p.set_amount(PUNCH_HPF, 0.9), |_| {});
+    }
+
+    #[test]
+    fn stereo_crush_and_slice_process_both_channels() {
+        assert_both_wet_and_independent("CRUSH", |p| p.set_amount(PUNCH_CRUSH, 1.0), |_| {});
+        assert_both_wet_and_independent("SLICE", |p| p.set_amount(PUNCH_SLICE, 0.9), |_| {});
+    }
+
+    #[test]
+    fn stereo_buffer_effects_process_both_channels() {
+        assert_both_wet_and_independent("RPT", |p| p.set_amount(PUNCH_RPT, 0.6), |_| {});
+        assert_both_wet_and_independent("TAPE", |p| p.set_amount(PUNCH_TAPE, 1.0), |_| {});
+        assert_both_wet_and_independent("DROP", |p| p.set_amount(PUNCH_DROP, 1.0), |_| {});
+        assert_both_wet_and_independent(
+            "RPT smooth",
+            |p| p.set_amount(PUNCH_RPT, 0.3),
+            |p| p.set_grid_mode(PunchGridMode::Smooth),
+        );
+    }
+
+    #[test]
+    fn stereo_buffer_priorities_stay_per_channel() {
+        for prio in PunchBufferPrio::ALL {
+            assert_both_wet_and_independent(
+                prio.label(),
+                |p| {
+                    p.set_amount(PUNCH_TAPE, 0.8);
+                    p.set_amount(PUNCH_RPT, 0.7);
+                    p.set_amount(PUNCH_DROP, 0.6);
+                },
+                |p| p.set_buffer_prio(prio),
+            );
+        }
+    }
+
+    #[test]
+    fn stereo_lock_and_grab_replay_each_channel() {
+        assert_both_wet_and_independent(
+            "LOCK",
+            |p| p.set_locked(true),
+            |_| {},
+        );
+        let mut st = PunchRack::new_stereo(48_000.0);
+        let mut ml = PunchRack::new(48_000.0);
+        let mut mr = PunchRack::new(48_000.0);
+        let (l, r) = distinct_lr(1024, 0);
+        let run = |st: &mut PunchRack, ml: &mut PunchRack, mr: &mut PunchRack| {
+            let (mut sl, mut sr) = (l.clone(), r.clone());
+            let (mut a, mut b) = (l.clone(), r.clone());
+            st.process_stereo(&mut sl, &mut sr, 120.0);
+            ml.process(&mut a, 120.0);
+            mr.process(&mut b, 120.0);
+            (sl, sr, a, b)
+        };
+        for rack in [&mut st, &mut ml, &mut mr] {
+            rack.set_grabbing(true);
+        }
+        run(&mut st, &mut ml, &mut mr);
+        for rack in [&mut st, &mut ml, &mut mr] {
+            rack.set_grabbing(false);
+        }
+        let silence = vec![0.0f32; 2048];
+        let (mut sl, mut sr) = (silence.clone(), silence.clone());
+        let (mut a, mut b) = (silence.clone(), silence.clone());
+        st.process_stereo(&mut sl, &mut sr, 120.0);
+        ml.process(&mut a, 120.0);
+        mr.process(&mut b, 120.0);
+        assert!(sl.iter().any(|v| v.abs() > 0.1), "grab replays left");
+        assert!(sr.iter().any(|v| v.abs() > 0.1), "grab replays right");
+        assert!(max_diff(&sl, &a) < 1e-6 && max_diff(&sr, &b) < 1e-6);
+        assert!(max_diff(&sl, &sr) > 0.05, "grab must keep L and R distinct");
+    }
+
+    #[test]
+    fn stereo_beat_synced_effects_stay_phase_aligned() {
+        let mut p = PunchRack::new_stereo(48_000.0);
+        let loop_n = rpt_loop_samples(0.1, 120.0, 48_000.0);
+        // Same impulse timing in both channels, different amplitude.
+        let mut l = vec![0.0f32; loop_n];
+        let mut r = vec![0.0f32; loop_n];
+        l[0] = 1.0;
+        r[0] = -0.5;
+        p.process_stereo(&mut l, &mut r, 120.0);
+        p.set_amount(PUNCH_RPT, 0.1);
+        let mut l = vec![0.0f32; loop_n * 3];
+        let mut r = vec![0.0f32; loop_n * 3];
+        p.process_stereo(&mut l, &mut r, 120.0);
+        let hits = |buf: &[f32]| -> Vec<usize> {
+            (0..buf.len()).filter(|i| buf[*i].abs() > 0.2).collect()
+        };
+        let (hl, hr) = (hits(&l), hits(&r));
+        assert!(hl.len() >= 3, "left must repeat, hits={hl:?}");
+        assert_eq!(hl, hr, "RPT hits must land on the same samples in L and R");
+
+        let mut p = PunchRack::new_stereo(48_000.0);
+        p.set_amount(PUNCH_SLICE, 0.9);
+        let mut l = vec![0.5f32; 8000];
+        let mut r = vec![-0.3f32; 8000];
+        p.process_stereo(&mut l, &mut r, 120.0);
+        let gate_l: Vec<bool> = l.iter().map(|s| s.abs() < 1e-5).collect();
+        let gate_r: Vec<bool> = r.iter().map(|s| s.abs() < 1e-5).collect();
+        assert!(gate_l.iter().any(|g| *g) && gate_l.iter().any(|g| !*g));
+        assert_eq!(gate_l, gate_r, "SLICE gate must open and close together");
+    }
+
+    #[test]
+    fn stereo_no_cross_channel_bleed() {
+        let mut p = PunchRack::new_stereo(48_000.0);
+        p.set_amount(PUNCH_LPF, 0.5);
+        p.set_amount(PUNCH_HPF, 0.3);
+        p.set_amount(PUNCH_CRUSH, 0.5);
+        p.set_amount(PUNCH_TAPE, 0.5);
+        let (l, _) = distinct_lr(8192, 0);
+        let mut left = l;
+        let mut right = vec![0.0f32; 8192];
+        p.process_stereo(&mut left, &mut right, 120.0);
+        assert!(left.iter().any(|v| v.abs() > 0.05));
+        assert!(
+            right.iter().all(|v| v.abs() < 1e-9),
+            "silent right must stay silent while left is loud"
+        );
+    }
+
+    #[test]
+    fn stereo_idle_rack_is_transparent() {
+        let mut p = PunchRack::new_stereo(48_000.0);
+        let (l, r) = distinct_lr(512, 0);
+        let (mut a, mut b) = (l.clone(), r.clone());
+        p.process_stereo(&mut a, &mut b, 120.0);
+        assert!(max_diff(&a, &l) < 1e-6 && max_diff(&b, &r) < 1e-6);
     }
 }

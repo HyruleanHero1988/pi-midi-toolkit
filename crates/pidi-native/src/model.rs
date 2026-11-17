@@ -6801,9 +6801,8 @@ impl NativeModel {
         if index >= Layout::PUNCH_PAD_COUNT {
             return;
         }
-        let cell = self.layout.punch_pad_cell(index);
-        let y = 1.0 - ((py - cell.y) as f32 / cell.h.max(1) as f32);
-        self.set_punch_amount_unit(index, y.clamp(0.0, 1.0), outbox);
+        let amount = self.layout.punch_amount_at(index, py);
+        self.set_punch_amount_unit(index, amount, outbox);
     }
 
     fn set_punch_amount_unit(&mut self, index: usize, amount: f32, outbox: &mut Outbox) {
@@ -6816,10 +6815,18 @@ impl NativeModel {
         if self.punch_armed[index] {
             outbox.punch_fx(self.punch_source, index as u8, amount);
         }
+        let division = if self.punch_grid_mode == jambox_core::PunchGridMode::Beat
+            && jambox_core::punch_slot_has_grid(index)
+        {
+            format!(" {}", jambox_core::punch_grid_label(amount))
+        } else {
+            String::new()
+        };
         self.status_line = format!(
-            "{} {} {:.0}%{}",
+            "{} {}{} {:.0}%{}",
             jambox_core::PunchSource::from_u8(self.punch_source).label(),
             jambox_core::PUNCH_LABELS[index],
+            division,
             amount * 100.0,
             if self.punch_armed[index] { " on" } else { "" }
         );
@@ -8401,6 +8408,7 @@ impl NativeModel {
                 events,
                 length_ticks,
                 launch,
+                immediate,
             } => {
                 outbox.tempo(self.seq.bpm);
                 self.bpm = self.seq.bpm;
@@ -8418,7 +8426,12 @@ impl NativeModel {
                 outbox.clip_gain(SEQ_DRUM_MIX_SLOT, self.seq_drum_level);
                 outbox.clip_gain(SEQ_KAOSS_MIX_SLOT, self.seq_kaoss_level);
                 if launch {
-                    outbox.clip_launch(SEQ_CLIP_SLOT, self.clip_quantize.wire());
+                    let grid = if immediate {
+                        "off"
+                    } else {
+                        self.clip_quantize.wire()
+                    };
+                    outbox.clip_launch(SEQ_CLIP_SLOT, grid);
                 }
             }
         }
@@ -8951,6 +8964,11 @@ impl NativeModel {
         let dir = phrases::phrases_dir_from_env();
         let _ = phrases::save_pad(&dir, index, &self.phrases[index], self.bpm);
         self.send_phrase_clip(index, outbox);
+        if self.phrase_playing[index] && !self.phrases[index].empty {
+            // Reloading the clip stops it in the engine. Keep a playing pad playing
+            // so the switch is audible and the pad button stays truthful.
+            outbox.clip_launch(index as u8, self.clip_quantize.wire());
+        }
         self.status_line = if self.phrases[index].voice_locked {
             format!("{} VOICE LOCK", phrases::pad_label(index))
         } else {
@@ -13160,6 +13178,33 @@ mod tests {
     }
 
     #[test]
+    fn punch_rpt_touch_selects_the_division_drawn_under_the_finger() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Fx);
+        for pad in [0usize, 5] {
+            for band in 0..jambox_core::PUNCH_GRID_LABELS.len() {
+                let (low, high) = jambox_core::punch_grid_band(band);
+                let y = model
+                    .layout
+                    .punch_y_for_amount(pad, 0.5 * (low + high))
+                    .round() as i32;
+                let x = model.layout.punch_pad_cell(pad).x + 12;
+                let mut out = Outbox::new();
+                let start_y = model.layout.punch_pad_cell(pad).y + 8;
+                model.finger_down(1, x, start_y, &mut out);
+                model.finger_move(1, x, y, &mut out);
+                model.finger_up(1, &mut out);
+                let amount = model.punch_amount[pad];
+                assert_eq!(
+                    jambox_core::punch_grid_index(amount),
+                    band,
+                    "pad {pad} touch at band {band} mid gave amount {amount}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn punch_clear_disarms_and_keeps_amounts() {
         let mut model = NativeModel::new();
         model.set_mode(UiMode::Fx);
@@ -14717,6 +14762,234 @@ mod tests {
         let kick = model.layout.kit_pad_cell(4);
         model.finger_down(2, kick.x + 4, kick.y + 4, &mut out);
         assert_eq!(model.seq.recorded_on_notes(), vec![36]);
+    }
+
+    fn tap_rect(model: &mut NativeModel, out: &mut Outbox, id: i32, r: crate::layout::Rect) {
+        model.finger_down(id, r.x + 4, r.y + 4, out);
+        model.finger_up(id, out);
+    }
+
+    fn pad_with_one_note() -> PhrasePad {
+        crate::phrases::from_wire(
+            vec![jambox_protocol::WireClipEvent::midi(0, true, 0, 60, 100)],
+            960,
+            120.0,
+            true,
+        )
+    }
+
+    fn edit_pad_and_tap_voice(model: &mut NativeModel, out: &mut Outbox, index: usize) -> Vec<Request> {
+        model.set_mode(UiMode::Pads);
+        let r = model.layout.pads_edit;
+        tap_rect(model, out, 1, r);
+        let r = model.layout.phrase_cell(index);
+        tap_rect(model, out, 2, r);
+        let _ = out.take();
+        let r = model.layout.pads_voice;
+        tap_rect(model, out, 3, r);
+        out.take()
+    }
+
+    fn clip_load_voice_for(reqs: &[Request], slot: u8) -> Option<jambox_protocol::WireClipVoice> {
+        reqs.iter().find_map(|r| match r {
+            Request::ClipLoad { slot: s, voice, .. } if *s == slot => *voice,
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn voice_button_switches_a_locked_pad_to_follow_and_uploads_it() {
+        let mut model = NativeModel::new();
+        let mut out = Outbox::new();
+        model.phrases[2] = pad_with_one_note();
+        model.phrases[2].voice_locked = true;
+        model.phrases[2].morph_a = 2;
+        let reqs = edit_pad_and_tap_voice(&mut model, &mut out, 2);
+        assert!(!model.phrases[2].voice_locked);
+        let voice = clip_load_voice_for(&reqs, 2).expect("clip reload");
+        assert!(!voice.locked, "engine must be told FOLLOW");
+        assert!(model.status_line.contains("FOLLOW"));
+    }
+
+    #[test]
+    fn voice_button_locks_a_follow_pad_to_the_live_voice_and_fx() {
+        let mut model = NativeModel::new();
+        let mut out = Outbox::new();
+        model.phrases[5] = pad_with_one_note();
+        model.phrases[5].voice_locked = false;
+        model.morph_a = 3;
+        model.morph_b = 4;
+        model.synth_params[0] = 0.7;
+        model.fx_voice = [0.2, 0.4, 0.6, 0.8];
+        model.release_drift = 0.9;
+        let reqs = edit_pad_and_tap_voice(&mut model, &mut out, 5);
+        assert!(model.phrases[5].voice_locked);
+        let v = clip_load_voice_for(&reqs, 5).expect("clip reload");
+        assert!(v.locked);
+        assert_eq!((v.morph_a, v.morph_b), (3, 4));
+        assert!((v.morph - 0.7).abs() < 1e-6);
+        assert!((v.drive - 0.2).abs() < 1e-6);
+        assert!((v.delay_mix - 0.4).abs() < 1e-6);
+        assert!((v.reverb_mix - 0.6).abs() < 1e-6);
+        assert!((v.flanger_mix - 0.8).abs() < 1e-6);
+        assert!(v.release_drift.is_some_and(|d| (d - 0.9).abs() < 1e-6));
+    }
+
+    #[test]
+    fn switching_voice_mode_keeps_a_playing_pad_playing() {
+        let mut model = NativeModel::new();
+        let mut out = Outbox::new();
+        model.phrases[1] = pad_with_one_note();
+        model.phrase_playing[1] = true;
+        let reqs = edit_pad_and_tap_voice(&mut model, &mut out, 1);
+        let load = reqs.iter().position(|r| matches!(r, Request::ClipLoad { slot: 1, .. }));
+        let launch = reqs.iter().position(|r| matches!(r, Request::ClipLaunch { slot: 1, .. }));
+        assert!(
+            matches!((load, launch), (Some(l), Some(c)) if l < c),
+            "reload stops the engine slot, so relaunch after it: {reqs:?}"
+        );
+        assert!(model.phrase_playing[1]);
+    }
+
+    #[test]
+    fn switching_voice_mode_does_not_start_an_idle_pad() {
+        let mut model = NativeModel::new();
+        let mut out = Outbox::new();
+        model.phrases[1] = pad_with_one_note();
+        let reqs = edit_pad_and_tap_voice(&mut model, &mut out, 1);
+        assert!(!reqs.iter().any(|r| matches!(r, Request::ClipLaunch { .. })));
+    }
+
+    #[test]
+    fn voice_lock_flag_survives_save_and_load() {
+        for locked in [true, false] {
+            let mut pad = pad_with_one_note();
+            pad.voice_locked = locked;
+            let file = crate::phrases::file_from_pad(&pad, 120.0);
+            let back = crate::phrases::pad_from_file(&file, 120.0);
+            assert_eq!(back.voice_locked, locked);
+        }
+    }
+
+    fn seq_launch_grids(reqs: &[Request]) -> Vec<String> {
+        reqs.iter()
+            .filter_map(|r| match r {
+                Request::ClipLaunch { slot, quantize } if *slot == SEQ_CLIP_SLOT => {
+                    Some(quantize.clone().unwrap_or_default())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn model_with_seeded_drum_backbone(q: ClipQuantize) -> NativeModel {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Drums);
+        model.clip_quantize = q;
+        model.seq.bpm = 120.0;
+        model.seq.seed_playing_backbone(
+            vec![crate::seq::RecEvent {
+                t: 0.0,
+                on: true,
+                channel: 9,
+                note: 36,
+                velocity: 100,
+            }],
+            2.0,
+        );
+        model
+    }
+
+    #[test]
+    fn overdub_starts_the_loop_immediately_under_every_quantize_setting() {
+        for q in [ClipQuantize::Off, ClipQuantize::Beat, ClipQuantize::Bar] {
+            let mut model = model_with_seeded_drum_backbone(q);
+            let mut out = Outbox::new();
+            let rec = model.layout.nav_chrome_rec();
+            model.finger_down(1, rec.x + 4, rec.y + 4, &mut out);
+            model.finger_up(1, &mut out);
+            assert_eq!(model.seq.state, crate::seq::SeqState::Overdub);
+            assert_eq!(
+                seq_launch_grids(&out.take()),
+                vec!["off".to_string()],
+                "{}: take clock starts on the REC press, so the loop must too",
+                q.label()
+            );
+        }
+    }
+
+    #[test]
+    fn pad_edit_clear_then_tap_empties_that_pad_and_the_engine_slot() {
+        let mut model = NativeModel::new();
+        let mut out = Outbox::new();
+        model.set_mode(UiMode::Pads);
+        model.phrases[3] = pad_with_one_note();
+        model.phrases[4] = pad_with_one_note();
+        model.phrase_playing[3] = true;
+        let r = model.layout.pads_edit;
+        tap_rect(&mut model, &mut out, 1, r);
+        let r = model.layout.pads_clear;
+        tap_rect(&mut model, &mut out, 2, r);
+        assert!(model.pads_clear_armed);
+        let _ = out.take();
+        let r = model.layout.phrase_cell(3);
+        tap_rect(&mut model, &mut out, 3, r);
+        assert!(model.phrases[3].empty);
+        assert!(!model.phrase_playing[3]);
+        assert!(!model.phrases[4].empty, "only the tapped pad is cleared");
+        assert!(!model.pads_clear_armed, "CLEAR disarms after one pad");
+        let reqs = out.take();
+        assert!(reqs.iter().any(|r| matches!(r, Request::ClipClear { slot: 3 })));
+        assert!(!reqs
+            .iter()
+            .any(|r| matches!(r, Request::ClipClear { slot } if *slot != 3)));
+        assert!(
+            !reqs.iter().any(|r| matches!(r, Request::ClipLaunch { .. })),
+            "clearing must not launch the pad"
+        );
+    }
+
+    #[test]
+    fn pad_clear_arm_is_ignored_in_play_view_and_taps_launch_instead() {
+        let mut model = NativeModel::new();
+        let mut out = Outbox::new();
+        model.set_mode(UiMode::Pads);
+        model.phrases[0] = pad_with_one_note();
+        model.pads_edit = false;
+        let clr = model.layout.pads_clear;
+        model.finger_down(1, clr.x + 4, clr.y + 4, &mut out);
+        model.finger_up(1, &mut out);
+        assert!(!model.pads_clear_armed);
+        let r = model.layout.phrase_cell(0);
+        tap_rect(&mut model, &mut out, 2, r);
+        assert!(!model.phrases[0].empty);
+    }
+
+    #[test]
+    fn play_and_keep_still_follow_the_quantize_setting() {
+        for q in [ClipQuantize::Off, ClipQuantize::Beat, ClipQuantize::Bar] {
+            let mut model = model_with_seeded_drum_backbone(q);
+            let mut out = Outbox::new();
+            model.seq.state = crate::seq::SeqState::Stopped;
+            let action = model.seq.toggle_play();
+            model.apply_seq_action(action, &mut out);
+            assert_eq!(seq_launch_grids(&out.take()), vec![q.wire().to_string()]);
+        }
+    }
+
+    #[test]
+    fn on_screen_drum_hits_under_qnt_bar_record_one_note_on_each() {
+        let mut model = model_with_seeded_drum_backbone(ClipQuantize::Bar);
+        let mut out = Outbox::new();
+        let action = model.seq.toggle_record();
+        model.apply_seq_action(action, &mut out);
+        let kick = model.layout.kit_pad_cell(4);
+        let tom = model.layout.kit_pad_cell(5);
+        for (id, cell) in [(1, kick), (2, tom), (3, kick)] {
+            model.finger_down(id, cell.x + 4, cell.y + 4, &mut out);
+            model.finger_up(id, &mut out);
+        }
+        assert_eq!(model.seq.recorded_on_notes(), vec![36, 45, 36]);
     }
 
     #[test]
