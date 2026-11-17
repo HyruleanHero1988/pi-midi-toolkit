@@ -4379,6 +4379,8 @@ fn draw_fx_settings(scene: &mut Scene, model: &NativeModel) {
     let prio = layout.punch_prio();
     let rpt = layout.punch_rpt_mode();
     let grid = layout.punch_grid_mode();
+    let after = layout.punch_aftertouch();
+    let dry = layout.punch_dry();
     let close = layout.punch_settings_close();
     scene.fill_rect(prio, 0x3c3836);
     scene.text_centered(
@@ -4405,6 +4407,38 @@ fn draw_fx_settings(scene: &mut Scene, model: &NativeModel) {
         },
     );
     scene.text_centered(grid, model.punch_grid_mode.label(), 0xffffff, 2);
+    scene.fill_rect(
+        after,
+        if model.punch_aftertouch {
+            0x689d6a
+        } else {
+            0x3c3836
+        },
+    );
+    scene.text_centered(
+        after,
+        if model.punch_aftertouch {
+            "AFTERTOUCH"
+        } else {
+            "AT OFF"
+        },
+        0xffffff,
+        2,
+    );
+    scene.fill_rect(
+        dry,
+        if model.punch_dry {
+            0x689d6a
+        } else {
+            0x3c3836
+        },
+    );
+    scene.text_centered(
+        dry,
+        if model.punch_dry { "DRY" } else { "DRY OFF" },
+        0xffffff,
+        2,
+    );
     scene.fill_rect(close, 0x504945);
     scene.text_centered(close, "CLOSE", 0xffffff, 2);
     scene.text(

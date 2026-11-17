@@ -112,7 +112,17 @@ def build_tar() -> bytes:
             rel = path.relative_to(ROOT)
             if should_skip(rel):
                 continue
-            tar.add(path, arcname=str(rel).replace("\\", "/"))
+            # Windows can leave broken junction/symlink ghosts that rglob still
+            # yields; skip anything that is not readable on disk.
+            try:
+                if not path.exists():
+                    continue
+            except OSError:
+                continue
+            try:
+                tar.add(path, arcname=str(rel).replace("\\", "/"))
+            except FileNotFoundError:
+                continue
     return buf.getvalue()
 
 

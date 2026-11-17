@@ -192,6 +192,10 @@ pub enum Command {
     SetPunchHistory {
         enabled: bool,
     },
+    /// Mix the pre-punch bus alongside the wet FX chain. Default off.
+    SetPunchDry {
+        enabled: bool,
+    },
     /// Dry capture on the headphone output. The audio callback skips render.
     SetInputBypass {
         enabled: bool,

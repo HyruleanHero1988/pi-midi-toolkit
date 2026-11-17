@@ -5,6 +5,9 @@
 //! crush, and slice run after. SEND is a wet-boost of the bus insert that
 //! runs after this rack (so it still works on a GRAB freeze).
 //!
+//! When [`PunchRack::set_dry`] is on, the pre-FX bus is mixed back in after the
+//! wet chain so dry and FX stay audible together. Default is off (wet replaces).
+//!
 //! Amounts are 0..1. The UI maps pad Y (and latch) onto them; this unit only
 //! hears the current amount per slot. `process` never allocates.
 
@@ -21,6 +24,8 @@ pub const PUNCH_CRUSH: u8 = 7;
 /// Continuous history kept for punch pads + LOCK grabs (vaporwave chorus length).
 const RING_SEC: f32 = 4.0;
 const ENGAGE: f32 = 0.04;
+/// Scratch for parallel dry mix. Matches [`crate::engine::MAX_RENDER_BLOCK`].
+const DRY_SCRATCH_MAX: usize = 8192;
 
 pub const PUNCH_LABELS: [&str; PUNCH_PAD_COUNT] =
     ["RPT", "TAPE", "LPF", "HPF", "SEND", "SLICE", "DROP", "CRUSH"];
@@ -451,6 +456,11 @@ pub struct PunchRack {
     crush_left: u32,
     /// Idle history. Off skips the ring until a buffer effect, LOCK, or GRAB needs it.
     history: bool,
+    /// Mix the pre-FX bus back in after the wet chain (parallel dry).
+    dry: bool,
+    /// Pre-FX copy for the current block when [`Self::dry`] is on.
+    dry_scratch: Vec<f32>,
+    dry_scratch_r: Vec<f32>,
 }
 
 impl PunchRack {
@@ -521,11 +531,26 @@ impl PunchRack {
             crush_hold_r: 0.0,
             crush_left: 0,
             history: true,
+            dry: false,
+            dry_scratch: vec![0.0; DRY_SCRATCH_MAX],
+            dry_scratch_r: if stereo {
+                vec![0.0; DRY_SCRATCH_MAX]
+            } else {
+                Vec::new()
+            },
         }
     }
 
     pub fn set_history(&mut self, on: bool) {
         self.history = on;
+    }
+
+    pub fn dry(&self) -> bool {
+        self.dry
+    }
+
+    pub fn set_dry(&mut self, on: bool) {
+        self.dry = on;
     }
 
     pub fn buffer_prio(&self) -> PunchBufferPrio {
@@ -820,6 +845,33 @@ impl PunchRack {
         let tape_want = tape > ENGAGE && !self.effect_baked(PUNCH_TAPE as usize);
         let rpt_want = rpt > ENGAGE;
         let drop_want = drop > ENGAGE && !self.effect_baked(PUNCH_DROP as usize);
+        let filter_want = self.amount[PUNCH_LPF as usize] > ENGAGE
+            || self.amount[PUNCH_HPF as usize] > ENGAGE
+            || self.amount[PUNCH_CRUSH as usize] > ENGAGE
+            || self.amount[PUNCH_SLICE as usize] > ENGAGE;
+        // Parallel dry: keep the pre-FX bus and add it back after the wet chain.
+        // Skip when nothing will change the buffer (avoids doubling on SEND-only
+        // or a baked TAPE/DROP that already left the ring).
+        let keep_dry = self.dry
+            && (tape_want
+                || rpt_want
+                || drop_want
+                || filter_want
+                || (self.locked && self.lock_len >= 32)
+                || self.grabbing);
+        let dry_n = if keep_dry {
+            let n = buf.len().min(self.dry_scratch.len());
+            self.dry_scratch[..n].copy_from_slice(&buf[..n]);
+            if let Some(r) = right.as_deref() {
+                let nr = n.min(r.len()).min(self.dry_scratch_r.len());
+                if nr > 0 {
+                    self.dry_scratch_r[..nr].copy_from_slice(&r[..nr]);
+                }
+            }
+            n
+        } else {
+            0
+        };
         let voice = pick_buffer_voice(
             self.buffer_prio,
             tape_want,
@@ -1064,6 +1116,18 @@ impl PunchRack {
             if let Some(r) = right.as_deref_mut() {
                 let mut phase_r = phase_at_start;
                 apply_slice(r, period, &mut phase_r);
+            }
+        }
+
+        if keep_dry && dry_n > 0 {
+            for i in 0..dry_n {
+                buf[i] += self.dry_scratch[i];
+            }
+            if let Some(r) = right.as_deref_mut() {
+                let nr = dry_n.min(r.len()).min(self.dry_scratch_r.len());
+                for i in 0..nr {
+                    r[i] += self.dry_scratch_r[i];
+                }
             }
         }
     }
@@ -1443,6 +1507,45 @@ mod tests {
         assert!((boost_send_mix(0.0, 1.0) - 0.95).abs() < 1e-5);
         assert!(boost_send_mix(0.4, 0.0) < 0.41);
         assert!(boost_send_mix(0.4, 1.0) > 0.9);
+    }
+
+    #[test]
+    fn dry_on_keeps_the_pre_fx_bus_alongside_slice() {
+        let mut wet_only = PunchRack::new(48_000.0);
+        wet_only.set_amount(PUNCH_SLICE, 0.9);
+        let mut dry_on = PunchRack::new(48_000.0);
+        dry_on.set_dry(true);
+        dry_on.set_amount(PUNCH_SLICE, 0.9);
+        let mut wet_buf = vec![0.5f32; 8000];
+        let mut dry_buf = vec![0.5f32; 8000];
+        wet_only.process(&mut wet_buf, 120.0);
+        dry_on.process(&mut dry_buf, 120.0);
+        let wet_silent = wet_buf.iter().filter(|s| s.abs() < 1e-5).count();
+        let dry_silent = dry_buf.iter().filter(|s| s.abs() < 1e-5).count();
+        assert!(wet_silent > 1000, "wet-only slice must gate, silent={wet_silent}");
+        assert!(
+            dry_silent < 10,
+            "dry+slice must keep the pre-FX tone in the gaps, silent={dry_silent}"
+        );
+        let dry_loud = dry_buf.iter().filter(|s| (*s - 1.0).abs() < 0.05).count();
+        assert!(
+            dry_loud > 1000,
+            "open slice slots should be dry+wet (~1.0), loud={dry_loud}"
+        );
+    }
+
+    #[test]
+    fn dry_off_is_the_default_and_send_alone_does_not_double() {
+        let mut p = PunchRack::new(48_000.0);
+        assert!(!p.dry());
+        p.set_amount(PUNCH_SEND, 1.0);
+        p.set_dry(true);
+        let mut buf = vec![0.4f32; 256];
+        p.process(&mut buf, 120.0);
+        assert!(
+            buf.iter().all(|v| (*v - 0.4).abs() < 1e-6),
+            "SEND-only must not double when dry is on"
+        );
     }
 
     #[test]

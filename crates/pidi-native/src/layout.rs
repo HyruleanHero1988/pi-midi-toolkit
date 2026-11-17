@@ -219,6 +219,10 @@ pub enum Hit {
     PunchPrio,
     PunchRptMode,
     PunchGrid,
+    /// FX SET: pad aftertouch drives punch pad amount.
+    PunchAftertouch,
+    /// FX SET: mix pre-FX (dry) audio alongside the wet punch chain.
+    PunchDry,
     MixBus(usize),
     MixPad(usize),
     SettingsWifi,
@@ -3817,9 +3821,27 @@ impl Layout {
         }
     }
 
-    pub fn punch_settings_close(&self) -> Rect {
+    pub fn punch_aftertouch(&self) -> Rect {
         Rect {
             x: 40,
+            y: HUD_H + 230,
+            w: 220,
+            h: 56,
+        }
+    }
+
+    pub fn punch_dry(&self) -> Rect {
+        Rect {
+            x: 280,
+            y: HUD_H + 230,
+            w: 160,
+            h: 56,
+        }
+    }
+
+    pub fn punch_settings_close(&self) -> Rect {
+        Rect {
+            x: 460,
             y: HUD_H + 230,
             w: 160,
             h: 56,
@@ -3963,6 +3985,12 @@ impl Layout {
         }
         if self.punch_grid_mode().contains(px, py) {
             return Hit::PunchGrid;
+        }
+        if self.punch_aftertouch().contains(px, py) {
+            return Hit::PunchAftertouch;
+        }
+        if self.punch_dry().contains(px, py) {
+            return Hit::PunchDry;
         }
         if self.punch_settings_close().contains(px, py) || self.punch_set().contains(px, py) {
             return Hit::PunchSet;
@@ -4860,6 +4888,24 @@ mod tests {
         assert_eq!(
             layout.hit_fx_settings(prio.x + 8, prio.y + 8),
             Hit::PunchPrio
+        );
+        let after = layout.punch_aftertouch();
+        assert_on_screen("punch aftertouch", after);
+        assert_eq!(
+            layout.hit_fx_settings(after.x + 8, after.y + 8),
+            Hit::PunchAftertouch
+        );
+        let dry = layout.punch_dry();
+        assert_on_screen("punch dry", dry);
+        assert_eq!(
+            layout.hit_fx_settings(dry.x + 8, dry.y + 8),
+            Hit::PunchDry
+        );
+        let close = layout.punch_settings_close();
+        assert_on_screen("punch settings close", close);
+        assert_eq!(
+            layout.hit_fx_settings(close.x + 8, close.y + 8),
+            Hit::PunchSet
         );
         let set = layout.punch_set();
         assert_eq!(layout.hit(UiMode::Fx, set.x + 8, set.y + 8), Hit::PunchSet);

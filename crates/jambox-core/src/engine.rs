@@ -618,11 +618,13 @@ impl JamboxEngine {
         let punch_prio = self.punch[0].buffer_prio();
         let punch_rpt_mode = self.punch[0].rpt_mode();
         let punch_grid = self.punch[0].grid_mode();
+        let punch_dry = self.punch[0].dry();
         self.punch = new_punch_racks(sr);
         for rack in &mut self.punch {
             rack.set_buffer_prio(punch_prio);
             rack.set_rpt_mode(punch_rpt_mode);
             rack.set_grid_mode(punch_grid);
+            rack.set_dry(punch_dry);
         }
         for (src, amounts) in punch_amounts.iter().enumerate() {
             for (i, amount) in amounts.iter().enumerate() {
@@ -1346,6 +1348,11 @@ impl JamboxEngine {
                     rack.set_history(enabled);
                 }
             }
+            Command::SetPunchDry { enabled } => {
+                for rack in &mut self.punch {
+                    rack.set_dry(enabled);
+                }
+            }
             Command::SetInputBypass { enabled } => {
                 self.input_bypass = enabled;
             }
@@ -1779,6 +1786,10 @@ impl JamboxEngine {
 
     pub fn input_bypass(&self) -> bool {
         self.input_bypass
+    }
+
+    pub fn punch_dry(&self) -> bool {
+        self.punch[0].dry()
     }
 
     /// Apply control commands without rendering a block. The dry-input path
@@ -2294,6 +2305,23 @@ mod tests {
             &mut midi,
         );
         assert!(!e.input_bypass());
+    }
+
+    #[test]
+    fn punch_dry_flag_follows_the_command() {
+        let mut e = engine();
+        let mut midi = MidiOutSink::new();
+        assert!(!e.punch_dry());
+        e.apply_scheduled(
+            &[ScheduledCommand::now(Command::SetPunchDry { enabled: true })],
+            &mut midi,
+        );
+        assert!(e.punch_dry());
+        e.apply_scheduled(
+            &[ScheduledCommand::now(Command::SetPunchDry { enabled: false })],
+            &mut midi,
+        );
+        assert!(!e.punch_dry());
     }
 
     #[test]

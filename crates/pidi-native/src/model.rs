@@ -407,6 +407,12 @@ pub struct NativeModel {
     pub punch_grid_mode: jambox_core::PunchGridMode,
     /// Bank A pads arm punch FX. Off: those pads play the kit.
     pub punch_pads_fx: bool,
+    /// Pad aftertouch drives that pad's punch amount on the FX page.
+    pub punch_aftertouch: bool,
+    /// Last Bank A pad that saw note-on / poly pressure (channel AT fallback).
+    punch_aftertouch_pad: Option<usize>,
+    /// Mix pre-punch (dry) audio alongside the wet FX chain. Default off.
+    pub punch_dry: bool,
     /// Idle 4-second punch rings. Off skips them until a buffer effect, LOCK, or GRAB is on.
     pub punch_history: bool,
     /// Headphones play the capture ring only. Synth, punch, and bus FX stay quiet.
@@ -787,6 +793,9 @@ impl NativeModel {
             punch_rpt_mode: jambox_core::PunchRptMode::Refresh,
             punch_grid_mode: jambox_core::PunchGridMode::Beat,
             punch_pads_fx: true,
+            punch_aftertouch: false,
+            punch_aftertouch_pad: None,
+            punch_dry: false,
             punch_history: true,
             input_bypass: false,
             fx_settings_open: false,
@@ -2483,6 +2492,8 @@ impl NativeModel {
         self.punch_rpt_mode = jambox_core::PunchRptMode::from_u8(s.punch_rpt_mode);
         self.punch_grid_mode = jambox_core::PunchGridMode::from_u8(s.punch_grid_mode);
         self.punch_pads_fx = s.punch_pads_fx;
+        self.punch_aftertouch = s.punch_aftertouch;
+        self.punch_dry = s.punch_dry;
         self.punch_history = s.punch_history;
         self.input_bypass = s.input_bypass;
         self.kaoss_show_all = s.kaoss_show_all;
@@ -2609,6 +2620,7 @@ impl NativeModel {
         outbox.punch_rpt_mode(self.punch_rpt_mode.as_u8());
         outbox.punch_grid(self.punch_grid_mode.as_u8());
         outbox.punch_pads(self.punch_pads_fx);
+        outbox.punch_dry(self.punch_dry);
         outbox.punch_history(self.punch_history);
         outbox.input_bypass(self.input_bypass);
         outbox.clip_gain(SEQ_CLIP_SLOT, self.seq_level);
@@ -2678,6 +2690,8 @@ impl NativeModel {
             punch_rpt_mode: self.punch_rpt_mode.as_u8(),
             punch_grid_mode: self.punch_grid_mode.as_u8(),
             punch_pads_fx: self.punch_pads_fx,
+            punch_aftertouch: self.punch_aftertouch,
+            punch_dry: self.punch_dry,
             punch_history: self.punch_history,
             input_bypass: self.input_bypass,
             fx_bus: [self.fx_bus[0], self.fx_bus[1], self.fx_bus[2]],
@@ -4630,9 +4644,33 @@ impl NativeModel {
                 self.tap_ui(slot, id, gesture, px, py);
                 self.cycle_punch_grid(outbox);
             }
+            Hit::PunchAftertouch => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.punch_aftertouch = !self.punch_aftertouch;
+                self.status_line = if self.punch_aftertouch {
+                    "aftertouch → that FX pad".into()
+                } else {
+                    "aftertouch off (FX pads)".into()
+                };
+                self.mark_dirty();
+            }
+            Hit::PunchDry => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.punch_dry = !self.punch_dry;
+                outbox.punch_dry(self.punch_dry);
+                self.status_line = if self.punch_dry {
+                    "DRY — hear pre-FX with the wet chain".into()
+                } else {
+                    "DRY OFF — wet replaces".into()
+                };
+                self.mark_dirty();
+            }
             Hit::PunchPads => {
                 self.tap_ui(slot, id, gesture, px, py);
                 self.punch_pads_fx = !self.punch_pads_fx;
+                if !self.punch_pads_fx {
+                    self.punch_aftertouch_pad = None;
+                }
                 outbox.punch_pads(self.punch_pads_fx);
                 self.status_line = if self.punch_pads_fx {
                     "pads → FX".into()
@@ -6757,15 +6795,17 @@ impl NativeModel {
             return true;
         }
         if kind == "channel_pressure" || kind == "aftertouch" {
-            let unit = (notice.value.unwrap_or(0) as f32 / 127.0).clamp(0.0, 1.0);
-            let mut any = false;
-            for index in 0..Layout::PUNCH_PAD_COUNT {
-                if self.punch_armed[index] {
-                    self.set_punch_amount_unit(index, unit, outbox);
-                    any = true;
-                }
+            // Channel AT has no note — only the last touched punch pad, never a
+            // broadcast. DRUMS mode (pads play kit) never moves FX pad levels.
+            if !self.punch_aftertouch || !self.punch_pads_fx {
+                return false;
             }
-            return any;
+            let Some(index) = self.punch_aftertouch_pad else {
+                return false;
+            };
+            let unit = (notice.value.unwrap_or(0) as f32 / 127.0).clamp(0.0, 1.0);
+            self.set_punch_amount_unit(index, unit, outbox);
+            return true;
         }
         if notice.channel != DRUM_CHANNEL || !self.punch_pads_fx {
             return false;
@@ -6777,6 +6817,7 @@ impl NativeModel {
                     .is_some();
             }
             if let Some(index) = profile.punch_index_for_pad(notice.note.unwrap_or(255)) {
+                self.punch_aftertouch_pad = Some(index);
                 self.toggle_punch_arm(index, outbox);
                 return true;
             }
@@ -6790,6 +6831,11 @@ impl NativeModel {
             let Some(index) = profile.punch_index_for_pad(notice.note.unwrap_or(255)) else {
                 return false;
             };
+            self.punch_aftertouch_pad = Some(index);
+            if !self.punch_aftertouch {
+                // Still consume so the FX page does not leak pad pressure elsewhere.
+                return true;
+            }
             let unit = (notice.value.unwrap_or(0) as f32 / 127.0).clamp(0.0, 1.0);
             self.set_punch_amount_unit(index, unit, outbox);
             return true;
@@ -13366,9 +13412,10 @@ mod tests {
     }
 
     #[test]
-    fn pad_aftertouch_sets_punch_amount() {
+    fn pad_aftertouch_sets_punch_amount_when_enabled() {
         let mut model = NativeModel::new();
         model.set_mode(UiMode::Fx);
+        model.punch_aftertouch = true;
         let mut out = Outbox::new();
         model.on_midi_notice(
             &punch_midi("poly_pressure", Some(40), None, None, Some(64)),
@@ -13380,6 +13427,82 @@ mod tests {
                 .iter()
                 .all(|r| !matches!(r, Request::PunchFx { .. })),
             "aftertouch on a disarmed pad only stores amount"
+        );
+    }
+
+    #[test]
+    fn pad_aftertouch_only_moves_that_pad() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Fx);
+        model.punch_aftertouch = true;
+        model.punch_armed = [true; Layout::PUNCH_PAD_COUNT];
+        model.punch_amount = [0.25; Layout::PUNCH_PAD_COUNT];
+        let mut out = Outbox::new();
+        // Pad 0 note 40, pad 1 note 41 (MPK Bank A top row).
+        model.on_midi_notice(
+            &punch_midi("poly_pressure", Some(41), None, None, Some(100)),
+            &mut out,
+        );
+        assert!((model.punch_amount[1] - 100.0 / 127.0).abs() < 1e-5);
+        assert!(
+            (model.punch_amount[0] - 0.25).abs() < 1e-5,
+            "other pads must keep their level"
+        );
+        assert!(
+            model.punch_amount[2..]
+                .iter()
+                .all(|a| (*a - 0.25).abs() < 1e-5)
+        );
+        // Channel AT follows the last poly pad only — not every armed pad.
+        model.on_midi_notice(
+            &punch_midi("channel_pressure", None, None, None, Some(10)),
+            &mut out,
+        );
+        assert!((model.punch_amount[1] - 10.0 / 127.0).abs() < 1e-5);
+        assert!((model.punch_amount[0] - 0.25).abs() < 1e-5);
+    }
+
+    #[test]
+    fn drums_mode_aftertouch_never_moves_fx_pad_level() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Fx);
+        model.punch_aftertouch = true;
+        model.punch_pads_fx = false;
+        model.punch_aftertouch_pad = Some(0);
+        model.punch_amount[0] = 0.4;
+        let mut out = Outbox::new();
+        model.on_midi_notice(
+            &punch_midi("poly_pressure", Some(40), None, None, Some(100)),
+            &mut out,
+        );
+        model.on_midi_notice(
+            &punch_midi("channel_pressure", None, None, None, Some(127)),
+            &mut out,
+        );
+        assert!(
+            (model.punch_amount[0] - 0.4).abs() < 1e-5,
+            "DRUMS mode must ignore aftertouch for FX pad level"
+        );
+    }
+
+    #[test]
+    fn pad_aftertouch_ignored_by_default_on_fx() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Fx);
+        assert!(!model.punch_aftertouch);
+        let mut out = Outbox::new();
+        model.on_midi_notice(
+            &punch_midi("poly_pressure", Some(40), None, None, Some(64)),
+            &mut out,
+        );
+        assert!(
+            model.punch_amount[0].abs() < 1e-5,
+            "FX aftertouch opt-in is off by default"
+        );
+        assert!(
+            out.take()
+                .iter()
+                .all(|r| !matches!(r, Request::PunchFx { .. }))
         );
     }
 
@@ -13494,6 +13617,53 @@ mod tests {
                 .any(|r| matches!(r, Request::PunchBufferPrio { mode: 4 })),
             "PRIO must send punch_buffer_prio"
         );
+    }
+
+    #[test]
+    fn fx_settings_aftertouch_toggles() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Fx);
+        model.fx_settings_open = true;
+        assert!(!model.punch_aftertouch);
+        let mut out = Outbox::new();
+        let after = model.layout.punch_aftertouch();
+        model.finger_down(1, after.x + 8, after.y + 8, &mut out);
+        model.finger_up(1, &mut out);
+        assert!(model.punch_aftertouch);
+        model.finger_down(1, after.x + 8, after.y + 8, &mut out);
+        model.finger_up(1, &mut out);
+        assert!(!model.punch_aftertouch);
+    }
+
+    #[test]
+    fn fx_settings_dry_toggles_and_sends() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Fx);
+        model.fx_settings_open = true;
+        assert!(!model.punch_dry);
+        let mut out = Outbox::new();
+        let dry = model.layout.punch_dry();
+        model.finger_down(1, dry.x + 8, dry.y + 8, &mut out);
+        model.finger_up(1, &mut out);
+        assert!(model.punch_dry);
+        assert!(
+            out.take()
+                .iter()
+                .any(|r| matches!(r, Request::PunchDry { enabled: true })),
+            "DRY on must send punch_dry"
+        );
+        model.finger_down(1, dry.x + 8, dry.y + 8, &mut out);
+        model.finger_up(1, &mut out);
+        assert!(!model.punch_dry);
+        assert!(
+            out.take()
+                .iter()
+                .any(|r| matches!(r, Request::PunchDry { enabled: false })),
+            "DRY off must send punch_dry"
+        );
+        assert!(!model.capture_session().punch_dry);
+        model.punch_dry = true;
+        assert!(model.capture_session().punch_dry);
     }
 
     #[test]

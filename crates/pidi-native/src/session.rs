@@ -229,6 +229,12 @@ pub struct SessionState {
     /// Bank A pads arm punch FX. Missing → on (previous FX-page behavior).
     #[serde(default = "default_full_velocity")]
     pub punch_pads_fx: bool,
+    /// Pad aftertouch sets punch pad amount on FX. Missing → off.
+    #[serde(default)]
+    pub punch_aftertouch: bool,
+    /// Mix pre-punch (dry) alongside wet FX. Missing → off (wet replaces).
+    #[serde(default)]
+    pub punch_dry: bool,
     /// Idle punch-history rings. Missing → on, so GRAB still has a pre-roll.
     #[serde(default = "default_punch_history")]
     pub punch_history: bool,
@@ -558,6 +564,8 @@ impl Default for SessionState {
             punch_rpt_mode: 0,
             punch_grid_mode: 0,
             punch_pads_fx: true,
+            punch_aftertouch: false,
+            punch_dry: false,
             punch_history: default_punch_history(),
             input_bypass: false,
             kaoss_show_all: false,
@@ -807,6 +815,36 @@ mod tests {
         let back: SessionState = serde_json::from_str(&json).unwrap();
         assert_eq!(back.midi_stick_y, MidiDest::Tone);
         assert_eq!(back.midi_aftertouch, MidiDest::Vibrato);
+    }
+
+    #[test]
+    fn session_roundtrip_includes_punch_aftertouch() {
+        let mut s = SessionState::default();
+        assert!(!s.punch_aftertouch);
+        s.punch_aftertouch = true;
+        let json = serde_json::to_string(&s).unwrap();
+        let back: SessionState = serde_json::from_str(&json).unwrap();
+        assert!(back.punch_aftertouch);
+        let old: SessionState = serde_json::from_str(
+            r#"{"version":1,"bpm":120.0,"morph":0.5,"tone":0.5,"level":0.8,"attack":0.05,"release":0.3,"morph_a":0,"morph_b":1,"kaoss_scale_index":1,"kaoss_key":0,"kaoss_octaves":2,"kaoss_program":0,"kaoss_gate":0,"kaoss_hold":false,"fx_bus":[0.0,0.0,0.0]}"#,
+        )
+        .unwrap();
+        assert!(!old.punch_aftertouch);
+    }
+
+    #[test]
+    fn session_roundtrip_includes_punch_dry() {
+        let mut s = SessionState::default();
+        assert!(!s.punch_dry);
+        s.punch_dry = true;
+        let json = serde_json::to_string(&s).unwrap();
+        let back: SessionState = serde_json::from_str(&json).unwrap();
+        assert!(back.punch_dry);
+        let old: SessionState = serde_json::from_str(
+            r#"{"version":1,"bpm":120.0,"morph":0.5,"tone":0.5,"level":0.8,"attack":0.05,"release":0.3,"morph_a":0,"morph_b":1,"kaoss_scale_index":1,"kaoss_key":0,"kaoss_octaves":2,"kaoss_program":0,"kaoss_gate":0,"kaoss_hold":false,"fx_bus":[0.0,0.0,0.0]}"#,
+        )
+        .unwrap();
+        assert!(!old.punch_dry);
     }
 
     #[test]
