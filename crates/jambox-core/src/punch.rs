@@ -1049,7 +1049,15 @@ impl PunchRack {
                     },
                     live,
                 );
-                self.heard[idx] = wet;
+                // While RPT plays from its freeze, keep recording the live bus
+                // into `heard`. Writing the loop back would poison the next
+                // Refresh capture so every hit re-grabs the first sample.
+                let heard_sample = if rpt_active && self.rpt_capture_len >= 32 && !locked {
+                    live
+                } else {
+                    wet
+                };
+                self.heard[idx] = heard_sample;
                 buf[i] = wet;
                 let wet_r = if let Some(r) = right.as_deref_mut() {
                     let w = tap.read(
@@ -1061,7 +1069,12 @@ impl PunchRack {
                         },
                         live_r,
                     );
-                    self.heard_r[idx] = w;
+                    let heard_r = if rpt_active && self.rpt_capture_len >= 32 && !locked {
+                        live_r
+                    } else {
+                        w
+                    };
+                    self.heard_r[idx] = heard_r;
                     r[i] = w;
                     Some(w)
                 } else {
@@ -1108,12 +1121,10 @@ impl PunchRack {
         }
         let slice = self.amount[PUNCH_SLICE as usize];
         if slice > ENGAGE {
-            let available = if self.locked && self.lock_len > 0 {
-                self.lock_len
-            } else {
-                self.filled.max(32)
-            };
-            let period = self.span_samples(slice, bpm, available).max(8) as f32;
+            // SLICE is a live amplitude gate — never clamp the period to ring
+            // fill. HIST-off leaves `filled` at 0, and the old path collapsed
+            // every division to 32 samples (~1.5 kHz buzz).
+            let period = slice_period_samples(slice, bpm, sr, self.grid_mode) as f32;
             let phase_at_start = self.slice_phase;
             apply_slice(buf, period, &mut self.slice_phase);
             if let Some(r) = right.as_deref_mut() {
@@ -1174,8 +1185,34 @@ fn read_window(buf: &[f32], start: usize, len: usize, pos: f32) -> f32 {
 /// 1/4 → 1/8 → 1/16 → 1/32 of a beat as amount rises.
 fn rpt_loop_samples(amount: f32, bpm: f32, sr: f32) -> usize {
     let beats = PUNCH_GRID_BEATS[punch_grid_index(amount).min(3)];
+    beat_samples(beats, bpm, sr)
+}
+
+fn beat_samples(beats: f32, bpm: f32, sr: f32) -> usize {
     let sec = beats * 60.0 / bpm.max(20.0);
-    (sec * sr).round() as usize
+    (sec * sr.max(8000.0)).round() as usize
+}
+
+/// Floor so the gate never enters ultrasonic / buzz territory.
+/// Matches the shortest Beat-grid division (1/32) at the given tempo.
+fn min_slice_samples(bpm: f32, sr: f32) -> usize {
+    beat_samples(PUNCH_GRID_BEATS[3], bpm, sr).max(32)
+}
+
+/// SLICE gate period in samples. Beat mode snaps to the punch grid; Smooth
+/// lerps continuously from 1/4 → 1/32. Independent of ring / lock fill.
+fn slice_period_samples(amount: f32, bpm: f32, sr: f32, mode: PunchGridMode) -> usize {
+    let floor = min_slice_samples(bpm, sr);
+    let len = match mode {
+        PunchGridMode::Beat => rpt_loop_samples(amount, bpm, sr),
+        PunchGridMode::Smooth => {
+            let long = beat_samples(PUNCH_GRID_BEATS[0], bpm, sr) as f32;
+            let short = beat_samples(PUNCH_GRID_BEATS[3], bpm, sr) as f32;
+            let t = amount.clamp(0.0, 1.0);
+            (long + (short - long) * t).round() as usize
+        }
+    };
+    len.max(floor)
 }
 
 /// The old smooth curve spent 0–85% on loops too long to use. Slider zero is
@@ -1368,6 +1405,70 @@ mod tests {
     }
 
     #[test]
+    fn refresh_mode_recaptures_on_each_new_engage() {
+        let mut p = PunchRack::new(48_000.0);
+        p.set_rpt_mode(PunchRptMode::Refresh);
+        let loop_n = rpt_loop_samples(0.1, 120.0, 48_000.0);
+        // First hit freezes a loud sustained tone.
+        let mut a = vec![0.9f32; loop_n];
+        p.process(&mut a, 120.0);
+        p.set_amount(PUNCH_RPT, 0.1);
+        // While stuttering A, the live bus is a soft tone. If RPT writes its
+        // freeze back into `heard`, every later Refresh hit still grabs A.
+        let mut under = vec![0.2f32; loop_n * 8];
+        p.process(&mut under, 120.0);
+        let mean_a = under.iter().map(|s| s.abs()).sum::<f32>() / under.len() as f32;
+        assert!(mean_a > 0.7, "first engage must loop loud A, mean={mean_a}");
+        // Immediate re-arm (pad tap-off / tap-on).
+        p.set_amount(PUNCH_RPT, 0.0);
+        let mut gap = vec![0.2f32; 64];
+        p.process(&mut gap, 120.0);
+        p.set_amount(PUNCH_RPT, 0.1);
+        let mut loop_b = vec![0.0f32; loop_n * 2];
+        p.process(&mut loop_b, 120.0);
+        let mean_b = loop_b.iter().map(|s| s.abs()).sum::<f32>() / loop_b.len() as f32;
+        assert!(
+            mean_b > 0.15 && mean_b < 0.35,
+            "Refresh must re-capture the soft live bus, not keep A, mean={mean_b}"
+        );
+    }
+
+    #[test]
+    fn hold_mode_keeps_the_first_capture_across_releases() {
+        let mut p = PunchRack::new(48_000.0);
+        p.set_rpt_mode(PunchRptMode::Hold);
+        let loop_n = rpt_loop_samples(0.1, 120.0, 48_000.0);
+        let mut a = vec![0.9f32; loop_n];
+        p.process(&mut a, 120.0);
+        p.set_amount(PUNCH_RPT, 0.1);
+        let mut loop_a = vec![0.2f32; loop_n * 2];
+        p.process(&mut loop_a, 120.0);
+        p.set_amount(PUNCH_RPT, 0.0);
+        let mut b = vec![0.2f32; loop_n * 2];
+        p.process(&mut b, 120.0);
+        p.set_amount(PUNCH_RPT, 0.1);
+        let mut loop_held = vec![0.0f32; loop_n * 2];
+        p.process(&mut loop_held, 120.0);
+        let mean = loop_held.iter().map(|s| s.abs()).sum::<f32>() / loop_held.len() as f32;
+        assert!(
+            mean > 0.7,
+            "Hold must keep loud A until CLEAR, mean={mean}"
+        );
+        p.clear();
+        // After CLEAR, prime soft history and engage again.
+        let mut after_clear = vec![0.15f32; loop_n];
+        p.process(&mut after_clear, 120.0);
+        p.set_amount(PUNCH_RPT, 0.1);
+        let mut out = vec![0.15f32; loop_n * 2];
+        p.process(&mut out, 120.0);
+        let mean_clear = out.iter().map(|s| s.abs()).sum::<f32>() / out.len() as f32;
+        assert!(
+            mean_clear > 0.05 && mean_clear < 0.35,
+            "CLEAR must drop the held A so a new capture can take, mean={mean_clear}"
+        );
+    }
+
+    #[test]
     fn grab_with_tape_replays_what_was_heard() {
         let mut p = PunchRack::new(48_000.0);
         p.set_amount(PUNCH_TAPE, 1.0);
@@ -1503,6 +1604,76 @@ mod tests {
         let loud = buf.iter().filter(|s| s.abs() > 0.4).count();
         assert!(silent > 1000, "slicer must close, silent={silent}");
         assert!(loud > 1000, "slicer must open, loud={loud}");
+    }
+
+    #[test]
+    fn slice_period_never_below_thirty_second_note() {
+        let sr = 48_000.0;
+        for &bpm in &[60.0_f32, 100.0, 120.0, 140.0, 180.0, 240.0] {
+            let floor = min_slice_samples(bpm, sr);
+            let want_32 = beat_samples(0.125, bpm, sr);
+            assert_eq!(floor, want_32.max(32), "floor @ {bpm} BPM");
+            for &amount in &[0.0_f32, 0.2, 0.5, 0.75, 1.0] {
+                for mode in PunchGridMode::ALL {
+                    let period = slice_period_samples(amount, bpm, sr, mode);
+                    assert!(
+                        period >= floor,
+                        "amount={amount} mode={mode:?} bpm={bpm}: period {period} < floor {floor}"
+                    );
+                }
+            }
+            // Beat bands map to exact grid lengths.
+            assert_eq!(
+                slice_period_samples(0.1, bpm, sr, PunchGridMode::Beat),
+                beat_samples(1.0, bpm, sr)
+            );
+            assert_eq!(
+                slice_period_samples(0.9, bpm, sr, PunchGridMode::Beat),
+                beat_samples(0.125, bpm, sr)
+            );
+        }
+    }
+
+    #[test]
+    fn slice_with_empty_history_stays_musical_not_buzz() {
+        // HIST off → filled stays 0. Old code clamped the gate to 32 samples.
+        let sr = 48_000.0;
+        let bpm = 120.0;
+        let mut p = PunchRack::new(sr);
+        p.set_history(false);
+        p.set_grid_mode(PunchGridMode::Beat);
+        p.set_amount(PUNCH_SLICE, 1.0); // 1/32
+        let mut buf = vec![0.5f32; 8_000];
+        p.process(&mut buf, bpm);
+
+        // Closed runs (~55% of period) should track 1/32 @ 120 BPM ≈ 1500 samples,
+        // not the old 32-sample buzz (~18-sample closed runs).
+        let period = slice_period_samples(1.0, bpm, sr, PunchGridMode::Beat);
+        assert!(period >= 1400, "1/32 @ 120 must be ~1500 samples, got {period}");
+        let mut closed_runs = Vec::new();
+        let mut run = 0usize;
+        let mut in_silence = buf[0].abs() < 1e-5;
+        for &s in &buf {
+            let silent = s.abs() < 1e-5;
+            if silent == in_silence {
+                run += 1;
+            } else {
+                if in_silence {
+                    closed_runs.push(run);
+                }
+                in_silence = silent;
+                run = 1;
+            }
+        }
+        if in_silence {
+            closed_runs.push(run);
+        }
+        let avg = closed_runs.iter().sum::<usize>() as f32 / closed_runs.len().max(1) as f32;
+        let expect_closed = period as f32 * 0.55;
+        assert!(
+            avg > 400.0,
+            "empty-history SLICE must not buzz: avg closed run {avg} (want ~{expect_closed}), runs={closed_runs:?}"
+        );
     }
 
     #[test]

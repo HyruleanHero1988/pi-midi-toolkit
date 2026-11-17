@@ -68,6 +68,10 @@ pub struct ControllerProfile {
     pub fader_ccs: [u8; 8],
     #[serde(default)]
     pub fader_channel: Option<u8>,
+    /// 0-based MIDI channel for the pad grid (punch / kit). `None` → GM drums
+    /// (channel 10 / index 9). Lab MPK Global→Pad Channel 1 uses `Some(0)`.
+    #[serde(default)]
+    pub pad_channel: Option<u8>,
     /// FX punch pads, left-to-right matching the on-screen grid.
     #[serde(default = "mpk_punch_pad_notes")]
     pub punch_pad_notes: [u8; 8],
@@ -132,6 +136,7 @@ impl ControllerProfile {
             knob_channel: None,
             fader_ccs: [0; 8],
             fader_channel: None,
+            pad_channel: None,
             punch_pad_notes: mpk_punch_pad_notes(),
             phrase_notes: mpk_phrase_notes(),
             transport_notes: Vec::new(),
@@ -140,13 +145,18 @@ impl ControllerProfile {
         }
     }
 
-    /// Akai MPK mini mk3 factory MPC program (Prog Select → Pad 1).
+    /// Akai MPK mini mk3 (Prog Select → Pad 1).
+    ///
+    /// Live lab unit sends Bank A pads on MIDI channel 1 (`pad_channel = 0`),
+    /// not GM drums ch10. Overlay `controllers/mpk-mini.json` if a unit keeps
+    /// factory pad channel 10 (`"pad_channel": 9`).
     pub fn mpk_mini() -> Self {
         Self {
             id: "mpk-mini".into(),
             name_hints: vec!["mpk".into()],
             keybed: true,
             full_vel_default: true,
+            pad_channel: Some(0),
             ..Self::generic()
         }
     }
@@ -179,6 +189,7 @@ impl ControllerProfile {
             knob_channel: None,
             fader_ccs: [20, 21, 22, 23, 24, 25, 26, 27],
             fader_channel: None,
+            pad_channel: Some(9),
             punch_pad_notes: [36, 37, 38, 39, 40, 41, 42, 43],
             phrase_notes: sequential_phrase_notes(),
             transport_notes: vec![76, 80, 81, 82, 83, 84, 85, 86, 87, 91, 92, 93, 94, 95],
@@ -205,6 +216,18 @@ impl ControllerProfile {
 
     pub fn punch_index_for_pad(&self, note: u8) -> Option<usize> {
         self.punch_pad_notes.iter().position(|&n| n == note)
+    }
+
+    /// Resolved pad MIDI channel (0-based). Missing profile field → GM ch10.
+    pub fn pad_channel_index(&self) -> u8 {
+        self.pad_channel.unwrap_or(9)
+    }
+
+    /// True when this note on `channel` is a Bank A punch / kit pad for the
+    /// profile — note match **and** the profile's pad channel. Keybed pitches
+    /// that reuse pad numbers on another channel stay melody.
+    pub fn is_punch_pad(&self, channel: u8, note: u8) -> bool {
+        self.punch_index_for_pad(note).is_some() && channel == self.pad_channel_index()
     }
 
     pub fn note_for_phrase_cell(&self, cell: usize) -> u8 {
@@ -397,6 +420,9 @@ mod tests {
         assert_eq!(p.punch_index_for_pad(40), Some(0));
         assert_eq!(p.punch_index_for_knob(70), Some(0));
         assert_eq!(p.punch_index_for_knob(1), None);
+        assert_eq!(p.pad_channel_index(), 0);
+        assert!(p.is_punch_pad(0, 40));
+        assert!(!p.is_punch_pad(9, 40));
     }
 
     #[test]

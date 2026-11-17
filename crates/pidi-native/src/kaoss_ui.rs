@@ -463,8 +463,9 @@ pub const KAOSS_PROGRAMS: &[KaossProgram] = &[
         curated: true,
     },
     // SPIKE 4 — signature destroy gestures. Ride Punch DSP under the hood
-    // (isolator / slicer) without cloning the Punch rack into PROG.
-    // Appended so older session program indices stay put.
+    // without cloning the Punch rack into PROG. Appended so older session
+    // program indices stay put. (Punch SLICE stays on the punch-link strip —
+    // a dedicated PROG was redundant.)
     KaossProgram {
         id: "scream",
         label: "SCREAM",
@@ -473,12 +474,23 @@ pub const KAOSS_PROGRAMS: &[KaossProgram] = &[
         x_param: Some("isolator"),
         curated: true,
     },
+    // X = tape/motor slowdown; Y = crush/noise. Replaces retired SLICE PROG
+    // at the same index so saved favs / kaoss_program pointing at old SLICE
+    // land on VINYL instead of shifting SCREAM.
     KaossProgram {
-        id: "slice",
-        label: "SLICE",
+        id: "vinyl",
+        label: "VINYL",
         note: false,
-        y_param: "punch_slice",
-        x_param: None,
+        y_param: "punch_crush",
+        x_param: Some("punch_tape"),
+        curated: true,
+    },
+    KaossProgram {
+        id: "drop",
+        label: "DROP",
+        note: false,
+        y_param: "isolator",
+        x_param: Some("punch_drop"),
         curated: true,
     },
 ];
@@ -566,6 +578,8 @@ impl KaossProgram {
         self.drives_param("punch_slice")
             || self.drives_param("punch_crush")
             || self.drives_param("punch_rpt")
+            || self.drives_param("punch_tape")
+            || self.drives_param("punch_drop")
             || self.drives_param("isolator")
     }
 }
@@ -573,7 +587,7 @@ impl KaossProgram {
 /// Default instant PROG slots: playable + destroy pair + a couple staples.
 pub fn default_prog_favs() -> [u16; KAOSS_FAV_SLOTS] {
     let mut out = [KAOSS_FAV_EMPTY; KAOSS_FAV_SLOTS];
-    for (i, id) in ["lead", "filter", "echo", "scream", "slice", "flange"]
+    for (i, id) in ["lead", "filter", "echo", "scream", "vinyl", "flange"]
         .iter()
         .enumerate()
     {
@@ -966,14 +980,23 @@ mod tests {
         assert!(scream.curated && !scream.note && scream.uses_punch_destroy());
         assert_eq!(scream.x_param, Some("isolator"));
         assert_eq!(scream.y_param, "drive");
-        let slice = KAOSS_PROGRAMS.iter().find(|p| p.id == "slice").unwrap();
-        assert!(slice.curated && !slice.note && slice.uses_punch_destroy());
-        assert_eq!(slice.y_param, "punch_slice");
+        let vinyl = KAOSS_PROGRAMS.iter().find(|p| p.id == "vinyl").unwrap();
+        assert!(vinyl.curated && !vinyl.note && vinyl.uses_punch_destroy());
+        assert_eq!(vinyl.x_param, Some("punch_tape"));
+        assert_eq!(vinyl.y_param, "punch_crush");
+        let drop = KAOSS_PROGRAMS.iter().find(|p| p.id == "drop").unwrap();
+        assert!(drop.curated && !drop.note && drop.uses_punch_destroy());
+        assert_eq!(drop.x_param, Some("punch_drop"));
+        assert_eq!(drop.y_param, "isolator");
+        assert!(
+            !KAOSS_PROGRAMS.iter().any(|p| p.id == "slice"),
+            "SLICE PROG retired — use punch-link strip"
+        );
         let favs = default_prog_favs();
         assert_eq!(favs.len(), KAOSS_FAV_SLOTS);
         assert!(favs.iter().all(|&f| f != KAOSS_FAV_EMPTY));
         assert_eq!(program(favs[3] as usize).id, "scream");
-        assert_eq!(program(favs[4] as usize).id, "slice");
+        assert_eq!(program(favs[4] as usize).id, "vinyl");
     }
 
     #[test]

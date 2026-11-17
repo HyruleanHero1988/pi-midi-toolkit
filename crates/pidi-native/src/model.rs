@@ -466,8 +466,8 @@ pub struct NativeModel {
     pub punch_history: bool,
     /// KAOSS↔Punch pairing: linked rack slot sculpted by the pad's right strip.
     /// `None` = off. Product rule: pad = gesture instrument; Punch = rack
-    /// (don't expose the full Punch rack as PROG entries — SCREAM/SLICE are
-    /// the curated destroy exceptions that ride Punch DSP).
+    /// (don't expose the full Punch rack as PROG entries — SCREAM/VINYL/DROP
+    /// are the curated destroy exceptions that ride Punch DSP).
     pub kaoss_punch_link: Option<usize>,
     /// True while the strip finger momentarily armed the linked slot (lift → disarm).
     kaoss_punch_strip_momentary: bool,
@@ -2232,6 +2232,16 @@ impl NativeModel {
             outbox.midi_assign(self.midi_stick_x, self.midi_stick_y, self.midi_aftertouch);
             outbox.channel_map(self.channel_map_bits);
             self.sync_drum_repeat_map(outbox);
+            // Engine process defaults to MODE_KEYS / pads_to_fx=true. Restore the
+            // live page map so FX stays in MODE_PUNCH and PAD FX keeps its flag
+            // after a deploy/restart without leaving the screen.
+            outbox.punch_pads(self.punch_pads_fx);
+            outbox.punch_rpt_mode(self.punch_rpt_mode.as_u8());
+            outbox.punch_grid(self.punch_grid_mode.as_u8());
+            outbox.punch_buffer_prio(self.punch_buffer_prio.as_u8());
+            outbox.punch_dry(self.punch_dry);
+            outbox.punch_history(self.punch_history);
+            self.sync_melody_engine(outbox);
         }
         self.connected = connected;
     }
@@ -7431,8 +7441,8 @@ impl NativeModel {
             return false;
         }
         let kind = notice.kind.to_ascii_lowercase();
-        // Knobs often share the keys channel; pads are channel 10. Only notes
-        // are gated so keyboard pitches cannot arm punch.
+        // Knobs often share the keys channel. Pads arm only on the profile's
+        // pad channel + punch_pad_notes (lab MPK: ch1, not GM ch10).
         let profile = self.profile_for_notice(notice);
         if kind == "control_change" || kind == "cc" {
             let Some(index) = profile.punch_index_for_knob(notice.control.unwrap_or(255)) else {
@@ -7457,28 +7467,28 @@ impl NativeModel {
             self.set_punch_amount_unit(index, unit, outbox);
             return true;
         }
-        if notice.channel != DRUM_CHANNEL || !self.punch_pads_fx {
+        if !self.punch_pads_fx {
+            return false;
+        }
+        let note = notice.note.unwrap_or(255);
+        if !profile.is_punch_pad(notice.channel, note) {
             return false;
         }
         if kind == "note_on" || kind == "noteon" {
             if notice.velocity.unwrap_or(0) == 0 {
-                return profile
-                    .punch_index_for_pad(notice.note.unwrap_or(255))
-                    .is_some();
+                return true;
             }
-            if let Some(index) = profile.punch_index_for_pad(notice.note.unwrap_or(255)) {
+            if let Some(index) = profile.punch_index_for_pad(note) {
                 self.punch_aftertouch_pad = Some(index);
                 self.toggle_punch_arm(index, outbox);
                 return true;
             }
         }
         if kind == "note_off" || kind == "noteoff" {
-            return profile
-                .punch_index_for_pad(notice.note.unwrap_or(255))
-                .is_some();
+            return true;
         }
         if kind == "poly_pressure" || kind == "polypressure" || kind == "polyaftertouch" {
-            let Some(index) = profile.punch_index_for_pad(notice.note.unwrap_or(255)) else {
+            let Some(index) = profile.punch_index_for_pad(note) else {
                 return false;
             };
             self.punch_aftertouch_pad = Some(index);
@@ -7617,7 +7627,10 @@ impl NativeModel {
     }
 
     fn is_punch_destroy_param(name: &str) -> bool {
-        matches!(name, "punch_slice" | "punch_crush" | "punch_rpt")
+        matches!(
+            name,
+            "punch_slice" | "punch_crush" | "punch_rpt" | "punch_tape" | "punch_drop"
+        )
     }
 
     fn punch_destroy_slot(name: &str) -> Option<usize> {
@@ -7625,6 +7638,8 @@ impl NativeModel {
             "punch_slice" => Some(jambox_core::PUNCH_SLICE as usize),
             "punch_crush" => Some(jambox_core::PUNCH_CRUSH as usize),
             "punch_rpt" => Some(jambox_core::PUNCH_RPT as usize),
+            "punch_tape" => Some(jambox_core::PUNCH_TAPE as usize),
+            "punch_drop" => Some(jambox_core::PUNCH_DROP as usize),
             _ => None,
         }
     }
@@ -9430,7 +9445,7 @@ impl NativeModel {
                 self.apply_kaoss_sweep(snap.sweep, outbox);
             }
         }
-        // SPIKE 4 — restore Punch amounts/arms touched by SCREAM/SLICE.
+        // SPIKE 4 — restore Punch amounts/arms touched by destroy PROG gestures.
         if self.kaoss_destroy_punch_mask != 0
             || snap.punch_amount != self.punch_amount
             || snap.punch_armed != self.punch_armed
@@ -14985,7 +15000,8 @@ mod tests {
     ) -> MidiNotice {
         MidiNotice {
             kind: kind.into(),
-            channel: 9,
+            // Default model profile is MPK: lab pad channel is MIDI ch1.
+            channel: midi_core::ControllerProfile::mpk_mini().pad_channel_index(),
             note,
             velocity,
             control,
@@ -15510,7 +15526,15 @@ mod tests {
         model.controller_profile = midi_core::ControllerProfile::smk_37_elite();
         let mut out = Outbox::new();
         model.on_midi_notice(
-            &punch_midi("note_on", Some(36), Some(100), None, None),
+            &MidiNotice {
+                kind: "note_on".into(),
+                channel: model.controller_profile.pad_channel_index(),
+                note: Some(36),
+                velocity: Some(100),
+                control: None,
+                value: None,
+                controller: Some("smk-37-elite".into()),
+            },
             &mut out,
         );
         assert!(
@@ -15560,15 +15584,38 @@ mod tests {
     }
 
     #[test]
-    fn punch_midi_ignores_keyboard_channel() {
+    fn reconnect_while_on_fx_restores_punch_knob_map_and_pads_flag() {
+        let mut model = NativeModel::new();
+        model.connected = false;
+        model.set_mode(UiMode::Fx);
+        model.punch_pads_fx = true;
+        let mut out = Outbox::new();
+        model.note_engine_link(true, &mut out);
+        let batch = out.take();
+        assert!(
+            batch
+                .iter()
+                .any(|r| matches!(r, Request::KnobMap { mode, .. } if mode == "punch")),
+            "reconnect on FX must re-enter MODE_PUNCH, got {batch:?}"
+        );
+        assert!(
+            batch
+                .iter()
+                .any(|r| matches!(r, Request::PunchPads { armed: true, .. })),
+            "reconnect must re-push pads→FX, got {batch:?}"
+        );
+    }
+
+    #[test]
+    fn punch_midi_ignores_non_pad_channel() {
         let mut model = NativeModel::new();
         model.set_mode(UiMode::Fx);
         let mut out = Outbox::new();
-        // Same pad note number on channel 1 (keys) must not arm punch.
+        // Lab MPK pads are ch1; the same note on GM drums ch10 must not arm.
         model.on_midi_notice(
             &MidiNotice {
                 kind: "note_on".into(),
-                channel: 0,
+                channel: 9,
                 note: Some(40),
                 velocity: Some(100),
                 control: None,
@@ -15582,7 +15629,7 @@ mod tests {
             out.take()
                 .iter()
                 .all(|r| !matches!(r, Request::PunchFx { .. })),
-            "keyboard channel must not toggle punch"
+            "non-pad channel must not toggle punch"
         );
         model.on_midi_notice(
             &MidiNotice {
@@ -17534,20 +17581,25 @@ mod tests {
     }
 
     #[test]
-    fn kaoss_destroy_slice_drives_punch_slice() {
+    fn kaoss_destroy_vinyl_drives_tape_and_crush() {
         let mut model = NativeModel::new();
         let mut out = Outbox::new();
         model.set_mode(UiMode::Kaoss);
-        let slice = kaoss_ui::KAOSS_PROGRAMS
+        let vinyl = kaoss_ui::KAOSS_PROGRAMS
             .iter()
-            .position(|p| p.id == "slice")
-            .expect("slice program");
-        model.set_kaoss_program(slice, &mut out);
+            .position(|p| p.id == "vinyl")
+            .expect("vinyl program");
+        model.set_kaoss_program(vinyl, &mut out);
         let pad = model.layout.kaoss;
-        model.finger_down(1, pad.x + pad.w / 2, pad.y + 8, &mut out);
+        // Right-ish + top → tape slowdown + crush.
+        model.finger_down(1, pad.x + (pad.w * 3) / 4, pad.y + 8, &mut out);
         assert!(
-            model.punch_amount[jambox_core::PUNCH_SLICE as usize] > 0.5,
-            "top Y should raise SLICE"
+            model.punch_amount[jambox_core::PUNCH_TAPE as usize] > 0.4,
+            "right X should raise TAPE"
+        );
+        assert!(
+            model.punch_amount[jambox_core::PUNCH_CRUSH as usize] > 0.5,
+            "top Y should raise CRUSH"
         );
         let batch = out.take();
         assert!(
@@ -17556,11 +17608,78 @@ mod tests {
                 Request::PunchFx {
                     slot: s,
                     ..
-                } if *s == jambox_core::PUNCH_SLICE
+                } if *s == jambox_core::PUNCH_TAPE
             )),
-            "expected punch SLICE: {batch:?}"
+            "expected punch TAPE: {batch:?}"
+        );
+        assert!(
+            batch.iter().any(|r| matches!(
+                r,
+                Request::PunchFx {
+                    slot: s,
+                    ..
+                } if *s == jambox_core::PUNCH_CRUSH
+            )),
+            "expected punch CRUSH: {batch:?}"
         );
         model.finger_up(1, &mut out);
+        assert!(
+            model.punch_amount[jambox_core::PUNCH_TAPE as usize] < 0.05
+                || !model.punch_armed[jambox_core::PUNCH_TAPE as usize],
+            "lift should spring Punch tape"
+        );
+    }
+
+    #[test]
+    fn kaoss_destroy_drop_drives_drop_and_isolator() {
+        let mut model = NativeModel::new();
+        let mut out = Outbox::new();
+        model.set_mode(UiMode::Kaoss);
+        let drop = kaoss_ui::KAOSS_PROGRAMS
+            .iter()
+            .position(|p| p.id == "drop")
+            .expect("drop program");
+        model.set_kaoss_program(drop, &mut out);
+        let pad = model.layout.kaoss;
+        // Far right + bottom-ish Y → drop amount + HPF isolator (Y above center).
+        model.finger_down(1, pad.x + (pad.w * 7) / 8, pad.y + pad.h / 8, &mut out);
+        assert!(
+            model.punch_amount[jambox_core::PUNCH_DROP as usize] > 0.5,
+            "right X should raise DROP"
+        );
+        assert!(
+            model.punch_amount[jambox_core::PUNCH_HPF as usize] > 0.2
+                || model.punch_amount[jambox_core::PUNCH_LPF as usize] > 0.2,
+            "Y off-center should engage isolator"
+        );
+        let batch = out.take();
+        assert!(
+            batch.iter().any(|r| matches!(
+                r,
+                Request::PunchFx {
+                    slot: s,
+                    ..
+                } if *s == jambox_core::PUNCH_DROP
+            )),
+            "expected punch DROP: {batch:?}"
+        );
+        model.finger_up(1, &mut out);
+    }
+
+    #[test]
+    fn kaoss_destroy_scream_index_stable_after_slice_retirement() {
+        // SCREAM was appended before SLICE; VINYL takes the old SLICE index so
+        // saved kaoss_program / favs for SCREAM keep working.
+        let scream = kaoss_ui::KAOSS_PROGRAMS
+            .iter()
+            .position(|p| p.id == "scream")
+            .expect("scream");
+        let vinyl = kaoss_ui::KAOSS_PROGRAMS
+            .iter()
+            .position(|p| p.id == "vinyl")
+            .expect("vinyl");
+        assert_eq!(vinyl, scream + 1, "VINYL replaces retired SLICE slot");
+        assert!(!kaoss_ui::KAOSS_PROGRAMS.iter().any(|p| p.id == "slice"));
     }
 
     #[test]

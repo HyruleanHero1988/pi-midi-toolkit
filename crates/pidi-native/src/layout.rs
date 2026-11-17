@@ -2586,13 +2586,35 @@ impl Layout {
     /// Right-edge width (px) of the KAOSS↔Punch sculpt strip when a slot is linked.
     pub const KAOSS_PUNCH_STRIP_W: i32 = 56;
 
+    /// Width reserved for the Punch sculpt strip (same as the live hit strip).
+    pub fn kaoss_punch_strip_w(&self) -> i32 {
+        Self::KAOSS_PUNCH_STRIP_W.min(self.kaoss.w.max(1) / 4)
+    }
+
     /// Right strip of the Kaoss pad used to modulate a linked Punch rack slot.
     pub fn kaoss_punch_strip(&self) -> Rect {
-        let w = Self::KAOSS_PUNCH_STRIP_W.min(self.kaoss.w.max(1) / 4);
+        let w = self.kaoss_punch_strip_w();
         Rect {
             x: self.kaoss.x + self.kaoss.w - w,
             y: self.kaoss.y,
             w,
+            h: self.kaoss.h,
+        }
+    }
+
+    /// Pad area for HUD overlays (note readout, etc.). Always insets the Punch
+    /// strip width so content never sits under the right-edge rack strip when
+    /// linked — hit-testing for the strip stays on the full pad edge.
+    pub fn kaoss_overlay_rect(&self, punch_linked: bool) -> Rect {
+        let inset = if punch_linked {
+            self.kaoss_punch_strip_w()
+        } else {
+            0
+        };
+        Rect {
+            x: self.kaoss.x,
+            y: self.kaoss.y,
+            w: (self.kaoss.w - inset).max(0),
             h: self.kaoss.h,
         }
     }
@@ -5036,6 +5058,20 @@ mod tests {
         };
         assert!(x < 0.1);
         assert!(y < 0.1);
+    }
+
+    #[test]
+    fn kaoss_overlay_insets_punch_strip_when_linked() {
+        let layout = Layout::new();
+        let full = layout.kaoss_overlay_rect(false);
+        let inset = layout.kaoss_overlay_rect(true);
+        let strip = layout.kaoss_punch_strip();
+        assert_eq!(full, layout.kaoss);
+        assert_eq!(inset.w, layout.kaoss.w - strip.w);
+        assert_eq!(strip.w, Layout::KAOSS_PUNCH_STRIP_W);
+        assert_eq!(inset.x + inset.w, strip.x);
+        // Strip hit area stays on the full pad edge.
+        assert!(layout.in_kaoss_punch_strip(strip.x + 2, strip.y + 2));
     }
 
     #[test]

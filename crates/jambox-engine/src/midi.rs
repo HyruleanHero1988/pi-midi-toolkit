@@ -365,18 +365,21 @@ impl MidiMap {
                 if profile.is_transport_note(note) {
                     return None;
                 }
-                // Pads→FX only steals the drum-channel pad notes. Keybed pitches
-                // that share those note numbers (e.g. C2–G2 = 36–43) must still
-                // sound on the FX page.
-                if channel == DRUM_CHANNEL
-                    && self.mode.load(Ordering::Relaxed) == MODE_PUNCH
+                // Remember pad hits on the profile pad channel (lab MPK: ch1)
+                // before Pads→FX may steal them for the UI.
+                if channel == profile.pad_channel_index() {
+                    self.remember_drum_note(note);
+                }
+                // Pads→FX steals only the profile's pad channel + pad notes.
+                // Keybed pitches that reuse those numbers on another channel
+                // (classic MPK: pads ch10, keys ch1) still sound on FX.
+                if self.mode.load(Ordering::Relaxed) == MODE_PUNCH
                     && self.pads_to_fx()
-                    && profile.punch_index_for_pad(note).is_some()
+                    && profile.is_punch_pad(channel, note)
                 {
                     return None;
                 }
                 if channel == DRUM_CHANNEL {
-                    self.remember_drum_note(note);
                     if let Some(command) = self.interpret_drum_repeat(note, velocity, true) {
                         return Some(command);
                     }
@@ -391,10 +394,9 @@ impl MidiMap {
                 if profile.is_transport_note(note) {
                     return None;
                 }
-                if channel == DRUM_CHANNEL
-                    && self.mode.load(Ordering::Relaxed) == MODE_PUNCH
+                if self.mode.load(Ordering::Relaxed) == MODE_PUNCH
                     && self.pads_to_fx()
-                    && profile.punch_index_for_pad(note).is_some()
+                    && profile.is_punch_pad(channel, note)
                 {
                     return None;
                 }
@@ -441,10 +443,9 @@ impl MidiMap {
             if profile.is_transport_note(note) {
                 return None;
             }
-            if channel == DRUM_CHANNEL
-                && self.mode.load(Ordering::Relaxed) == MODE_PUNCH
+            if self.mode.load(Ordering::Relaxed) == MODE_PUNCH
                 && self.pads_to_fx()
-                && profile.punch_index_for_pad(note).is_some()
+                && profile.is_punch_pad(channel, note)
             {
                 return None;
             }
@@ -2068,77 +2069,110 @@ mod tests {
     fn punch_mode_eats_mpk_pads_and_knobs() {
         let map = MidiMap::default();
         map.set_punch();
+        let profile = ControllerProfile::mpk_mini();
+        let pad_ch = profile.pad_channel_index();
         assert!(map
-            .interpret(MidiEvent::NoteOn {
-                channel: 9,
-                note: 40,
-                velocity: 100,
-            })
+            .interpret_with(
+                &profile,
+                MidiEvent::NoteOn {
+                    channel: pad_ch,
+                    note: 40,
+                    velocity: 100,
+                }
+            )
             .is_none());
         assert!(map
-            .interpret(MidiEvent::ControlChange {
-                channel: 0,
-                controller: 70,
-                value: 64,
-            })
+            .interpret_with(
+                &profile,
+                MidiEvent::ControlChange {
+                    channel: 0,
+                    controller: 70,
+                    value: 64,
+                }
+            )
             .is_none());
         assert!(map
-            .interpret(MidiEvent::NoteOn {
-                channel: 0,
-                note: 60,
-                velocity: 100,
-            })
+            .interpret_with(
+                &profile,
+                MidiEvent::NoteOn {
+                    channel: 0,
+                    note: 60,
+                    velocity: 100,
+                }
+            )
             .is_some());
     }
 
     #[test]
-    fn punch_mode_keeps_keybed_notes_that_overlap_pad_numbers() {
-        // MPK punch pads are MIDI 36–43 on ch10. Without a channel gate those
-        // same pitches on the keybed went silent on the FX page.
+    fn punch_mode_only_steals_profile_pad_channel() {
+        // Lab MPK: pads on ch1 (index 0). Factory-style pads on ch10 must not
+        // silence keybed pitches that share pad note numbers on another channel.
         let map = MidiMap::default();
         map.set_punch();
         assert!(map.pads_to_fx());
-        let profile = ControllerProfile::mpk_mini();
+        let mpk = ControllerProfile::mpk_mini();
+        assert_eq!(mpk.pad_channel_index(), 0);
         for note in 36u8..=43 {
+            assert!(mpk.is_punch_pad(0, note));
+            assert!(!mpk.is_punch_pad(9, note));
             assert!(
-                profile.punch_index_for_pad(note).is_some(),
-                "fixture expects pad note {note}"
+                map.interpret_with(
+                    &mpk,
+                    MidiEvent::NoteOn {
+                        channel: 0,
+                        note,
+                        velocity: 100,
+                    }
+                )
+                .is_none(),
+                "MPK pad channel note {note} arms FX"
             );
             assert_eq!(
-                map.interpret(MidiEvent::NoteOn {
-                    channel: 0,
-                    note,
-                    velocity: 100,
-                }),
+                map.interpret_with(
+                    &mpk,
+                    MidiEvent::NoteOn {
+                        channel: 9,
+                        note,
+                        velocity: 100,
+                    }
+                ),
                 Some(Command::NoteOn {
-                    channel: 0,
+                    channel: 9,
                     note,
                     velocity: 100
                 }),
-                "FX page must still play keybed MIDI {note}"
-            );
-            assert_eq!(
-                map.interpret(MidiEvent::NoteOff {
-                    channel: 0,
-                    note,
-                    velocity: 0,
-                }),
-                Some(Command::NoteOff {
-                    channel: 0,
-                    note
-                }),
-                "FX page must release keybed MIDI {note}"
-            );
-            assert!(
-                map.interpret(MidiEvent::NoteOn {
-                    channel: 9,
-                    note,
-                    velocity: 100,
-                })
-                .is_none(),
-                "drum-channel pad {note} still belongs to FX"
+                "non-pad-channel MIDI {note} must still sound"
             );
         }
+        // SMK (and factory ch10 maps): pads on drums channel; keys ch1 keep 36–43.
+        let smk = ControllerProfile::smk_37_elite();
+        assert_eq!(smk.pad_channel_index(), 9);
+        assert_eq!(
+            map.interpret_with(
+                &smk,
+                MidiEvent::NoteOn {
+                    channel: 0,
+                    note: 40,
+                    velocity: 100,
+                }
+            ),
+            Some(Command::NoteOn {
+                channel: 0,
+                note: 40,
+                velocity: 100
+            }),
+            "keybed must keep pad-number pitches when pads live on ch10"
+        );
+        assert!(map
+            .interpret_with(
+                &smk,
+                MidiEvent::NoteOn {
+                    channel: 9,
+                    note: 40,
+                    velocity: 100,
+                }
+            )
+            .is_none());
     }
 
     #[test]

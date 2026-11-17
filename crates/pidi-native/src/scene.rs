@@ -1245,7 +1245,12 @@ fn draw_kaoss(scene: &mut Scene, model: &NativeModel) {
             }
         }
         draw_kaoss_axes(scene, layout.kaoss, model);
-        draw_kaoss_note_readout(scene, layout.kaoss, model);
+        // Note HUD uses overlay rect so it clears the Punch strip (56px).
+        draw_kaoss_note_readout(
+            scene,
+            layout.kaoss_overlay_rect(model.kaoss_punch_link.is_some()),
+            model,
+        );
         // Punch link strip: rack lives on the right edge, not in PROG.
         if let Some(index) = model.kaoss_punch_link {
             let strip = layout.kaoss_punch_strip();
@@ -1782,6 +1787,8 @@ fn draw_kaoss_axes(scene: &mut Scene, pad: crate::layout::Rect, model: &NativeMo
             "punch_slice" => "Y SLICE",
             "punch_crush" => "Y CRUSH",
             "punch_rpt" => "Y RPT",
+            "punch_tape" => "Y TAPE",
+            "punch_drop" => "Y DROP",
             "isolator" => "Y ISOL",
             "sweep" => {
                 if prog.x_param == Some("sweep") {
@@ -1811,6 +1818,8 @@ fn draw_kaoss_axes(scene: &mut Scene, pad: crate::layout::Rect, model: &NativeMo
                 Some("punch_slice") => "X SLICE",
                 Some("punch_crush") => "X CRUSH",
                 Some("punch_rpt") => "X RPT",
+                Some("punch_tape") => "X TAPE",
+                Some("punch_drop") => "X DROP",
                 _ => "X",
             }
         };
@@ -1896,12 +1905,14 @@ fn draw_kaoss_grid(
 }
 
 /// Fixed note HUD (chord-mode style) — never sits under the finger.
+/// `pad` should be [`Layout::kaoss_overlay_rect`] so a linked Punch strip
+/// (56px) does not cover the readout.
 fn draw_kaoss_note_readout(scene: &mut Scene, pad: crate::layout::Rect, model: &NativeModel) {
     let Some(fx) = model.kaoss_sounding_x() else {
         return;
     };
     let label = kaoss_ui::midi_note_label(model.kaoss_note_at(fx));
-    // Top-right of the pad: clear of Y-axis labels (left) and typical play area.
+    // Top-right of the overlay pad: clear of Y-axis labels (left) and strip.
     let w = 104;
     let h = 40;
     let r = Rect {

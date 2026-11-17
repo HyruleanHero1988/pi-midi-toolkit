@@ -175,7 +175,8 @@ pub fn program_hue(program_id: &str) -> f32 {
         "bend" => 0.42,
         "sweep" => 0.48,
         "scream" => 0.02,
-        "slice" => 0.88,
+        "vinyl" => 0.12,
+        "drop" => 0.92,
         _ => 0.93,
     }
 }
