@@ -89,6 +89,11 @@ pub struct MidiMap {
     repeat_latch: AtomicBool,
     hw_latched: [AtomicBool; DRUM_MODEL_COUNT],
     hw_note: [AtomicU8; DRUM_MODEL_COUNT],
+    /// Last drum-channel pad note (36..51). Drums-mode knobs, stick, and
+    /// channel-pressure drum destinations write that voice only — never the
+    /// whole kit — so raising snare LEVEL cannot stamp kick/clap/etc.
+    /// `0xff` = no pad has spoken yet this session.
+    last_drum_note: AtomicU8,
     /// Last absolute 0..=10000 for relative encoders (knobs 0..7, bank2 8..15).
     cc_last: [AtomicU16; 16],
 }
@@ -112,6 +117,7 @@ impl Default for MidiMap {
             repeat_latch: AtomicBool::new(false),
             hw_latched: std::array::from_fn(|_| AtomicBool::new(false)),
             hw_note: std::array::from_fn(|_| AtomicU8::new(0)),
+            last_drum_note: AtomicU8::new(0xff),
             cc_last: std::array::from_fn(|_| AtomicU16::new(0)),
         }
     }
@@ -159,8 +165,8 @@ impl MidiMap {
         )
     }
 
-    /// Scale mode: move keybed notes onto the scale. Drum channel and the
-    /// controller's transport notes pass through untouched.
+    /// Scale mode: remap keybed notes onto unique scale degrees. Drum channel
+    /// and the controller's transport notes pass through untouched.
     pub fn apply_scale(&self, event: MidiEvent, profile: &ControllerProfile) -> MidiEvent {
         let (on, root, mask) = self.scale_lock();
         let lookup = |channel: u8, note: u8| (channel as usize & 0x0f) * 128 + (note as usize & 0x7f);
@@ -214,6 +220,19 @@ impl MidiMap {
 
     pub fn set_pads_to_fx(&self, armed: bool) {
         self.pads_to_fx.store(armed, Ordering::Relaxed);
+    }
+
+    fn remember_drum_note(&self, note: u8) {
+        self.last_drum_note.store(note, Ordering::Relaxed);
+    }
+
+    fn last_drum_note(&self) -> Option<u8> {
+        let note = self.last_drum_note.load(Ordering::Relaxed);
+        if note == 0xff {
+            None
+        } else {
+            Some(note)
+        }
     }
 
     fn pads_to_fx(&self) -> bool {
@@ -346,9 +365,17 @@ impl MidiMap {
                 if profile.is_transport_note(note) {
                     return None;
                 }
+                // Remember pad hits on the profile pad channel (lab MPK: ch1)
+                // before Pads→FX may steal them for the UI.
+                if channel == profile.pad_channel_index() {
+                    self.remember_drum_note(note);
+                }
+                // Pads→FX steals only the profile's pad channel + pad notes.
+                // Keybed pitches that reuse those numbers on another channel
+                // (classic MPK: pads ch10, keys ch1) still sound on FX.
                 if self.mode.load(Ordering::Relaxed) == MODE_PUNCH
                     && self.pads_to_fx()
-                    && profile.punch_index_for_pad(note).is_some()
+                    && profile.is_punch_pad(channel, note)
                 {
                     return None;
                 }
@@ -369,7 +396,7 @@ impl MidiMap {
                 }
                 if self.mode.load(Ordering::Relaxed) == MODE_PUNCH
                     && self.pads_to_fx()
-                    && profile.punch_index_for_pad(note).is_some()
+                    && profile.is_punch_pad(channel, note)
                 {
                     return None;
                 }
@@ -382,7 +409,9 @@ impl MidiMap {
                 let dest = self.dest_for(MidiSource::StickX);
                 let unit = (value as f32 / 16_383.0).clamp(0.0, 1.0);
                 let semis = ((value as f32) - 8192.0) / 8192.0 * 2.0;
-                dest_command(dest, unit, Some(semis), None)
+                // Drum destinations follow the last pad so stick X cannot
+                // rewrite every voice's pitch/level at once.
+                dest_command(dest, unit, Some(semis), self.last_drum_note())
             }
             MidiEvent::ControlChange {
                 channel,
@@ -395,7 +424,10 @@ impl MidiMap {
                 pressure,
             } => self.interpret_aftertouch(profile, Some((channel, note)), pressure),
             MidiEvent::ChannelPressure { pressure, .. } => {
-                self.interpret_aftertouch(profile, None, pressure)
+                // No note on the wire — aim at the last pad so a hard hit
+                // cannot raise every drum's stored LEVEL/TONE together.
+                let pad = self.last_drum_note().map(|note| (DRUM_CHANNEL, note));
+                self.interpret_aftertouch(profile, pad, pressure)
             }
             _ => None,
         }
@@ -413,7 +445,7 @@ impl MidiMap {
             }
             if self.mode.load(Ordering::Relaxed) == MODE_PUNCH
                 && self.pads_to_fx()
-                && profile.punch_index_for_pad(note).is_some()
+                && profile.is_punch_pad(channel, note)
             {
                 return None;
             }
@@ -463,7 +495,12 @@ impl MidiMap {
     ) -> Option<Command> {
         if controller == CC_MOD {
             let unit = (value as f32 / 127.0).clamp(0.0, 1.0);
-            return dest_command(self.dest_for(MidiSource::StickY), unit, None, None);
+            return dest_command(
+                self.dest_for(MidiSource::StickY),
+                unit,
+                None,
+                self.last_drum_note(),
+            );
         }
         if controller == 64
             && profile.fader_index(64).is_none()
@@ -518,6 +555,9 @@ impl MidiMap {
             });
         }
         if mode == MODE_DRUMS {
+            // K1–K4 reshape the last-hit pad only. Kit-wide SetSynth used to
+            // make "play loud snare → every drum got louder" when a knob or
+            // residual CC landed after a pad hit. K8 stays the shared kit bus.
             let param = match knob {
                 0 => SynthParam::DrumPitch,
                 1 => SynthParam::DrumTone,
@@ -531,7 +571,7 @@ impl MidiMap {
                 }
                 _ => return None,
             };
-            return Some(Command::SetSynth { param, value: unit });
+            return drum_express(param, unit, self.last_drum_note());
         }
         if mode == MODE_FM {
             let param = match knob {
@@ -629,10 +669,9 @@ fn dest_command(
                     amount: unit,
                 })
             } else {
-                Some(Command::SetSynth {
-                    param: SynthParam::DrumTone,
-                    value: unit,
-                })
+                // No pad context: refuse kit-wide tone stomps. ALL DRUMS still
+                // reaches the engine through the UI SetSynth path.
+                None
             }
         }
         MidiDest::DrumPitch => drum_express(SynthParam::DrumPitch, unit, drum_note),
@@ -643,15 +682,14 @@ fn dest_command(
 }
 
 fn drum_express(param: SynthParam, unit: f32, drum_note: Option<u8>) -> Option<Command> {
-    if let Some(note) = drum_note {
-        Some(Command::SetDrumMacro {
-            model: drum_model_for_note(note).index() as u8,
-            param,
-            value: unit,
-        })
-    } else {
-        Some(Command::SetSynth { param, value: unit })
-    }
+    // Never fall back to kit-wide SetSynth: that is what made one pad's LEVEL
+    // appear to raise the whole kit. Hit a pad first (or use ALL DRUMS on UI).
+    let note = drum_note?;
+    Some(Command::SetDrumMacro {
+        model: drum_model_for_note(note).index() as u8,
+        param,
+        value: unit,
+    })
 }
 
 fn bank2_fx_command(index: usize, unit: f32) -> Option<Command> {
@@ -703,27 +741,42 @@ fn mix_fader_command(index: usize, unit: f32) -> Option<Command> {
     }
 }
 
-/// Nearest note whose pitch class is in `mask` (bit i = `root + i`).
-/// Ties go down. An empty mask leaves the note alone.
+/// Remap a chromatic MIDI note onto the scale in `mask` (bit i = `root + i`).
+///
+/// Each successive physical key walks the next scale degree, so adjacent keys
+/// never share a pitch when the scale has fewer than 12 tones. Root keys
+/// (`note % 12 == root`) keep their octave (C4 stays C4 in C major). An empty
+/// or chromatic mask leaves the note alone.
+///
+/// Nearest-pitch snapping is intentionally *not* used: it maps several
+/// chromatics onto one degree (C and C♯ → C), which sounded like duplicate
+/// notes in a row on the keybed.
 pub fn snap_to_scale(note: u8, root: u8, mask: u16) -> u8 {
     let mask = mask & 0x0fff;
-    if mask == 0 {
+    if mask == 0 || mask == 0x0fff {
         return note;
     }
-    let in_scale = |n: i16| {
-        let rel = (n - root as i16).rem_euclid(12);
-        mask & (1 << rel) != 0
-    };
-    let n = note as i16;
-    for d in 0..12i16 {
-        if n - d >= 0 && in_scale(n - d) {
-            return (n - d) as u8;
-        }
-        if n + d <= 127 && in_scale(n + d) {
-            return (n + d) as u8;
+    let mut deg = [0u8; 12];
+    let mut n_deg = 0usize;
+    for i in 0..12u8 {
+        if mask & (1 << i) != 0 {
+            deg[n_deg] = i;
+            n_deg += 1;
         }
     }
-    note
+    if n_deg == 0 || n_deg == 12 {
+        return note;
+    }
+    let root = (root % 12) as i32;
+    let rel = note as i32 - root;
+    let kb_oct = rel.div_euclid(12);
+    let local = rel.rem_euclid(12);
+    let global_idx = kb_oct * n_deg as i32 + local;
+    let n = n_deg as i32;
+    let oct = global_idx.div_euclid(n);
+    let di = global_idx.rem_euclid(n) as usize;
+    let out = root + deg[di] as i32 + 12 * oct;
+    out.clamp(0, 127) as u8
 }
 
 /// Push a MIDI event into DSP and to every UI client except `origin`
@@ -1229,17 +1282,58 @@ mod tests {
     }
 
     #[test]
-    fn snap_to_scale_picks_nearest_and_ties_down() {
+    fn snap_to_scale_walks_unique_degrees() {
         let major = jambox_protocol::default_scale_mask();
-        assert_eq!(snap_to_scale(60, 0, major), 60);
-        assert_eq!(snap_to_scale(61, 0, major), 60); // C# → C (tie, down)
-        assert_eq!(snap_to_scale(66, 0, major), 65); // F# → F
+        // C major from C4: successive keys climb the scale (no C♯→C duplicate).
+        assert_eq!(snap_to_scale(60, 0, major), 60); // C4
+        assert_eq!(snap_to_scale(61, 0, major), 62); // → D4
+        assert_eq!(snap_to_scale(62, 0, major), 64); // → E4
+        assert_eq!(snap_to_scale(66, 0, major), 71); // → B4
+        assert_eq!(snap_to_scale(67, 0, major), 72); // → C5
         // A minor pentatonic (A C D E G) rooted at A.
         let pent: u16 = 1 | 1 << 3 | 1 << 5 | 1 << 7 | 1 << 10;
-        assert_eq!(snap_to_scale(59, 9, pent), 60); // B → C
-        assert_eq!(snap_to_scale(65, 9, pent), 64); // F → E (tie, down)
+        assert_eq!(snap_to_scale(57, 9, pent), 57); // A3
+        assert_eq!(snap_to_scale(58, 9, pent), 60); // → C4
         assert_eq!(snap_to_scale(61, 0, 0), 61);
+        assert_eq!(snap_to_scale(61, 0, 0x0fff), 61);
         assert_eq!(snap_to_scale(127, 0, major), 127);
+    }
+
+    #[test]
+    fn snap_to_scale_adjacent_keys_are_distinct_for_common_scales() {
+        let ids = [
+            "ionian",
+            "dorian",
+            "aeolian",
+            "major_pent",
+            "minor_pent",
+            "blues",
+            "whole",
+            "harmonic",
+            "ryukyu",
+        ];
+        for id in ids {
+            let scale = jambox_core::kaoss_scale(jambox_core::kaoss_scale_index_by_id(id) as usize);
+            let mask = scale
+                .degrees
+                .iter()
+                .fold(0u16, |m, d| m | 1 << (d % 12));
+            assert!(mask != 0 && mask != 0x0fff, "{id} should be a proper subset");
+            for root in 0..12u8 {
+                let mut prev = None;
+                // Stay clear of MIDI 0/127 clamp saturation at the extremes.
+                for note in 24u8..=100 {
+                    let mapped = snap_to_scale(note, root, mask);
+                    if let Some(p) = prev {
+                        assert_ne!(
+                            mapped, p,
+                            "{id} root={root}: MIDI {note} mapped to {mapped}, same as previous key"
+                        );
+                    }
+                    prev = Some(mapped);
+                }
+            }
+        }
     }
 
     #[test]
@@ -1251,13 +1345,14 @@ mod tests {
         map.set_scale_lock(true, 0, jambox_protocol::default_scale_mask());
         assert_eq!(
             map.apply_scale(on, &profile),
-            MidiEvent::NoteOn { channel: 0, note: 60, velocity: 100 }
+            MidiEvent::NoteOn { channel: 0, note: 62, velocity: 100 },
+            "C♯4 walks to D4 in C major"
         );
-        // Scale changes while held: the note-off still releases C.
+        // Scale changes while held: the note-off still releases what note-on played.
         map.set_scale_lock(true, 1, 0b1);
         assert_eq!(
             map.apply_scale(MidiEvent::NoteOff { channel: 0, note: 61, velocity: 0 }, &profile),
-            MidiEvent::NoteOff { channel: 0, note: 60, velocity: 0 }
+            MidiEvent::NoteOff { channel: 0, note: 62, velocity: 0 }
         );
         // Drum pads pass through.
         let pad = MidiEvent::NoteOn { channel: 9, note: 37, velocity: 100 };
@@ -1394,21 +1489,18 @@ mod tests {
                 pressure: 127,
             }),
             Some(Command::SetDrumAftertouch {
-                model: 1,
+                model: drum_model_for_note(37).index() as u8,
                 amount: 1.0,
             })
         );
-        assert_eq!(
+        assert!(
             map.interpret(MidiEvent::PolyPressure {
                 channel: 0,
                 note: 60,
                 pressure: 90,
-            }),
-            Some(Command::SetSynth {
-                param: SynthParam::DrumTone,
-                value: 90.0 / 127.0
-            }),
-            "key aftertouch uses the same dest globally, not a pad overlay"
+            })
+            .is_none(),
+            "key aftertouch must not kit-wide stomp drum macros without a pad"
         );
     }
 
@@ -1845,6 +1937,27 @@ mod tests {
     fn drum_mode_rebinds_the_same_ccs() {
         let map = MidiMap::default();
         map.set_drums();
+        assert!(
+            map.interpret(MidiEvent::ControlChange {
+                channel: 0,
+                controller: CC_MORPH,
+                value: 64,
+            })
+            .is_none(),
+            "drums-mode knobs stay quiet until a pad names the target voice"
+        );
+        assert_eq!(
+            map.interpret(MidiEvent::NoteOn {
+                channel: 9,
+                note: 45,
+                velocity: 100,
+            }),
+            Some(Command::NoteOn {
+                channel: 9,
+                note: 45,
+                velocity: 100
+            })
+        );
         let command = map
             .interpret(MidiEvent::ControlChange {
                 channel: 0,
@@ -1853,12 +1966,68 @@ mod tests {
             })
             .unwrap();
         match command {
-            Command::SetSynth {
+            Command::SetDrumMacro {
+                model,
                 param: SynthParam::DrumPitch,
                 value,
-            } => assert!((value - 64.0 / 127.0).abs() < 0.001),
+            } => {
+                assert_eq!(model, drum_model_for_note(45).index() as u8);
+                assert!((value - 64.0 / 127.0).abs() < 0.001);
+            }
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn drum_level_expression_hits_only_the_last_pad() {
+        let map = MidiMap::default();
+        map.set_assigns(None, Some("drum_level"), Some("drum_level"));
+        assert!(
+            map.interpret(MidiEvent::ChannelPressure {
+                channel: 9,
+                pressure: 100,
+            })
+            .is_none(),
+            "channel pressure with no prior pad must not raise the whole kit"
+        );
+        assert!(map
+            .interpret(MidiEvent::NoteOn {
+                channel: 9,
+                note: 45,
+                velocity: 110,
+            })
+            .is_some());
+        assert_eq!(
+            map.interpret(MidiEvent::ChannelPressure {
+                channel: 9,
+                pressure: 100,
+            }),
+            Some(Command::SetDrumMacro {
+                model: drum_model_for_note(45).index() as u8,
+                param: SynthParam::DrumAmp,
+                value: 100.0 / 127.0,
+            })
+        );
+        assert!(map
+            .interpret(MidiEvent::NoteOn {
+                channel: 9,
+                note: 36,
+                velocity: 40,
+            })
+            .is_some());
+        assert_eq!(
+            map.interpret(MidiEvent::ControlChange {
+                channel: 0,
+                controller: CC_MOD,
+                value: 20,
+            }),
+            Some(Command::SetDrumMacro {
+                model: 0,
+                param: SynthParam::DrumAmp,
+                value: 20.0 / 127.0,
+            }),
+            "stick Y drum-level follows the last pad (kick), not the whole kit"
+        );
     }
 
     #[test]
@@ -1900,27 +2069,110 @@ mod tests {
     fn punch_mode_eats_mpk_pads_and_knobs() {
         let map = MidiMap::default();
         map.set_punch();
+        let profile = ControllerProfile::mpk_mini();
+        let pad_ch = profile.pad_channel_index();
         assert!(map
-            .interpret(MidiEvent::NoteOn {
-                channel: 9,
-                note: 40,
-                velocity: 100,
-            })
+            .interpret_with(
+                &profile,
+                MidiEvent::NoteOn {
+                    channel: pad_ch,
+                    note: 40,
+                    velocity: 100,
+                }
+            )
             .is_none());
         assert!(map
-            .interpret(MidiEvent::ControlChange {
-                channel: 0,
-                controller: 70,
-                value: 64,
-            })
+            .interpret_with(
+                &profile,
+                MidiEvent::ControlChange {
+                    channel: 0,
+                    controller: 70,
+                    value: 64,
+                }
+            )
             .is_none());
         assert!(map
-            .interpret(MidiEvent::NoteOn {
-                channel: 0,
-                note: 60,
-                velocity: 100,
-            })
+            .interpret_with(
+                &profile,
+                MidiEvent::NoteOn {
+                    channel: 0,
+                    note: 60,
+                    velocity: 100,
+                }
+            )
             .is_some());
+    }
+
+    #[test]
+    fn punch_mode_only_steals_profile_pad_channel() {
+        // Lab MPK: pads on ch1 (index 0). Factory-style pads on ch10 must not
+        // silence keybed pitches that share pad note numbers on another channel.
+        let map = MidiMap::default();
+        map.set_punch();
+        assert!(map.pads_to_fx());
+        let mpk = ControllerProfile::mpk_mini();
+        assert_eq!(mpk.pad_channel_index(), 0);
+        for note in 36u8..=43 {
+            assert!(mpk.is_punch_pad(0, note));
+            assert!(!mpk.is_punch_pad(9, note));
+            assert!(
+                map.interpret_with(
+                    &mpk,
+                    MidiEvent::NoteOn {
+                        channel: 0,
+                        note,
+                        velocity: 100,
+                    }
+                )
+                .is_none(),
+                "MPK pad channel note {note} arms FX"
+            );
+            assert_eq!(
+                map.interpret_with(
+                    &mpk,
+                    MidiEvent::NoteOn {
+                        channel: 9,
+                        note,
+                        velocity: 100,
+                    }
+                ),
+                Some(Command::NoteOn {
+                    channel: 9,
+                    note,
+                    velocity: 100
+                }),
+                "non-pad-channel MIDI {note} must still sound"
+            );
+        }
+        // SMK (and factory ch10 maps): pads on drums channel; keys ch1 keep 36–43.
+        let smk = ControllerProfile::smk_37_elite();
+        assert_eq!(smk.pad_channel_index(), 9);
+        assert_eq!(
+            map.interpret_with(
+                &smk,
+                MidiEvent::NoteOn {
+                    channel: 0,
+                    note: 40,
+                    velocity: 100,
+                }
+            ),
+            Some(Command::NoteOn {
+                channel: 0,
+                note: 40,
+                velocity: 100
+            }),
+            "keybed must keep pad-number pitches when pads live on ch10"
+        );
+        assert!(map
+            .interpret_with(
+                &smk,
+                MidiEvent::NoteOn {
+                    channel: 9,
+                    note: 40,
+                    velocity: 100,
+                }
+            )
+            .is_none());
     }
 
     #[test]

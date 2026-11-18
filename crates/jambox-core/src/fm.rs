@@ -641,6 +641,8 @@ impl FmSynth {
             release_drift_semis: 0.0,
             bend_slew_dt: 0.0,
             attack_sec: 0.0,
+            decay_sec: 0.0,
+            sustain_level: 1.0,
             release_sec: 0.0,
             live_gain: 1.0,
             clip_gains: [1.0; MAX_CLIPS],
@@ -802,7 +804,10 @@ impl FmSynth {
                         sample_rate,
                     );
                 }
-                let out = mix * VOICE_AMP * if v.recorded { 1.0 } else { ctx.live_gain };
+                let out = mix
+                    * VOICE_AMP
+                    * crate::mix::note_presence(v.note)
+                    * if v.recorded { 1.0 } else { ctx.live_gain };
                 if stereo {
                     *sample += out * gl;
                     live_r[idx] += out * gr;
@@ -1026,6 +1031,8 @@ mod tests {
             release_drift_semis: 0.0,
             bend_slew_dt: 0.0,
             attack_sec: 0.0,
+            decay_sec: 0.0,
+            sustain_level: 1.0,
             release_sec: 0.0,
             live_gain: 1.0,
             clip_gains: [1.0; MAX_CLIPS],

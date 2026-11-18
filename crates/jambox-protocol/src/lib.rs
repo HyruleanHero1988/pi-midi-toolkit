@@ -112,6 +112,10 @@ pub enum Request {
     PunchHistory {
         enabled: bool,
     },
+    /// Mix pre-punch (dry) audio alongside the wet FX chain.
+    PunchDry {
+        enabled: bool,
+    },
     /// Copy capture to the headphones with no synth, punch, or bus FX.
     InputBypass {
         enabled: bool,

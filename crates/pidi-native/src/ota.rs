@@ -1,8 +1,9 @@
 //! In-process SET→UPDATE: GitHub CHECK/INSTALL with no Python helper.
 //!
 //! Overlay only [`PIDI_REPO_ROOT`]. User data stays under [`crate::paths::data_root`].
-//! Live `bin/` is not copied from the archive; staged `dist/armv7` engines are
-//! installed with an atomic rename. The kiosk process is never stopped.
+//! Live `bin/` is not copied from the archive; staged engines under
+//! `dist/armv7` or `dist/aarch64` (chosen by device arch) are installed with
+//! an atomic rename. The kiosk process is never stopped.
 
 use std::fs::{self, File};
 use std::io;
@@ -25,6 +26,30 @@ const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(180);
 
 const ENGINE_BINS: &[&str] = &["midi-engine", "jambox-engine", "pidi-native"];
 const STOPPABLE_UNITS: &[&str] = &["jambox-engine", "midi-engine"];
+
+/// Stage directory name under `dist/` for this device (`armv7` or `aarch64`).
+///
+/// Override with `PIDI_DIST_ARCH=armv7|aarch64` (also accepts `arm64`).
+/// Default: `aarch64` when the running binary is aarch64/arm64, else `armv7`
+/// so today's 32-bit lab Pi keeps working.
+pub fn staged_dist_dirname() -> &'static str {
+    if let Ok(raw) = std::env::var("PIDI_DIST_ARCH") {
+        let v = raw.trim().to_ascii_lowercase();
+        match v.as_str() {
+            "aarch64" | "arm64" => return "aarch64",
+            "armv7" | "armhf" | "armv7l" => return "armv7",
+            _ => {}
+        }
+    }
+    match std::env::consts::ARCH {
+        "aarch64" => "aarch64",
+        _ => "armv7",
+    }
+}
+
+pub fn staged_dist_dir(repo: &Path) -> PathBuf {
+    repo.join("dist").join(staged_dist_dirname())
+}
 
 const SKIP_PREFIXES: &[&str] = &[
     "bin",
@@ -225,7 +250,7 @@ pub fn atomic_install(src: &Path, dest: &Path) -> Result<(), String> {
 }
 
 pub fn install_staged_bins(repo: &Path) -> Result<Vec<String>, String> {
-    let src_dir = repo.join("dist").join("armv7");
+    let src_dir = staged_dist_dir(repo);
     let dest_dir = repo.join("bin");
     if !src_dir.is_dir() {
         return Ok(Vec::new());
@@ -300,7 +325,7 @@ pub fn local_status_line() -> String {
             parts.push(stamp.source);
         }
     }
-    let ver = repo_root().join("dist/armv7/VERSION");
+    let ver = staged_dist_dir(&repo_root()).join("VERSION");
     if let Ok(text) = fs::read_to_string(ver) {
         for line in text.lines() {
             if let Some(rest) = line.strip_prefix("git_sha=") {
@@ -619,6 +644,12 @@ fn fail(err: &str) -> UpdateCheckResult {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{Mutex, OnceLock};
+
+    fn dist_arch_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     fn uniq_dir(tag: &str) -> PathBuf {
         static N: AtomicU64 = AtomicU64::new(0);
@@ -709,8 +740,9 @@ mod tests {
         let dest = uniq_dir("apply-dest");
         let data = uniq_dir("apply-data");
         native_tree(&src);
-        write(&src.join("dist/armv7/pidi-native"), "NEWUI");
-        write(&src.join("dist/armv7/jambox-engine"), "NEWENG");
+        let dist = format!("dist/{}", staged_dist_dirname());
+        write(&src.join(format!("{dist}/pidi-native")), "NEWUI");
+        write(&src.join(format!("{dist}/jambox-engine")), "NEWENG");
         write(&dest.join("bin/pidi-native"), "OLDUI");
         write(&dest.join("bin/jambox-engine"), "NEWENG");
 
@@ -719,8 +751,8 @@ mod tests {
         // restore live bins that overlay skipped
         write(&dest.join("bin/pidi-native"), "OLDUI");
         write(&dest.join("bin/jambox-engine"), "NEWENG");
-        write(&dest.join("dist/armv7/pidi-native"), "NEWUI");
-        write(&dest.join("dist/armv7/jambox-engine"), "NEWENG");
+        write(&dest.join(format!("{dist}/pidi-native")), "NEWUI");
+        write(&dest.join(format!("{dist}/jambox-engine")), "NEWENG");
 
         let out = apply_extracted(&src, &dest, &data).unwrap();
         assert!(out.installed_bins.contains(&"pidi-native".into()));
@@ -738,11 +770,49 @@ mod tests {
     }
 
     #[test]
+    fn apply_extracted_uses_aarch64_stage_when_overridden() {
+        let _guard = dist_arch_lock().lock().unwrap();
+        std::env::set_var("PIDI_DIST_ARCH", "aarch64");
+        let src = uniq_dir("apply-a64-src");
+        let dest = uniq_dir("apply-a64-dest");
+        let data = uniq_dir("apply-a64-data");
+        native_tree(&src);
+        write(&src.join("dist/aarch64/pidi-native"), "A64UI");
+        write(&src.join("dist/armv7/pidi-native"), "V7UI");
+        write(&dest.join("bin/pidi-native"), "OLD");
+
+        overlay_tree(&src, &dest, &data).unwrap();
+        write(&dest.join("bin/pidi-native"), "OLD");
+        write(&dest.join("dist/aarch64/pidi-native"), "A64UI");
+        write(&dest.join("dist/armv7/pidi-native"), "V7UI");
+
+        let out = apply_extracted(&src, &dest, &data).unwrap();
+        assert!(out.installed_bins.contains(&"pidi-native".into()));
+        assert_eq!(fs::read_to_string(dest.join("bin/pidi-native")).unwrap(), "A64UI");
+
+        std::env::remove_var("PIDI_DIST_ARCH");
+        let _ = fs::remove_dir_all(src);
+        let _ = fs::remove_dir_all(dest);
+        let _ = fs::remove_dir_all(data);
+    }
+
+    #[test]
+    fn staged_dist_dirname_honors_env_override() {
+        let _guard = dist_arch_lock().lock().unwrap();
+        std::env::set_var("PIDI_DIST_ARCH", "arm64");
+        assert_eq!(staged_dist_dirname(), "aarch64");
+        std::env::set_var("PIDI_DIST_ARCH", "armv7");
+        assert_eq!(staged_dist_dirname(), "armv7");
+        std::env::remove_var("PIDI_DIST_ARCH");
+    }
+
+    #[test]
     fn should_skip_bin_prefix() {
         assert!(should_skip_overlay(Path::new("bin")));
         assert!(should_skip_overlay(Path::new("bin/pidi-native")));
         assert!(should_skip_overlay(Path::new("target/release/x")));
         assert!(!should_skip_overlay(Path::new("crates/pidi-native")));
         assert!(!should_skip_overlay(Path::new("dist/armv7/pidi-native")));
+        assert!(!should_skip_overlay(Path::new("dist/aarch64/pidi-native")));
     }
 }

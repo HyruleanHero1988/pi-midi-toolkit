@@ -45,6 +45,6 @@ pub use font::FontStyle;
 pub use input::TouchEvent;
 pub use layout::{Hit, Layout, Surface};
 pub use mode::UiMode;
-pub use model::{NativeModel, RepeatDivisionChoice};
+pub use model::{NativeModel, RepeatDivisionChoice, SettingsPicker};
 pub use render::{Frame, SCREEN_H, SCREEN_W};
 pub use session::{KaossFxTarget, OutMode};

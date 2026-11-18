@@ -74,10 +74,20 @@ impl DrumModel {
     }
 }
 
-/// MPK factory MPC program: notes 36–51 map to the 16 kit voices in order.
+/// MPK factory MPC program: notes 36–51 map to the 16 kit voices.
+///
+/// A6 (note 37) and B6 (note 45) swap noises only — pad positions/labels stay
+/// put. Factory note 37 still leaves the MPK as A6; it just triggers rimshot.
+/// Note 45 (B6) triggers snare. Same mapping for screen taps and hardware pads.
 pub fn drum_model_for_note(note: u8) -> DrumModel {
-    let idx = note.wrapping_sub(36) as usize;
-    DrumModel::from_index(idx % DRUM_MODEL_COUNT)
+    match note {
+        37 => DrumModel::Rimshot,
+        45 => DrumModel::Snare,
+        n => {
+            let idx = n.wrapping_sub(36) as usize;
+            DrumModel::from_index(idx % DRUM_MODEL_COUNT)
+        }
+    }
 }
 
 /// Live kit macros, all 0..1.
@@ -245,6 +255,15 @@ impl DrumKit {
     pub fn set_macros(&mut self, macros: DrumMacros) {
         let macros = macros.clamped();
         self.macros = [macros; DRUM_MODEL_COUNT];
+    }
+
+    /// Patch one macro field on every model. Leaves the other four alone so a
+    /// kit-wide TONE/LEVEL nudge cannot stamp kick's stored LEVEL onto snare.
+    pub fn map_macros_all(&mut self, mut f: impl FnMut(&mut DrumMacros)) {
+        for macros in self.macros.iter_mut() {
+            f(macros);
+            *macros = macros.clamped();
+        }
     }
 
     /// Write macros for one kit voice. Other models keep their own settings.
@@ -640,7 +659,7 @@ pub fn preview_drum(
     let sr = sample_rate.max(8000.0);
     let n = ((seconds.clamp(0.05, 2.0) * sr) as usize).max(64);
     let mut kit = DrumKit::new(sr);
-    kit.set_macros(macros);
+    kit.set_model_macros(model, macros);
     kit.trigger(model, 120);
     let mut out = vec![0.0f32; n];
     let mut pos = 0;
@@ -690,7 +709,8 @@ mod tests {
     #[test]
     fn factory_pad_notes_map_in_order() {
         assert_eq!(drum_model_for_note(36), DrumModel::Kick);
-        assert_eq!(drum_model_for_note(37), DrumModel::Snare);
+        assert_eq!(drum_model_for_note(37), DrumModel::Rimshot);
+        assert_eq!(drum_model_for_note(45), DrumModel::Snare);
         assert_eq!(drum_model_for_note(51), DrumModel::Ride);
     }
 
@@ -856,6 +876,19 @@ mod tests {
         });
         assert!((kit.macros_for(DrumModel::Kick).pitch - 0.2).abs() < 1e-6);
         assert!((kit.macros_for(DrumModel::Snare).pitch - 0.2).abs() < 1e-6);
+    }
+
+    #[test]
+    fn map_macros_all_keeps_other_fields_per_model() {
+        let mut kit = DrumKit::new(48_000.0);
+        let mut snare = DrumMacros::default();
+        snare.level = 0.9;
+        kit.set_model_macros(DrumModel::Snare, snare);
+        kit.map_macros_all(|m| m.pitch = 0.15);
+        assert!((kit.macros_for(DrumModel::Snare).level - 0.9).abs() < 1e-6);
+        assert!((kit.macros_for(DrumModel::Snare).pitch - 0.15).abs() < 1e-6);
+        assert!((kit.macros_for(DrumModel::Kick).pitch - 0.15).abs() < 1e-6);
+        assert!((kit.macros_for(DrumModel::Kick).level - DrumMacros::default().level).abs() < 1e-6);
     }
 
     #[test]

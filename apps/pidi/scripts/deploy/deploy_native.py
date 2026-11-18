@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
-"""Deploy the local repo tree + native armv7 bins to the lab Pi.
+"""Deploy the local repo tree + native bins to the lab Pi.
 
 Uses ``apps/pidi/.pi-credentials`` (gitignored). Overlays source onto the Pi
-while preserving user data, then installs ``dist/armv7`` engines and restarts
+while preserving user data, then installs staged engines and restarts
 ``jambox-engine`` + ``pidi-native``.
+
+Defaults to ``dist/armv7`` (current lab Pi). For a 64-bit Pi 4B::
+
+    python apps/pidi/scripts/deploy/deploy_native.py --arch aarch64
 
 Run from anywhere::
 
@@ -23,6 +27,7 @@ import argparse
 import hashlib
 import io
 import json
+import os
 import pathlib
 import subprocess
 import sys
@@ -37,7 +42,15 @@ except ImportError:
 HERE = pathlib.Path(__file__).resolve().parents[2]  # apps/pidi
 ROOT = HERE.parents[1]  # repo root
 CREDS_PATH = HERE / ".pi-credentials"
-STAGE = ROOT / "dist" / "armv7"
+VALID_DIST_ARCHES = ("armv7", "aarch64")
+
+
+def resolve_stage(arch: str) -> pathlib.Path:
+    if arch == "arm64":
+        arch = "aarch64"
+    if arch not in VALID_DIST_ARCHES:
+        raise SystemExit(f"unsupported arch '{arch}' (want armv7 or aarch64)")
+    return ROOT / "dist" / arch
 
 KEEP_REPO = {
     ".git",
@@ -267,8 +280,8 @@ echo "overlay complete"
 """
 
 
-def version_payload(sha: str, branch: str) -> dict[str, object]:
-    native = STAGE / "pidi-native"
+def version_payload(sha: str, branch: str, stage: pathlib.Path, arch: str) -> dict[str, object]:
+    native = stage / "pidi-native"
     components: dict[str, str] = {}
     if native.is_file():
         components["pidi-native"] = sha256_file(native)[:16]
@@ -277,20 +290,22 @@ def version_payload(sha: str, branch: str) -> dict[str, object]:
         "branch": branch,
         "source": "ssh-deploy",
         "repo_url": "local",
+        "dist_arch": arch,
         "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "components": components,
     }
 
 
-def deploy(*, branch: str | None, skip_bins: bool, restart: bool) -> int:
+def deploy(*, branch: str | None, skip_bins: bool, restart: bool, arch: str) -> int:
+    stage = resolve_stage(arch)
     for name in ENGINE_BINS:
-        if not skip_bins and not (STAGE / name).is_file():
-            print(f"missing {STAGE / name}", file=sys.stderr)
+        if not skip_bins and not (stage / name).is_file():
+            print(f"missing {stage / name}", file=sys.stderr)
             return 1
 
     sha = git_sha()
     branch_name = branch or git_branch()
-    print(f"deploying {branch_name} @ {sha[:7]} …", flush=True)
+    print(f"deploying {branch_name} @ {sha[:7]} (dist/{arch}) …", flush=True)
 
     tar_data = build_tar()
     print(
@@ -335,9 +350,9 @@ def deploy(*, branch: str | None, skip_bins: bool, restart: bool) -> int:
         if not skip_bins:
             sudo(client, password, "systemctl stop pidi-native jambox-engine 2>/dev/null || true")
             for name in ENGINE_BINS:
-                sftp_put_file(client, STAGE / name, f"{remote_repo}/bin/{name}")
+                sftp_put_file(client, stage / name, f"{remote_repo}/bin/{name}")
 
-        version_json = json.dumps(version_payload(sha, branch_name), indent=2) + "\n"
+        version_json = json.dumps(version_payload(sha, branch_name, stage, arch), indent=2) + "\n"
         for dest in (f"{data_root}/version.json", f"{remote_repo}/version.json"):
             sftp_put_bytes(client, version_json.encode(), dest + ".tmp")
             run(client, f"mv -f '{dest}.tmp' '{dest}'")
@@ -372,9 +387,15 @@ def main(argv: list[str] | None = None) -> int:
         help="Branch name to record in version.json (default: current git branch)",
     )
     parser.add_argument(
+        "--arch",
+        default=os.environ.get("PI_DIST_ARCH", "armv7"),
+        choices=["armv7", "aarch64", "arm64"],
+        help="Staged dist arch to upload (default: armv7 / PI_DIST_ARCH)",
+    )
+    parser.add_argument(
         "--skip-bins",
         action="store_true",
-        help="Overlay source only; do not upload dist/armv7 engines",
+        help="Overlay source only; do not upload staged engines",
     )
     parser.add_argument(
         "--no-restart",
@@ -382,7 +403,13 @@ def main(argv: list[str] | None = None) -> int:
         help="Upload without restarting jambox-engine / pidi-native",
     )
     args = parser.parse_args(argv)
-    return deploy(branch=args.branch, skip_bins=args.skip_bins, restart=not args.no_restart)
+    arch = "aarch64" if args.arch == "arm64" else args.arch
+    return deploy(
+        branch=args.branch,
+        skip_bins=args.skip_bins,
+        restart=not args.no_restart,
+        arch=arch,
+    )
 
 
 if __name__ == "__main__":

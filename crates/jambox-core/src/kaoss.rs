@@ -796,6 +796,38 @@ mod tests {
     }
 
     #[test]
+    fn scale_notes_adjacent_are_distinct_for_common_scales() {
+        let ids = [
+            "ionian",
+            "dorian",
+            "aeolian",
+            "major_pent",
+            "minor_pent",
+            "blues",
+            "whole",
+            "harmonic",
+            "ryukyu",
+            "bassline",
+        ];
+        for id in ids {
+            let scale = kaoss_scale(kaoss_scale_index_by_id(id) as usize);
+            for key in 0..12u8 {
+                for octaves in 1..=4u8 {
+                    let notes = scale_notes(scale.degrees, key, 48, octaves);
+                    let n = count_filled(&notes);
+                    for i in 1..n {
+                        assert_ne!(
+                            notes[i], notes[i - 1],
+                            "{id} key={key} oct={octaves}: duplicate adjacent MIDI {} at {i}",
+                            notes[i]
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn ionian_c8_one_octave() {
         let notes = scale_notes(&IONIAN, 0, 108, 1);
         let n = count_filled(&notes);

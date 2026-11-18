@@ -1,0 +1,7 @@
+target=aarch64-unknown-linux-gnu
+arch=aarch64
+built_utc=2026-11-10T16:20:47Z
+host=Linux x86_64
+host_glibc=2.35
+git_sha=1eaf80d3dad937191cfa20e8130479655637aa58
+crates=jambox-engine,pidi-native

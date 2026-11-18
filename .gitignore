@@ -27,10 +27,13 @@ Thumbs.db
 /user-wavetables/
 crates/pidi-native/phrases/
 
-# Deploy scratch. Committed Pi engines live in dist/armv7/ (see deploy/build-pi-bins.sh).
+# Deploy scratch. Committed Pi engines live in dist/armv7/ and dist/aarch64/
+# (see deploy/build-pi-bins.sh).
 /dist/*
 !/dist/armv7/
 !/dist/armv7/**
+!/dist/aarch64/
+!/dist/aarch64/**
 .cargo/config.toml
 
 # Python / PiDI kiosk

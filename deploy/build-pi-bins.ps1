@@ -1,7 +1,7 @@
 ﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
-  Cross-build Pi armv7 bins on this PC with a Bookworm-safe glibc floor.
+  Cross-build Pi armv7 and/or aarch64 bins with a Bookworm-safe glibc floor.
 
 .DESCRIPTION
   Pi Bookworm has glibc 2.36. Building inside the default Debian/Ubuntu-24.04
@@ -13,11 +13,15 @@
 
   Usage:
     .\deploy\build-pi-bins.ps1
-    .\deploy\build-pi-bins.ps1 -Packages "jambox-engine,pidi-native"
+    .\deploy\build-pi-bins.ps1 -Arch both
+    .\deploy\build-pi-bins.ps1 -Arch aarch64
+    .\deploy\build-pi-bins.ps1 -Arch armv7 -Packages "jambox-engine,pidi-native"
     .\deploy\build-pi-bins.ps1 -InstallDistro   # install Ubuntu-22.04 if missing
 #>
 param(
     [string]$Packages = "midi-engine,jambox-engine,pidi-native",
+    [ValidateSet("armv7", "aarch64", "both")]
+    [string]$Arch = "both",
     [switch]$InstallDistro,
     [switch]$PreferDocker
 )
@@ -72,6 +76,15 @@ function ConvertTo-WslPath([string]$WinPath) {
     throw "cannot map Windows path to WSL: $WinPath"
 }
 
+function Get-ArchesEnv([string]$Arch) {
+    switch ($Arch) {
+        "armv7" { return "armv7" }
+        "aarch64" { return "aarch64" }
+        "both" { return "armv7,aarch64" }
+        default { throw "unknown -Arch $Arch" }
+    }
+}
+
 function Ensure-Ubuntu2204 {
     $existing = Find-Ubuntu2204
     if ($existing) { return $existing }
@@ -109,10 +122,11 @@ Docker alternative (if Docker Desktop is installed):
     return $existing
 }
 
-function Invoke-WslBuild([string]$Distro) {
+function Invoke-WslBuild([string]$Distro, [string]$Arches) {
     $wslRoot = ConvertTo-WslPath $Root
     Write-Step "building inside WSL distro '$Distro' (Ubuntu 22.04 / glibc <= 2.36)"
     Write-Step "repo: $wslRoot"
+    Write-Step "arches: $Arches"
 
     # Single-quoted here-string so PowerShell does not expand $HOME / $PATH.
     # Run as root so apt in build-pi-bins.sh works without a passwordless sudo user.
@@ -122,10 +136,14 @@ set -euo pipefail
 cd '__ROOT__'
 export PI_BINS_OK_GLIBC=1
 export PACKAGES='__PACKAGES__'
+export ARCHES='__ARCHES__'
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/root/.cache/pi-midi-toolkit-target}"
 mkdir -p "$CARGO_TARGET_DIR"
-if ! command -v arm-linux-gnueabihf-gcc >/dev/null 2>&1; then
-  echo 'build-pi-bins: bootstrapping Ubuntu 22.04 toolchain...'
+need_bootstrap=0
+if ! command -v arm-linux-gnueabihf-gcc >/dev/null 2>&1; then need_bootstrap=1; fi
+if ! command -v aarch64-linux-gnu-gcc >/dev/null 2>&1; then need_bootstrap=1; fi
+if [[ "$need_bootstrap" -eq 1 ]]; then
+  echo 'build-pi-bins: bootstrapping Ubuntu 22.04 toolchain (armv7 + aarch64)...'
   ./deploy/bootstrap-pi-bins-wsl.sh
 fi
 if ! command -v rustup >/dev/null 2>&1; then
@@ -136,10 +154,11 @@ fi
 source "$HOME/.cargo/env" 2>/dev/null || true
 export PATH="$HOME/.cargo/bin:$PATH"
 rustup target add armv7-unknown-linux-gnueabihf
+rustup target add aarch64-unknown-linux-gnu
 export SKIP_APT=1
 ./deploy/build-pi-bins.sh
 '@
-    $bash = $bash.Replace('__ROOT__', $wslRoot).Replace('__PACKAGES__', $Packages)
+    $bash = $bash.Replace('__ROOT__', $wslRoot).Replace('__PACKAGES__', $Packages).Replace('__ARCHES__', $Arches)
     # PowerShell here-strings are CRLF on Windows; bash rejects `set -o pipefail\r`.
     $bash = $bash -replace "`r`n", "`n" -replace "`r", "`n"
 
@@ -155,7 +174,7 @@ export SKIP_APT=1
     }
 }
 
-function Invoke-DockerBuild {
+function Invoke-DockerBuild([string]$Arches) {
     if (-not (Test-Command docker)) {
         throw "Docker not found on PATH. Install Docker Desktop or use Ubuntu-22.04 WSL."
     }
@@ -165,10 +184,11 @@ function Invoke-DockerBuild {
     if ($LASTEXITCODE -ne 0) { throw "docker build failed" }
 
     # Map Windows path; Docker Desktop accepts Windows paths for -v.
-    Write-Step "running cross-build in container"
+    Write-Step "running cross-build in container (ARCHES=$Arches)"
     $vol = "${Root}:/src"
     & docker run --rm `
         -e "PACKAGES=$Packages" `
+        -e "ARCHES=$Arches" `
         -e "PI_BINS_OK_GLIBC=1" `
         -e "SKIP_APT=1" `
         -v $vol `
@@ -177,26 +197,39 @@ function Invoke-DockerBuild {
     if ($LASTEXITCODE -ne 0) { throw "docker run build failed" }
 }
 
+function Show-Staged([string]$ArchName) {
+    $stage = Join-Path $Root "dist\$ArchName"
+    if (-not (Test-Path $stage)) {
+        Write-Host "  (missing dist/$ArchName)" -ForegroundColor Yellow
+        return
+    }
+    Write-Step "staged dist/$ArchName :"
+    Get-ChildItem $stage -File | ForEach-Object {
+        $size = $_.Length
+        Write-Host ("  {0}  ({1} bytes)" -f $_.Name, $size)
+    }
+}
+
 # --- main ---
+$arches = Get-ArchesEnv $Arch
 Write-Step "Pi Bookworm needs glibc <= 2.36; staging bins via Ubuntu 22.04 toolchain"
+Write-Step "requested arches: $arches"
 
 if ($PreferDocker) {
-    Invoke-DockerBuild
+    Invoke-DockerBuild -Arches $arches
 } elseif (Test-Command wsl) {
     $distro = Ensure-Ubuntu2204
-    Invoke-WslBuild -Distro $distro
+    Invoke-WslBuild -Distro $distro -Arches $arches
 } elseif (Test-Command docker) {
     Write-Step "WSL unavailable - falling back to Docker"
-    Invoke-DockerBuild
+    Invoke-DockerBuild -Arches $arches
 } else {
     throw "Need either WSL (Ubuntu-22.04) or Docker Desktop to build Pi-compatible bins on this PC."
 }
 
-$stage = Join-Path $Root "dist\armv7"
-Write-Step "staged:"
-Get-ChildItem $stage -File | ForEach-Object {
-    $size = $_.Length
-    Write-Host ("  {0}  ({1} bytes)" -f $_.Name, $size)
+Write-Host ""
+foreach ($a in ($arches -split ",")) {
+    Show-Staged $a.Trim()
 }
 Write-Host ""
-Write-Host "Next: deploy with your usual script, or commit dist/armv7 for SET->UPDATE." -ForegroundColor Green
+Write-Host "Next: deploy with your usual script (default armv7), or commit dist/armv7 and/or dist/aarch64 for SET->UPDATE." -ForegroundColor Green

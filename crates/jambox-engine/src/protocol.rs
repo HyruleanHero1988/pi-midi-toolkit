@@ -66,6 +66,9 @@ pub enum Request {
     PunchHistory {
         enabled: bool,
     },
+    PunchDry {
+        enabled: bool,
+    },
     InputBypass {
         enabled: bool,
     },
@@ -651,6 +654,8 @@ fn parse_synth_param(name: &str) -> Option<SynthParam> {
         "tone" => SynthParam::Tone,
         "level" => SynthParam::Level,
         "attack" => SynthParam::Attack,
+        "decay" => SynthParam::Decay,
+        "sustain_level" => SynthParam::SustainLevel,
         "release" => SynthParam::Release,
         "release_drift" => SynthParam::ReleaseDrift,
         "vibrato_depth" => SynthParam::VibratoDepth,
@@ -838,6 +843,7 @@ pub fn decode(request: Request) -> Result<Decoded, String> {
         }
         Request::PunchBufferPrio { mode } => Decoded::Command(Command::SetPunchBufferPrio { mode }),
         Request::PunchHistory { enabled } => Decoded::Command(Command::SetPunchHistory { enabled }),
+        Request::PunchDry { enabled } => Decoded::Command(Command::SetPunchDry { enabled }),
         Request::InputBypass { enabled } => Decoded::Command(Command::SetInputBypass { enabled }),
         Request::PunchRptMode { mode } => Decoded::Command(Command::SetPunchRptMode { mode }),
         Request::PunchGrid { mode } => Decoded::Command(Command::SetPunchGrid { mode }),
@@ -1102,6 +1108,15 @@ mod tests {
                 assert_eq!(source, 0);
                 assert!(active);
             }
+            _ => panic!("wrong decode"),
+        }
+    }
+
+    #[test]
+    fn punch_dry_decodes() {
+        let d = decode_line(r#"{"cmd":"punch_dry","enabled":true}"#);
+        match d {
+            Decoded::Command(Command::SetPunchDry { enabled }) => assert!(enabled),
             _ => panic!("wrong decode"),
         }
     }

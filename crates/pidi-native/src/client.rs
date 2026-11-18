@@ -284,6 +284,10 @@ impl Outbox {
         self.reliable.push_back(Request::PunchHistory { enabled });
     }
 
+    pub fn punch_dry(&mut self, enabled: bool) {
+        self.reliable.push_back(Request::PunchDry { enabled });
+    }
+
     pub fn input_bypass(&mut self, enabled: bool) {
         self.reliable.push_back(Request::InputBypass { enabled });
     }

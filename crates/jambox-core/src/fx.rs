@@ -9,6 +9,15 @@ const REVERB_MAX_SEC: f32 = 0.55;
 /// Classic analog flanger window (~1–12 ms). Sized once in `new`.
 const FLANGER_MAX_SEC: f32 = 0.020;
 
+/// Delay gap at `delay_time == 0` (seconds). Kept public for tempo-grid snaps.
+pub const DELAY_TIME_SEC_MIN: f32 = 0.05;
+/// Extra seconds added when `delay_time == 1` (max gap = min + span).
+pub const DELAY_TIME_SEC_SPAN: f32 = 0.70;
+/// Flanger LFO Hz at `flanger_rate == 0`.
+pub const FLANGER_RATE_HZ_MIN: f32 = 0.08;
+/// Extra Hz when `flanger_rate == 1`.
+pub const FLANGER_RATE_HZ_SPAN: f32 = 6.0;
+
 /// Plain-old-data FX amounts, all 0..1. Cheap to copy across the command ring.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FxParams {
@@ -149,7 +158,7 @@ impl FxUnit {
 
         if p.flanger_mix > 0.001 {
             let flen = self.flanger.len();
-            let rate_hz = 0.08 + p.flanger_rate * 6.0;
+            let rate_hz = FLANGER_RATE_HZ_MIN + p.flanger_rate * FLANGER_RATE_HZ_SPAN;
             let depth = p.flanger_depth;
             let fb = p.flanger_fb.min(0.92);
             let mix = p.flanger_mix;
@@ -178,7 +187,7 @@ impl FxUnit {
 
         if p.delay_mix > 0.001 || p.delay_fb > 0.001 {
             let dlen = self.delay.len();
-            let delay_sec = 0.05 + p.delay_time * 0.70;
+            let delay_sec = DELAY_TIME_SEC_MIN + p.delay_time * DELAY_TIME_SEC_SPAN;
             let ds = ((delay_sec * self.sample_rate) as usize).clamp(1, dlen - 1);
             let fb = p.delay_fb.min(0.92);
             let mix = p.delay_mix;
@@ -238,7 +247,7 @@ impl FxUnit {
 fn tail_samples(p: &FxParams, sample_rate: f32) -> u32 {
     let mut sec = 0.0f32;
     if p.delay_mix > 0.001 {
-        let delay_sec = 0.05 + p.delay_time * 0.70;
+        let delay_sec = DELAY_TIME_SEC_MIN + p.delay_time * DELAY_TIME_SEC_SPAN;
         let fb = p.delay_fb.clamp(0.0, 0.92);
         let repeats = if fb < 0.05 {
             2.0

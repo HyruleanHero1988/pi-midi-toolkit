@@ -19,6 +19,8 @@ pub enum OutMode {
 }
 
 impl OutMode {
+    pub const ALL: [Self; 3] = [Self::Local, Self::Usb, Self::Both];
+
     pub fn cycle(self) -> Self {
         match self {
             Self::Local => Self::Usb,
@@ -80,6 +82,8 @@ pub enum ClipQuantize {
 }
 
 impl ClipQuantize {
+    pub const ALL: [Self; 3] = [Self::Bar, Self::Beat, Self::Off];
+
     pub fn cycle(self) -> Self {
         match self {
             Self::Bar => Self::Beat,
@@ -180,6 +184,12 @@ pub struct SessionState {
     #[serde(default = "default_seq_level")]
     pub seq_kaoss_level: f32,
     pub attack: f32,
+    /// Global ADSR decay (0..1). Missing in old sessions → moderate decay.
+    #[serde(default = "default_env_decay")]
+    pub env_decay: f32,
+    /// Global ADSR sustain level (0..1). Missing → 1.0 (legacy AR hold).
+    #[serde(default = "default_env_sustain")]
+    pub env_sustain: f32,
     pub release: f32,
     /// SYNTH DRIFT. 0.5 = no pitch glide on release. Missing → center.
     #[serde(default = "default_release_drift")]
@@ -199,6 +209,9 @@ pub struct SessionState {
     pub kaoss_root_midi: u8,
     pub kaoss_octaves: u8,
     pub kaoss_program: usize,
+    /// Instant PROG recall slots (`u16::MAX` = empty). Missing → factory defaults.
+    #[serde(default = "default_kaoss_prog_favs")]
+    pub kaoss_prog_favs: [u16; 6],
     pub kaoss_gate: usize,
     pub kaoss_hold: bool,
     /// When true, Kaoss FX stays at the lift position. When false, it springs back.
@@ -229,14 +242,27 @@ pub struct SessionState {
     /// Bank A pads arm punch FX. Missing → on (previous FX-page behavior).
     #[serde(default = "default_full_velocity")]
     pub punch_pads_fx: bool,
+    /// Pad aftertouch sets punch pad amount on FX. Missing → off.
+    #[serde(default)]
+    pub punch_aftertouch: bool,
+    /// Mix pre-punch (dry) alongside wet FX. Missing → off (wet replaces).
+    #[serde(default)]
+    pub punch_dry: bool,
     /// Idle punch-history rings. Missing → on, so GRAB still has a pre-roll.
     #[serde(default = "default_punch_history")]
     pub punch_history: bool,
+    /// KAOSS↔Punch link: Punch rack slot index sculpted from the pad strip.
+    /// Missing / None = off. Pad stays the instrument; Punch stays the rack.
+    #[serde(default)]
+    pub kaoss_punch_link: Option<u8>,
     /// Dry capture passthrough. Missing → off, so punch-in stays the mix path.
     #[serde(default)]
     pub input_bypass: bool,
     #[serde(default)]
     pub kaoss_show_all: bool,
+    /// PROG picker filter chip: "note" | "fx" | "midi" | "all". Missing → note.
+    #[serde(default = "default_kaoss_prog_filter")]
+    pub kaoss_prog_filter: String,
     #[serde(default)]
     pub kaoss_channel: u8,
     #[serde(default)]
@@ -358,6 +384,10 @@ pub struct SessionState {
     /// Sub low-pass cutoff in Hz. Missing → 80.
     #[serde(default = "crate::wave_viz::default_sub_hz")]
     pub wave_sub_hz: f32,
+    /// Home launcher tile order (wire names). Empty / missing → shipping order.
+    /// Unknown names are dropped; new shipping tiles are appended on load.
+    #[serde(default)]
+    pub home_tiles: Vec<String>,
 }
 
 /// A named draw-mode patch. The operator data is the same shape as `FmUserPatch`.
@@ -449,12 +479,20 @@ fn default_kaoss_root_midi() -> u8 {
     jambox_core::DEFAULT_ROOT_MIDI
 }
 
+fn default_kaoss_prog_favs() -> [u16; 6] {
+    crate::kaoss_ui::default_prog_favs()
+}
+
 fn default_screensaver_sec() -> f32 {
     crate::screensaver::DEFAULT_TIMEOUT_SEC
 }
 
 fn default_kaoss_out() -> OutMode {
     OutMode::Local
+}
+
+fn default_kaoss_prog_filter() -> String {
+    "note".into()
 }
 
 fn default_arp_octaves() -> u8 {
@@ -467,6 +505,14 @@ fn default_arp_gate() -> u8 {
 
 fn default_kaoss_viz_style() -> String {
     "cells".into()
+}
+
+fn default_env_decay() -> f32 {
+    0.35
+}
+
+fn default_env_sustain() -> f32 {
+    1.0
 }
 
 fn default_release_drift() -> f32 {
@@ -535,6 +581,8 @@ impl Default for SessionState {
             seq_drum_level: default_seq_level(),
             seq_kaoss_level: default_seq_level(),
             attack: 0.05,
+            env_decay: default_env_decay(),
+            env_sustain: default_env_sustain(),
             release: 0.3,
             release_drift: default_release_drift(),
             synth_width: default_synth_width(),
@@ -546,6 +594,7 @@ impl Default for SessionState {
             kaoss_root_midi: default_kaoss_root_midi(),
             kaoss_octaves: 2,
             kaoss_program: 0,
+            kaoss_prog_favs: default_kaoss_prog_favs(),
             kaoss_gate: 0,
             kaoss_hold: false,
             kaoss_fx_hold: false,
@@ -558,9 +607,13 @@ impl Default for SessionState {
             punch_rpt_mode: 0,
             punch_grid_mode: 0,
             punch_pads_fx: true,
+            punch_aftertouch: false,
+            punch_dry: false,
             punch_history: default_punch_history(),
+            kaoss_punch_link: None,
             input_bypass: false,
             kaoss_show_all: false,
+            kaoss_prog_filter: default_kaoss_prog_filter(),
             kaoss_channel: 0,
             vibrato_always: 0.0,
             vibrato_depth: default_vibrato_depth(),
@@ -607,6 +660,7 @@ impl Default for SessionState {
             fm_width: 0.0,
             wave_signals: crate::wave_viz::default_signals(),
             wave_sub_hz: crate::wave_viz::default_sub_hz(),
+            home_tiles: Vec::new(),
         }
     }
 }
@@ -675,6 +729,23 @@ mod tests {
         assert_eq!(ClipQuantize::Beat.cycle(), ClipQuantize::Off);
         assert_eq!(ClipQuantize::Off.cycle(), ClipQuantize::Bar);
         assert_eq!(ClipQuantize::Bar.wire(), "bar");
+    }
+
+    #[test]
+    fn session_roundtrip_includes_home_tiles() {
+        let mut s = SessionState::default();
+        s.home_tiles = vec!["kaoss".into(), "synth".into(), "drums".into()];
+        let json = serde_json::to_string(&s).unwrap();
+        let back: SessionState = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.home_tiles, s.home_tiles);
+        assert!(SessionState::default().home_tiles.is_empty());
+    }
+
+    #[test]
+    fn old_session_json_defaults_home_tiles_empty() {
+        let json = r#"{"version":1,"bpm":120.0,"morph":0.5,"tone":0.5,"level":0.8,"attack":0.05,"release":0.3,"morph_a":0,"morph_b":1,"kaoss_scale_index":1,"kaoss_key":0,"kaoss_octaves":2,"kaoss_program":0,"kaoss_gate":0,"kaoss_hold":false,"fx_bus":[0.0,0.0,0.0]}"#;
+        let s: SessionState = serde_json::from_str(json).unwrap();
+        assert!(s.home_tiles.is_empty());
     }
 
     #[test]
@@ -807,6 +878,36 @@ mod tests {
         let back: SessionState = serde_json::from_str(&json).unwrap();
         assert_eq!(back.midi_stick_y, MidiDest::Tone);
         assert_eq!(back.midi_aftertouch, MidiDest::Vibrato);
+    }
+
+    #[test]
+    fn session_roundtrip_includes_punch_aftertouch() {
+        let mut s = SessionState::default();
+        assert!(!s.punch_aftertouch);
+        s.punch_aftertouch = true;
+        let json = serde_json::to_string(&s).unwrap();
+        let back: SessionState = serde_json::from_str(&json).unwrap();
+        assert!(back.punch_aftertouch);
+        let old: SessionState = serde_json::from_str(
+            r#"{"version":1,"bpm":120.0,"morph":0.5,"tone":0.5,"level":0.8,"attack":0.05,"release":0.3,"morph_a":0,"morph_b":1,"kaoss_scale_index":1,"kaoss_key":0,"kaoss_octaves":2,"kaoss_program":0,"kaoss_gate":0,"kaoss_hold":false,"fx_bus":[0.0,0.0,0.0]}"#,
+        )
+        .unwrap();
+        assert!(!old.punch_aftertouch);
+    }
+
+    #[test]
+    fn session_roundtrip_includes_punch_dry() {
+        let mut s = SessionState::default();
+        assert!(!s.punch_dry);
+        s.punch_dry = true;
+        let json = serde_json::to_string(&s).unwrap();
+        let back: SessionState = serde_json::from_str(&json).unwrap();
+        assert!(back.punch_dry);
+        let old: SessionState = serde_json::from_str(
+            r#"{"version":1,"bpm":120.0,"morph":0.5,"tone":0.5,"level":0.8,"attack":0.05,"release":0.3,"morph_a":0,"morph_b":1,"kaoss_scale_index":1,"kaoss_key":0,"kaoss_octaves":2,"kaoss_program":0,"kaoss_gate":0,"kaoss_hold":false,"fx_bus":[0.0,0.0,0.0]}"#,
+        )
+        .unwrap();
+        assert!(!old.punch_dry);
     }
 
     #[test]

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # One-time bootstrap for Ubuntu-22.04 WSL Pi builds (run as root).
+# Installs both armv7 (armhf) and aarch64 (arm64) cross toolchains.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
@@ -11,6 +12,7 @@ fi
 # shellcheck disable=SC1090
 source "$HOME/.cargo/env"
 rustup target add armv7-unknown-linux-gnueabihf
+rustup target add aarch64-unknown-linux-gnu
 
 # C toolchain for the host (rustc needs cc for build scripts)
 export DEBIAN_FRONTEND=noninteractive
@@ -25,6 +27,15 @@ apt-get install -y --no-install-recommends \
   libasound2-dev:armhf libsdl2-dev:armhf libgles2-mesa-dev:armhf \
   libegl1-mesa-dev:armhf libgbm-dev:armhf libdrm-dev:armhf
 
+dpkg --add-architecture arm64
+bash "$ROOT/deploy/ubuntu-arm64-ports.sh"
+apt-get update -qq
+apt-get install -y --no-install-recommends \
+  gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
+  libasound2-dev:arm64 libsdl2-dev:arm64 libgles2-mesa-dev:arm64 \
+  libegl1-mesa-dev:arm64 libgbm-dev:arm64 libdrm-dev:arm64
+
 arm-linux-gnueabihf-gcc --version | head -1
+aarch64-linux-gnu-gcc --version | head -1
 ldd --version | head -1
-echo "bootstrap-pi-bins: OK"
+echo "bootstrap-pi-bins: OK (armv7 + aarch64)"

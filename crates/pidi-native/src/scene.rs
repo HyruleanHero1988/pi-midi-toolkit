@@ -81,14 +81,19 @@ pub fn stroke_mesh(pts: &[(f32, f32)], thickness: f32) -> Vec<[f32; 2]> {
         return Vec::new();
     }
 
-    // Unit normal of each segment.
+    // Unit normal of each segment. Zero-length → no normal (skip later) so we
+    // never push Inf/NaN verts that can stall the GLES batch on the Pi.
     let normals: Vec<(f32, f32)> = path
         .windows(2)
         .map(|w| {
             let dx = w[1].0 - w[0].0;
             let dy = w[1].1 - w[0].1;
             let len = (dx * dx + dy * dy).sqrt();
-            (-dy / len, dx / len)
+            if len < 1e-6 {
+                (0.0, 0.0)
+            } else {
+                (-dy / len, dx / len)
+            }
         })
         .collect();
 
@@ -122,6 +127,9 @@ pub fn stroke_mesh(pts: &[(f32, f32)], thickness: f32) -> Vec<[f32; 2]> {
 
     let mut out = Vec::with_capacity((path.len() - 1) * 6);
     for i in 0..path.len() - 1 {
+        if normals[i].0 == 0.0 && normals[i].1 == 0.0 {
+            continue;
+        }
         let (p0, o0) = (path[i], offsets[i]);
         let (p1, o1) = (path[i + 1], offsets[i + 1]);
         let l0 = [p0.0 + o0.0, p0.1 + o0.1];
@@ -156,6 +164,8 @@ pub struct Scene {
     pub glyphs: Vec<GlyphQuad>,
     pub strokes: Vec<Stroke>,
     order: Vec<DrawOp>,
+    /// Optional scissor for scroll viewports (content must not paint over chrome).
+    clip: Option<Rect>,
 }
 
 /// Unpack 0xRRGGBB (or 0xAARRGGBB) into RGBA floats for GLES.
@@ -172,7 +182,21 @@ pub fn unpack_rgb(color: u32) -> [f32; 4] {
 }
 
 impl Scene {
+    /// Restrict subsequent draws to `clip` until [`Self::clear_clip`].
+    pub fn set_clip(&mut self, clip: Rect) {
+        self.clip = Some(clip);
+    }
+
+    pub fn clear_clip(&mut self) {
+        self.clip = None;
+    }
+
     pub fn fill_rect(&mut self, rect: Rect, color: u32) {
+        let rect = match self.clip.and_then(|c| rect.intersection(c)) {
+            Some(r) => r,
+            None if self.clip.is_some() => return,
+            None => rect,
+        };
         self.fill(
             rect.x as f32,
             rect.y as f32,
@@ -187,17 +211,38 @@ impl Scene {
         const BORDER: u32 = 0xa89984;
         self.fill_rect(rect, BORDER);
         if rect.w > 2 && rect.h > 2 {
-            self.fill(
-                (rect.x + 1) as f32,
-                (rect.y + 1) as f32,
-                (rect.w - 2) as f32,
-                (rect.h - 2) as f32,
+            self.fill_rect(
+                Rect {
+                    x: rect.x + 1,
+                    y: rect.y + 1,
+                    w: rect.w - 2,
+                    h: rect.h - 2,
+                },
                 fill,
             );
         }
     }
 
     pub fn fill(&mut self, x: f32, y: f32, w: f32, h: f32, color: u32) {
+        let (x, y, w, h) = if let Some(c) = self.clip {
+            let r = Rect {
+                x: x as i32,
+                y: y as i32,
+                w: w.ceil() as i32,
+                h: h.ceil() as i32,
+            };
+            let Some(clipped) = r.intersection(c) else {
+                return;
+            };
+            (
+                clipped.x as f32,
+                clipped.y as f32,
+                clipped.w as f32,
+                clipped.h as f32,
+            )
+        } else {
+            (x, y, w, h)
+        };
         if w <= 0.0 || h <= 0.0 {
             return;
         }
@@ -207,6 +252,18 @@ impl Scene {
     }
 
     fn push_glyph(&mut self, glyph: GlyphQuad) {
+        if let Some(c) = self.clip {
+            let gy = glyph.y as i32;
+            let gh = glyph.h.ceil() as i32;
+            if gy + gh <= c.y || gy >= c.y + c.h {
+                return;
+            }
+            let gx = glyph.x as i32;
+            let gw = glyph.w.ceil() as i32;
+            if gx + gw <= c.x || gx >= c.x + c.w {
+                return;
+            }
+        }
         let index = self.glyphs.len() as u32;
         self.glyphs.push(glyph);
         self.order.push(DrawOp::Glyph(index));
@@ -442,6 +499,7 @@ pub fn build(model: &NativeModel) -> Scene {
         glyphs: Vec::with_capacity(240),
         strokes: Vec::new(),
         order: Vec::with_capacity(if model.song_viz_open { 1100 } else { 440 }),
+        clip: None,
     };
     if model.song_viz_open && !model.screensaver_active() && !model.power_menu_open {
         draw_song_viz(&mut scene, model);
@@ -466,6 +524,8 @@ pub fn build(model: &NativeModel) -> Scene {
         draw_power_menu(&mut scene, model);
     } else if model.update_panel_open {
         draw_update_panel(&mut scene, model);
+    } else if let Some(kind) = model.settings_picker {
+        draw_settings_picker(&mut scene, model, kind);
     } else if model.midi_panel_open {
         draw_midi_panel(&mut scene, model);
     } else if model.wifi_kb_open {
@@ -489,6 +549,7 @@ pub fn build(model: &NativeModel) -> Scene {
             UiMode::Fx if model.fx_settings_open => draw_fx_settings(&mut scene, model),
             UiMode::Fx => draw_fx(&mut scene, model),
             UiMode::Mix => draw_mix(&mut scene, model),
+            UiMode::Env => draw_env(&mut scene, model),
             UiMode::Log => draw_log(&mut scene, model),
             UiMode::Wave => draw_wave(&mut scene, model),
             UiMode::Chords => draw_chords(&mut scene, model),
@@ -1069,21 +1130,16 @@ fn draw_kaoss(scene: &mut Scene, model: &NativeModel) {
 
     if let Some(kind) = model.kaoss_picker {
         scene.fill_rect(layout.kaoss, 0x08040a);
-        let n = kaoss_ui::picker_count(kind, model.kaoss_show_all);
+        let filter = model.kaoss_prog_filter;
+        let n = kaoss_ui::picker_count(kind, model.kaoss_show_all, filter);
         let grid = layout.kaoss_picker_grid(kind, n, model.kaoss_show_all);
         let selected = match kind {
-            kaoss_ui::KaossPicker::Program => {
-                if model.kaoss_show_all {
-                    model.kaoss_program
-                } else {
-                    kaoss_ui::KAOSS_PROGRAMS
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, p)| p.curated)
-                        .position(|(i, _)| i == model.kaoss_program)
-                        .unwrap_or(0)
-                }
-            }
+            kaoss_ui::KaossPicker::Program => kaoss_ui::program_picker_index(
+                model.kaoss_show_all,
+                filter,
+                model.kaoss_program,
+            )
+            .unwrap_or(usize::MAX),
             kaoss_ui::KaossPicker::Scale => {
                 kaoss_ui::scale_picker_index(model.kaoss_show_all, model.kaoss_scale_index)
             }
@@ -1091,21 +1147,41 @@ fn draw_kaoss(scene: &mut Scene, model: &NativeModel) {
             kaoss_ui::KaossPicker::Octave => usize::MAX, // dual-select below
             kaoss_ui::KaossPicker::Gate => model.kaoss_gate,
         };
-        scene.text(
-            layout.kaoss.x + 8,
-            layout.kaoss.y + 4,
-            if matches!(kind, kaoss_ui::KaossPicker::Program) {
-                "teal NOTE = plays · orange FX = sculpts"
-            } else if matches!(kind, kaoss_ui::KaossPicker::Octave) {
-                "start C + width · tap outside to close"
-            } else {
-                "drag to scroll"
-            },
-            0xa89984,
-        );
+        if matches!(kind, kaoss_ui::KaossPicker::Program) {
+            for (i, chip) in kaoss_ui::KaossProgramFilter::ALL.iter().enumerate() {
+                let cell = layout.kaoss_prog_filter_chip(i);
+                let on = *chip == filter;
+                let fill = if on {
+                    chip.selected_color()
+                } else {
+                    0x3c3836
+                };
+                scene.button(cell, fill);
+                scene.text_centered(cell, chip.label(), 0xffffff, 1);
+            }
+            let hint_y = layout.kaoss.y + Layout::KAOSS_PROG_FILTER_H + 2;
+            scene.text(
+                layout.kaoss.x + 8,
+                hint_y,
+                "NOTE plays · FX sculpts · MIDI = USB CC",
+                0xa89984,
+            );
+        } else {
+            scene.text(
+                layout.kaoss.x + 8,
+                layout.kaoss.y + 4,
+                if matches!(kind, kaoss_ui::KaossPicker::Octave) {
+                    "start C + width · tap outside to close"
+                } else {
+                    "drag to scroll"
+                },
+                0xa89984,
+            );
+        }
         let oct_start = kaoss_ui::root_octave_index(model.kaoss_root_midi);
         let oct_wide =
             kaoss_ui::ROOT_OCTAVE_MIDI.len() + (model.kaoss_octaves as usize).saturating_sub(1);
+        let midi_dim = !model.kaoss_out.includes_usb();
         for index in grid.visible_range(model.kaoss_picker_scroll) {
             let cell = grid.cell_rect(index, model.kaoss_picker_scroll);
             if cell.y + cell.h < grid.viewport.y || cell.y > grid.viewport.y + grid.viewport.h {
@@ -1117,9 +1193,14 @@ fn draw_kaoss(scene: &mut Scene, model: &NativeModel) {
                 index == selected
             };
             let fill = if matches!(kind, kaoss_ui::KaossPicker::Program) {
-                let prog = kaoss_ui::program_at(model.kaoss_show_all, index);
+                let prog = kaoss_ui::program_at(model.kaoss_show_all, filter, index);
+                let dim_midi = midi_dim
+                    && prog.category() == kaoss_ui::KaossProgramCategory::Midi
+                    && !on;
                 if on {
                     prog.picker_selected_color()
+                } else if dim_midi {
+                    prog.picker_dim_color()
                 } else {
                     prog.picker_color()
                 }
@@ -1129,10 +1210,10 @@ fn draw_kaoss(scene: &mut Scene, model: &NativeModel) {
                 0x2a2a38
             };
             scene.button(cell, fill);
-            let label = kaoss_ui::picker_label(kind, index, model.kaoss_show_all);
+            let label = kaoss_ui::picker_label(kind, index, model.kaoss_show_all, filter);
             scene.text_centered(cell, &label, 0xffffff, 2);
             if matches!(kind, kaoss_ui::KaossPicker::Program) {
-                let prog = kaoss_ui::program_at(model.kaoss_show_all, index);
+                let prog = kaoss_ui::program_at(model.kaoss_show_all, filter, index);
                 scene.text(
                     cell.x + 4,
                     cell.y + 4,
@@ -1164,17 +1245,70 @@ fn draw_kaoss(scene: &mut Scene, model: &NativeModel) {
             }
         }
         draw_kaoss_axes(scene, layout.kaoss, model);
-        draw_kaoss_note_readout(scene, layout.kaoss, model);
+        // Note HUD uses overlay rect so it clears the Punch strip (56px).
+        draw_kaoss_note_readout(
+            scene,
+            layout.kaoss_overlay_rect(model.kaoss_punch_link.is_some()),
+            model,
+        );
+        // Punch link strip: rack lives on the right edge, not in PROG.
+        if let Some(index) = model.kaoss_punch_link {
+            let strip = layout.kaoss_punch_strip();
+            scene.fill_rect(strip, 0x1d2021);
+            let fill_h = ((strip.h as f32) * model.punch_amount[index].clamp(0.0, 1.0)) as i32;
+            if fill_h > 0 {
+                scene.fill_rect(
+                    crate::layout::Rect {
+                        x: strip.x,
+                        y: strip.y + strip.h - fill_h,
+                        w: strip.w,
+                        h: fill_h,
+                    },
+                    if model.punch_armed[index] {
+                        0xcc241d
+                    } else {
+                        0x504945
+                    },
+                );
+            }
+            scene.text(
+                strip.x + 4,
+                strip.y + 8,
+                jambox_core::PUNCH_LABELS[index],
+                0xfbf1c7,
+            );
+        }
         // Corner family cue on the play surface (picker already tags every tile).
+        // Product rule: pad = gesture instrument; Punch = rack.
+        let cue = if let Some(index) = model.kaoss_punch_link {
+            if prog.note {
+                format!("NOTE · strip={}", jambox_core::PUNCH_LABELS[index])
+            } else {
+                format!("FX · strip={}", jambox_core::PUNCH_LABELS[index])
+            }
+        } else if prog.note {
+            "NOTE · pad plays".into()
+        } else if prog.category() == kaoss_ui::KaossProgramCategory::Midi {
+            if model.kaoss_out.includes_usb() {
+                "MIDI · USB gestures".into()
+            } else {
+                "MIDI · needs USB out".into()
+            }
+        } else if prog.uses_punch_destroy() {
+            format!("DESTROY · {} (Punch DSP)", prog.label)
+        } else {
+            "FX · latch a note first".into()
+        };
+        let cue_color = match prog.category() {
+            kaoss_ui::KaossProgramCategory::Note => 0x8ec07c,
+            kaoss_ui::KaossProgramCategory::Fx => 0xfe8019,
+            kaoss_ui::KaossProgramCategory::Midi => 0xd3869b,
+        };
         scene.text(
             layout.kaoss.x + 8,
             layout.kaoss.y + 8,
-            if prog.note {
-                "NOTE · pad plays"
-            } else {
-                "FX · latch a note first"
-            },
-            if prog.note { 0x8ec07c } else { 0xfe8019 },
+            &cue,
+            cue_color,
         );
     }
 
@@ -1187,6 +1321,29 @@ fn draw_kaoss(scene: &mut Scene, model: &NativeModel) {
         model.kaoss_octaves
     );
     let gate = kaoss_ui::gate(model.kaoss_gate).label;
+
+    if layout.kaoss_favs.w > 0 {
+        for i in 0..kaoss_ui::KAOSS_FAV_SLOTS {
+            let cell = layout.kaoss_fav_cell(i);
+            let fav = model.kaoss_prog_favs[i];
+            let active = fav != kaoss_ui::KAOSS_FAV_EMPTY
+                && fav as usize % kaoss_ui::KAOSS_PROGRAMS.len() == model.kaoss_program;
+            let fill = if fav == kaoss_ui::KAOSS_FAV_EMPTY {
+                0x1d2021
+            } else if active {
+                kaoss_ui::program(fav as usize).picker_selected_color()
+            } else {
+                kaoss_ui::program(fav as usize).chrome_color()
+            };
+            scene.button(cell, fill);
+            let label = if fav == kaoss_ui::KAOSS_FAV_EMPTY {
+                format!("F{}", i + 1)
+            } else {
+                kaoss_ui::program(fav as usize).label.to_string()
+            };
+            scene.text_centered(cell, &label, 0xffffff, 1);
+        }
+    }
 
     if layout.kaoss_prog.w > 0 {
         scene.button(layout.kaoss_prog, prog.chrome_color());
@@ -1259,6 +1416,18 @@ fn draw_kaoss(scene: &mut Scene, model: &NativeModel) {
             0xffffff,
             2,
         );
+        if layout.kaoss_punch_link.w > 0 {
+            let linked = model.kaoss_punch_link;
+            scene.button(
+                layout.kaoss_punch_link,
+                if linked.is_some() { 0xcc241d } else { 0x3c3836 },
+            );
+            let label = match linked {
+                Some(i) => jambox_core::PUNCH_LABELS[i],
+                None => "PUNCH",
+            };
+            scene.text_centered(layout.kaoss_punch_link, label, 0xffffff, 2);
+        }
     }
 
     if layout.kaoss_full.w > 0 && layout.kaoss_gate.w == 0 {
@@ -1326,6 +1495,7 @@ fn draw_kaoss_settings(scene: &mut Scene, model: &NativeModel) {
     let scroll = model.kaoss_settings_scroll;
     let c = layout.content;
     scene.fill_rect(c, 0x111111);
+    scene.set_clip(c);
     scene.text(c.x + 8, c.y + 8 - scroll, "KAOSS settings", 0xfbf1c7);
     scene.text(c.x + c.w - 80, c.y + 8 - scroll, "SCROLL", 0xa89984);
 
@@ -1514,6 +1684,7 @@ fn draw_kaoss_settings(scene: &mut Scene, model: &NativeModel) {
         scene.button(cell, if on { 0x458588 } else { 0x3c3836 });
         scene.text_centered(cell, &format!("{}", ch + 1), 0xffffff, 2);
     }
+    scene.clear_clip();
 }
 
 fn draw_kaoss_color_picker(scene: &mut Scene, model: &NativeModel) {
@@ -1613,6 +1784,12 @@ fn draw_kaoss_axes(scene: &mut Scene, pad: crate::layout::Rect, model: &NativeMo
             "pressure" => "Y PRESS",
             "glide" => "Y GLIDE",
             "mod" => "Y MOD",
+            "punch_slice" => "Y SLICE",
+            "punch_crush" => "Y CRUSH",
+            "punch_rpt" => "Y RPT",
+            "punch_tape" => "Y TAPE",
+            "punch_drop" => "Y DROP",
+            "isolator" => "Y ISOL",
             "sweep" => {
                 if prog.x_param == Some("sweep") {
                     ""
@@ -1637,6 +1814,12 @@ fn draw_kaoss_axes(scene: &mut Scene, pad: crate::layout::Rect, model: &NativeMo
                 Some("reso") => "X RESO",
                 Some("pan") => "X PAN",
                 Some("sweep") => "X L/R",
+                Some("isolator") => "X ISOL",
+                Some("punch_slice") => "X SLICE",
+                Some("punch_crush") => "X CRUSH",
+                Some("punch_rpt") => "X RPT",
+                Some("punch_tape") => "X TAPE",
+                Some("punch_drop") => "X DROP",
                 _ => "X",
             }
         };
@@ -1722,12 +1905,14 @@ fn draw_kaoss_grid(
 }
 
 /// Fixed note HUD (chord-mode style) — never sits under the finger.
+/// `pad` should be [`Layout::kaoss_overlay_rect`] so a linked Punch strip
+/// (56px) does not cover the readout.
 fn draw_kaoss_note_readout(scene: &mut Scene, pad: crate::layout::Rect, model: &NativeModel) {
     let Some(fx) = model.kaoss_sounding_x() else {
         return;
     };
     let label = kaoss_ui::midi_note_label(model.kaoss_note_at(fx));
-    // Top-right of the pad: clear of Y-axis labels (left) and typical play area.
+    // Top-right of the overlay pad: clear of Y-axis labels (left) and strip.
     let w = 104;
     let h = 40;
     let r = Rect {
@@ -1877,28 +2062,42 @@ fn draw_pads(scene: &mut Scene, model: &NativeModel) {
 }
 
 fn draw_home(scene: &mut Scene, model: &NativeModel) {
-    use crate::layout::HOME_TILES;
-
     let layout = model.layout;
+    let scroll = model.home_scroll;
+    scene.set_clip(layout.content);
     scene.text_scaled(
         layout.content.x + 12,
-        layout.content.y + 10,
-        "Home",
+        layout.home_title_y(scroll),
+        if model.home_edit { "Edit Home" } else { "Home" },
         0xfbf1c7,
         3,
     );
-    scene.text_scaled(
-        layout.content.x + layout.content.w - 160,
-        layout.content.y + 14,
-        "tap a mode",
-        0x928374,
+    let edit = layout.home_edit_btn(scroll);
+    scene.button(edit, if model.home_edit { 0xd79921 } else { 0x504945 });
+    scene.text_centered(
+        edit,
+        if model.home_edit { "DONE" } else { "EDIT" },
+        0xfbf1c7,
         2,
     );
-    for (i, (_mode, title, color)) in HOME_TILES.iter().enumerate() {
-        let cell = layout.home_tile(i, model.home_scroll);
-        scene.button(cell, *color);
+    let grid = layout.home_grid_for(model.home_tile_order.len());
+    for (i, mode) in model.home_tile_order.iter().enumerate() {
+        let Some((title, color)) = crate::layout::home_tile_meta(*mode) else {
+            continue;
+        };
+        let cell = grid.cell_rect(i, scroll);
+        if !cell.intersects(layout.content) {
+            continue;
+        }
+        scene.button(cell, color);
         scene.text_centered(cell, title, 0xfbf1c7, 2);
+        if model.home_edit {
+            // Small corner cue: slot rank.
+            let rank = format!("{}", i + 1);
+            scene.text_scaled(cell.x + 6, cell.y + 4, &rank, 0x1d2021, 1);
+        }
     }
+    scene.clear_clip();
 }
 
 fn draw_chords(scene: &mut Scene, model: &NativeModel) {
@@ -2107,7 +2306,7 @@ fn draw_arp(scene: &mut Scene, model: &NativeModel) {
         scene.text_centered(cell, order.label(), 0xfbf1c7, 1);
     }
 
-    let oct_label = format!("{}", model.arp.octaves);
+    let oct_label = model.arp.octaves_label();
     let gate_label = model.arp.gate_label();
     let tools = [
         if model.arp.latch { "LATCH" } else { "HOLD" },
@@ -2164,7 +2363,11 @@ fn draw_arp(scene: &mut Scene, model: &NativeModel) {
         }
     }
 
-    let edits = ["-", "+", "ADD", "DEL", "KEY-", "KEY+"];
+    let edits: &[&str] = if layout.show_on_screen_keys {
+        &["-", "+", "ADD", "DEL", "KEY-", "KEY+"]
+    } else {
+        &["-", "+", "ADD", "DEL"]
+    };
     for (i, label) in edits.iter().enumerate() {
         let cell = layout.arp_edit(i);
         scene.button(cell, 0x3c3836);
@@ -4069,6 +4272,32 @@ fn draw_wave_slider(
     scene.fill(track.x as f32, track.y as f32, w, track.h as f32, color);
 }
 
+fn draw_settings_picker(scene: &mut Scene, model: &NativeModel, kind: crate::model::SettingsPicker) {
+    let layout = model.layout;
+    let c = layout.content;
+    scene.fill_rect(c, 0x111111);
+    let title = NativeModel::settings_picker_title(kind);
+    let hint = NativeModel::settings_picker_hint(kind);
+    scene.text(c.x + 8, c.y + 12, title, 0xfbf1c7);
+    scene.text(c.x + 8, c.y + 32, hint, 0xa89984);
+    let n = model.settings_picker_count(kind);
+    let selected = model.settings_picker_selected(kind);
+    let grid = layout.settings_picker_grid(n);
+    for index in grid.visible_range(model.settings_picker_scroll) {
+        let cell = grid.cell_rect(index, model.settings_picker_scroll);
+        if cell.y + cell.h < grid.viewport.y || cell.y > grid.viewport.y + grid.viewport.h {
+            continue;
+        }
+        let on = index == selected;
+        scene.button(cell, if on { 0x458588 } else { 0x3c3836 });
+        let label = model.settings_picker_label(kind, index);
+        scene.text_centered(cell, &label, 0xffffff, 2);
+    }
+    let done = layout.settings_picker_done();
+    scene.button(done, 0x458588);
+    scene.text_centered(done, "DONE", 0xffffff, 2);
+}
+
 fn draw_settings(scene: &mut Scene, model: &NativeModel) {
     let layout = model.layout;
     scene.text_scaled(
@@ -4266,7 +4495,7 @@ fn draw_fx(scene: &mut Scene, model: &NativeModel) {
     scene.fill_rect(clear, if punch_live { 0xcc241d } else { 0x3c3836 });
     scene.text_centered(clear, "CLEAR", 0xffffff, 2);
     const LABELS: [&str; Layout::FX_SLIDER_COUNT] = [
-        "DRIVE", "DELAY", "REVERB", "FLANGE", "LEVEL", "DRUMS", "MIC",
+        "DRIVE", "DELAY", "REVERB", "FLANGE", "KEYS", "DRUMS", "MIC",
     ];
     let inserts = match model.fx_target {
         crate::model::FxEditTarget::Bus => &model.fx_bus,
@@ -4278,6 +4507,7 @@ fn draw_fx(scene: &mut Scene, model: &NativeModel) {
         crate::model::FxEditTarget::Voice => 0xb16286,
         crate::model::FxEditTarget::DrumGroup => 0xd79921,
     };
+    scene.fill_rect(layout.settings_fx_mix_divider(), 0x504945);
     for index in 0..Layout::FX_SLIDER_COUNT {
         let track = layout.settings_fx_slider(index);
         scene.fill_rect(track, 0x20202c);
@@ -4379,6 +4609,8 @@ fn draw_fx_settings(scene: &mut Scene, model: &NativeModel) {
     let prio = layout.punch_prio();
     let rpt = layout.punch_rpt_mode();
     let grid = layout.punch_grid_mode();
+    let after = layout.punch_aftertouch();
+    let dry = layout.punch_dry();
     let close = layout.punch_settings_close();
     scene.fill_rect(prio, 0x3c3836);
     scene.text_centered(
@@ -4405,6 +4637,38 @@ fn draw_fx_settings(scene: &mut Scene, model: &NativeModel) {
         },
     );
     scene.text_centered(grid, model.punch_grid_mode.label(), 0xffffff, 2);
+    scene.fill_rect(
+        after,
+        if model.punch_aftertouch {
+            0x689d6a
+        } else {
+            0x3c3836
+        },
+    );
+    scene.text_centered(
+        after,
+        if model.punch_aftertouch {
+            "AFTERTOUCH"
+        } else {
+            "AT OFF"
+        },
+        0xffffff,
+        2,
+    );
+    scene.fill_rect(
+        dry,
+        if model.punch_dry {
+            0x689d6a
+        } else {
+            0x3c3836
+        },
+    );
+    scene.text_centered(
+        dry,
+        if model.punch_dry { "DRY" } else { "DRY OFF" },
+        0xffffff,
+        2,
+    );
     scene.fill_rect(close, 0x504945);
     scene.text_centered(close, "CLOSE", 0xffffff, 2);
     scene.text(
@@ -4413,6 +4677,113 @@ fn draw_fx_settings(scene: &mut Scene, model: &NativeModel) {
         "BEAT locks 1/4–1/32. SMOOTH loops the whole capture at the bottom.",
         0xa89984,
     );
+}
+
+fn draw_env(scene: &mut Scene, model: &NativeModel) {
+    let layout = model.layout;
+    scene.text_scaled(
+        layout.content.x + 16,
+        layout.content.y + 10,
+        "ENVELOPE · all voices",
+        0xfbf1c7,
+        2,
+    );
+    const LABELS: [&str; Layout::ENV_SLIDER_COUNT] = ["ATTACK", "DECAY", "SUSTAIN", "RELEASE"];
+    const COLORS: [u32; Layout::ENV_SLIDER_COUNT] = [0x458588, 0xd79921, 0x689d6a, 0xb16286];
+    let values = [
+        model.synth_params[3],
+        model.env_decay,
+        model.env_sustain,
+        model.synth_params[4],
+    ];
+    draw_adsr_plot(scene, layout.env_plot(), values);
+    for index in 0..Layout::ENV_SLIDER_COUNT {
+        let track = layout.env_slider(index);
+        scene.fill_rect(track, 0x20202c);
+        scene.text(track.x + 4, track.y - 18, LABELS[index], 0xc0c0d0);
+        let fill_h = (track.h as f32 * values[index]) as i32;
+        let fill = Rect {
+            x: track.x + 6,
+            y: track.y + track.h - fill_h,
+            w: track.w - 12,
+            h: fill_h,
+        };
+        scene.fill_rect(fill, COLORS[index]);
+    }
+}
+
+/// Normalized ADSR corner points in 0..1 plot space (x = time, y = level).
+/// Stage widths track the A/D/R knobs; S is a fixed hold so the plateau reads.
+fn adsr_curve_norm(attack: f32, decay: f32, sustain: f32, release: f32) -> [(f32, f32); 5] {
+    let a = attack.clamp(0.0, 1.0);
+    let d = decay.clamp(0.0, 1.0);
+    let s = sustain.clamp(0.0, 1.0);
+    let r = release.clamp(0.0, 1.0);
+    let aw = 0.06 + a * 0.30;
+    let dw = 0.06 + d * 0.30;
+    let sw = 0.22;
+    let rw = 0.06 + r * 0.30;
+    let sum = (aw + dw + sw + rw).max(1e-3);
+    let (aw, dw, sw, _rw) = (aw / sum, dw / sum, sw / sum, rw / sum);
+    let x1 = aw;
+    let x2 = x1 + dw;
+    let x3 = x2 + sw;
+    [
+        (0.0, 0.0),
+        (x1, 1.0),
+        (x2, s),
+        (x3, s),
+        (1.0, 0.0),
+    ]
+}
+
+fn draw_adsr_plot(scene: &mut Scene, plot: Rect, values: [f32; 4]) {
+    scene.fill_rect(plot, 0x1a1a22);
+    // Thin guides — two 1px lines, not a shaded body.
+    scene.fill(
+        plot.x as f32 + 8.0,
+        (plot.y + plot.h - 10) as f32,
+        (plot.w - 16) as f32,
+        1.0,
+        0x3c3836,
+    );
+    scene.fill(
+        plot.x as f32 + 8.0,
+        (plot.y + 12) as f32,
+        (plot.w - 16) as f32,
+        1.0,
+        0x3c3836,
+    );
+
+    let corners = adsr_curve_norm(values[0], values[1], values[2], values[3]);
+    let pad_x = 10.0;
+    let pad_y = 14.0;
+    let left = plot.x as f32 + pad_x;
+    let top = plot.y as f32 + pad_y;
+    let width = (plot.w as f32 - pad_x * 2.0).max(1.0);
+    let height = (plot.h as f32 - pad_y * 2.0).max(1.0);
+    let to_px = |nx: f32, ny: f32| -> (f32, f32) {
+        (left + nx * width, top + (1.0 - ny) * height)
+    };
+
+    // Outline only: five ADSR corners. No under-curve fill (that used to
+    // emit a tall quad per segment every frame and made ENV feel hung on
+    // the Pi when load was already high).
+    let pts: [(f32, f32); 5] = [
+        to_px(corners[0].0, corners[0].1),
+        to_px(corners[1].0, corners[1].1),
+        to_px(corners[2].0, corners[2].1),
+        to_px(corners[3].0, corners[3].1),
+        to_px(corners[4].0, corners[4].1),
+    ];
+    scene.stroke(&pts, 0xd3869b, 3.0);
+
+    const MARK: [u32; 4] = [0x458588, 0xd79921, 0x689d6a, 0xb16286];
+    for (i, &(nx, ny)) in corners[1..].iter().enumerate() {
+        let (px, py) = to_px(nx, ny);
+        scene.fill(px - 3.0, py - 3.0, 6.0, 6.0, MARK[i.min(3)]);
+    }
+    scene.text_scaled(plot.x + 12, plot.y + 4, "ADSR", 0x928374, 1);
 }
 
 fn draw_mix(scene: &mut Scene, model: &NativeModel) {
@@ -4982,17 +5353,58 @@ mod tests {
         model.set_mode(UiMode::Kaoss);
         model.kaoss_picker = Some(kaoss_ui::KaossPicker::Program);
         model.kaoss_show_all = true;
+        // Default NOTE filter — only teal tiles in the grid.
+        assert_eq!(model.kaoss_prog_filter, kaoss_ui::KaossProgramFilter::Note);
         let scene = build(&model);
         let note_tile = scene
             .color
             .iter()
             .any(|q| q.color == 0x458588 && q.w > 40.0);
+        assert!(note_tile, "NOTE programs should paint teal tiles");
+        // Filter chips are always drawn.
+        let note_chip = model.layout.kaoss_prog_filter_chip(0);
+        assert!(scene.color.iter().any(|q| {
+            (q.x - note_chip.x as f32).abs() < 2.0
+                && (q.y - note_chip.y as f32).abs() < 2.0
+                && q.color == 0x458588
+        }));
+        // ALL shows NOTE + FX families together.
+        model.kaoss_prog_filter = kaoss_ui::KaossProgramFilter::All;
+        let scene = build(&model);
         let fx_tile = scene
             .color
             .iter()
             .any(|q| q.color == 0xd65d0e && q.w > 40.0);
-        assert!(note_tile, "NOTE programs should paint teal tiles");
+        let midi_tile = scene
+            .color
+            .iter()
+            .any(|q| q.color == 0xb16286 && q.w > 40.0);
         assert!(fx_tile, "FX programs should paint orange tiles");
+        assert!(midi_tile, "MIDI programs should paint purple tiles");
+    }
+
+    #[test]
+    fn program_filter_chip_hit_switches_list() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Kaoss);
+        model.kaoss_picker = Some(kaoss_ui::KaossPicker::Program);
+        let fx = model.layout.kaoss_prog_filter_chip(1);
+        assert_eq!(
+            model.layout.hit_kaoss_prog_filter(fx.x + 2, fx.y + 2),
+            Some(crate::layout::Hit::KaossProgFilter(
+                kaoss_ui::KaossProgramFilter::Fx
+            ))
+        );
+        let mut out = Outbox::new();
+        model.finger_down(1, fx.x + 2, fx.y + 2, &mut out);
+        model.finger_up(1, &mut out);
+        assert_eq!(model.kaoss_prog_filter, kaoss_ui::KaossProgramFilter::Fx);
+        // MIDI chip still hit-able when Local-only (chip never hidden).
+        model.kaoss_out = crate::session::OutMode::Local;
+        let midi = model.layout.kaoss_prog_filter_chip(2);
+        model.finger_down(2, midi.x + 2, midi.y + 2, &mut out);
+        model.finger_up(2, &mut out);
+        assert_eq!(model.kaoss_prog_filter, kaoss_ui::KaossProgramFilter::Midi);
     }
 
     #[test]
@@ -5162,6 +5574,40 @@ mod tests {
     }
 
     #[test]
+    fn env_mode_draws_live_adsr_curve_stroke() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Env);
+        model.synth_params[3] = 0.2;
+        model.env_decay = 0.4;
+        model.env_sustain = 0.55;
+        model.synth_params[4] = 0.7;
+        let scene = build(&model);
+        assert!(
+            scene.strokes.iter().any(|s| s.color == 0xd3869b && s.points.len() == 5),
+            "ENV must stroke the 5-corner ADSR outline, got {} strokes",
+            scene.strokes.len()
+        );
+        // No shaded body under the curve — only the plot backdrop + thin guides
+        // + corner markers (keeps ENV cheap on the Pi).
+        let plot = model.layout.env_plot();
+        let under_fill = scene.color.iter().filter(|q| {
+            q.color == 0x3d2c40
+                && q.x >= plot.x as f32
+                && q.x <= (plot.x + plot.w) as f32
+                && q.h > 8.0
+        }).count();
+        assert_eq!(under_fill, 0, "ENV must not shade under the ADSR curve");
+        let a = adsr_curve_norm(0.1, 0.2, 1.0, 0.3);
+        let b = adsr_curve_norm(0.9, 0.2, 0.2, 0.3);
+        assert!(
+            (a[1].0 - b[1].0).abs() > 0.05,
+            "longer attack must widen the first stage"
+        );
+        assert!((a[2].1 - 1.0).abs() < 1e-4);
+        assert!((b[2].1 - 0.2).abs() < 1e-4);
+    }
+
+    #[test]
     fn wave_mode_submits_one_stroke_per_trace() {
         let mut model = NativeModel::new();
         model.set_mode(UiMode::Wave);
@@ -5277,6 +5723,7 @@ mod tests {
             glyphs: Vec::new(),
             strokes: Vec::new(),
             order: Vec::new(),
+            clip: None,
         };
         // Horizontal run then a vertical spike: exercises the miter join.
         scene.stroke(
@@ -5312,6 +5759,7 @@ mod tests {
             glyphs: Vec::new(),
             strokes: Vec::new(),
             order: Vec::new(),
+            clip: None,
         };
         scene.fill(0.0, 0.0, 80.0, 20.0, 0xff0000);
         scene.text(2, 2, "BEAT", 0xffffff);
@@ -5517,6 +5965,7 @@ mod tests {
             glyphs: Vec::new(),
             strokes: Vec::new(),
             order: Vec::new(),
+            clip: None,
         };
         draw_piano_roll(
             &mut scene,

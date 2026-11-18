@@ -146,35 +146,42 @@ python deploy_master.py          # deploy master
 python deploy/deploy-branch.py   # deploy the current checkout
 ```
 
-These overlay the repo, install committed `dist/armv7` engines, and restart
-`jambox-engine` + `pidi-native`. Rebuild bins first with
-`.\deploy\build-pi-bins.ps1` when crates changed.
+These overlay the repo, install committed engines (default **`dist/armv7`**),
+and restart `jambox-engine` + `pidi-native`. Rebuild bins first with
+`.\deploy\build-pi-bins.ps1` when crates changed. For a 64-bit Pi 4B see
+[docs/AARCH64.md](docs/AARCH64.md) and pass `--arch aarch64`.
 
-Cross-compile is preferred for Pi 2. **SET→UPDATE** installs committed
-`dist/armv7/{midi-engine,jambox-engine,pidi-native}` onto `bin/`. A green
-push to `master` that touches crates runs
-[`.github/workflows/build-pi-bins.yml`](.github/workflows/build-pi-bins.yml),
-which rebuilds those ELFs and commits them back so cloud-agent merges are
-OTA-ready. Manual rebuild is still useful for LAN SSH deploys:
+Dual-arch cross-compile: **armv7** (lab / Pi 2) and **aarch64** (Pi 4B).
+**SET→UPDATE** installs the stage dir matching the device
+(`dist/armv7` or `dist/aarch64`). A green push to `master` that touches crates
+runs [`.github/workflows/build-pi-bins.yml`](.github/workflows/build-pi-bins.yml),
+which rebuilds both trees and commits them back so cloud-agent merges are
+OTA-ready. Manual rebuild:
 
 ```bash
-./deploy/build-pi-bins.sh          # stages dist/armv7/{midi-engine,jambox-engine,pidi-native}
-git add dist/armv7 && git commit   # optional when CI commit-back will run
+./deploy/build-pi-bins.sh                 # armv7 (default)
+ARCHES=aarch64 ./deploy/build-pi-bins.sh  # Pi 4B 64-bit
+ARCHES=armv7,aarch64 ./deploy/build-pi-bins.sh
+git add dist/armv7 dist/aarch64 && git commit   # optional when CI commit-back will run
 ```
 
-SSH deploy still works the same way. Easiest linker path is often Debian/WSL
-`gcc-arm-linux-gnueabihf` (the script installs it when sudo is available) or
-[cross](https://github.com/cross-rs/cross) — see [`.cargo/config.toml.example`](.cargo/config.toml.example).
+SSH deploy still works the same way. Easiest linker path is Debian/WSL
+`gcc-arm-linux-gnueabihf` / `gcc-aarch64-linux-gnu` (the script installs them
+when sudo is available) or [cross](https://github.com/cross-rs/cross) — see
+[`.cargo/config.toml.example`](.cargo/config.toml.example).
 
 ```bash
-# Bash (Git Bash / WSL / Linux) — also stages dist/armv7 when TARGET is armv7
+# Bash (Git Bash / WSL / Linux)
 TARGET=armv7-unknown-linux-gnueabihf ./deploy/deploy.sh pi@<pi-ip>
+TARGET=aarch64-unknown-linux-gnu PI_DIST_ARCH=aarch64 ./deploy/deploy.sh pi@<pi-ip>
 
 # Or scp already-committed engines (no cargo):
 USE_STAGED=1 WITH_JAMBOX=1 ./deploy/deploy.sh pi@<pi-ip>
+PI_DIST_ARCH=aarch64 USE_STAGED=1 WITH_JAMBOX=1 ./deploy/deploy.sh pi@<pi-ip>
 
 # PowerShell
 .\deploy\deploy.ps1 -PiHost pi@<pi-ip> -Target armv7-unknown-linux-gnueabihf
+.\deploy\deploy.ps1 -PiHost pi@<pi-ip> -Target aarch64-unknown-linux-gnu -Arch aarch64
 ```
 
 If you cannot cross-compile yet, build **on the Pi** (slow) or copy a host-built binary only for same-arch testing.
@@ -192,7 +199,7 @@ Edit `presets/active.json` on the device for the live map (port name changes nee
 - [x] Linux `SCHED_FIFO` + `mlockall` hints (`--rt`)
 - [x] systemd + setup/deploy scripts
 - [ ] Real hardware smoke (MPK → Pi → DIN synth) — needs your devices
-- [ ] Working armv7 cross linker on the dev machine
+- [ ] Working armv7 / aarch64 cross linker on the dev machine
 
 ## Roadmap
 
