@@ -2486,6 +2486,30 @@ fn draw_synth_vib(scene: &mut Scene, model: &NativeModel) {
     scene.text_centered(layout.synth_pick_done, "DONE", 0xffffff, 2);
 }
 
+/// Label above + horizontal fill for FX insert rows (matches synth slider styling).
+fn draw_horizontal_labeled_slider(
+    scene: &mut Scene,
+    track: Rect,
+    label: &str,
+    value: f32,
+    fill_color: u32,
+) {
+    scene.fill_rect(track, 0x20202c);
+    scene.text_scaled(track.x, track.y - 16, label, 0xc0c0d0, 2);
+    let v_pad = if track.h < 12 { 1 } else { 4 };
+    let fill_h = (track.h - v_pad * 2).max(2);
+    let fill_w = (track.w as f32 * value.clamp(0.0, 1.0)) as i32;
+    scene.fill_rect(
+        Rect {
+            x: track.x,
+            y: track.y + v_pad,
+            w: fill_w.max(2),
+            h: fill_h,
+        },
+        fill_color,
+    );
+}
+
 fn draw_synth(scene: &mut Scene, model: &NativeModel) {
     let layout = model.layout;
 
@@ -4510,8 +4534,6 @@ fn draw_fx(scene: &mut Scene, model: &NativeModel) {
     scene.fill_rect(layout.settings_fx_mix_divider(), 0x504945);
     for index in 0..Layout::FX_SLIDER_COUNT {
         let track = layout.settings_fx_slider(index);
-        scene.fill_rect(track, 0x20202c);
-        scene.text(track.x + 2, track.y - 16, LABELS[index], 0xc0c0d0);
         let value = if index == Layout::FX_KEYS_LEVEL {
             model.synth_params[2]
         } else if index == Layout::FX_DRUMS_LEVEL {
@@ -4520,13 +4542,6 @@ fn draw_fx(scene: &mut Scene, model: &NativeModel) {
             model.input_level
         } else {
             inserts[index]
-        };
-        let fill_h = (track.h as f32 * value) as i32;
-        let fill = Rect {
-            x: track.x + 3,
-            y: track.y + track.h - fill_h,
-            w: track.w - 6,
-            h: fill_h,
         };
         let fill_color = if index == Layout::FX_KEYS_LEVEL {
             0x689d6a
@@ -4537,7 +4552,22 @@ fn draw_fx(scene: &mut Scene, model: &NativeModel) {
         } else {
             insert_color
         };
-        scene.fill_rect(fill, fill_color);
+        if index < Layout::FX_INSERT_COUNT {
+            draw_horizontal_labeled_slider(scene, track, LABELS[index], value, fill_color);
+        } else {
+            scene.fill_rect(track, 0x20202c);
+            scene.text(track.x + 2, track.y - 16, LABELS[index], 0xc0c0d0);
+            let fill_h = (track.h as f32 * value) as i32;
+            scene.fill_rect(
+                Rect {
+                    x: track.x + 3,
+                    y: track.y + track.h - fill_h,
+                    w: track.w - 6,
+                    h: fill_h,
+                },
+                fill_color,
+            );
+        }
     }
     const PUNCH_COLOR: [u32; Layout::PUNCH_PAD_COUNT] = [
         0xfb4934, 0xfe8019, 0xd79921, 0xb8bb26, 0x8ec07c, 0x458588, 0xb16286, 0xcc241d,
