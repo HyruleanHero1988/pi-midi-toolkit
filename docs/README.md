@@ -5,6 +5,7 @@ Native SDL/KMSDRM kiosk (`pidi-native`), 800×480.
 - **[Screen reference](index.html)** — labeled captures of every mode and overlay (HOME, SYNTH, SEQ, PADS, KAOSS, CHORDS, …).
 - **[NATIVE_KIOSK.md](../NATIVE_KIOSK.md)** — architecture, run, and Pi appliance.
 - **[README.md](../README.md)** — repo overview, engines, deploy.
+- **[YouTube reply: feature requests](youtube-reply-feature-requests.md)** — what @ianhill5074 asked for, in plain language, with a feasibility pass against PiDI.
 
 Recapture after UI changes:
 
