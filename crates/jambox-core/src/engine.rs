@@ -1167,6 +1167,8 @@ impl JamboxEngine {
             boosted.delay_mix = boost_send_mix(boosted.delay_mix, send);
             boosted.reverb_mix = boost_send_mix(boosted.reverb_mix, send);
             boosted.flanger_mix = boost_send_mix(boosted.flanger_mix, send);
+            boosted.chorus_mix = boost_send_mix(boosted.chorus_mix, send);
+            boosted.phaser_mix = boost_send_mix(boosted.phaser_mix, send);
             bus_fx.set_params(boosted);
             Some(saved)
         } else {
@@ -1913,6 +1915,8 @@ impl JamboxEngine {
             SynthParam::FmHit => self.fm.set_hit(unit),
             SynthParam::FmTail => self.fm.set_tail(unit),
             SynthParam::FmWidth => self.fm.set_width(unit),
+            SynthParam::FmMono => self.fm.set_mono(unit >= 0.5),
+            SynthParam::FmGlide => self.fm.set_glide(unit),
         }
     }
 
@@ -1952,6 +1956,13 @@ impl JamboxEngine {
             FxParam::FlangerRate => params.flanger_rate = unit,
             FxParam::FlangerDepth => params.flanger_depth = unit,
             FxParam::FlangerFb => params.flanger_fb = unit,
+            FxParam::ChorusMix => params.chorus_mix = unit,
+            FxParam::ChorusRate => params.chorus_rate = unit,
+            FxParam::ChorusDepth => params.chorus_depth = unit,
+            FxParam::PhaserMix => params.phaser_mix = unit,
+            FxParam::PhaserRate => params.phaser_rate = unit,
+            FxParam::PhaserDepth => params.phaser_depth = unit,
+            FxParam::PhaserFb => params.phaser_fb = unit,
         }
         slot.set_params(params);
     }
@@ -3880,6 +3891,11 @@ mod tests {
         );
         let mut bright = vec![0.0f32; 2048];
         let mut midi = MidiOutSink::new();
+        // Warm past the attack so consecutive blocks sit at sustain.
+        for _ in 0..4 {
+            clip_only.render(&mut bright, &[], &mut midi);
+        }
+        bright.fill(0.0);
         clip_only.render(&mut bright, &[], &mut midi);
         apply_now(
             &mut clip_only,

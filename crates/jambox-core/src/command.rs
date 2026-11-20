@@ -38,6 +38,13 @@ pub enum FxParam {
     FlangerRate,
     FlangerDepth,
     FlangerFb,
+    ChorusMix,
+    ChorusRate,
+    ChorusDepth,
+    PhaserMix,
+    PhaserRate,
+    PhaserDepth,
+    PhaserFb,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -101,6 +108,10 @@ pub enum SynthParam {
     FmTail,
     /// FM stereo width 0..1 (key-tracked pan). 0 = dual mono.
     FmWidth,
+    /// ≥0.5 enables last-note-wins mono + legato for live FM keys.
+    FmMono,
+    /// 0..1 portamento time while mono (0 = instant).
+    FmGlide,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
