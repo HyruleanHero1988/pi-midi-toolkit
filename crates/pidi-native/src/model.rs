@@ -5213,7 +5213,7 @@ impl NativeModel {
                     surface: Surface::FxSlider { index },
                     gate_on: false,
                 };
-                self.apply_fx_slider(index, py, outbox);
+                self.apply_fx_slider(index, px, py, outbox);
             }
             Hit::PunchPad(index) => {
                 self.fingers[slot] = Finger {
@@ -5830,7 +5830,8 @@ impl NativeModel {
                 self.apply_kit_slider(index, py, true, drum, outbox);
             }
             Surface::FxSlider { index } => {
-                self.apply_fx_slider(index, py, outbox);
+                let px = self.fingers[slot].px;
+                self.apply_fx_slider(index, px, py, outbox);
             }
             Surface::EnvSlider { index } => {
                 self.apply_env_slider(index, py, outbox);
@@ -7414,13 +7415,20 @@ impl NativeModel {
         self.mark_dirty();
     }
 
-    fn apply_fx_slider(&mut self, index: usize, py: i32, outbox: &mut Outbox) {
+    fn apply_fx_slider(&mut self, index: usize, px: i32, py: i32, outbox: &mut Outbox) {
         if index >= Layout::FX_SLIDER_COUNT {
             return;
         }
         let track = self.layout.settings_fx_slider(index);
-        let y = 1.0 - ((py - track.y) as f32 / track.h.max(1) as f32);
-        let value = y.clamp(0.0, 1.0);
+        let value = if index < Layout::FX_INSERT_COUNT {
+            let Some(v) = Self::horizontal_slider_t(track, px, py) else {
+                return;
+            };
+            v
+        } else {
+            let y = 1.0 - ((py - track.y) as f32 / track.h.max(1) as f32);
+            y.clamp(0.0, 1.0)
+        };
         if index == Layout::FX_KEYS_LEVEL {
             self.synth_params[2] = value;
             outbox.synth("level", value);
@@ -14605,8 +14613,8 @@ mod tests {
         model.fx_target = FxEditTarget::Bus;
         let mut out = Outbox::new();
         let track = model.layout.settings_fx_slider(3);
-        // Top of the slider → wet ≈ 1.
-        model.finger_down(1, track.x + 8, track.y + 4, &mut out);
+        // Right end of the horizontal track → wet ≈ 1.
+        model.finger_down(1, track.x + track.w - 8, track.y + track.h / 2, &mut out);
         let batch = out.take();
         assert!(
             batch.iter().any(|r| matches!(
@@ -15075,14 +15083,14 @@ mod tests {
         model.fx_target = FxEditTarget::Voice;
         for (index, param) in [(4, "chorus_mix"), (5, "phaser_mix")] {
             let track = model.layout.settings_fx_slider(index);
-            model.apply_fx_slider(index, track.y, &mut out);
+            model.apply_fx_slider(index, track.x + track.w - 1, track.y + track.h / 2, &mut out);
             assert!(out.take().iter().any(|r| matches!(
                 r,
                 Request::Fx { param: p, .. } if p == param
             )));
         }
         let s = model.capture_session();
-        assert!((s.fx_chorus - 1.0).abs() < 1e-3 && (s.fx_phaser - 1.0).abs() < 1e-3);
+        assert!(s.fx_chorus > 0.99 && s.fx_phaser > 0.99, "insert FX uses horizontal tracks");
     }
 
     fn punch_midi(

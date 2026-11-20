@@ -2582,7 +2582,7 @@ impl Layout {
     }
 
     /// One-octave piano keyboard inside `synth_keys`.
-    /// FX page: four insert sliders + KEYS / DRUMS / MIC mix levels.
+    /// FX page: six insert sliders + KEYS / DRUMS / MIC mix levels.
     pub const FX_INSERT_COUNT: usize = 6;
     pub const FX_SLIDER_COUNT: usize = 9;
     pub const FX_KEYS_LEVEL: usize = 6;
@@ -4135,26 +4135,42 @@ impl Layout {
         }
     }
 
-    pub fn settings_fx_slider(&self, index: usize) -> Rect {
-        // Top: DRIVE / DELAY / REVERB / FLANGE / CHORUS / PHASER (follow FxEditTarget).
-        // Bottom row: KEYS / DRUMS / MIC (global mix trims).
-        let i = index % Self::FX_SLIDER_COUNT;
+    /// Height of the stacked insert rows above the KEYS/DRUMS/MIC band.
+    fn settings_fx_insert_block_h(&self) -> i32 {
+        self.settings_fx.h - Self::FX_MIX_BAND_H - Self::FX_MIX_DIVIDER_GAP - 4
+    }
+
+    fn settings_fx_insert_cell(&self, index: usize) -> Rect {
+        let index = (index % Self::FX_INSERT_COUNT) as i32;
         let area = self.settings_fx;
-        let label_pad = 22;
+        let rows = Self::FX_INSERT_COUNT as i32;
+        let block_h = self.settings_fx_insert_block_h();
+        let row_h = block_h / rows;
+        Rect {
+            x: area.x,
+            y: area.y + 4 + index * row_h,
+            w: area.w,
+            h: row_h,
+        }
+    }
+
+    /// Horizontal insert track (DRIVE … PHASER), synth-style rows.
+    pub fn settings_fx_slider(&self, index: usize) -> Rect {
+        let i = index % Self::FX_SLIDER_COUNT;
         if i < Self::FX_INSERT_COUNT {
-            let col = i as i32;
-            let cols = Self::FX_INSERT_COUNT as i32;
-            let w = area.w / cols;
-            let h = area.h - label_pad - Self::FX_MIX_BAND_H - Self::FX_MIX_DIVIDER_GAP;
+            let cell = self.settings_fx_insert_cell(i);
+            let label_h = 16;
             Rect {
-                x: area.x + col * w + 4,
-                y: area.y + label_pad,
-                w: w - 8,
-                h: h - 8,
+                x: cell.x,
+                y: cell.y + label_h,
+                w: cell.w,
+                h: (cell.h - label_h - 2).max(8),
             }
         } else {
             let mix_i = (i - Self::FX_INSERT_COUNT) as i32;
             let cols = 3;
+            let area = self.settings_fx;
+            let label_pad = 22;
             let w = area.w / cols;
             let band_y = area.y + area.h - Self::FX_MIX_BAND_H;
             Rect {
@@ -5481,7 +5497,8 @@ mod tests {
         assert!(first.x >= layout.settings_fx.x);
         assert!(flange.x + flange.w <= layout.settings_fx.x + layout.settings_fx.w);
         assert!(mic.x + mic.w <= layout.settings_fx.x + layout.settings_fx.w);
-        assert_eq!(first.y, flange.y, "insert FX share one top row");
+        assert!(first.y < flange.y, "insert FX stack in separate rows");
+        assert!(flange.y + flange.h <= keys.y - 8, "insert block clears mix band");
         assert_eq!(keys.y, drums.y, "KEYS/DRUMS share the mix row");
         assert_eq!(drums.y, mic.y, "DRUMS/MIC share the mix row");
         assert!(
