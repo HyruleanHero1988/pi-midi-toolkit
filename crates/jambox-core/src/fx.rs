@@ -10,7 +10,14 @@ const REVERB_MAX_SEC: f32 = 0.55;
 const FLANGER_MAX_SEC: f32 = 0.020;
 /// Chorus delay window (~15–30 ms base + depth).
 const CHORUS_MAX_SEC: f32 = 0.040;
-const PHASER_STAGES: usize = 6;
+/// Serial first-order all-pass stages (Phase 90–class; six for stronger combing).
+const PHASER_STAGES: usize = 10;
+/// Lowest sweep corner when the LFO is down (Hz).
+const PHASER_FREQ_HZ_MIN: f32 = 100.0;
+/// Added Hz at full depth when the LFO is up (top ~1.6–3 kHz, classic pedal range).
+const PHASER_FREQ_HZ_SPAN: f32 = 3_200.0;
+/// Cap on phaser feedback — higher `phaser_fb` tightens the jet / resonant peaks.
+const PHASER_FB_MAX: f32 = 0.92;
 /// Drive oversampling factor around the tube nonlinearity.
 const DRIVE_OS: usize = 2;
 
@@ -71,8 +78,8 @@ impl Default for FxParams {
             chorus_depth: 0.55,
             phaser_mix: 0.0,
             phaser_rate: 0.35,
-            phaser_depth: 0.70,
-            phaser_fb: 0.35,
+            phaser_depth: 0.85,
+            phaser_fb: 0.55,
         }
     }
 }
@@ -282,28 +289,33 @@ impl FxUnit {
         if p.phaser_mix > 0.001 {
             let rate_hz = PHASER_RATE_HZ_MIN + p.phaser_rate * PHASER_RATE_HZ_SPAN;
             let depth = p.phaser_depth;
-            let fb = p.phaser_fb.min(0.85);
+            let fb = p.phaser_fb.min(PHASER_FB_MAX);
             let mix = p.phaser_mix;
-            let dry = 1.0 - mix;
             let phase_inc = rate_hz / self.sample_rate;
             let two_pi = std::f32::consts::TAU;
-            // Sweep all-pass coefficient ~0.1..0.9 with depth.
+            let sweep_hz = depth * PHASER_FREQ_HZ_SPAN;
+            let f_lo = PHASER_FREQ_HZ_MIN;
+            let f_hi = PHASER_FREQ_HZ_MIN + sweep_hz.max(80.0);
             for s in buf.iter_mut() {
+                let dry = *s;
                 self.phaser_phase += phase_inc;
                 if self.phaser_phase >= 1.0 {
                     self.phaser_phase -= 1.0;
                 }
                 let lfo = 0.5 + 0.5 * (self.phaser_phase * two_pi).sin();
-                let coeff = (0.15 + 0.70 * depth * lfo).clamp(0.05, 0.95);
-                let mut x = *s + self.phaser_fb_z * fb;
+                let center_hz = f_lo + (f_hi - f_lo) * lfo;
+                let coeff = phaser_ap_coeff(center_hz, self.sample_rate);
+                let mut x = (dry + self.phaser_fb_z * fb).clamp(-2.0, 2.0);
                 for z in self.phaser_z.iter_mut() {
                     // First-order all-pass: y = a*x + z; z = x - a*y
                     let y = coeff * x + *z;
                     *z = x - coeff * y;
                     x = y;
                 }
-                self.phaser_fb_z = x;
-                *s = *s * dry + x * mix;
+                self.phaser_fb_z = x.clamp(-1.5, 1.5);
+                // Classic insert: notches come from ~50/50 dry + phased, not all-pass alone.
+                let classic = 0.5 * (dry + x);
+                *s = dry * (1.0 - mix) + classic * mix;
             }
         }
 
@@ -363,6 +375,13 @@ impl FxUnit {
             self.tail_hold = self.tail_hold.saturating_sub(buf.len() as u32);
         }
     }
+}
+
+/// Bilinear first-order all-pass coefficient for notch center `center_hz`.
+#[inline]
+fn phaser_ap_coeff(center_hz: f32, sample_rate: f32) -> f32 {
+    let t = (std::f32::consts::PI * center_hz / sample_rate).tan();
+    ((1.0 - t) / (1.0 + t)).clamp(0.05, 0.95)
 }
 
 #[inline]
@@ -618,24 +637,126 @@ mod tests {
         assert!(peak > 0.2, "chorus should reprint the impulse, peak={peak}");
     }
 
+    fn fill_phaser_noise(buf: &mut [f32], seed: u32) {
+        let mut s = seed;
+        for x in buf.iter_mut() {
+            s = s.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            *x = (s as f32 / u32::MAX as f32) * 2.0 - 1.0;
+        }
+    }
+
+    fn measure_phaser_noise_rms_gain(fx: &mut FxUnit, sample_rate: f32, seed: u32) -> f32 {
+        let frames = (sample_rate * 0.35) as usize;
+        let mut buf = vec![0.0f32; frames];
+        fill_phaser_noise(&mut buf, seed);
+        let in_rms = (buf.iter().map(|v| v * v).sum::<f32>() / frames as f32).sqrt();
+        fx.process(&mut buf);
+        let out_rms = (buf.iter().map(|v| v * v).sum::<f32>() / frames as f32).sqrt();
+        out_rms / in_rms
+    }
+
+    fn measure_phaser_tone_gain_at_lfo(fx: &mut FxUnit, freq_hz: f32, sample_rate: f32) -> f32 {
+        let frames = 4096usize;
+        let mut buf = vec![0.0f32; frames];
+        for (i, s) in buf.iter_mut().enumerate() {
+            *s = (i as f32 * freq_hz / sample_rate * std::f32::consts::TAU).sin();
+        }
+        fx.process(&mut buf);
+        let out_rms = (buf.iter().map(|v| v * v).sum::<f32>() / frames as f32).sqrt();
+        out_rms / std::f32::consts::FRAC_1_SQRT_2
+    }
+
+    fn phaser_params_loud() -> FxParams {
+        FxParams {
+            phaser_mix: 1.0,
+            phaser_rate: 0.0,
+            phaser_depth: 1.0,
+            phaser_fb: 0.55,
+            ..FxParams::default()
+        }
+    }
+
+    #[test]
+    fn phaser_ap_coeff_tracks_center_frequency() {
+        let low = phaser_ap_coeff(120.0, 48_000.0);
+        let high = phaser_ap_coeff(2_400.0, 48_000.0);
+        assert!((low - high).abs() > 0.1, "coeff should move with notch center");
+    }
+
+    #[test]
+    fn phaser_full_mix_produces_deep_notches() {
+        let sr = 48_000.0;
+        let params = phaser_params_loud();
+        let mut fx = FxUnit::new(sr);
+        fx.set_params(params);
+        let noise_gain = measure_phaser_noise_rms_gain(&mut fx, sr, 0xFACE_0001);
+        assert!(
+            noise_gain < 0.82,
+            "colored noise should lose clear energy in moving notches, gain={noise_gain}"
+        );
+
+        let rate_hz = PHASER_RATE_HZ_MIN + params.phaser_rate * PHASER_RATE_HZ_SPAN;
+        let mut min_tone_gain = 1.0f32;
+        for step in 0..32 {
+            let mut fx = FxUnit::new(sr);
+            fx.set_params(params);
+            let adv = ((step as f32 / 32.0) * sr / rate_hz.max(0.05)) as usize;
+            if adv > 0 {
+                let mut z = vec![0.0f32; adv.min(12_000)];
+                fx.process(&mut z);
+            }
+            for freq in (100..3100).step_by(80).map(|f| f as f32) {
+                let g = measure_phaser_tone_gain_at_lfo(&mut fx, freq, sr);
+                min_tone_gain = min_tone_gain.min(g);
+            }
+        }
+        assert!(
+            min_tone_gain < 0.82,
+            "expected audible combing while the LFO sweeps, worst gain={min_tone_gain}"
+        );
+    }
+
+    #[test]
+    fn phaser_notches_move_when_lfo_advances() {
+        let sr = 48_000.0;
+        let params = phaser_params_loud();
+        let rate_hz = PHASER_RATE_HZ_MIN + params.phaser_rate * PHASER_RATE_HZ_SPAN;
+
+        let mut fx = FxUnit::new(sr);
+        fx.set_params(params);
+        let g_600 = measure_phaser_tone_gain_at_lfo(&mut fx, 600.0, sr);
+
+        let half_period = (0.5 / rate_hz * sr) as usize;
+        let mut silence = vec![0.0f32; half_period.max(512)];
+        fx.process(&mut silence);
+
+        let g_600_late = measure_phaser_tone_gain_at_lfo(&mut fx, 600.0, sr);
+
+        let mut fx3 = FxUnit::new(sr);
+        fx3.set_params(params);
+        let noise_early = measure_phaser_noise_rms_gain(&mut fx3, sr, 0xA5A5_1234);
+        let half = (0.5 / rate_hz.max(0.05) * sr) as usize;
+        let mut z = vec![0.0f32; half.max(256)];
+        fx3.process(&mut z);
+        let noise_late = measure_phaser_noise_rms_gain(&mut fx3, sr, 0xA5A5_1234);
+        assert!(
+            (g_600 - g_600_late).abs() > 0.02
+                || (noise_early - noise_late).abs() > 0.03,
+            "gain@600 early={g_600} late={g_600_late} noise early={noise_early} late={noise_late}"
+        );
+    }
+
     #[test]
     fn phaser_wet_alters_a_tone() {
         let mut fx = FxUnit::new(48_000.0);
-        fx.set_params(FxParams {
-            phaser_mix: 1.0,
-            phaser_rate: 0.5,
-            phaser_depth: 1.0,
-            phaser_fb: 0.4,
-            ..FxParams::default()
-        });
+        fx.set_params(phaser_params_loud());
         let mut buf = vec![0.0f32; 512];
         for (i, s) in buf.iter_mut().enumerate() {
             *s = (i as f32 * 0.08).sin() * 0.5;
         }
         let before = buf[100];
         fx.process(&mut buf);
-        // Full mix through all-pass stages should differ from the dry sine.
-        assert!((buf[100] - before).abs() > 1e-4 || buf.iter().any(|v| v.abs() > 0.01));
+        assert!((buf[100] - before).abs() > 1e-3);
     }
 
     #[test]
