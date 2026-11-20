@@ -1,7 +1,7 @@
 target=aarch64-unknown-linux-gnu
 arch=aarch64
-built_utc=2026-11-18T01:09:21Z
+built_utc=2026-11-20T22:33:30Z
 host=Linux x86_64
 host_glibc=2.35
-git_sha=9b5d0b34359d14469f5ab4e3ea4df67a42ff8abb
+git_sha=ad4c4e5e581f6713f046c5bce773abcd3ed08a77
 crates=midi-engine,jambox-engine,pidi-native
