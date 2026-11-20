@@ -9,3 +9,7 @@ description = "Jambox soft-synth DSP and sample-accurate sequencer (no I/O, no a
 midi-core = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+
+[[example]]
+name = "phaser_render"
+path = "examples/phaser_render.rs"
