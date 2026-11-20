@@ -227,6 +227,18 @@ pub struct SessionState {
     /// Global bus flanger wet (FX→BUS FLANGE).
     #[serde(default)]
     pub fx_bus_flanger: f32,
+    /// Per-voice chorus wet (FX→VOICE CHORUS).
+    #[serde(default)]
+    pub fx_chorus: f32,
+    /// Per-voice phaser wet (FX→VOICE PHASER).
+    #[serde(default)]
+    pub fx_phaser: f32,
+    /// Global bus chorus wet (FX→BUS CHORUS).
+    #[serde(default)]
+    pub fx_bus_chorus: f32,
+    /// Global bus phaser wet (FX→BUS PHASER).
+    #[serde(default)]
+    pub fx_bus_phaser: f32,
     /// KAOSS pad FX destination: voice insert, kit-group insert, or both.
     #[serde(default)]
     pub kaoss_fx_target: KaossFxTarget,
@@ -378,6 +390,12 @@ pub struct SessionState {
     /// FM stereo width 0..1. Missing in old sessions → 0 (dual mono, old sound).
     #[serde(default)]
     pub fm_width: f32,
+    /// FM mono (last-note-wins legato). Missing → polyphonic.
+    #[serde(default)]
+    pub fm_mono: bool,
+    /// FM mono glide 0..1. Missing → 0 (instant).
+    #[serde(default)]
+    pub fm_glide: f32,
     /// Left, right, and sub wave layout. Missing → the first test layout.
     #[serde(default = "crate::wave_viz::default_signals")]
     pub wave_signals: [crate::wave_viz::WaveSignal; 3],
@@ -602,6 +620,10 @@ impl Default for SessionState {
             fx_flanger: 0.0,
             fx_flanger_rate: default_fx_flanger_rate(),
             fx_bus_flanger: 0.0,
+            fx_chorus: 0.0,
+            fx_phaser: 0.0,
+            fx_bus_chorus: 0.0,
+            fx_bus_phaser: 0.0,
             kaoss_fx_target: KaossFxTarget::Voice,
             punch_buffer_prio: 0,
             punch_rpt_mode: 0,
@@ -658,6 +680,8 @@ impl Default for SessionState {
             fm_user: None,
             fm_patches: Vec::new(),
             fm_width: 0.0,
+            fm_mono: false,
+            fm_glide: 0.0,
             wave_signals: crate::wave_viz::default_signals(),
             wave_sub_hz: crate::wave_viz::default_sub_hz(),
             home_tiles: Vec::new(),

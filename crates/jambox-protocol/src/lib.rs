@@ -440,6 +440,10 @@ pub struct WireClipVoice {
     pub reverb_mix: f32,
     #[serde(default)]
     pub flanger_mix: f32,
+    #[serde(default)]
+    pub chorus_mix: f32,
+    #[serde(default)]
+    pub phaser_mix: f32,
     /// DRIFT slider captured with the take. Absent follows the live slider.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub release_drift: Option<f32>,

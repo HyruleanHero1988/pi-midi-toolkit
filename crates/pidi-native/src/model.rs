@@ -340,6 +340,9 @@ pub struct NativeModel {
     pub fm_params: [f32; 4],
     /// FM WIDTH slider (global, not per-op). 0 = dual mono (old sound).
     pub fm_width: f32,
+    /// FM mono toggle (last-note-wins legato) and GLIDE slider (0..1).
+    pub fm_mono: bool,
+    pub fm_glide: f32,
     /// True while the heard graph is the saved user patch, not a recipe.
     pub fm_user_live: bool,
     pub fm_user_index: Option<usize>,
@@ -430,11 +433,11 @@ pub struct NativeModel {
     song_viz_name: String,
     song_origin: Option<Instant>,
     song_elapsed_ticks: f64,
-    pub fx_bus: [f32; 4],
-    pub fx_voice: [f32; 4],
+    pub fx_bus: [f32; 6],
+    pub fx_voice: [f32; 6],
     /// Voice flanger LFO rate (0..1). Independent of SYNTH FLANGE mix.
     pub fx_flanger_rate: f32,
-    pub fx_drum: [f32; 4],
+    pub fx_drum: [f32; 6],
     pub fx_target: FxEditTarget,
     pub punch_amount: [f32; Layout::PUNCH_PAD_COUNT],
     pub punch_armed: [bool; Layout::PUNCH_PAD_COUNT],
@@ -686,8 +689,8 @@ struct KaossFxSpring {
     vibrato_depth: f32,
     vibrato_always: f32,
     vibrato_rate: f32,
-    fx_voice: [f32; 4],
-    fx_drum: [f32; 4],
+    fx_voice: [f32; 6],
+    fx_drum: [f32; 6],
     fx_flanger_rate: f32,
     delay_time: f32,
     delay_fb: f32,
@@ -705,10 +708,10 @@ struct KaossFxSpring {
 /// reverb / flange mixes ease out so `FxUnit` tanks stay audible briefly.
 #[derive(Clone, Copy)]
 struct KaossFxReleaseTail {
-    voice_from: [f32; 4],
-    voice_to: [f32; 4],
-    drum_from: [f32; 4],
-    drum_to: [f32; 4],
+    voice_from: [f32; 6],
+    voice_to: [f32; 6],
+    drum_from: [f32; 6],
+    drum_to: [f32; 6],
     elapsed: f32,
 }
 
@@ -781,6 +784,8 @@ impl NativeModel {
             fm_ops: fm_patch.ops,
             fm_matrix: fm_patch.matrix,
             fm_width: 0.0,
+            fm_mono: false,
+            fm_glide: 0.0,
             fm_params: [
                 fm_patch.ops[3].ratio,
                 fm_patch.ops[3].audio,
@@ -860,10 +865,10 @@ impl NativeModel {
             song_viz_name: String::new(),
             song_origin: None,
             song_elapsed_ticks: 0.0,
-            fx_bus: [0.0, 0.0, 0.0, 0.0],
-            fx_voice: [0.0, 0.0, 0.0, 0.0],
+            fx_bus: [0.0; 6],
+            fx_voice: [0.0; 6],
             fx_flanger_rate: 0.35,
-            fx_drum: [0.0, 0.0, 0.0, 0.0],
+            fx_drum: [0.0; 6],
             fx_target: FxEditTarget::Bus,
             punch_amount: [0.0; Layout::PUNCH_PAD_COUNT],
             punch_armed: [false; Layout::PUNCH_PAD_COUNT],
@@ -3029,9 +3034,13 @@ impl NativeModel {
             s.fx_bus[1],
             s.fx_bus[2],
             s.fx_bus_flanger.clamp(0.0, 1.0),
+            s.fx_bus_chorus.clamp(0.0, 1.0),
+            s.fx_bus_phaser.clamp(0.0, 1.0),
         ];
         // Voice flange (SYNTH / FX→VOICE); bus flange is independent global wet.
         self.fx_voice[3] = s.fx_flanger.clamp(0.0, 1.0);
+        self.fx_voice[4] = s.fx_chorus.clamp(0.0, 1.0);
+        self.fx_voice[5] = s.fx_phaser.clamp(0.0, 1.0);
         self.fx_flanger_rate = s.fx_flanger_rate.clamp(0.0, 1.0);
         self.pads_out = s.pads_out;
         self.clip_quantize = s.clip_quantize;
@@ -3111,6 +3120,8 @@ impl NativeModel {
         self.home_edit = false;
         self.fm_patches = s.fm_patches.clone();
         self.fm_width = s.fm_width.clamp(0.0, 1.0);
+        self.fm_mono = s.fm_mono;
+        self.fm_glide = s.fm_glide.clamp(0.0, 1.0);
         if self.fm_patches.is_empty() {
             if let Some(old) = s.fm_user {
                 self.fm_patches.push(session::FmNamedPatch {
@@ -3175,13 +3186,12 @@ impl NativeModel {
                 outbox.synth_drum(name, macros[i], Some(model as u8));
             }
         }
-        for (i, name) in ["drive", "delay_mix", "reverb_mix", "flanger_mix"]
-            .iter()
-            .enumerate()
-        {
+        for (i, name) in Self::FX_PARAM_NAMES.iter().enumerate() {
             outbox.fx_bus(name, self.fx_bus[i]);
         }
         self.push_voice_fx("flanger_mix", self.fx_voice[3], outbox);
+        self.push_voice_fx("chorus_mix", self.fx_voice[4], outbox);
+        self.push_voice_fx("phaser_mix", self.fx_voice[5], outbox);
         self.push_voice_fx("flanger_rate", self.fx_flanger_rate, outbox);
         self.sync_wave_bank();
         self.push_kaoss_scale(outbox);
@@ -3237,6 +3247,10 @@ impl NativeModel {
             fx_flanger: self.fx_voice[3],
             fx_flanger_rate: self.fx_flanger_rate,
             fx_bus_flanger: self.fx_bus[3],
+            fx_chorus: self.fx_voice[4],
+            fx_phaser: self.fx_voice[5],
+            fx_bus_chorus: self.fx_bus[4],
+            fx_bus_phaser: self.fx_bus[5],
             kaoss_show_all: self.kaoss_show_all,
             kaoss_prog_filter: self.kaoss_prog_filter.wire().to_string(),
             kaoss_channel: self.kaoss_channel,
@@ -3295,6 +3309,8 @@ impl NativeModel {
             fm_user: self.fm_user,
             fm_patches: self.fm_patches.clone(),
             fm_width: self.fm_width,
+            fm_mono: self.fm_mono,
+            fm_glide: self.fm_glide,
             wave_signals: self.wave_signals,
             wave_sub_hz: self.wave_sub_hz,
             home_tiles: self
@@ -4449,6 +4465,10 @@ impl NativeModel {
             Hit::FmSave => {
                 self.tap_ui(slot, id, gesture, px, py);
                 self.open_fm_name();
+            }
+            Hit::FmMono => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.toggle_fm_mono(outbox);
             }
             Hit::FmUser => {
                 self.tap_ui(slot, id, gesture, px, py);
@@ -6379,6 +6399,8 @@ impl NativeModel {
         pad.fx_delay_mix = self.fx_voice[1].clamp(0.0, 1.0);
         pad.fx_reverb_mix = self.fx_voice[2].clamp(0.0, 1.0);
         pad.fx_flanger_mix = self.fx_voice[3].clamp(0.0, 1.0);
+        pad.fx_chorus_mix = self.fx_voice[4].clamp(0.0, 1.0);
+        pad.fx_phaser_mix = self.fx_voice[5].clamp(0.0, 1.0);
         pad.release_drift = Some(self.release_drift.clamp(0.0, 1.0));
     }
 
@@ -6391,6 +6413,8 @@ impl NativeModel {
             self.fx_voice[1].clamp(0.0, 1.0),
             self.fx_voice[2].clamp(0.0, 1.0),
             self.fx_voice[3].clamp(0.0, 1.0),
+            self.fx_voice[4].clamp(0.0, 1.0),
+            self.fx_voice[5].clamp(0.0, 1.0),
         ];
         let pad = &mut self.phrases[index];
         pad.voice_locked = true;
@@ -6401,6 +6425,8 @@ impl NativeModel {
         pad.fx_delay_mix = fx[1];
         pad.fx_reverb_mix = fx[2];
         pad.fx_flanger_mix = fx[3];
+        pad.fx_chorus_mix = fx[4];
+        pad.fx_phaser_mix = fx[5];
         pad.release_drift = Some(self.release_drift.clamp(0.0, 1.0));
     }
 
@@ -6414,6 +6440,8 @@ impl NativeModel {
             delay_mix: pad.fx_delay_mix,
             reverb_mix: pad.fx_reverb_mix,
             flanger_mix: pad.fx_flanger_mix,
+            chorus_mix: pad.fx_chorus_mix,
+            phaser_mix: pad.fx_phaser_mix,
             release_drift: pad.release_drift,
         }
     }
@@ -6635,6 +6663,8 @@ impl NativeModel {
         }
         outbox.synth("fm_op", self.fm_selected as f32);
         outbox.synth("fm_width", self.fm_width);
+        outbox.synth("fm_mono", if self.fm_mono { 1.0 } else { 0.0 });
+        outbox.synth("fm_glide", self.fm_glide);
     }
 
     fn select_fm_recipe(&mut self, index: usize, outbox: &mut Outbox) {
@@ -6819,6 +6849,13 @@ impl NativeModel {
         self.select_fm_op(from, outbox);
     }
 
+    fn toggle_fm_mono(&mut self, outbox: &mut Outbox) {
+        self.fm_mono = !self.fm_mono;
+        outbox.synth("fm_mono", if self.fm_mono { 1.0 } else { 0.0 });
+        self.status_line = if self.fm_mono { "FM MONO on" } else { "FM MONO off" }.into();
+        self.mark_dirty();
+    }
+
     fn apply_fm_slider(&mut self, index: usize, py: i32, outbox: &mut Outbox) {
         if index >= Layout::FM_SLIDER_COUNT {
             return;
@@ -6830,6 +6867,13 @@ impl NativeModel {
             self.fm_width = value;
             outbox.synth("fm_width", value);
             self.status_line = format!("FM WIDTH {:.2}", value);
+            self.mark_dirty();
+            return;
+        }
+        if index == 5 {
+            self.fm_glide = value;
+            outbox.synth("fm_glide", value);
+            self.status_line = format!("FM GLIDE {:.2}", value);
             self.mark_dirty();
             return;
         }
@@ -6850,7 +6894,14 @@ impl NativeModel {
         self.mark_dirty();
     }
 
-    const FX_PARAM_NAMES: [&'static str; 4] = ["drive", "delay_mix", "reverb_mix", "flanger_mix"];
+    const FX_PARAM_NAMES: [&'static str; 6] = [
+        "drive",
+        "delay_mix",
+        "reverb_mix",
+        "flanger_mix",
+        "chorus_mix",
+        "phaser_mix",
+    ];
     const DRUM_MACRO_NAMES: [&'static str; 5] = [
         "drum_tone",
         "drum_noise",
@@ -9311,14 +9362,14 @@ impl NativeModel {
         let drum_from = self.fx_drum;
         let voice_to = snap.fx_voice;
         let drum_to = snap.fx_drum;
-        let needs_ramp = (0..4).any(|i| {
+        let needs_ramp = (0..6).any(|i| {
             (voice_from[i] - voice_to[i]).abs() > 0.001
                 || (drum_from[i] - drum_to[i]).abs() > 0.001
         });
         if !needs_ramp {
             self.kaoss_fx_release = None;
             // Already at spring mixes — still push so the engine matches UI.
-            self.apply_fx_mix_quad(voice_to, drum_to, outbox);
+            self.apply_fx_mix_sextet(voice_to, drum_to, outbox);
             return;
         }
         self.kaoss_fx_release = Some(KaossFxReleaseTail {
@@ -9341,33 +9392,32 @@ impl NativeModel {
         let t = (tail.elapsed / dur).clamp(0.0, 1.0);
         // Smoothstep — softer than a linear cut at the start of the release.
         let u = t * t * (3.0 - 2.0 * t);
-        let mut voice = [0.0f32; 4];
-        let mut drum = [0.0f32; 4];
-        for i in 0..4 {
+        let mut voice = [0.0f32; 6];
+        let mut drum = [0.0f32; 6];
+        for i in 0..6 {
             voice[i] = tail.voice_from[i] + (tail.voice_to[i] - tail.voice_from[i]) * u;
             drum[i] = tail.drum_from[i] + (tail.drum_to[i] - tail.drum_from[i]) * u;
         }
-        self.apply_fx_mix_quad(voice, drum, outbox);
+        self.apply_fx_mix_sextet(voice, drum, outbox);
         if t >= 1.0 - f32::EPSILON {
             self.kaoss_fx_release = None;
             // Final snap to exact spring targets (kill float drift).
-            self.apply_fx_mix_quad(tail.voice_to, tail.drum_to, outbox);
+            self.apply_fx_mix_sextet(tail.voice_to, tail.drum_to, outbox);
         } else {
             self.kaoss_fx_release = Some(tail);
         }
         self.mark_dirty();
     }
 
-    fn apply_fx_mix_quad(&mut self, voice: [f32; 4], drum: [f32; 4], outbox: &mut Outbox) {
-        const FX: [&str; 4] = ["drive", "delay_mix", "reverb_mix", "flanger_mix"];
-        for i in 0..4 {
+    fn apply_fx_mix_sextet(&mut self, voice: [f32; 6], drum: [f32; 6], outbox: &mut Outbox) {
+        for i in 0..6 {
             if (self.fx_voice[i] - voice[i]).abs() > 0.0005 {
                 self.fx_voice[i] = voice[i];
-                self.push_voice_fx(FX[i], voice[i], outbox);
+                self.push_voice_fx(Self::FX_PARAM_NAMES[i], voice[i], outbox);
             }
             if (self.fx_drum[i] - drum[i]).abs() > 0.0005 {
                 self.fx_drum[i] = drum[i];
-                outbox.fx_drum_group(FX[i], drum[i]);
+                outbox.fx_drum_group(Self::FX_PARAM_NAMES[i], drum[i]);
             }
         }
     }
@@ -9474,6 +9524,8 @@ impl NativeModel {
             "delay_mix" => Some(1),
             "reverb_mix" => Some(2),
             "flanger_mix" => Some(3),
+            "chorus_mix" => Some(4),
+            "phaser_mix" => Some(5),
             _ => None,
         }
     }
@@ -9490,6 +9542,8 @@ impl NativeModel {
                 | "reverb_mix"
                 | "reverb_size"
                 | "flanger_mix"
+                | "chorus_mix"
+                | "phaser_mix"
                 | "flanger_rate"
                 | "flanger_depth"
                 | "flanger_fb"
@@ -10531,8 +10585,8 @@ impl NativeModel {
         // SPIKE 1 — abort any soft FX Release; wipe is an immediate dry cut.
         self.kaoss_fx_release = None;
         self.kaoss_fx_spring = None;
-        self.fx_voice = [0.0, 0.0, 0.0, 0.0];
-        self.fx_drum = [0.0, 0.0, 0.0, 0.0];
+        self.fx_voice = [0.0; 6];
+        self.fx_drum = [0.0; 6];
         for name in [
             "drive",
             "delay_mix",
@@ -10541,6 +10595,8 @@ impl NativeModel {
             "reverb_mix",
             "reverb_size",
             "flanger_mix",
+            "chorus_mix",
+            "phaser_mix",
             "flanger_rate",
         ] {
             self.push_voice_fx(name, 0.0, outbox);
@@ -10548,7 +10604,7 @@ impl NativeModel {
         }
         // Also dry the master bus so leftover pad wet from the old mix-bus
         // routing (echo/reverb used to smear drums) is gone in one tap.
-        self.fx_bus = [0.0, 0.0, 0.0, 0.0];
+        self.fx_bus = [0.0; 6];
         for name in Self::FX_PARAM_NAMES {
             outbox.fx_bus(name, 0.0);
         }
@@ -12126,7 +12182,7 @@ mod tests {
         model.morph_b = 3;
         model.synth_params[0] = 0.4;
         model.synth_params[1] = 0.25;
-        model.fx_voice = [0.1, 0.55, 0.35, 0.2];
+        model.fx_voice = [0.1, 0.55, 0.35, 0.2, 0.0, 0.0];
         let mut out = Outbox::new();
         model.set_mode(UiMode::Pads);
         let rec = model.layout.pads_rec;
@@ -12414,8 +12470,8 @@ mod tests {
     fn kaoss_dub_touch_engages_wet_delay_and_releases_on_lift() {
         let mut model = model_on_kaoss();
         select_kaoss_program(&mut model, "dub");
-        model.fx_voice = [0.0; 4];
-        model.fx_drum = [0.0; 4];
+        model.fx_voice = [0.0; 6];
+        model.fx_drum = [0.0; 6];
         let mut out = Outbox::new();
         let k = model.layout.kaoss;
         // Mid pad: time/tone mid; wet engage must still bump delay_mix.
@@ -12459,7 +12515,7 @@ mod tests {
         let mut model = model_on_kaoss();
         select_kaoss_program(&mut model, "dub");
         model.kaoss_fx_hold = true;
-        model.fx_voice = [0.0; 4];
+        model.fx_voice = [0.0; 6];
         let mut out = Outbox::new();
         let k = model.layout.kaoss;
         model.finger_down(1, k.x + k.w / 2, k.y + k.h / 2, &mut out);
@@ -12872,9 +12928,9 @@ mod tests {
         let mut model = NativeModel::new();
         model.set_mode(UiMode::Kaoss);
         model.kaoss_settings_open = true;
-        model.fx_voice = [0.4, 0.8, 0.6, 0.5];
-        model.fx_drum = [0.2, 0.9, 0.7, 0.1];
-        model.fx_bus = [0.3, 0.7, 0.5, 0.2];
+        model.fx_voice = [0.4, 0.8, 0.6, 0.5, 0.3, 0.2];
+        model.fx_drum = [0.2, 0.9, 0.7, 0.1, 0.4, 0.5];
+        model.fx_bus = [0.3, 0.7, 0.5, 0.2, 0.6, 0.1];
         let mut out = Outbox::new();
         model.wipe_kaoss_fx(&mut out);
         assert!(model.fx_voice.iter().all(|v| *v == 0.0));
@@ -14991,6 +15047,44 @@ mod tests {
         assert!((model.capture_session().fm_width - 1.0).abs() < 1e-3);
     }
 
+    #[test]
+    fn fm_glide_slider_and_mono_toggle_send_synth_and_persist() {
+        let mut model = NativeModel::new();
+        let mut out = Outbox::new();
+        let track = model.layout.fm_slider(5);
+        model.apply_fm_slider(5, track.y, &mut out);
+        assert!((model.fm_glide - 1.0).abs() < 1e-3);
+        assert!(out.take().iter().any(|r| matches!(
+            r,
+            Request::Synth { param, value, .. } if param == "fm_glide" && (*value - 1.0).abs() < 1e-3
+        )));
+        model.toggle_fm_mono(&mut out);
+        assert!(model.fm_mono);
+        assert!(out.take().iter().any(|r| matches!(
+            r,
+            Request::Synth { param, value, .. } if param == "fm_mono" && *value >= 0.5
+        )));
+        let s = model.capture_session();
+        assert!(s.fm_mono && (s.fm_glide - 1.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn chorus_phaser_sliders_persist_in_session() {
+        let mut model = NativeModel::new();
+        let mut out = Outbox::new();
+        model.fx_target = FxEditTarget::Voice;
+        for (index, param) in [(4, "chorus_mix"), (5, "phaser_mix")] {
+            let track = model.layout.settings_fx_slider(index);
+            model.apply_fx_slider(index, track.y, &mut out);
+            assert!(out.take().iter().any(|r| matches!(
+                r,
+                Request::Fx { param: p, .. } if p == param
+            )));
+        }
+        let s = model.capture_session();
+        assert!((s.fx_chorus - 1.0).abs() < 1e-3 && (s.fx_phaser - 1.0).abs() < 1e-3);
+    }
+
     fn punch_midi(
         kind: &str,
         note: Option<u8>,
@@ -16825,7 +16919,7 @@ mod tests {
         model.morph_a = 3;
         model.morph_b = 4;
         model.synth_params[0] = 0.7;
-        model.fx_voice = [0.2, 0.4, 0.6, 0.8];
+        model.fx_voice = [0.2, 0.4, 0.6, 0.8, 0.0, 0.0];
         model.release_drift = 0.9;
         let reqs = edit_pad_and_tap_voice(&mut model, &mut out, 5);
         assert!(model.phrases[5].voice_locked);

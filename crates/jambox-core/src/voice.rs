@@ -28,6 +28,8 @@ struct Voice {
     phase: f64,
     amp: f32,
     target_amp: f32,
+    /// 0..1 note-on velocity — scales filter brightness (timbre, not just loudness).
+    vel_tone: f32,
     releasing: bool,
     /// True once attack has reached the peak (ADSR decay/sustain may run).
     env_peaked: bool,
@@ -59,6 +61,7 @@ impl Voice {
             phase: 0.0,
             amp: 0.0,
             target_amp: 0.0,
+            vel_tone: 1.0,
             releasing: false,
             env_peaked: false,
             age: 0,
@@ -214,7 +217,10 @@ impl VoicePool {
             return;
         }
         self.serial = self.serial.wrapping_add(1);
-        let target = (velocity as f32 / 127.0) * self.voice_amp;
+        let vel = (velocity as f32 / 127.0).clamp(0.0, 1.0);
+        let target = vel * self.voice_amp;
+        // Soft hits stay darker even with the tone knob open.
+        let vel_tone = vel;
 
         if let Some(slot) = self.find_playing(channel, note, recorded) {
             let v = &mut self.voices[slot];
@@ -226,6 +232,7 @@ impl VoicePool {
             v.phase = 0.0;
             v.amp = 0.0;
             v.target_amp = target;
+            v.vel_tone = vel_tone;
             v.releasing = false;
             v.env_peaked = false;
             v.age = self.serial;
@@ -251,6 +258,7 @@ impl VoicePool {
             phase: 0.0,
             amp: 0.0,
             target_amp: target,
+            vel_tone,
             releasing: false,
             env_peaked: false,
             age: self.serial,
@@ -495,9 +503,9 @@ impl VoicePool {
         ctx: VoiceContext,
     ) -> bool {
         let mut audible = false;
-        let attack_step = linear_env_step(ctx.attack_sec, ctx.sample_rate);
-        let decay_step = linear_env_step(ctx.decay_sec, ctx.sample_rate);
-        let release_step = linear_env_step(ctx.release_sec, ctx.sample_rate);
+        let attack_coef = exp_env_coef(ctx.attack_sec, ctx.sample_rate);
+        let decay_coef = exp_env_coef(ctx.decay_sec, ctx.sample_rate);
+        let release_coef = exp_env_coef(ctx.release_sec, ctx.sample_rate);
         let n = dest_l.len().min(dest_r.len());
         if n == 0 {
             return false;
@@ -523,10 +531,11 @@ impl VoicePool {
             );
             v.release_age = release_age;
             let use_lfo = !v.recorded && ctx.tone_lfo_amount > 0.01;
+            // Recorded takes keep their baked tone; only live hits get velocity→timbre.
             let static_tone = if v.recorded {
                 v.tone
             } else {
-                ctx.live_tone
+                velocity_tone(ctx.live_tone, v.vel_tone)
             };
             let filter_tone = !use_lfo && static_tone < 0.985;
             let mut tone_lp = v.tone_lp;
@@ -544,9 +553,9 @@ impl VoicePool {
                     v.target_amp,
                     v.releasing,
                     &mut v.env_peaked,
-                    attack_step,
-                    decay_step,
-                    release_step,
+                    attack_coef,
+                    decay_coef,
+                    release_coef,
                     ctx.sustain_level,
                 );
 
@@ -560,9 +569,10 @@ impl VoicePool {
                         lfo_phase %= std::f64::consts::TAU;
                     }
                     let lfo = 0.5 + 0.5 * lfo_phase.sin() as f32;
-                    let tone = (ctx.live_tone * (1.0 - ctx.tone_lfo_amount)
-                        + lfo * ctx.tone_lfo_amount)
-                        .clamp(0.0, 1.0);
+                    let tone = velocity_tone(
+                        ctx.live_tone * (1.0 - ctx.tone_lfo_amount) + lfo * ctx.tone_lfo_amount,
+                        v.vel_tone,
+                    );
                     s = tone_svf_sample(s, tone, &mut tone_lp, &mut tone_bp, ctx.sample_rate);
                 } else if filter_tone {
                     s = tone_svf_sample(
@@ -613,9 +623,9 @@ impl VoicePool {
         ctx: VoiceContext,
     ) -> bool {
         let mut audible = false;
-        let attack_step = linear_env_step(ctx.attack_sec, ctx.sample_rate);
-        let decay_step = linear_env_step(ctx.decay_sec, ctx.sample_rate);
-        let release_step = linear_env_step(ctx.release_sec, ctx.sample_rate);
+        let attack_coef = exp_env_coef(ctx.attack_sec, ctx.sample_rate);
+        let decay_coef = exp_env_coef(ctx.decay_sec, ctx.sample_rate);
+        let release_coef = exp_env_coef(ctx.release_sec, ctx.sample_rate);
         let n = live.len();
 
         for v in self.voices.iter_mut() {
@@ -648,7 +658,7 @@ impl VoicePool {
             let static_tone = if v.recorded {
                 v.tone
             } else {
-                ctx.live_tone
+                velocity_tone(ctx.live_tone, v.vel_tone)
             };
             let filter_tone = !use_lfo && static_tone < 0.985;
             let mut tone_lp = v.tone_lp;
@@ -665,9 +675,9 @@ impl VoicePool {
                     v.target_amp,
                     v.releasing,
                     &mut v.env_peaked,
-                    attack_step,
-                    decay_step,
-                    release_step,
+                    attack_coef,
+                    decay_coef,
+                    release_coef,
                     ctx.sustain_level,
                 );
 
@@ -681,9 +691,10 @@ impl VoicePool {
                         lfo_phase %= std::f64::consts::TAU;
                     }
                     let lfo = 0.5 + 0.5 * lfo_phase.sin() as f32;
-                    let tone = (ctx.live_tone * (1.0 - ctx.tone_lfo_amount)
-                        + lfo * ctx.tone_lfo_amount)
-                        .clamp(0.0, 1.0);
+                    let tone = velocity_tone(
+                        ctx.live_tone * (1.0 - ctx.tone_lfo_amount) + lfo * ctx.tone_lfo_amount,
+                        v.vel_tone,
+                    );
                     s = tone_svf_sample(s, tone, &mut tone_lp, &mut tone_bp, ctx.sample_rate);
                 } else if filter_tone {
                     s = tone_svf_sample(
@@ -740,9 +751,9 @@ impl VoicePool {
         ctx: VoiceContext,
     ) -> bool {
         let mut audible = false;
-        let attack_step = linear_env_step(ctx.attack_sec, ctx.sample_rate);
-        let decay_step = linear_env_step(ctx.decay_sec, ctx.sample_rate);
-        let release_step = linear_env_step(ctx.release_sec, ctx.sample_rate);
+        let attack_coef = exp_env_coef(ctx.attack_sec, ctx.sample_rate);
+        let decay_coef = exp_env_coef(ctx.decay_sec, ctx.sample_rate);
+        let release_coef = exp_env_coef(ctx.release_sec, ctx.sample_rate);
         let n = live.len();
 
         for v in self.voices.iter_mut() {
@@ -771,7 +782,7 @@ impl VoicePool {
             let static_tone = if v.recorded {
                 v.tone
             } else {
-                ctx.live_tone
+                velocity_tone(ctx.live_tone, v.vel_tone)
             };
             let filter_tone = !use_lfo && static_tone < 0.985;
             let mut tone_lp = v.tone_lp;
@@ -788,9 +799,9 @@ impl VoicePool {
                     v.target_amp,
                     v.releasing,
                     &mut v.env_peaked,
-                    attack_step,
-                    decay_step,
-                    release_step,
+                    attack_coef,
+                    decay_coef,
+                    release_coef,
                     ctx.sustain_level,
                 );
 
@@ -804,9 +815,10 @@ impl VoicePool {
                         lfo_phase %= std::f64::consts::TAU;
                     }
                     let lfo = 0.5 + 0.5 * lfo_phase.sin() as f32;
-                    let tone = (ctx.live_tone * (1.0 - ctx.tone_lfo_amount)
-                        + lfo * ctx.tone_lfo_amount)
-                        .clamp(0.0, 1.0);
+                    let tone = velocity_tone(
+                        ctx.live_tone * (1.0 - ctx.tone_lfo_amount) + lfo * ctx.tone_lfo_amount,
+                        v.vel_tone,
+                    );
                     s = tone_svf_sample(s, tone, &mut tone_lp, &mut tone_bp, ctx.sample_rate);
                 } else if filter_tone {
                     s = tone_svf_sample(
@@ -861,12 +873,21 @@ pub(crate) fn tone_svf_sample(
     *lp
 }
 
+/// One-pole coefficient: `amp += (target - amp) * coef` reaches ~63% in `seconds`.
 #[inline]
-fn linear_env_step(seconds: f32, sample_rate: f32) -> f32 {
-    1.0 / (seconds.max(0.0005) * sample_rate).max(1.0)
+fn exp_env_coef(seconds: f32, sample_rate: f32) -> f32 {
+    let n = (seconds.max(0.0005) * sample_rate).max(1.0);
+    1.0 - (-1.0 / n).exp()
 }
 
-/// One sample of the global wavetable ADSR.
+/// Velocity darkens the filter: soft hits stay muted even with tone fully open.
+#[inline]
+fn velocity_tone(tone: f32, vel_tone: f32) -> f32 {
+    let scale = 0.28 + 0.72 * vel_tone.clamp(0.0, 1.0);
+    (tone.clamp(0.0, 1.0) * scale).clamp(0.0, 1.0)
+}
+
+/// One sample of the global wavetable ADSR with exponential stage curves.
 ///
 /// `peak` is velocity×voice amp. Sustain level 1.0 keeps the classic
 /// attack→hold→release shape (decay is a no-op).
@@ -876,30 +897,27 @@ fn advance_adsr(
     peak: f32,
     releasing: bool,
     env_peaked: &mut bool,
-    attack_step: f32,
-    decay_step: f32,
-    release_step: f32,
+    attack_coef: f32,
+    decay_coef: f32,
+    release_coef: f32,
     sustain_level: f32,
 ) -> f32 {
     if releasing {
         *env_peaked = false;
-        return (amp - release_step * amp.max(1e-4)).max(0.0);
+        let next = amp + (0.0 - amp) * release_coef;
+        return next.max(0.0);
     }
     if !*env_peaked {
-        let next = (amp + attack_step * peak.max(0.05)).min(peak);
-        if next >= peak * 0.98 {
+        let target = peak.max(1e-4);
+        let next = amp + (target - amp) * attack_coef;
+        if next >= peak * 0.995 {
             *env_peaked = true;
+            return peak;
         }
-        return next;
+        return next.max(0.0);
     }
     let sus = peak * sustain_level.clamp(0.0, 1.0);
-    if amp > sus + 1e-5 {
-        (amp - decay_step * amp.max(0.05)).max(sus)
-    } else if amp < sus - 1e-5 {
-        (amp + attack_step * sus.max(0.05)).min(sus)
-    } else {
-        sus
-    }
+    amp + (sus - amp) * decay_coef
 }
 
 /// Frequency ratio for a semitone offset. Unison is 1.
@@ -978,6 +996,12 @@ fn phase_inc_span(
 
 #[inline]
 pub fn midi_to_hz(note: u8) -> f64 {
+    midi_to_hz_f(note as f32)
+}
+
+/// Continuous MIDI note → Hz (for portamento / glide).
+#[inline]
+pub fn midi_to_hz_f(note: f32) -> f64 {
     440.0 * 2f64.powf((note as f64 - 69.0) / 12.0)
 }
 

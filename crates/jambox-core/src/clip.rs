@@ -95,6 +95,8 @@ pub struct ClipVoice {
     pub delay_mix: f32,
     pub reverb_mix: f32,
     pub flanger_mix: f32,
+    pub chorus_mix: f32,
+    pub phaser_mix: f32,
     /// DRIFT slider (0..1, center 0.5) captured with the take.
     /// `None` follows the live slider (older pads).
     pub release_drift: Option<f32>,
@@ -112,6 +114,8 @@ impl Default for ClipVoice {
             delay_mix: 0.0,
             reverb_mix: 0.0,
             flanger_mix: 0.0,
+            chorus_mix: 0.0,
+            phaser_mix: 0.0,
             release_drift: None,
         }
     }
@@ -131,6 +135,8 @@ impl ClipVoice {
         params.delay_mix = self.delay_mix.clamp(0.0, 1.0);
         params.reverb_mix = self.reverb_mix.clamp(0.0, 1.0);
         params.flanger_mix = self.flanger_mix.clamp(0.0, 1.0);
+        params.chorus_mix = self.chorus_mix.clamp(0.0, 1.0);
+        params.phaser_mix = self.phaser_mix.clamp(0.0, 1.0);
         params
     }
 }
