@@ -644,6 +644,8 @@ fn clip_voice_from_wire(voice: jambox_protocol::WireClipVoice) -> jambox_core::C
         delay_mix: voice.delay_mix,
         reverb_mix: voice.reverb_mix,
         flanger_mix: voice.flanger_mix,
+        chorus_mix: voice.chorus_mix,
+        phaser_mix: voice.phaser_mix,
         release_drift: voice.release_drift.map(|v| v.clamp(0.0, 1.0)),
     }
 }
@@ -685,6 +687,8 @@ fn parse_synth_param(name: &str) -> Option<SynthParam> {
         "fm_hit" => SynthParam::FmHit,
         "fm_tail" => SynthParam::FmTail,
         "fm_width" => SynthParam::FmWidth,
+        "fm_mono" => SynthParam::FmMono,
+        "fm_glide" => SynthParam::FmGlide,
         _ => return None,
     })
 }
@@ -747,6 +751,13 @@ fn parse_fx_param(name: &str) -> Option<FxParam> {
         "flanger_rate" => FxParam::FlangerRate,
         "flanger_depth" => FxParam::FlangerDepth,
         "flanger_fb" => FxParam::FlangerFb,
+        "chorus_mix" => FxParam::ChorusMix,
+        "chorus_rate" => FxParam::ChorusRate,
+        "chorus_depth" => FxParam::ChorusDepth,
+        "phaser_mix" => FxParam::PhaserMix,
+        "phaser_rate" => FxParam::PhaserRate,
+        "phaser_depth" => FxParam::PhaserDepth,
+        "phaser_fb" => FxParam::PhaserFb,
         _ => return None,
     })
 }

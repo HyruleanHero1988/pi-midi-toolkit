@@ -172,6 +172,8 @@ pub enum Hit {
     FmClear,
     FmUndo,
     FmSave,
+    /// Toggle mono (legato glide) on the FM voice.
+    FmMono,
     FmUser,
     /// Open the patch list.
     FmPatches,
@@ -2281,7 +2283,7 @@ impl Layout {
     fn fm_tool(&self, slot: i32, w: i32) -> Rect {
         let gap = 8;
         let mut x = 316;
-        let widths = [72, 72, 80, 64, 64];
+        let widths = [72, 72, 80, 64, 64, 64];
         for i in 0..slot {
             x += widths[i as usize] + gap;
         }
@@ -2311,6 +2313,10 @@ impl Layout {
 
     pub fn fm_oct_up(&self) -> Rect {
         self.fm_tool(4, 64)
+    }
+
+    pub fn fm_mono(&self) -> Rect {
+        self.fm_tool(5, 64)
     }
 
     pub fn fm_patch_done(&self) -> Rect {
@@ -2453,7 +2459,7 @@ impl Layout {
         best
     }
 
-    pub const FM_SCOPE_W: i32 = 140;
+    pub const FM_SCOPE_W: i32 = 96;
     /// Slider column: starts after the scope with an 12px gutter, ends 12px
     /// short of the screen edge.
     const FM_SLIDER_AREA_X: i32 = 420 + Self::FM_SCOPE_W + 12;
@@ -2469,8 +2475,8 @@ impl Layout {
         }
     }
 
-    /// RATIO, OUT, FOLD, ENV (selected op) + WIDTH (whole FM voice).
-    pub const FM_SLIDER_COUNT: usize = 5;
+    /// RATIO, OUT, FOLD, ENV (selected op) + WIDE, GLIDE (whole FM voice).
+    pub const FM_SLIDER_COUNT: usize = 6;
 
     pub fn fm_slider(&self, index: usize) -> Rect {
         let n = Self::FM_SLIDER_COUNT as i32;
@@ -2576,12 +2582,12 @@ impl Layout {
     }
 
     /// One-octave piano keyboard inside `synth_keys`.
-    /// FX page: four insert sliders + KEYS / DRUMS / MIC mix levels.
-    pub const FX_INSERT_COUNT: usize = 4;
-    pub const FX_SLIDER_COUNT: usize = 7;
-    pub const FX_KEYS_LEVEL: usize = 4;
-    pub const FX_DRUMS_LEVEL: usize = 5;
-    pub const FX_MIC_LEVEL: usize = 6;
+    /// FX page: six insert sliders + KEYS / DRUMS / MIC mix levels.
+    pub const FX_INSERT_COUNT: usize = 6;
+    pub const FX_SLIDER_COUNT: usize = 9;
+    pub const FX_KEYS_LEVEL: usize = 6;
+    pub const FX_DRUMS_LEVEL: usize = 7;
+    pub const FX_MIC_LEVEL: usize = 8;
     pub const PUNCH_PAD_COUNT: usize = 8;
     /// Right-edge width (px) of the KAOSS↔Punch sculpt strip when a slot is linked.
     pub const KAOSS_PUNCH_STRIP_W: i32 = 56;
@@ -3399,6 +3405,9 @@ impl Layout {
         if self.fm_oct_up().contains(px, py) {
             return Hit::SynthOctUp;
         }
+        if self.fm_mono().contains(px, py) {
+            return Hit::FmMono;
+        }
         if let Some(index) = self.fm_op_hit(px, py) {
             return Hit::FmOp(index);
         }
@@ -4126,7 +4135,7 @@ impl Layout {
         }
     }
 
-    /// Height of the four stacked insert rows above the KEYS/DRUMS/MIC band.
+    /// Height of the stacked insert rows above the KEYS/DRUMS/MIC band.
     fn settings_fx_insert_block_h(&self) -> i32 {
         self.settings_fx.h - Self::FX_MIX_BAND_H - Self::FX_MIX_DIVIDER_GAP - 4
     }
@@ -4145,7 +4154,7 @@ impl Layout {
         }
     }
 
-    /// Horizontal insert track (DRIVE / DELAY / REVERB / FLANGE), synth-style rows.
+    /// Horizontal insert track (DRIVE … PHASER), synth-style rows.
     pub fn settings_fx_slider(&self, index: usize) -> Rect {
         let i = index % Self::FX_SLIDER_COUNT;
         if i < Self::FX_INSERT_COUNT {

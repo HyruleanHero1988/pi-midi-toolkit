@@ -30,6 +30,8 @@ pub struct PhrasePad {
     pub fx_delay_mix: f32,
     pub fx_reverb_mix: f32,
     pub fx_flanger_mix: f32,
+    pub fx_chorus_mix: f32,
+    pub fx_phaser_mix: f32,
     /// DRIFT slider captured with the take. `None` follows the live slider.
     pub release_drift: Option<f32>,
 }
@@ -54,6 +56,8 @@ impl Default for PhrasePad {
             fx_delay_mix: 0.0,
             fx_reverb_mix: 0.0,
             fx_flanger_mix: 0.0,
+            fx_chorus_mix: 0.0,
+            fx_phaser_mix: 0.0,
             release_drift: None,
         }
     }
@@ -91,6 +95,10 @@ pub struct PhraseFile {
     fx_reverb_mix: f32,
     #[serde(default)]
     fx_flanger_mix: f32,
+    #[serde(default)]
+    fx_chorus_mix: f32,
+    #[serde(default)]
+    fx_phaser_mix: f32,
     /// DRIFT slider captured with the take. Absent follows the live slider.
     #[serde(default)]
     release_drift: Option<f32>,
@@ -188,6 +196,8 @@ pub fn pad_from_file(file: &PhraseFile, bpm: f32) -> PhrasePad {
         fx_delay_mix: file.fx_delay_mix.clamp(0.0, 1.0),
         fx_reverb_mix: file.fx_reverb_mix.clamp(0.0, 1.0),
         fx_flanger_mix: file.fx_flanger_mix.clamp(0.0, 1.0),
+        fx_chorus_mix: file.fx_chorus_mix.clamp(0.0, 1.0),
+        fx_phaser_mix: file.fx_phaser_mix.clamp(0.0, 1.0),
         release_drift: file.release_drift.map(|v| v.clamp(0.0, 1.0)),
     }
 }
@@ -234,6 +244,8 @@ pub fn file_from_pad(pad: &PhrasePad, bpm: f32) -> PhraseFile {
         fx_delay_mix: pad.fx_delay_mix.clamp(0.0, 1.0),
         fx_reverb_mix: pad.fx_reverb_mix.clamp(0.0, 1.0),
         fx_flanger_mix: pad.fx_flanger_mix.clamp(0.0, 1.0),
+        fx_chorus_mix: pad.fx_chorus_mix.clamp(0.0, 1.0),
+        fx_phaser_mix: pad.fx_phaser_mix.clamp(0.0, 1.0),
         release_drift: pad.release_drift.map(|v| v.clamp(0.0, 1.0)),
         events,
     }

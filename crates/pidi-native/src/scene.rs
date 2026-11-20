@@ -2917,11 +2917,18 @@ fn draw_fm(scene: &mut Scene, model: &NativeModel) {
     scene.text_centered(layout.fm_oct_down(), "OCT-", 0xfbf1c7, 2);
     scene.fill_rect(layout.fm_oct_up(), 0x504945);
     scene.text_centered(layout.fm_oct_up(), "OCT+", 0xfbf1c7, 2);
+    scene.fill_rect(layout.fm_mono(), if model.fm_mono { 0x83a598 } else { 0x504945 });
+    scene.text_centered(
+        layout.fm_mono(),
+        "MONO",
+        if model.fm_mono { 0x1d2021 } else { 0xfbf1c7 },
+        2,
+    );
 
     draw_fm_graph(scene, model);
     draw_fm_scope(scene, model);
 
-    const LABELS: [&str; Layout::FM_SLIDER_COUNT] = ["RATIO", "OUT", "FOLD", "ENV", "WIDE"];
+    const LABELS: [&str; Layout::FM_SLIDER_COUNT] = ["RATIO", "OUT", "FOLD", "ENV", "WIDE", "GLIDE"];
     // One scale for the whole row so the labels read as a set.
     let label_scale = scene.fit_scale(&LABELS, layout.fm_slider_label(0).w - 2, 2);
     for index in 0..Layout::FM_SLIDER_COUNT {
@@ -2933,7 +2940,11 @@ fn draw_fm(scene: &mut Scene, model: &NativeModel) {
             0xc0c0d0,
             label_scale,
         );
-        let value = if index == 4 { model.fm_width } else { model.fm_params[index] };
+        let value = match index {
+            4 => model.fm_width,
+            5 => model.fm_glide,
+            _ => model.fm_params[index],
+        };
         let fill_h = (track.h as f32 * value) as i32;
         let fill = Rect {
             x: track.x + 3,
@@ -2946,6 +2957,7 @@ fn draw_fm(scene: &mut Scene, model: &NativeModel) {
             match index {
                 2 => 0xfe8019,
                 4 => 0x83a598,
+                5 => 0xd3869b,
                 _ => 0x8ec07c,
             },
         );
@@ -4519,7 +4531,7 @@ fn draw_fx(scene: &mut Scene, model: &NativeModel) {
     scene.fill_rect(clear, if punch_live { 0xcc241d } else { 0x3c3836 });
     scene.text_centered(clear, "CLEAR", 0xffffff, 2);
     const LABELS: [&str; Layout::FX_SLIDER_COUNT] = [
-        "DRIVE", "DELAY", "REVERB", "FLANGE", "KEYS", "DRUMS", "MIC",
+        "DRIVE", "DELAY", "REVERB", "FLANGE", "CHORUS", "PHASER", "KEYS", "DRUMS", "MIC",
     ];
     let inserts = match model.fx_target {
         crate::model::FxEditTarget::Bus => &model.fx_bus,
@@ -5015,7 +5027,7 @@ mod tests {
 
     #[test]
     fn fm_screen_text_stays_in_its_box_and_never_overlaps() {
-        let labels = ["RATIO", "OUT", "FOLD", "ENV", "WIDE"];
+        let labels = ["RATIO", "OUT", "FOLD", "ENV", "WIDE", "GLIDE"];
         for style in [FontStyle::Retro, FontStyle::Smooth] {
             for (extreme, keys) in [(false, true), (true, true), (true, false), (false, false)] {
                 for clang in [0.0f32, 0.35, 0.75, 1.0] {
@@ -5063,6 +5075,7 @@ mod tests {
                         layout.fm_clear(),
                         layout.fm_oct_down(),
                         layout.fm_oct_up(),
+                        layout.fm_mono(),
                     ];
                     for rect in controls {
                         let owned: Vec<_> = body.iter().filter(|g| center_in(g, rect)).collect();

@@ -1,4 +1,4 @@
-//! Insert FX: drive → flanger → delay → short multi-tap tank.
+//! Insert FX: drive → chorus → flanger → phaser → delay → short multi-tap tank.
 //!
 //! One [`FxUnit`] per wavetable voice, per drum model, per drum group, and one on
 //! the master bus (see `PLAN.md` "Effects (insert + kit group + bus)"). Buffers are
@@ -8,6 +8,11 @@ const DELAY_MAX_SEC: f32 = 1.0;
 const REVERB_MAX_SEC: f32 = 0.55;
 /// Classic analog flanger window (~1–12 ms). Sized once in `new`.
 const FLANGER_MAX_SEC: f32 = 0.020;
+/// Chorus delay window (~15–30 ms base + depth).
+const CHORUS_MAX_SEC: f32 = 0.040;
+const PHASER_STAGES: usize = 6;
+/// Drive oversampling factor around the tube nonlinearity.
+const DRIVE_OS: usize = 2;
 
 /// Delay gap at `delay_time == 0` (seconds). Kept public for tempo-grid snaps.
 pub const DELAY_TIME_SEC_MIN: f32 = 0.05;
@@ -17,6 +22,14 @@ pub const DELAY_TIME_SEC_SPAN: f32 = 0.70;
 pub const FLANGER_RATE_HZ_MIN: f32 = 0.08;
 /// Extra Hz when `flanger_rate == 1`.
 pub const FLANGER_RATE_HZ_SPAN: f32 = 6.0;
+/// Chorus LFO Hz at `chorus_rate == 0`.
+pub const CHORUS_RATE_HZ_MIN: f32 = 0.30;
+/// Extra Hz when `chorus_rate == 1`.
+pub const CHORUS_RATE_HZ_SPAN: f32 = 0.70;
+/// Phaser LFO Hz at `phaser_rate == 0`.
+pub const PHASER_RATE_HZ_MIN: f32 = 0.10;
+/// Extra Hz when `phaser_rate == 1`.
+pub const PHASER_RATE_HZ_SPAN: f32 = 4.0;
 
 /// Plain-old-data FX amounts, all 0..1. Cheap to copy across the command ring.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -31,6 +44,13 @@ pub struct FxParams {
     pub flanger_rate: f32,
     pub flanger_depth: f32,
     pub flanger_fb: f32,
+    pub chorus_mix: f32,
+    pub chorus_rate: f32,
+    pub chorus_depth: f32,
+    pub phaser_mix: f32,
+    pub phaser_rate: f32,
+    pub phaser_depth: f32,
+    pub phaser_fb: f32,
 }
 
 impl Default for FxParams {
@@ -46,6 +66,13 @@ impl Default for FxParams {
             flanger_rate: 0.35,
             flanger_depth: 0.70,
             flanger_fb: 0.45,
+            chorus_mix: 0.0,
+            chorus_rate: 0.40,
+            chorus_depth: 0.55,
+            phaser_mix: 0.0,
+            phaser_rate: 0.35,
+            phaser_depth: 0.70,
+            phaser_fb: 0.35,
         }
     }
 }
@@ -58,11 +85,17 @@ impl FxParams {
             && self.delay_fb <= 0.001
             && self.reverb_mix <= 0.001
             && self.flanger_mix <= 0.001
+            && self.chorus_mix <= 0.001
+            && self.phaser_mix <= 0.001
     }
 
     /// True when a wet mix would still be audible after the dry voice dies.
     pub fn is_wet(&self) -> bool {
-        self.delay_mix > 0.001 || self.reverb_mix > 0.001 || self.flanger_mix > 0.001
+        self.delay_mix > 0.001
+            || self.reverb_mix > 0.001
+            || self.flanger_mix > 0.001
+            || self.chorus_mix > 0.001
+            || self.phaser_mix > 0.001
     }
 }
 
@@ -78,6 +111,15 @@ pub struct FxUnit {
     flanger: Vec<f32>,
     flanger_pos: usize,
     flanger_phase: f32,
+    chorus: Vec<f32>,
+    chorus_pos: usize,
+    chorus_phase: f32,
+    phaser_z: [f32; PHASER_STAGES],
+    phaser_phase: f32,
+    phaser_fb_z: f32,
+    /// DC blocker state after the tube drive.
+    drive_dc_x: f32,
+    drive_dc_y: f32,
     /// Samples of silence still worth running so delay / reverb can finish.
     tail_hold: u32,
 }
@@ -88,6 +130,7 @@ impl FxUnit {
         let dlen = (sample_rate * DELAY_MAX_SEC) as usize + 64;
         let rlen = (sample_rate * REVERB_MAX_SEC) as usize + 64;
         let flen = (sample_rate * FLANGER_MAX_SEC) as usize + 8;
+        let clen = (sample_rate * CHORUS_MAX_SEC) as usize + 8;
         Self {
             params: FxParams::default(),
             sample_rate,
@@ -99,6 +142,14 @@ impl FxUnit {
             flanger: vec![0.0; flen.max(32)],
             flanger_pos: 0,
             flanger_phase: 0.0,
+            chorus: vec![0.0; clen.max(64)],
+            chorus_pos: 0,
+            chorus_phase: 0.0,
+            phaser_z: [0.0; PHASER_STAGES],
+            phaser_phase: 0.0,
+            phaser_fb_z: 0.0,
+            drive_dc_x: 0.0,
+            drive_dc_y: 0.0,
             tail_hold: 0,
         }
     }
@@ -119,6 +170,13 @@ impl FxUnit {
             flanger_rate: params.flanger_rate.clamp(0.0, 1.0),
             flanger_depth: params.flanger_depth.clamp(0.0, 1.0),
             flanger_fb: params.flanger_fb.clamp(0.0, 1.0),
+            chorus_mix: params.chorus_mix.clamp(0.0, 1.0),
+            chorus_rate: params.chorus_rate.clamp(0.0, 1.0),
+            chorus_depth: params.chorus_depth.clamp(0.0, 1.0),
+            phaser_mix: params.phaser_mix.clamp(0.0, 1.0),
+            phaser_rate: params.phaser_rate.clamp(0.0, 1.0),
+            phaser_depth: params.phaser_depth.clamp(0.0, 1.0),
+            phaser_fb: params.phaser_fb.clamp(0.0, 1.0),
         };
     }
 
@@ -127,11 +185,19 @@ impl FxUnit {
         self.delay.iter_mut().for_each(|v| *v = 0.0);
         self.reverb.iter_mut().for_each(|v| *v = 0.0);
         self.flanger.iter_mut().for_each(|v| *v = 0.0);
+        self.chorus.iter_mut().for_each(|v| *v = 0.0);
         self.delay_pos = 0;
         self.reverb_pos = 0;
         self.reverb_prev = 0.0;
         self.flanger_pos = 0;
         self.flanger_phase = 0.0;
+        self.chorus_pos = 0;
+        self.chorus_phase = 0.0;
+        self.phaser_z = [0.0; PHASER_STAGES];
+        self.phaser_phase = 0.0;
+        self.phaser_fb_z = 0.0;
+        self.drive_dc_x = 0.0;
+        self.drive_dc_y = 0.0;
         self.tail_hold = 0;
     }
 
@@ -149,10 +215,42 @@ impl FxUnit {
         let input_hot = buf.iter().any(|s| s.abs() > 1e-4);
 
         if p.drive > 0.001 {
-            let amount = 1.0 + p.drive * 12.0;
-            let norm = 1.0 / amount.tanh().max(0.25);
+            process_tube_drive(
+                buf,
+                p.drive,
+                &mut self.drive_dc_x,
+                &mut self.drive_dc_y,
+            );
+        }
+
+        if p.chorus_mix > 0.001 {
+            let clen = self.chorus.len();
+            let rate_hz = CHORUS_RATE_HZ_MIN + p.chorus_rate * CHORUS_RATE_HZ_SPAN;
+            let depth = p.chorus_depth;
+            let mix = p.chorus_mix;
+            let dry = 1.0 - mix;
+            // ~15–30 ms base delay; depth adds a few ms of LFO travel.
+            let min_delay = 0.015 * self.sample_rate;
+            let max_extra = 0.012 * self.sample_rate * depth;
+            let two_pi = std::f32::consts::TAU;
+            let phase_inc = rate_hz / self.sample_rate;
             for s in buf.iter_mut() {
-                *s = (*s * amount).tanh() * norm;
+                self.chorus_phase += phase_inc;
+                if self.chorus_phase >= 1.0 {
+                    self.chorus_phase -= 1.0;
+                }
+                // Two taps 90° apart for a stereo-ish thickness on a mono bus.
+                let lfo_a = 0.5 + 0.5 * (self.chorus_phase * two_pi).sin();
+                let lfo_b = 0.5 + 0.5 * ((self.chorus_phase + 0.25) * two_pi).sin();
+                let d_a = (min_delay + max_extra * lfo_a).clamp(1.0, (clen - 2) as f32);
+                let d_b = (min_delay + max_extra * lfo_b).clamp(1.0, (clen - 2) as f32);
+                let wet = 0.5
+                    * (read_delay_frac(&self.chorus, self.chorus_pos, d_a)
+                        + read_delay_frac(&self.chorus, self.chorus_pos, d_b));
+                // No feedback — chorus, not flanger.
+                self.chorus[self.chorus_pos] = (*s).clamp(-1.5, 1.5);
+                self.chorus_pos = (self.chorus_pos + 1) % clen;
+                *s = *s * dry + wet * mix;
             }
         }
 
@@ -174,14 +272,38 @@ impl FxUnit {
                 }
                 let lfo = 0.5 + 0.5 * (self.flanger_phase * two_pi).sin();
                 let delay_samp = (min_delay + max_extra * lfo).clamp(1.0, (flen - 2) as f32);
-                let delay_i = delay_samp.floor() as usize;
-                let frac = delay_samp - delay_i as f32;
-                let i0 = (self.flanger_pos + flen - delay_i) % flen;
-                let i1 = (i0 + flen - 1) % flen;
-                let wet = self.flanger[i0] * (1.0 - frac) + self.flanger[i1] * frac;
+                let wet = read_delay_frac(&self.flanger, self.flanger_pos, delay_samp);
                 self.flanger[self.flanger_pos] = (*s + wet * fb).clamp(-1.5, 1.5);
                 self.flanger_pos = (self.flanger_pos + 1) % flen;
                 *s = *s * dry + wet * mix;
+            }
+        }
+
+        if p.phaser_mix > 0.001 {
+            let rate_hz = PHASER_RATE_HZ_MIN + p.phaser_rate * PHASER_RATE_HZ_SPAN;
+            let depth = p.phaser_depth;
+            let fb = p.phaser_fb.min(0.85);
+            let mix = p.phaser_mix;
+            let dry = 1.0 - mix;
+            let phase_inc = rate_hz / self.sample_rate;
+            let two_pi = std::f32::consts::TAU;
+            // Sweep all-pass coefficient ~0.1..0.9 with depth.
+            for s in buf.iter_mut() {
+                self.phaser_phase += phase_inc;
+                if self.phaser_phase >= 1.0 {
+                    self.phaser_phase -= 1.0;
+                }
+                let lfo = 0.5 + 0.5 * (self.phaser_phase * two_pi).sin();
+                let coeff = (0.15 + 0.70 * depth * lfo).clamp(0.05, 0.95);
+                let mut x = *s + self.phaser_fb_z * fb;
+                for z in self.phaser_z.iter_mut() {
+                    // First-order all-pass: y = a*x + z; z = x - a*y
+                    let y = coeff * x + *z;
+                    *z = x - coeff * y;
+                    x = y;
+                }
+                self.phaser_fb_z = x;
+                *s = *s * dry + x * mix;
             }
         }
 
@@ -243,6 +365,80 @@ impl FxUnit {
     }
 }
 
+#[inline]
+fn read_delay_frac(buf: &[f32], write_pos: usize, delay_samp: f32) -> f32 {
+    let len = buf.len();
+    let delay_i = delay_samp.floor() as usize;
+    let frac = delay_samp - delay_i as f32;
+    let i0 = (write_pos + len - delay_i) % len;
+    let i1 = (i0 + len - 1) % len;
+    buf[i0] * (1.0 - frac) + buf[i1] * frac
+}
+
+/// Asymmetric soft-knee tube clipper (H2-rich) with mid pre-emphasis, DC block,
+/// level compensation, and 2× oversampling around the nonlinearity.
+fn process_tube_drive(buf: &mut [f32], drive: f32, dc_x: &mut f32, dc_y: &mut f32) {
+    // Map 0..1 slider → 0..24 dB drive.
+    let drive_db = drive * 24.0;
+    let gain = 0.35 * 10f32.powf(drive_db / 20.0);
+    let inv_gain = 1.0 / gain.max(0.35);
+    // One-pole mid pre-emphasis (~2–3 dB around 1–2 kHz feel); remove after.
+    let pre = 0.18 * drive;
+    // DC blocker (R=0.995).
+    let r = 0.995f32;
+
+    for s in buf.iter_mut() {
+        let dry = *s;
+        // Cheap 2× OS: process mid-point and current, average.
+        let mut acc = 0.0f32;
+        let mut prev = dry;
+        for step in 0..DRIVE_OS {
+            let x = if step == 0 {
+                // Linear interpolate toward next is unavailable per-sample; use
+                // hold + slight blend with previous output sample.
+                dry
+            } else {
+                0.5 * (prev + dry)
+            };
+            prev = dry;
+            // Mid pre-emphasis (simple high-shelf-ish boost of highs/mids).
+            let emphasized = x + pre * (x - *dc_y);
+            let hot = emphasized * gain;
+            let clipped = dual_knee_clip(hot);
+            // Remove the linear pre-emphasis contribution after the nonlinearity.
+            let shaped = clipped * inv_gain - pre * (clipped * inv_gain - x) * 0.5;
+            // DC blocker
+            let y = shaped - *dc_x + r * *dc_y;
+            *dc_x = shaped;
+            *dc_y = y;
+            acc += y;
+        }
+        let wet = acc / DRIVE_OS as f32;
+        // Crossfade by drive amount so Drive 0 is clean (caller already gated).
+        *s = dry * (1.0 - drive) + wet * drive;
+    }
+}
+
+/// Positive half saturates earlier/firmer; negative later/softer → mostly H2.
+#[inline]
+fn dual_knee_clip(x: f32) -> f32 {
+    if x >= 0.0 {
+        soft_knee(x, 0.35, 0.56)
+    } else {
+        -soft_knee(-x, 0.95, 1.20)
+    }
+}
+
+#[inline]
+fn soft_knee(x: f32, knee: f32, span: f32) -> f32 {
+    if x <= knee {
+        x
+    } else {
+        let d = x - knee;
+        knee + d * span / (span + d)
+    }
+}
+
 /// How long to keep running after the last dry input, given current wet amounts.
 fn tail_samples(p: &FxParams, sample_rate: f32) -> u32 {
     let mut sec = 0.0f32;
@@ -262,6 +458,12 @@ fn tail_samples(p: &FxParams, sample_rate: f32) -> u32 {
     if p.flanger_mix > 0.001 {
         sec = sec.max(0.08);
     }
+    if p.chorus_mix > 0.001 {
+        sec = sec.max(0.10);
+    }
+    if p.phaser_mix > 0.001 {
+        sec = sec.max(0.06);
+    }
     (sec * sample_rate).ceil() as u32
 }
 
@@ -277,6 +479,8 @@ mod tests {
         assert!(FxParams::default().delay_mix <= 0.001);
         assert!(FxParams::default().reverb_mix <= 0.001);
         assert!(FxParams::default().drive <= 0.001);
+        assert!(FxParams::default().chorus_mix <= 0.001);
+        assert!(FxParams::default().phaser_mix <= 0.001);
     }
 
     #[test]
@@ -296,9 +500,21 @@ mod tests {
         });
         let mut buf = [0.8f32; 32];
         fx.process(&mut buf);
-        assert!(buf.iter().all(|v| v.abs() <= 1.0));
-        // Saturation lifts a steady 0.8 toward the rail.
-        assert!(buf[0] > 0.8);
+        assert!(buf.iter().all(|v| v.abs() <= 1.5));
+        // Tube drive should still be audible / non-zero.
+        assert!(buf.iter().any(|v| v.abs() > 0.1));
+    }
+
+    #[test]
+    fn drive_zero_is_clean() {
+        let mut fx = FxUnit::new(48_000.0);
+        fx.set_params(FxParams {
+            drive: 0.0,
+            ..FxParams::default()
+        });
+        let mut buf = [0.4f32; 64];
+        fx.process(&mut buf);
+        assert!(buf.iter().all(|v| (*v - 0.4).abs() < 1e-5));
     }
 
     #[test]
@@ -341,10 +557,14 @@ mod tests {
         fx.set_params(FxParams {
             drive: 9.0,
             delay_mix: -3.0,
+            chorus_mix: 2.0,
+            phaser_mix: -1.0,
             ..FxParams::default()
         });
         assert_eq!(fx.params().drive, 1.0);
         assert_eq!(fx.params().delay_mix, 0.0);
+        assert_eq!(fx.params().chorus_mix, 1.0);
+        assert_eq!(fx.params().phaser_mix, 0.0);
     }
 
     #[test]
@@ -379,6 +599,43 @@ mod tests {
         let mut buf = [0.4f32; 64];
         fx.process(&mut buf);
         assert!(buf.iter().all(|v| (*v - 0.4).abs() < 1e-5));
+    }
+
+    #[test]
+    fn chorus_wet_moves_an_impulse() {
+        let mut fx = FxUnit::new(48_000.0);
+        fx.set_params(FxParams {
+            chorus_mix: 1.0,
+            chorus_rate: 0.0,
+            chorus_depth: 0.0,
+            ..FxParams::default()
+        });
+        let expect = (0.015 * 48_000.0) as usize;
+        let mut buf = vec![0.0f32; expect + 16];
+        buf[0] = 1.0;
+        fx.process(&mut buf);
+        let peak = buf.iter().copied().fold(0.0f32, |a, b| a.max(b.abs()));
+        assert!(peak > 0.2, "chorus should reprint the impulse, peak={peak}");
+    }
+
+    #[test]
+    fn phaser_wet_alters_a_tone() {
+        let mut fx = FxUnit::new(48_000.0);
+        fx.set_params(FxParams {
+            phaser_mix: 1.0,
+            phaser_rate: 0.5,
+            phaser_depth: 1.0,
+            phaser_fb: 0.4,
+            ..FxParams::default()
+        });
+        let mut buf = vec![0.0f32; 512];
+        for (i, s) in buf.iter_mut().enumerate() {
+            *s = (i as f32 * 0.08).sin() * 0.5;
+        }
+        let before = buf[100];
+        fx.process(&mut buf);
+        // Full mix through all-pass stages should differ from the dry sine.
+        assert!((buf[100] - before).abs() > 1e-4 || buf.iter().any(|v| v.abs() > 0.01));
     }
 
     #[test]

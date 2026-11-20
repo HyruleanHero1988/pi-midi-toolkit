@@ -11,7 +11,7 @@
 //! [`FmSynth::new`].
 
 use crate::clip::MAX_CLIPS;
-use crate::voice::{midi_to_hz, tone_svf_sample, VoiceContext};
+use crate::voice::{midi_to_hz, midi_to_hz_f, tone_svf_sample, VoiceContext};
 
 const SINE_SIZE: usize = 2048;
 const SINE_MASK: usize = SINE_SIZE - 1;
@@ -353,6 +353,8 @@ pub fn fm_recipe_patch(index: usize) -> FmPatch {
     p
 }
 
+const MONO_HELD_MAX: usize = 8;
+
 #[derive(Debug, Clone, Copy)]
 struct FmVoice {
     active: bool,
@@ -366,6 +368,8 @@ struct FmVoice {
     amp: [f32; FM_OP_COUNT],
     peaked: [bool; FM_OP_COUNT],
     target: f32,
+    /// 0..1 note-on velocity — scales modulation index (timbre).
+    vel_mod: f32,
     last: [f32; FM_OP_COUNT],
     releasing: bool,
     age: u64,
@@ -373,6 +377,8 @@ struct FmVoice {
     bend_semis: f32,
     release_age: f32,
     pedal: bool,
+    /// Current sounding pitch (MIDI note float) while gliding in mono mode.
+    glide_note: f32,
 }
 
 impl FmVoice {
@@ -389,12 +395,14 @@ impl FmVoice {
             amp: [0.0; FM_OP_COUNT],
             peaked: [false; FM_OP_COUNT],
             target: 0.0,
+            vel_mod: 1.0,
             last: [0.0; FM_OP_COUNT],
             releasing: false,
             age: 0,
             bend_semis: 0.0,
             release_age: 0.0,
             pedal: false,
+            glide_note: 0.0,
         }
     }
 }
@@ -410,6 +418,13 @@ pub struct FmSynth {
     /// Stereo width 0..1: low keys lean left, high keys right (same curve as
     /// the wavetable WIDTH). 0 = the old dual-mono output.
     width: f32,
+    /// Last-note-wins mono for live keys. Recorded / clip voices stay poly.
+    mono: bool,
+    /// Portamento time in seconds (0 = instant). Only used while `mono`.
+    glide_sec: f32,
+    /// Live mono note stack: (note, velocity); last entry is the sounding note.
+    held: [(u8, u8); MONO_HELD_MAX],
+    held_len: usize,
 }
 
 impl Default for FmSynth {
@@ -434,6 +449,10 @@ impl FmSynth {
             patch: fm_recipe_patch(0),
             sustain: false,
             width: 0.0,
+            mono: false,
+            glide_sec: 0.0,
+            held: [(0, 0); MONO_HELD_MAX],
+            held_len: 0,
         }
     }
 
@@ -466,6 +485,42 @@ impl FmSynth {
 
     pub fn set_width(&mut self, unit: f32) {
         self.width = unit.clamp(0.0, 1.0);
+    }
+
+    pub fn mono(&self) -> bool {
+        self.mono
+    }
+
+    pub fn set_mono(&mut self, on: bool) {
+        if self.mono == on {
+            return;
+        }
+        self.mono = on;
+        self.held_len = 0;
+        if on {
+            // Drop to a single live voice so mono doesn't stack leftovers.
+            let mut kept = false;
+            for v in self.voices.iter_mut() {
+                if !v.active || v.recorded {
+                    continue;
+                }
+                if !kept && !v.releasing {
+                    kept = true;
+                    continue;
+                }
+                v.releasing = true;
+                v.target = 0.0;
+            }
+        }
+    }
+
+    pub fn glide_sec(&self) -> f32 {
+        self.glide_sec
+    }
+
+    /// 0..1 → 0..0.45 s portamento.
+    pub fn set_glide(&mut self, unit: f32) {
+        self.glide_sec = unit.clamp(0.0, 1.0) * 0.45;
     }
 
     pub fn set_selected(&mut self, op: usize) {
@@ -528,6 +583,27 @@ impl FmSynth {
         self.serial = self.serial.wrapping_add(1);
         let vel = (velocity as f32 / 127.0).clamp(0.05, 1.0);
         let target = vel;
+        let vel_mod = vel;
+
+        // Live mono: last-note-wins with legato (no envelope retrigger) + glide.
+        if self.mono && !recorded {
+            self.mono_push(note, velocity);
+            if let Some(slot) = self.find_live_mono_voice(channel) {
+                let v = &mut self.voices[slot];
+                v.note = note;
+                v.target = target;
+                v.vel_mod = vel_mod;
+                v.tone = tone.clamp(0.0, 1.0);
+                v.releasing = false;
+                v.pedal = false;
+                v.age = self.serial;
+                // Legato: keep phase/amp; only retarget pitch (glide handles the rest).
+                if self.glide_sec <= 1e-4 {
+                    v.glide_note = note as f32;
+                }
+                return;
+            }
+        }
 
         if let Some(slot) = self.find_playing(channel, note, recorded) {
             let v = &mut self.voices[slot];
@@ -539,11 +615,13 @@ impl FmSynth {
             v.peaked = [false; FM_OP_COUNT];
             v.last = [0.0; FM_OP_COUNT];
             v.target = target;
+            v.vel_mod = vel_mod;
             v.releasing = false;
             v.age = self.serial;
             v.bend_semis = 0.0;
             v.release_age = 0.0;
             v.pedal = false;
+            v.glide_note = note as f32;
             return;
         }
 
@@ -560,12 +638,14 @@ impl FmSynth {
             amp: [0.0; FM_OP_COUNT],
             peaked: [false; FM_OP_COUNT],
             target,
+            vel_mod,
             last: [0.0; FM_OP_COUNT],
             releasing: false,
             age: self.serial,
             bend_semis: 0.0,
             release_age: 0.0,
             pedal: false,
+            glide_note: note as f32,
         };
     }
 
@@ -592,6 +672,39 @@ impl FmSynth {
     }
 
     fn release_note(&mut self, channel: u8, note: u8, recorded: bool) {
+        if self.mono && !recorded {
+            self.mono_remove(note);
+            if self.held_len > 0 {
+                let (prev, vel) = self.held[self.held_len - 1];
+                if let Some(slot) = self.find_live_mono_voice(channel) {
+                    let v = &mut self.voices[slot];
+                    v.note = prev;
+                    v.target = (vel as f32 / 127.0).clamp(0.05, 1.0);
+                    v.vel_mod = v.target;
+                    v.releasing = false;
+                    v.pedal = false;
+                    if self.glide_sec <= 1e-4 {
+                        v.glide_note = prev as f32;
+                    }
+                    return;
+                }
+                // No sounding voice — start the remaining held note fresh.
+                self.start_note(channel, prev, vel, false, 1.0);
+                return;
+            }
+            // Fall through: release whatever is sounding for this channel.
+            if let Some(slot) = self.find_live_mono_voice(channel) {
+                let v = &mut self.voices[slot];
+                if self.sustain {
+                    v.pedal = true;
+                    return;
+                }
+                v.pedal = false;
+                v.releasing = true;
+                v.target = 0.0;
+                return;
+            }
+        }
         if let Some(slot) = self.find_playing(channel, note, recorded) {
             let v = &mut self.voices[slot];
             if self.sustain && !recorded {
@@ -602,6 +715,39 @@ impl FmSynth {
             v.releasing = true;
             v.target = 0.0;
         }
+    }
+
+    fn mono_push(&mut self, note: u8, velocity: u8) {
+        self.mono_remove(note);
+        if self.held_len < MONO_HELD_MAX {
+            self.held[self.held_len] = (note, velocity);
+            self.held_len += 1;
+        } else {
+            self.held[MONO_HELD_MAX - 1] = (note, velocity);
+        }
+    }
+
+    fn mono_remove(&mut self, note: u8) {
+        let mut w = 0usize;
+        for i in 0..self.held_len {
+            if self.held[i].0 != note {
+                self.held[w] = self.held[i];
+                w += 1;
+            }
+        }
+        self.held_len = w;
+    }
+
+    fn find_live_mono_voice(&self, channel: u8) -> Option<usize> {
+        // Prefer a non-releasing live voice; otherwise any live voice on channel.
+        self.voices
+            .iter()
+            .position(|v| v.active && !v.recorded && !v.releasing && v.channel == channel)
+            .or_else(|| {
+                self.voices
+                    .iter()
+                    .position(|v| v.active && !v.recorded && v.channel == channel)
+            })
     }
 
     pub fn set_sustain(&mut self, on: bool) {
@@ -620,6 +766,7 @@ impl FmSynth {
     }
 
     pub fn all_notes_off(&mut self) {
+        self.held_len = 0;
         for v in self.voices.iter_mut() {
             if v.active {
                 v.releasing = true;
@@ -630,6 +777,7 @@ impl FmSynth {
 
     pub fn silence(&mut self) {
         self.voices = [FmVoice::silent(); MAX_FM_VOICES];
+        self.held_len = 0;
     }
 
     pub fn render(&mut self, out: &mut [f32], sample_rate: f32, pitch_mul: f32) {
@@ -708,11 +856,23 @@ impl FmSynth {
             } else {
                 &mut live[..n]
             };
-            let hz = midi_to_hz(v.note);
-            let mut inc = [0.0f32; FM_OP_COUNT];
-            for i in 0..FM_OP_COUNT {
-                inc[i] = (hz * inc_ratio[i] as f64 * SINE_SIZE as f64 / sr as f64) as f32;
+            let glide_coef = if self.mono && !v.recorded && self.glide_sec > 1e-4 {
+                let n_samp = (self.glide_sec * sr).max(1.0);
+                1.0 - (-1.0 / n_samp).exp()
+            } else {
+                1.0
+            };
+            let target_note = v.note as f32;
+            if glide_coef >= 0.999 {
+                v.glide_note = target_note;
             }
+            let mut inc = [0.0f32; FM_OP_COUNT];
+            // Base increments at note 69; scaled per-sample by glide pitch ratio.
+            let base_hz = midi_to_hz(69);
+            for i in 0..FM_OP_COUNT {
+                inc[i] = (base_hz * inc_ratio[i] as f64 * SINE_SIZE as f64 / sr as f64) as f32;
+            }
+            let vel_mod = v.vel_mod.clamp(0.05, 1.0);
             let wheel = ctx.wheel_mul.max(0.05);
             let voice = if v.releasing && !v.recorded {
                 crate::voice::semis_to_ratio(v.bend_semis)
@@ -759,6 +919,10 @@ impl FmSynth {
                 / ctx.sample_rate.max(8000.0) as f64;
 
             for (idx, sample) in dest.iter_mut().enumerate() {
+                if glide_coef < 0.999 {
+                    v.glide_note += (target_note - v.glide_note) * glide_coef;
+                }
+                let pitch_ratio = (midi_to_hz_f(v.glide_note) / base_hz).max(0.01) as f32;
                 let mut mix = 0.0f32;
                 let prev = v.last;
                 for i in 0..FM_OP_COUNT {
@@ -775,12 +939,12 @@ impl FmSynth {
                         dec[i],
                         rel[i],
                     );
-                    let mod_phase = phase_mod(&prev, &patch.matrix, i);
+                    let mod_phase = phase_mod(&prev, &patch.matrix, i) * vel_mod;
                     let s = sine_at(&self.sine, v.phase[i] + mod_phase);
                     let wave = waveshape(s, patch.ops[i].fold);
                     v.last[i] = wave * v.amp[i];
                     mix += v.last[i] * patch.ops[i].audio;
-                    v.phase[i] += inc[i] * scale;
+                    v.phase[i] += inc[i] * scale * pitch_ratio;
                     if v.phase[i] >= size {
                         v.phase[i] -= size * (v.phase[i] / size).floor();
                     }
@@ -1050,7 +1214,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn fm_link_packing_is_wire_compatible_and_reaches_e_f() {
         // A–D links keep the old 4-op integers (old engines decode them right).
         for from in 0..4 {
@@ -1100,6 +1263,7 @@ mod tests {
         assert!(energy(&l) > 0.01);
     }
 
+    #[test]
     fn fm_width_zero_is_dual_mono_and_width_pans_by_key() {
         let mut fm = FmSynth::new();
         fm.note_on(0, 36, 110); // low key
@@ -1335,5 +1499,26 @@ mod tests {
             "carrier envelope must not include VOICE_AMP, ampD={}",
             amps[3]
         );
+    }
+
+    #[test]
+    fn mono_legato_keeps_one_voice_and_retunes() {
+        let mut fm = FmSynth::new();
+        fm.set_mono(true);
+        fm.set_glide(0.0);
+        fm.note_on(0, 60, 100);
+        fm.note_on(0, 64, 100);
+        assert_eq!(fm.active_count(), 1, "mono must not stack live voices");
+        let slot = fm.find_live_mono_voice(0).unwrap();
+        assert_eq!(fm.voices[slot].note, 64);
+        // Legato: envelope should still be peaked / sounding, not restarted at 0.
+        assert!(fm.voices[slot].amp.iter().any(|a| *a > 0.01) || !fm.voices[slot].releasing);
+        fm.note_off(0, 64);
+        assert_eq!(fm.voices[fm.find_live_mono_voice(0).unwrap()].note, 60);
+        fm.note_off(0, 60);
+        assert!(fm.find_live_mono_voice(0).is_none() || {
+            let v = &fm.voices[fm.find_live_mono_voice(0).unwrap()];
+            v.releasing
+        });
     }
 }
