@@ -230,6 +230,16 @@ impl ControllerProfile {
         self.punch_index_for_pad(note).is_some() && channel == self.pad_channel_index()
     }
 
+    /// Pads→FX steal / UI arming: profile pad channel, or GM drums ch10 when
+    /// the hardware still sends factory pad hits there (lab MPK overlay may
+    /// claim ch1 while Prog Select left pads on ch10).
+    pub fn is_fx_pad_hit(&self, channel: u8, note: u8) -> bool {
+        if self.punch_index_for_pad(note).is_none() {
+            return false;
+        }
+        channel == self.pad_channel_index() || channel == 9
+    }
+
     pub fn note_for_phrase_cell(&self, cell: usize) -> u8 {
         self.phrase_notes[cell & 0x0f]
     }
@@ -423,6 +433,9 @@ mod tests {
         assert_eq!(p.pad_channel_index(), 0);
         assert!(p.is_punch_pad(0, 40));
         assert!(!p.is_punch_pad(9, 40));
+        assert!(p.is_fx_pad_hit(0, 40));
+        assert!(p.is_fx_pad_hit(9, 40));
+        assert!(!p.is_fx_pad_hit(2, 40));
     }
 
     #[test]

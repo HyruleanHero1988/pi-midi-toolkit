@@ -307,6 +307,8 @@ pub struct NativeModel {
     pub synth_width: f32,
     /// Last synth-slider tap (index, time) for double-tap-to-neutral.
     synth_slider_tap: Option<(usize, Instant)>,
+    /// Last wave-viz horizontal slider tap (signal, param, time).
+    wave_slider_tap: Option<(usize, u8, Instant)>,
     pub vibrato_always: f32,
     /// Vibrato depth in semitones (0..2).
     pub vibrato_depth: f32,
@@ -762,6 +764,7 @@ impl NativeModel {
             release_drift: 0.5,
             synth_width: 0.6,
             synth_slider_tap: None,
+            wave_slider_tap: None,
             vibrato_always: 0.0,
             vibrato_depth: 0.5,
             vibrato_rate: 5.0,
@@ -1185,6 +1188,11 @@ impl NativeModel {
         }
         self.set_mode(mode);
         self.sync_melody_engine(outbox);
+        // Re-assert Pads→FX whenever FX opens so a stale engine flag cannot
+        // leave the kit firing under a green PAD FX button.
+        if mode == UiMode::Fx {
+            outbox.punch_pads(self.punch_pads_fx);
+        }
         if mode == UiMode::Arp {
             self.enter_arp_mode(outbox);
         }
@@ -1374,6 +1382,17 @@ impl NativeModel {
     }
 
     fn leave_arp_mode(&mut self, outbox: &mut Outbox) {
+        // Latched patterns keep running outside ARP UI; only tear down when
+        // latch is off (or an explicit silence/panic/unlatch path runs).
+        if self.arp.latch {
+            return;
+        }
+        self.disable_arp(outbox);
+        outbox.all_notes_off();
+    }
+
+    /// Disarm the engine arp so later note-ons are not stolen outside ARP UI.
+    fn disable_arp(&mut self, outbox: &mut Outbox) {
         outbox.set_arp(
             false,
             self.arp.latch,
@@ -1382,7 +1401,6 @@ impl NativeModel {
             self.arp.octaves,
             self.arp.gate,
         );
-        outbox.all_notes_off();
     }
 
     fn push_arp_config(&mut self, outbox: &mut Outbox) {
@@ -2960,6 +2978,51 @@ impl NativeModel {
         self.mark_dirty();
     }
 
+    /// Double-tap: restore factory defaults (offset centre, default thick/amp/colour).
+    fn reset_wave_slider(&mut self, signal: usize, param: u8) {
+        if signal == 3 {
+            self.wave_sub_hz = crate::wave_viz::default_sub_hz();
+            self.status_line = format!("sub {:.0} Hz", self.wave_sub_hz);
+            self.mark_dirty();
+            return;
+        }
+        let defaults = crate::wave_viz::default_signals();
+        let Some(def) = defaults.get(signal).copied() else {
+            return;
+        };
+        let Some(sig) = self.wave_signals.get_mut(signal) else {
+            return;
+        };
+        match param {
+            0 => {
+                sig.offset = def.offset;
+                self.status_line = format!("base {:.2}", def.offset);
+            }
+            1 => {
+                sig.thickness = def.thickness;
+                self.status_line = format!("thick {:.1}", def.thickness);
+            }
+            2 => {
+                sig.amplitude = def.amplitude;
+                self.status_line = format!("amp {:.2}", def.amplitude);
+            }
+            3 => {
+                sig.rgb[0] = def.rgb[0];
+                self.status_line = format!("R {}", def.rgb[0]);
+            }
+            4 => {
+                sig.rgb[1] = def.rgb[1];
+                self.status_line = format!("G {}", def.rgb[1]);
+            }
+            5 => {
+                sig.rgb[2] = def.rgb[2];
+                self.status_line = format!("B {}", def.rgb[2]);
+            }
+            _ => return,
+        }
+        self.mark_dirty();
+    }
+
     pub fn apply_session(&mut self, s: &SessionState, outbox: &mut Outbox) {
         self.bpm = s.bpm.clamp(40.0, 240.0);
         self.seq.bpm = self.bpm;
@@ -3650,6 +3713,8 @@ impl NativeModel {
         self.kaoss_gate_on = false;
         self.kaoss_hold_gesture = None;
         self.kaoss_gate_gesture = None;
+        self.arp.latch = false;
+        self.disable_arp(outbox);
         let action = self.seq.stop_all();
         self.apply_seq_action(action, outbox);
         self.clear_punch(outbox);
@@ -4968,6 +5033,7 @@ impl NativeModel {
             }
             Hit::SeqAllOff => {
                 self.tap_ui(slot, id, gesture, px, py);
+                self.disable_arp(outbox);
                 outbox.all_notes_off();
                 outbox.stop_all_clips();
                 self.phrase_playing = [false; 16];
@@ -5127,6 +5193,7 @@ impl NativeModel {
                     surface: Surface::UiTap,
                     gate_on: false,
                 };
+                self.disable_arp(outbox);
                 outbox.all_notes_off();
                 self.status_line = "all notes off".into();
                 self.push_log("all notes off");
@@ -5772,21 +5839,37 @@ impl NativeModel {
                 }
             }
             Hit::WaveVizSlider { signal, param } => {
-                self.fingers[slot] = Finger {
-                    active: true,
-                    id,
-                    gesture,
-                    x: 0.0,
-                    y: 0.0,
-                    px,
-                    py,
-                    surface: Surface::WaveSlider { signal, param },
-                    gate_on: false,
-                };
-                self.apply_wave_slider(signal, param, px);
+                const DOUBLE_TAP: Duration = Duration::from_millis(300);
+                let now = Instant::now();
+                let double = matches!(
+                    self.wave_slider_tap,
+                    Some((prev_s, prev_p, at))
+                        if prev_s == signal && prev_p == param
+                            && now.duration_since(at) <= DOUBLE_TAP
+                );
+                if double {
+                    self.wave_slider_tap = None;
+                    self.tap_ui(slot, id, gesture, px, py);
+                    self.reset_wave_slider(signal, param);
+                } else {
+                    self.wave_slider_tap = Some((signal, param, now));
+                    self.fingers[slot] = Finger {
+                        active: true,
+                        id,
+                        gesture,
+                        x: 0.0,
+                        y: 0.0,
+                        px,
+                        py,
+                        surface: Surface::WaveSlider { signal, param },
+                        gate_on: false,
+                    };
+                    self.apply_wave_slider(signal, param, px);
+                }
             }
             Hit::LogAllOff => {
                 self.tap_ui(slot, id, gesture, px, py);
+                self.disable_arp(outbox);
                 outbox.all_notes_off();
                 outbox.stop_all_clips();
                 self.phrase_playing = [false; 16];
@@ -7530,7 +7613,8 @@ impl NativeModel {
             return false;
         }
         let note = notice.note.unwrap_or(255);
-        if !profile.is_punch_pad(notice.channel, note) {
+        // Accept profile pad channel or GM ch10 (factory pad hits).
+        if !profile.is_fx_pad_hit(notice.channel, note) {
             return false;
         }
         if kind == "note_on" || kind == "noteon" {
@@ -15093,6 +15177,47 @@ mod tests {
         assert!(s.fx_chorus > 0.99 && s.fx_phaser > 0.99, "insert FX uses horizontal tracks");
     }
 
+    #[test]
+    fn horizontal_synth_slider_double_tap_snaps_to_neutral() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Synth);
+        let mut out = Outbox::new();
+        let track = model.layout.synth_slider(1);
+        let x = track.x + track.w - 4;
+        let y = track.y + track.h / 2;
+        model.finger_down(1, x, y, &mut out);
+        model.finger_up(1, &mut out);
+        assert!(model.synth_params[1] > 0.5);
+        model.finger_down(2, x, y, &mut out);
+        model.finger_up(2, &mut out);
+        assert!(
+            model.synth_params[1] < 0.01,
+            "second tap within window must zero the horizontal slider"
+        );
+    }
+
+    #[test]
+    fn wave_slider_double_tap_restores_default_offset() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Wave);
+        model.wave_setup = true;
+        model.wave_signals[0].offset = 0.1;
+        let mut out = Outbox::new();
+        let chrome = crate::wave_viz::chrome(model.layout.content);
+        let row = chrome.cols[0].rows[0];
+        let x = row.x + 4;
+        let y = row.y + row.h / 2;
+        model.finger_down(1, x, y, &mut out);
+        model.finger_up(1, &mut out);
+        model.finger_down(2, x, y, &mut out);
+        model.finger_up(2, &mut out);
+        assert!(
+            (model.wave_signals[0].offset - 0.5).abs() < 0.02,
+            "double-tap restores centred BASE, got {}",
+            model.wave_signals[0].offset
+        );
+    }
+
     fn punch_midi(
         kind: &str,
         note: Option<u8>,
@@ -15123,6 +15248,36 @@ mod tests {
                 .iter()
                 .any(|r| matches!(r, Request::KnobMap { mode, .. } if mode == "punch")),
             "FX page should steal MPK knobs/pads for punch, got {batch:?}"
+        );
+        assert!(
+            batch
+                .iter()
+                .any(|r| matches!(r, Request::PunchPads { armed: true, .. })),
+            "entering FX must re-push pads→FX, got {batch:?}"
+        );
+    }
+
+    #[test]
+    fn factory_ch10_pad_still_arms_fx_on_lab_mpk_profile() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Fx);
+        model.punch_pads_fx = true;
+        let mut out = Outbox::new();
+        model.on_midi_notice(
+            &MidiNotice {
+                kind: "note_on".into(),
+                channel: 9,
+                note: Some(40),
+                velocity: Some(100),
+                control: None,
+                value: None,
+                controller: None,
+            },
+            &mut out,
+        );
+        assert!(
+            model.punch_armed[0],
+            "factory ch10 pad hits must arm FX when PAD FX is on"
         );
     }
 
@@ -15713,11 +15868,11 @@ mod tests {
         let mut model = NativeModel::new();
         model.set_mode(UiMode::Fx);
         let mut out = Outbox::new();
-        // Lab MPK pads are ch1; the same note on GM drums ch10 must not arm.
+        // Lab MPK pads are ch1 (or factory ch10). A third channel must not arm.
         model.on_midi_notice(
             &MidiNotice {
                 kind: "note_on".into(),
-                channel: 9,
+                channel: 2,
                 note: Some(40),
                 velocity: Some(100),
                 control: None,
@@ -17279,6 +17434,90 @@ mod tests {
         assert!(batch
             .iter()
             .any(|r| matches!(r, Request::SetArp { latch: true, .. })));
+    }
+
+    #[test]
+    fn leave_arp_mode_keeps_latched_arp_running() {
+        let mut model = NativeModel::new();
+        let mut out = Outbox::new();
+        model.switch_mode(UiMode::Arp, &mut out);
+        model.arp.latch = true;
+        model.arp.len = 3;
+        model.arp.steps[0] = 0;
+        model.arp.steps[1] = 4;
+        model.arp.steps[2] = 7;
+        out.take();
+
+        model.switch_mode(UiMode::Synth, &mut out);
+        let batch = out.take();
+        assert!(
+            !batch
+                .iter()
+                .any(|r| matches!(r, Request::SetArp { enabled: false, .. })),
+            "latched leave must not disable the engine: {batch:?}"
+        );
+        assert!(
+            !batch.iter().any(|r| matches!(r, Request::AllNotesOff)),
+            "latched leave must not silence: {batch:?}"
+        );
+        assert!(model.arp.latch);
+        assert_eq!(model.mode, UiMode::Synth);
+
+        model.switch_mode(UiMode::Arp, &mut out);
+        let batch = out.take();
+        assert!(
+            batch.iter().any(|r| matches!(
+                r,
+                Request::SetArp {
+                    enabled: true,
+                    latch: true,
+                    ..
+                }
+            )),
+            "re-enter should reaffirm enabled+latch: {batch:?}"
+        );
+        assert!(model.arp.latch);
+        assert!(model.status_line.contains("LATCH"));
+        assert_eq!(model.arp.len, 3);
+        assert_eq!(&model.arp.steps[..3], &[0, 4, 7]);
+    }
+
+    #[test]
+    fn leave_arp_mode_stops_unlatched_arp() {
+        let mut model = NativeModel::new();
+        let mut out = Outbox::new();
+        model.switch_mode(UiMode::Arp, &mut out);
+        assert!(!model.arp.latch);
+        out.take();
+
+        model.switch_mode(UiMode::Home, &mut out);
+        let batch = out.take();
+        assert!(
+            batch
+                .iter()
+                .any(|r| matches!(r, Request::SetArp { enabled: false, .. })),
+            "unlatched leave must disable the engine: {batch:?}"
+        );
+        assert!(
+            batch.iter().any(|r| matches!(r, Request::AllNotesOff)),
+            "unlatched leave must silence: {batch:?}"
+        );
+    }
+
+    #[test]
+    fn panic_disables_latched_arp() {
+        let mut model = NativeModel::new();
+        let mut out = Outbox::new();
+        model.arp.latch = true;
+        model.panic_ui_state(&mut out);
+        let batch = out.take();
+        assert!(!model.arp.latch);
+        assert!(
+            batch
+                .iter()
+                .any(|r| matches!(r, Request::SetArp { enabled: false, .. })),
+            "panic must disarm the arp engine: {batch:?}"
+        );
     }
 
     fn rects_disjoint(a: Rect, b: Rect) -> bool {

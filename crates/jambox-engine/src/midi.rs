@@ -370,22 +370,31 @@ impl MidiMap {
                 if channel == profile.pad_channel_index() {
                     self.remember_drum_note(note);
                 }
-                // Pads→FX steals only the profile's pad channel + pad notes.
+                // Pads→FX steals profile pad notes (pad channel or GM ch10).
                 // Keybed pitches that reuse those numbers on another channel
                 // (classic MPK: pads ch10, keys ch1) still sound on FX.
                 if self.mode.load(Ordering::Relaxed) == MODE_PUNCH
                     && self.pads_to_fx()
-                    && profile.is_punch_pad(channel, note)
+                    && profile.is_fx_pad_hit(channel, note)
                 {
                     return None;
                 }
-                if channel == DRUM_CHANNEL {
+                // DRUMS mode: lab MPK pads on ch1 must still hit the kit.
+                let play_ch = if !self.pads_to_fx()
+                    && profile.is_punch_pad(channel, note)
+                    && channel != DRUM_CHANNEL
+                {
+                    DRUM_CHANNEL
+                } else {
+                    channel
+                };
+                if play_ch == DRUM_CHANNEL {
                     if let Some(command) = self.interpret_drum_repeat(note, velocity, true) {
                         return Some(command);
                     }
                 }
                 Some(Command::NoteOn {
-                    channel,
+                    channel: play_ch,
                     note,
                     velocity,
                 })
@@ -396,14 +405,25 @@ impl MidiMap {
                 }
                 if self.mode.load(Ordering::Relaxed) == MODE_PUNCH
                     && self.pads_to_fx()
-                    && profile.is_punch_pad(channel, note)
+                    && profile.is_fx_pad_hit(channel, note)
                 {
                     return None;
                 }
-                if channel == DRUM_CHANNEL && self.repeat_division_for_note(note).is_some() {
+                let play_ch = if !self.pads_to_fx()
+                    && profile.is_punch_pad(channel, note)
+                    && channel != DRUM_CHANNEL
+                {
+                    DRUM_CHANNEL
+                } else {
+                    channel
+                };
+                if play_ch == DRUM_CHANNEL && self.repeat_division_for_note(note).is_some() {
                     return self.interpret_drum_repeat(note, 0, false);
                 }
-                Some(Command::NoteOff { channel, note })
+                Some(Command::NoteOff {
+                    channel: play_ch,
+                    note,
+                })
             }
             MidiEvent::PitchBend { value, .. } => {
                 let dest = self.dest_for(MidiSource::StickX);
@@ -445,7 +465,7 @@ impl MidiMap {
             }
             if self.mode.load(Ordering::Relaxed) == MODE_PUNCH
                 && self.pads_to_fx()
-                && profile.is_punch_pad(channel, note)
+                && profile.is_fx_pad_hit(channel, note)
             {
                 return None;
             }
@@ -2105,8 +2125,10 @@ mod tests {
 
     #[test]
     fn punch_mode_only_steals_profile_pad_channel() {
-        // Lab MPK: pads on ch1 (index 0). Factory-style pads on ch10 must not
-        // silence keybed pitches that share pad note numbers on another channel.
+        // Lab MPK: pads on ch1 (index 0). Pads→FX also steals factory ch10 pad
+        // hits so a Prog Select reset cannot leave the kit firing on FX.
+        // Keybed pitches that reuse pad numbers on a non-pad / non-drum channel
+        // still sound.
         let map = MidiMap::default();
         map.set_punch();
         assert!(map.pads_to_fx());
@@ -2115,6 +2137,7 @@ mod tests {
         for note in 36u8..=43 {
             assert!(mpk.is_punch_pad(0, note));
             assert!(!mpk.is_punch_pad(9, note));
+            assert!(mpk.is_fx_pad_hit(9, note));
             assert!(
                 map.interpret_with(
                     &mpk,
@@ -2127,7 +2150,7 @@ mod tests {
                 .is_none(),
                 "MPK pad channel note {note} arms FX"
             );
-            assert_eq!(
+            assert!(
                 map.interpret_with(
                     &mpk,
                     MidiEvent::NoteOn {
@@ -2135,9 +2158,21 @@ mod tests {
                         note,
                         velocity: 100,
                     }
+                )
+                .is_none(),
+                "factory ch10 pad {note} must also arm FX, not the kit"
+            );
+            assert_eq!(
+                map.interpret_with(
+                    &mpk,
+                    MidiEvent::NoteOn {
+                        channel: 1,
+                        note,
+                        velocity: 100,
+                    }
                 ),
                 Some(Command::NoteOn {
-                    channel: 9,
+                    channel: 1,
                     note,
                     velocity: 100
                 }),
@@ -2173,6 +2208,30 @@ mod tests {
                 }
             )
             .is_none());
+    }
+
+    #[test]
+    fn drums_mode_remaps_lab_mpk_pads_onto_drum_channel() {
+        let map = MidiMap::default();
+        map.set_punch();
+        map.set_pads_to_fx(false);
+        let mpk = ControllerProfile::mpk_mini();
+        assert_eq!(
+            map.interpret_with(
+                &mpk,
+                MidiEvent::NoteOn {
+                    channel: 0,
+                    note: 40,
+                    velocity: 100,
+                }
+            ),
+            Some(Command::NoteOn {
+                channel: DRUM_CHANNEL,
+                note: 40,
+                velocity: 100
+            }),
+            "PAD FX off must play the kit even when pads arrive on ch1"
+        );
     }
 
     #[test]
