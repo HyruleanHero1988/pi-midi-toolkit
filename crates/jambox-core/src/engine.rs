@@ -6,12 +6,12 @@
 
 use midi_core::MidiEvent;
 
+use crate::arp::{ArpDivision, ArpEvent, ArpOrder, Arpeggiator, MAX_ARP_EVENTS_PER_BLOCK};
 use crate::clip::{
     Clip, ClipEventKind, ClipVoice, LaunchMode, SeqEvent, SeqLoopCue, Sequencer, MAX_CLIPS,
     MAX_SLOT_RELEASES, SEQ_CLIP_SLOT, SEQ_KAOSS_MIX_SLOT,
 };
 use crate::seq_cue::SeqCueClick;
-use crate::mix::MixSource;
 use crate::command::{
     Command, EmitMode, FxParam, FxTarget, ScheduledCommand, SynthParam, MAX_BLOCK_COMMANDS,
 };
@@ -20,11 +20,9 @@ use crate::drums::{
 };
 use crate::fm::FmSynth;
 use crate::fx::{FxParams, FxUnit};
-use crate::punch::{boost_send_mix, PunchRack, PunchSource, PUNCH_PAD_COUNT};
-use crate::arp::{
-    ArpDivision, ArpEvent, ArpOrder, Arpeggiator, MAX_ARP_EVENTS_PER_BLOCK,
-};
 use crate::kaoss::{unpack_xy, KaossMapper, LatestTouch, TouchDelta};
+use crate::mix::MixSource;
+use crate::punch::{boost_send_mix, PunchRack, PunchSource, PUNCH_PAD_COUNT};
 use crate::repeat::{
     note_from_hw_repeat_owner, RepeatEvent, RepeatRack, MAX_REPEAT_EVENTS_PER_BLOCK,
 };
@@ -1050,11 +1048,7 @@ impl JamboxEngine {
                 let t = &clip_table[slot];
                 (t, t, t)
             } else {
-                (
-                    bank.morph_table(),
-                    bank.table(morph_a),
-                    bank.table(morph_b),
-                )
+                (bank.morph_table(), bank.table(morph_a), bank.table(morph_b))
             };
             voices.render_clip_stereo(
                 slot,
@@ -1073,7 +1067,14 @@ impl JamboxEngine {
                 unlocked_voice_fx = Some(bank.nearer_index());
                 voice_fx.get_mut(bank.nearer_index())
             };
-            mix_group_fx(fx, &mut group_buf[..n], &mut group_buf_r[..n], key_bus, key_bus_r, n);
+            mix_group_fx(
+                fx,
+                &mut group_buf[..n],
+                &mut group_buf_r[..n],
+                key_bus,
+                key_bus_r,
+                n,
+            );
         }
         flush_fx_tails(
             voice_fx,
@@ -1260,8 +1261,7 @@ impl JamboxEngine {
             }
             Command::NoteOff { channel, note } => {
                 if channel == DRUM_CHANNEL {
-                    self.drums
-                        .set_aftertouch(drum_model_for_note(note), 0.0);
+                    self.drums.set_aftertouch(drum_model_for_note(note), 0.0);
                 } else if self.arp.enabled() {
                     if let Some((ch, n)) = self.arp.note_off(note) {
                         self.apply_arp_voice(ch, n, 0, false, relative_frame, midi_out);
@@ -1490,8 +1490,7 @@ impl JamboxEngine {
             Command::StopRepeat { owner } => {
                 self.repeats.stop(owner);
                 if let Some(note) = note_from_hw_repeat_owner(owner) {
-                    self.drums
-                        .set_aftertouch(drum_model_for_note(note), 0.0);
+                    self.drums.set_aftertouch(drum_model_for_note(note), 0.0);
                 }
             }
             Command::StopAllRepeats => self.repeats.stop_all(),
@@ -1546,7 +1545,8 @@ impl JamboxEngine {
                 octaves,
             } => {
                 self.kaoss.configure(scale_index, key, root_midi, octaves);
-                self.kaoss_seq.configure(scale_index, key, root_midi, octaves);
+                self.kaoss_seq
+                    .configure(scale_index, key, root_midi, octaves);
             }
             Command::ClipTouchDown {
                 owner,
@@ -1677,8 +1677,7 @@ impl JamboxEngine {
             self.fm.note_on(channel, note, velocity);
         } else {
             let group = self.bank.nearer_index();
-            self.voices
-                .note_on_mix(channel, note, velocity, group, mix);
+            self.voices.note_on_mix(channel, note, velocity, group, mix);
         }
     }
 
@@ -1872,9 +1871,7 @@ impl JamboxEngine {
             SynthParam::Attack => {
                 self.attack_sec = map_exp_time(unit, ATTACK_SEC_MIN, ATTACK_SEC_MAX)
             }
-            SynthParam::Decay => {
-                self.decay_sec = map_exp_time(unit, DECAY_SEC_MIN, DECAY_SEC_MAX)
-            }
+            SynthParam::Decay => self.decay_sec = map_exp_time(unit, DECAY_SEC_MIN, DECAY_SEC_MAX),
             SynthParam::SustainLevel => self.sustain_level = unit,
             SynthParam::Release => {
                 self.release_sec = map_exp_time(unit, RELEASE_SEC_MIN, RELEASE_SEC_MAX)
@@ -1925,7 +1922,10 @@ impl JamboxEngine {
             }
             SynthParam::FmRecipe => {
                 self.fm.set_recipe(
-                    value.round().clamp(0.0, (crate::fm::FM_RECIPE_COUNT - 1) as f32) as usize,
+                    value
+                        .round()
+                        .clamp(0.0, (crate::fm::FM_RECIPE_COUNT - 1) as f32)
+                        as usize,
                 );
             }
             SynthParam::FmOp => {
@@ -2047,9 +2047,7 @@ mod tests {
     }
 
     fn rising_crossings(buf: &[f32]) -> usize {
-        buf.windows(2)
-            .filter(|w| w[0] <= 0.0 && w[1] > 0.0)
-            .count()
+        buf.windows(2).filter(|w| w[0] <= 0.0 && w[1] > 0.0).count()
     }
 
     #[test]
@@ -2337,7 +2335,9 @@ mod tests {
         assert!(!e.input_bypass());
         e.render(
             &mut out,
-            &[ScheduledCommand::now(Command::SetInputBypass { enabled: true })],
+            &[ScheduledCommand::now(Command::SetInputBypass {
+                enabled: true,
+            })],
             &mut midi,
         );
         assert!(e.input_bypass());
@@ -2356,12 +2356,16 @@ mod tests {
         let mut midi = MidiOutSink::new();
         assert!(!e.punch_dry());
         e.apply_scheduled(
-            &[ScheduledCommand::now(Command::SetPunchDry { enabled: true })],
+            &[ScheduledCommand::now(Command::SetPunchDry {
+                enabled: true,
+            })],
             &mut midi,
         );
         assert!(e.punch_dry());
         e.apply_scheduled(
-            &[ScheduledCommand::now(Command::SetPunchDry { enabled: false })],
+            &[ScheduledCommand::now(Command::SetPunchDry {
+                enabled: false,
+            })],
             &mut midi,
         );
         assert!(!e.punch_dry());
@@ -2521,11 +2525,7 @@ mod tests {
         );
         let (l, r) = e.last_stereo();
         assert!(peak(l) > 0.01, "hard left must still speak on L");
-        assert!(
-            peak(r) < 1e-4,
-            "hard left must mute R, peak={}",
-            peak(r)
-        );
+        assert!(peak(r) < 1e-4, "hard left must mute R, peak={}", peak(r));
     }
 
     #[test]
@@ -2899,7 +2899,8 @@ mod tests {
             }
             (l, r)
         };
-        let diff = |a: &[f32], b: &[f32]| -> f32 { a.iter().zip(b).map(|(x, y)| (x - y).abs()).sum() };
+        let diff =
+            |a: &[f32], b: &[f32]| -> f32 { a.iter().zip(b).map(|(x, y)| (x - y).abs()).sum() };
         let (dry_l, dry_r) = render_stereo(None);
         assert!(diff(&dry_l, &dry_r) > 1.0, "test needs a stereo image");
         for (name, slot) in [
@@ -2967,8 +2968,20 @@ mod tests {
         let mut midi = MidiOutSink::new();
         dry.render(&mut buf, &on, &mut midi);
         wet.render(&mut buf, &on, &mut midi);
-        apply_now(&mut dry, Command::SetPunchLock { source: 0, locked: true });
-        apply_now(&mut wet, Command::SetPunchLock { source: 0, locked: true });
+        apply_now(
+            &mut dry,
+            Command::SetPunchLock {
+                source: 0,
+                locked: true,
+            },
+        );
+        apply_now(
+            &mut wet,
+            Command::SetPunchLock {
+                source: 0,
+                locked: true,
+            },
+        );
         apply_now(
             &mut dry,
             Command::NoteOff {
@@ -3086,7 +3099,8 @@ mod tests {
             e.render(&mut out, &[], &mut midi);
         }
         assert_eq!(
-            e.status().active_voices, 0,
+            e.status().active_voices,
+            0,
             "dry voice must be gone before we listen for the echo"
         );
 
@@ -3218,7 +3232,10 @@ mod tests {
         }
         let wave = wobble(false);
         let fm = wobble(true);
-        assert!(wave > 1.0, "mod wheel should wobble a wavetable note, diff={wave}");
+        assert!(
+            wave > 1.0,
+            "mod wheel should wobble a wavetable note, diff={wave}"
+        );
         assert!(fm > 1.0, "mod wheel should wobble an FM note, diff={fm}");
     }
 
@@ -3613,7 +3630,11 @@ mod tests {
             },
         );
         assert!((e.sustain_level - 0.4).abs() < 1e-6);
-        assert!(e.decay_sec > 0.5, "max decay knob should be long, got {}", e.decay_sec);
+        assert!(
+            e.decay_sec > 0.5,
+            "max decay knob should be long, got {}",
+            e.decay_sec
+        );
     }
 
     #[test]
@@ -3995,13 +4016,20 @@ mod tests {
         e.render(&mut out, &[], &mut midi);
         assert!(e.status().active_voices >= 2);
 
-        apply_now(&mut e, Command::ClipNoteOff { channel: 0, note: 60 });
+        apply_now(
+            &mut e,
+            Command::ClipNoteOff {
+                channel: 0,
+                note: 60,
+            },
+        );
         for _ in 0..64 {
             out.iter_mut().for_each(|s| *s = 0.0);
             e.render(&mut out, &[], &mut midi);
         }
         assert_eq!(
-            e.status().active_voices, 1,
+            e.status().active_voices,
+            1,
             "live melody should keep sounding after the pad note ends"
         );
         assert!(peak(&out) > 0.01);
@@ -4051,7 +4079,13 @@ mod tests {
             }],
             PPQ * 8,
         );
-        let _ = e.apply_clip_update(0, Some(Box::new(clip)), Some(LaunchMode::Loop), None, Some(voice));
+        let _ = e.apply_clip_update(
+            0,
+            Some(Box::new(clip)),
+            Some(LaunchMode::Loop),
+            None,
+            Some(voice),
+        );
         apply_now(
             e,
             Command::LaunchClip {
@@ -4086,10 +4120,7 @@ mod tests {
         };
 
         let mut locked = engine();
-        apply_now(
-            &mut locked,
-            Command::SetMorphPair { a: 0, b: 0 },
-        );
+        apply_now(&mut locked, Command::SetMorphPair { a: 0, b: 0 });
         apply_now(
             &mut locked,
             Command::SetSynth {
@@ -4134,12 +4165,35 @@ mod tests {
         );
     }
 
-    fn pad_render(voice: ClipVoice, live_pair: (u16, u16), live_fx: Option<(u16, FxParam, f32)>) -> Vec<f32> {
+    fn pad_render(
+        voice: ClipVoice,
+        live_pair: (u16, u16),
+        live_fx: Option<(u16, FxParam, f32)>,
+    ) -> Vec<f32> {
         let mut e = engine();
-        apply_now(&mut e, Command::SetMorphPair { a: live_pair.0, b: live_pair.1 });
-        apply_now(&mut e, Command::SetSynth { param: SynthParam::Morph, value: 0.0 });
+        apply_now(
+            &mut e,
+            Command::SetMorphPair {
+                a: live_pair.0,
+                b: live_pair.1,
+            },
+        );
+        apply_now(
+            &mut e,
+            Command::SetSynth {
+                param: SynthParam::Morph,
+                value: 0.0,
+            },
+        );
         if let Some((i, param, v)) = live_fx {
-            apply_now(&mut e, Command::SetFx { target: FxTarget::Voice(i), param, value: v });
+            apply_now(
+                &mut e,
+                Command::SetFx {
+                    target: FxTarget::Voice(i),
+                    param,
+                    value: v,
+                },
+            );
         }
         load_locked_clip(&mut e, voice);
         let mut midi = MidiOutSink::new();
@@ -4176,8 +4230,14 @@ mod tests {
             live_sine,
             None,
         );
-        assert!(correlate(&follow, &sine_ref) > 0.99, "FOLLOW plays the live sine");
-        assert!(correlate(&lock, &sine_ref) < 0.9, "LOCK keeps its recorded saw");
+        assert!(
+            correlate(&follow, &sine_ref) > 0.99,
+            "FOLLOW plays the live sine"
+        );
+        assert!(
+            correlate(&lock, &sine_ref) < 0.9,
+            "LOCK keeps its recorded saw"
+        );
     }
 
     #[test]
@@ -4199,17 +4259,36 @@ mod tests {
 
     fn drift_crossings(locked: bool) -> (usize, usize) {
         let mut e = engine();
-        apply_now(&mut e, Command::SetSynth { param: SynthParam::Release, value: 1.0 });
-        apply_now(&mut e, Command::SetSynth { param: SynthParam::ReleaseDrift, value: 0.5 });
+        apply_now(
+            &mut e,
+            Command::SetSynth {
+                param: SynthParam::Release,
+                value: 1.0,
+            },
+        );
+        apply_now(
+            &mut e,
+            Command::SetSynth {
+                param: SynthParam::ReleaseDrift,
+                value: 0.5,
+            },
+        );
         let clip = Clip::new(
             vec![
                 ClipEvent {
                     tick: 0,
-                    kind: ClipEventKind::NoteOn { channel: 0, note: 57, velocity: 120 },
+                    kind: ClipEventKind::NoteOn {
+                        channel: 0,
+                        note: 57,
+                        velocity: 120,
+                    },
                 },
                 ClipEvent {
                     tick: 192,
-                    kind: ClipEventKind::NoteOff { channel: 0, note: 57 },
+                    kind: ClipEventKind::NoteOff {
+                        channel: 0,
+                        note: 57,
+                    },
                 },
             ],
             PPQ * 4,
@@ -4219,8 +4298,20 @@ mod tests {
             release_drift: Some(1.0),
             ..ClipVoice::default()
         };
-        let _ = e.apply_clip_update(0, Some(Box::new(clip)), Some(LaunchMode::Loop), None, Some(voice));
-        apply_now(&mut e, Command::LaunchClip { slot: 0, quantize: Quantize::Off });
+        let _ = e.apply_clip_update(
+            0,
+            Some(Box::new(clip)),
+            Some(LaunchMode::Loop),
+            None,
+            Some(voice),
+        );
+        apply_now(
+            &mut e,
+            Command::LaunchClip {
+                slot: 0,
+                quantize: Quantize::Off,
+            },
+        );
         let mut midi = MidiOutSink::new();
         let mut block = vec![0.0f32; 1024];
         for _ in 0..5 {
@@ -4348,9 +4439,7 @@ mod tests {
     }
 
     fn zero_crossings(buf: &[f32]) -> usize {
-        buf.windows(2)
-            .filter(|w| w[0] <= 0.0 && w[1] > 0.0)
-            .count()
+        buf.windows(2).filter(|w| w[0] <= 0.0 && w[1] > 0.0).count()
     }
 
     #[test]
@@ -4626,5 +4715,23 @@ mod tests {
                 "each loop pass should carry the same 1/16 clave grid, got {pass_energy:?}"
             );
         }
+    }
+
+    #[test]
+    fn wire_ch1_pad_number_does_not_hit_kit() {
+        let mut e = engine();
+        let mut out = vec![0.0f32; 512];
+        let mut midi = MidiOutSink::new();
+        e.render(
+            &mut out,
+            &[ScheduledCommand::now(Command::NoteOn {
+                channel: 0,
+                note: 40,
+                velocity: 110,
+            })],
+            &mut midi,
+        );
+        assert_eq!(e.status().active_drums, 0);
+        assert!(peak(&out) > 0.0, "ch1 pad-number note should still sound");
     }
 }

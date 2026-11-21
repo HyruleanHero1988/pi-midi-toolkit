@@ -8,14 +8,17 @@ const DELAY_MAX_SEC: f32 = 1.0;
 const REVERB_MAX_SEC: f32 = 0.55;
 /// Classic analog flanger window (~1–12 ms). Sized once in `new`.
 const FLANGER_MAX_SEC: f32 = 0.020;
-/// Chorus delay window (~18–25 ms base + shallow depth).
-const CHORUS_MAX_SEC: f32 = 0.045;
-/// Fixed chorus center delay (seconds). Wider than flanger so comb notches
-/// sit dense and don't whoosh when mixed with dry.
-const CHORUS_BASE_SEC: f32 = 0.020;
-/// Peak LFO travel at `chorus_depth == 1` (seconds). Keep small so chorus is
-/// pitch shimmer, not a flanger-style notch sweep.
-const CHORUS_DEPTH_SEC: f32 = 0.0035;
+/// Chorus delay window (base + voice offsets + shallow LFO).
+const CHORUS_MAX_SEC: f32 = 0.050;
+/// BBD-style first tap (~22 ms); additional voices stagger after this.
+const CHORUS_BASE_SEC: f32 = 0.022;
+/// Per-voice static offset (seconds) for ensemble width.
+const CHORUS_VOICE_OFFSET_SEC: f32 = 0.004;
+/// Peak LFO travel at `chorus_depth == 1` — keep shallow (CE/Juno class).
+const CHORUS_DEPTH_SEC: f32 = 0.0010;
+/// Parallel detuned copies mixed into dry; keeps level sensible.
+const CHORUS_ENSEMBLE_GAIN: f32 = 0.62;
+const CHORUS_VOICES: usize = 3;
 /// Serial first-order all-pass stages (Phase 90–class; stronger combing).
 const PHASER_STAGES: usize = 10;
 /// Lowest sweep corner when the LFO is down (Hz).
@@ -24,8 +27,18 @@ const PHASER_FREQ_HZ_MIN: f32 = 100.0;
 const PHASER_FREQ_HZ_SPAN: f32 = 3_200.0;
 /// Cap on phaser feedback — higher `phaser_fb` tightens the jet / resonant peaks.
 const PHASER_FB_MAX: f32 = 0.92;
-/// Drive oversampling factor around the tube nonlinearity.
-const DRIVE_OS: usize = 2;
+/// Oversampling around the drive nonlinearity (inter-sample at 4×).
+const DRIVE_OS: usize = 4;
+/// High-pass before clipping — keeps lows from turning to mud.
+const DRIVE_HP_HZ: f32 = 105.0;
+/// Peak the tube stage is normalized toward (post SYNTH LEVEL, pre insert).
+const DRIVE_NORM_REF: f32 = 0.24;
+/// Envelope floor so silence does not crank the normalizer to infinity.
+const DRIVE_ENV_FLOOR: f32 = 0.010;
+/// Max boost when the bus is quiet (≈ +20 dB).
+const DRIVE_NORM_MAX: f32 = 10.0;
+/// Min attenuation when the bus is already hot.
+const DRIVE_NORM_MIN: f32 = 0.18;
 
 /// Delay gap at `delay_time == 0` (seconds). Kept public for tempo-grid snaps.
 pub const DELAY_TIME_SEC_MIN: f32 = 0.05;
@@ -35,10 +48,10 @@ pub const DELAY_TIME_SEC_SPAN: f32 = 0.70;
 pub const FLANGER_RATE_HZ_MIN: f32 = 0.08;
 /// Extra Hz when `flanger_rate == 1`.
 pub const FLANGER_RATE_HZ_SPAN: f32 = 6.0;
-/// Chorus LFO Hz at `chorus_rate == 0` (slow shimmer).
-pub const CHORUS_RATE_HZ_MIN: f32 = 0.15;
+/// Chorus LFO Hz at `chorus_rate == 0` (slow ensemble).
+pub const CHORUS_RATE_HZ_MIN: f32 = 0.12;
 /// Extra Hz when `chorus_rate == 1`.
-pub const CHORUS_RATE_HZ_SPAN: f32 = 0.55;
+pub const CHORUS_RATE_HZ_SPAN: f32 = 0.38;
 /// Phaser LFO Hz at `phaser_rate == 0`.
 pub const PHASER_RATE_HZ_MIN: f32 = 0.10;
 /// Extra Hz when `phaser_rate == 1`.
@@ -133,6 +146,12 @@ pub struct FxUnit {
     /// DC blocker state after the tube drive.
     drive_dc_x: f32,
     drive_dc_y: f32,
+    /// Slow peak envelope for input-normalized tube drive.
+    drive_env: f32,
+    /// One-pole lowpass state (high-pass is input − this).
+    drive_hp_lp: f32,
+    /// Cab-style tone lowpass after the clipper.
+    drive_tone_lp: f32,
     /// Samples of silence still worth running so delay / reverb can finish.
     tail_hold: u32,
 }
@@ -163,6 +182,9 @@ impl FxUnit {
             phaser_fb_z: 0.0,
             drive_dc_x: 0.0,
             drive_dc_y: 0.0,
+            drive_env: DRIVE_ENV_FLOOR,
+            drive_hp_lp: 0.0,
+            drive_tone_lp: 0.0,
             tail_hold: 0,
         }
     }
@@ -211,6 +233,9 @@ impl FxUnit {
         self.phaser_fb_z = 0.0;
         self.drive_dc_x = 0.0;
         self.drive_dc_y = 0.0;
+        self.drive_env = DRIVE_ENV_FLOOR;
+        self.drive_hp_lp = 0.0;
+        self.drive_tone_lp = 0.0;
         self.tail_hold = 0;
     }
 
@@ -231,6 +256,10 @@ impl FxUnit {
             process_tube_drive(
                 buf,
                 p.drive,
+                self.sample_rate,
+                &mut self.drive_env,
+                &mut self.drive_hp_lp,
+                &mut self.drive_tone_lp,
                 &mut self.drive_dc_x,
                 &mut self.drive_dc_y,
             );
@@ -240,12 +269,10 @@ impl FxUnit {
             let clen = self.chorus.len();
             let rate_hz = CHORUS_RATE_HZ_MIN + p.chorus_rate * CHORUS_RATE_HZ_SPAN;
             let depth = p.chorus_depth;
-            let mix = p.chorus_mix;
+            let mix = perceptual_insert_mix(p.chorus_mix);
             let dry = 1.0 - mix;
-            // Classic chorus: ~20 ms center, ±~3.5 ms at full depth, no feedback.
-            // Opposing (180°) voices keep average delay steady so dry+wet doesn't
-            // whoosh like a flanger/phaser notch sweep.
-            let center = CHORUS_BASE_SEC * self.sample_rate;
+            let center0 = CHORUS_BASE_SEC * self.sample_rate;
+            let voice_step = CHORUS_VOICE_OFFSET_SEC * self.sample_rate;
             let travel = CHORUS_DEPTH_SEC * self.sample_rate * depth;
             let two_pi = std::f32::consts::TAU;
             let phase_inc = rate_hz / self.sample_rate;
@@ -254,16 +281,22 @@ impl FxUnit {
                 if self.chorus_phase >= 1.0 {
                     self.chorus_phase -= 1.0;
                 }
-                let lfo = (self.chorus_phase * two_pi).sin();
-                let d_a = (center + travel * lfo).clamp(1.0, (clen - 2) as f32);
-                let d_b = (center - travel * lfo).clamp(1.0, (clen - 2) as f32);
-                let wet = 0.5
-                    * (read_delay_frac(&self.chorus, self.chorus_pos, d_a)
-                        + read_delay_frac(&self.chorus, self.chorus_pos, d_b));
-                // No feedback — chorus, not flanger.
-                self.chorus[self.chorus_pos] = (*s).clamp(-1.5, 1.5);
+                let input = *s;
+                let mut ensemble = 0.0f32;
+                for v in 0..CHORUS_VOICES {
+                    let phase_off = v as f32 * two_pi / CHORUS_VOICES as f32;
+                    let lfo = (self.chorus_phase * two_pi + phase_off).sin();
+                    let base = center0 + v as f32 * voice_step;
+                    let delay_samp = (base + travel * lfo).clamp(1.0, (clen - 2) as f32);
+                    ensemble += read_delay_frac(&self.chorus, self.chorus_pos, delay_samp);
+                }
+                ensemble /= CHORUS_VOICES as f32;
+                self.chorus[self.chorus_pos] = input.clamp(-1.5, 1.5);
                 self.chorus_pos = (self.chorus_pos + 1) % clen;
-                *s = *s * dry + wet * mix;
+                // Juno/CE thickening: dry plus low-level staggered copies, not a
+                // single sweeping comb against dry (which reads as flange/phaser).
+                let thickened = input + ensemble * CHORUS_ENSEMBLE_GAIN;
+                *s = input * dry + thickened * mix;
             }
         }
 
@@ -294,14 +327,14 @@ impl FxUnit {
 
         if p.phaser_mix > 0.001 {
             let rate_hz = PHASER_RATE_HZ_MIN + p.phaser_rate * PHASER_RATE_HZ_SPAN;
-            let depth = p.phaser_depth;
-            let fb = p.phaser_fb.min(PHASER_FB_MAX);
-            let mix = p.phaser_mix;
+            let mix = perceptual_insert_mix(p.phaser_mix);
+            let depth = p.phaser_depth * (0.45 + 0.55 * mix);
+            let fb = p.phaser_fb.min(PHASER_FB_MAX) * (0.5 + 0.5 * mix);
             let phase_inc = rate_hz / self.sample_rate;
             let two_pi = std::f32::consts::TAU;
             let sweep_hz = depth * PHASER_FREQ_HZ_SPAN;
             let f_lo = PHASER_FREQ_HZ_MIN;
-            let f_hi = PHASER_FREQ_HZ_MIN + sweep_hz.max(80.0);
+            let f_hi = PHASER_FREQ_HZ_MIN + sweep_hz.max(120.0);
             for s in buf.iter_mut() {
                 let dry = *s;
                 self.phaser_phase += phase_inc;
@@ -383,6 +416,13 @@ impl FxUnit {
     }
 }
 
+/// Slider 0..1 → wet amount; mid positions already feel clearly effected.
+#[inline]
+fn perceptual_insert_mix(mix: f32) -> f32 {
+    let mix = mix.clamp(0.0, 1.0);
+    1.0 - (1.0 - mix).powf(1.65)
+}
+
 /// Bilinear first-order all-pass coefficient for notch center `center_hz`.
 #[inline]
 fn phaser_ap_coeff(center_hz: f32, sample_rate: f32) -> f32 {
@@ -400,57 +440,122 @@ fn read_delay_frac(buf: &[f32], write_pos: usize, delay_samp: f32) -> f32 {
     buf[i0] * (1.0 - frac) + buf[i1] * frac
 }
 
-/// Asymmetric soft-knee tube clipper (H2-rich) with mid pre-emphasis, DC block,
-/// level compensation, and 2× oversampling around the nonlinearity.
-fn process_tube_drive(buf: &mut [f32], drive: f32, dc_x: &mut f32, dc_y: &mut f32) {
-    // Map 0..1 slider → 0..24 dB drive.
-    let drive_db = drive * 24.0;
-    let gain = 0.35 * 10f32.powf(drive_db / 20.0);
-    let inv_gain = 1.0 / gain.max(0.35);
-    // One-pole mid pre-emphasis (~2–3 dB around 1–2 kHz feel); remove after.
-    let pre = 0.18 * drive;
-    // DC blocker (R=0.995).
-    let r = 0.995f32;
+/// Peak envelope coefficients — slow enough to avoid obvious pumping.
+fn drive_env_coeffs(sample_rate: f32) -> (f32, f32) {
+    let sr = sample_rate.max(8_000.0);
+    let attack = 1.0 - (-1.0 / (0.006 * sr)).exp();
+    let release = 1.0 - (-1.0 / (0.220 * sr)).exp();
+    (attack, release)
+}
 
-    for s in buf.iter_mut() {
-        let dry = *s;
-        // Cheap 2× OS: process mid-point and current, average.
+#[inline]
+fn one_pole_alpha(freq_hz: f32, sample_rate: f32) -> f32 {
+    let sr = sample_rate.max(8_000.0);
+    1.0 - (-std::f32::consts::TAU * freq_hz / sr).exp()
+}
+
+/// Progressive pre-gain (≈0–44 dB) — cubic feel, slams hard only near the top.
+#[inline]
+fn drive_pre_gain(drive: f32) -> f32 {
+    let t = drive.clamp(0.0, 1.0);
+    let db = 44.0 * t.powf(1.18);
+    10f32.powf(db / 20.0)
+}
+
+/// Linear zones undo `color_gain`; saturated zones target a fixed perceived level.
+#[inline]
+fn drive_post_gain(drive: f32, color_gain: f32) -> f32 {
+    let t = drive.clamp(0.0, 1.0);
+    let crush = t * t;
+    let inv = 1.0 / color_gain.max(1.0);
+    let sat_level = 0.17 + 0.33 * (1.0 - t).powf(1.05);
+    inv * (1.0 - crush) + sat_level * crush
+}
+
+/// Soft tube knee into harder asymmetric saturation (high-gain pedal stack).
+#[inline]
+fn staged_drive_clip(x: f32, drive: f32) -> f32 {
+    let t = drive.clamp(0.0, 1.0);
+    let soft = dual_knee_clip(x, t);
+    let crush = t * t;
+    let hot = soft * (1.0 + crush * 8.0);
+    let hard = hot.tanh();
+    let bite = hard.abs().powf(0.72).copysign(hard);
+    let blend = (0.45 * t + 0.55 * crush).clamp(0.0, 0.92);
+    soft * (1.0 - blend) + bite * blend
+}
+
+/// Asymmetric soft-knee tube clipper with envelope-normalized staging, DC block,
+/// loudness-matched output, and 4× oversampling around the nonlinearity.
+///
+/// Input is peak-normalized toward [`DRIVE_NORM_REF`] so saturation follows the
+/// DRIVE slider, not SYNTH LEVEL. Output is scaled back by the same factor so
+/// perceived loudness tracks the source within a few dB while DRIVE rises.
+fn process_tube_drive(
+    buf: &mut [f32],
+    drive: f32,
+    sample_rate: f32,
+    env: &mut f32,
+    hp_lp: &mut f32,
+    tone_lp: &mut f32,
+    dc_x: &mut f32,
+    dc_y: &mut f32,
+) {
+    let t = drive.clamp(0.0, 1.0);
+    let pre_gain = drive_pre_gain(t);
+    let treble = 1.0 + 0.32 * t * t;
+    let color_gain = pre_gain * treble;
+    let post_gain = drive_post_gain(t, color_gain);
+    let r = 0.995f32;
+    let (env_attack, env_release) = drive_env_coeffs(sample_rate);
+    let hp_a = one_pole_alpha(DRIVE_HP_HZ, sample_rate);
+    let tone_fc = 5_100.0 - 3_200.0 * t;
+    let tone_a = one_pole_alpha(tone_fc, sample_rate);
+    let len = buf.len();
+
+    for i in 0..len {
+        let x0 = buf[i];
+        let x1 = if i + 1 < len { buf[i + 1] } else { x0 };
+        let mag = x0.abs();
+        let coeff = if mag > *env { env_attack } else { env_release };
+        *env += coeff * (mag - *env);
+        let norm = (DRIVE_NORM_REF / env.max(DRIVE_ENV_FLOOR)).clamp(DRIVE_NORM_MIN, DRIVE_NORM_MAX);
+
         let mut acc = 0.0f32;
-        let mut prev = dry;
         for step in 0..DRIVE_OS {
-            let x = if step == 0 {
-                // Linear interpolate toward next is unavailable per-sample; use
-                // hold + slight blend with previous output sample.
-                dry
-            } else {
-                0.5 * (prev + dry)
-            };
-            prev = dry;
-            // Mid pre-emphasis (simple high-shelf-ish boost of highs/mids).
-            let emphasized = x + pre * (x - *dc_y);
-            let hot = emphasized * gain;
-            let clipped = dual_knee_clip(hot);
-            // Remove the linear pre-emphasis contribution after the nonlinearity.
-            let shaped = clipped * inv_gain - pre * (clipped * inv_gain - x) * 0.5;
-            // DC blocker
+            let frac = (step as f32 + 0.5) / DRIVE_OS as f32;
+            let x = x0 * (1.0 - frac) + x1 * frac;
+            let internal = x * norm;
+            *hp_lp += hp_a * (internal - *hp_lp);
+            let tight = internal - *hp_lp;
+            let hot = tight * color_gain;
+            let clipped = staged_drive_clip(hot, t);
+            let restored = clipped / norm;
+            *tone_lp += tone_a * (restored - *tone_lp);
+            let toned = *tone_lp;
+            let shaped = toned * post_gain;
             let y = shaped - *dc_x + r * *dc_y;
             *dc_x = shaped;
             *dc_y = y;
             acc += y;
         }
-        let wet = acc / DRIVE_OS as f32;
-        // Crossfade by drive amount so Drive 0 is clean (caller already gated).
-        *s = dry * (1.0 - drive) + wet * drive;
+        let raw = acc / DRIVE_OS as f32;
+        buf[i] = (raw * 2.4).tanh() * 0.58;
     }
 }
 
 /// Positive half saturates earlier/firmer; negative later/softer → mostly H2.
+/// Knees tighten as `drive` rises so bus-level signals hit the tube sooner.
 #[inline]
-fn dual_knee_clip(x: f32) -> f32 {
+fn dual_knee_clip(x: f32, drive: f32) -> f32 {
+    let knee_p = (0.92 - 0.70 * drive).max(0.12);
+    let knee_n = (1.20 - 0.55 * drive).max(0.25);
+    let span_p = 0.48 + 0.14 * drive;
+    let span_n = 1.08 + 0.18 * drive;
     if x >= 0.0 {
-        soft_knee(x, 0.35, 0.56)
+        soft_knee(x, knee_p, span_p)
     } else {
-        -soft_knee(-x, 0.95, 1.20)
+        -soft_knee(-x, knee_n, span_n)
     }
 }
 
@@ -523,11 +628,255 @@ mod tests {
             drive: 1.0,
             ..FxParams::default()
         });
-        let mut buf = [0.8f32; 32];
+        let mut buf = vec![0.0f32; 4096];
+        for (i, s) in buf.iter_mut().enumerate() {
+            *s = (i as f32 * 0.07).sin() * 0.85;
+        }
+        let mut warm = sine_buffer(220.0, 0.5, 48_000.0, 4096);
+        fx.process(&mut warm);
         fx.process(&mut buf);
-        assert!(buf.iter().all(|v| v.abs() <= 1.5));
-        // Tube drive should still be audible / non-zero.
-        assert!(buf.iter().any(|v| v.abs() > 0.1));
+        assert!(buf.iter().all(|v| v.abs() <= 1.2));
+        let peak = buf.iter().fold(0.0f32, |a, &v| a.max(v.abs()));
+        assert!(peak > 0.12, "drive should pass a non-silent bus signal, peak={peak}");
+        assert!(peak < 0.88, "full drive should tame hot peaks, peak={peak}");
+    }
+
+    fn sine_buffer(freq_hz: f32, amp: f32, sample_rate: f32, frames: usize) -> Vec<f32> {
+        let mut buf = vec![0.0f32; frames];
+        for (i, s) in buf.iter_mut().enumerate() {
+            *s = (i as f32 * freq_hz / sample_rate * std::f32::consts::TAU).sin() * amp;
+        }
+        buf
+    }
+
+  /// Single-bin Goertzel magnitude at `freq_hz` (optionally a harmonic of the base tone).
+    fn goertzel_mag(buf: &[f32], freq_hz: f32, sample_rate: f32) -> f32 {
+        let n = buf.len();
+        let omega = std::f32::consts::TAU * freq_hz / sample_rate;
+        let coeff = 2.0 * omega.cos();
+        let mut s1 = 0.0f32;
+        let mut s2 = 0.0f32;
+        for &x in buf {
+            let s0 = x + coeff * s1 - s2;
+            s2 = s1;
+            s1 = s0;
+        }
+        let real = s1 - s2 * omega.cos();
+        let imag = s2 * omega.sin();
+        (real * real + imag * imag).sqrt() / n as f32 * 2.0
+    }
+
+    fn buffer_rms(buf: &[f32]) -> f32 {
+        (buf.iter().map(|v| v * v).sum::<f32>() / buf.len() as f32).sqrt()
+    }
+
+    /// Prewarm the drive envelope, then measure on a fresh tail of the tone.
+    fn measure_h2_over_h1(
+        fx: &mut FxUnit,
+        drive: f32,
+        freq_hz: f32,
+        amp: f32,
+        sample_rate: f32,
+    ) -> f32 {
+        let warm = (sample_rate * 0.35) as usize;
+        let measure = (sample_rate * 0.5) as usize;
+        fx.set_params(FxParams {
+            drive,
+            ..FxParams::default()
+        });
+        let mut lead = sine_buffer(freq_hz, amp, sample_rate, warm);
+        fx.process(&mut lead);
+        let mut buf = sine_buffer(freq_hz, amp, sample_rate, measure);
+        fx.process(&mut buf);
+        let h1 = goertzel_mag(&buf, freq_hz, sample_rate).max(1e-8);
+        let h2 = goertzel_mag(&buf, freq_hz * 2.0, sample_rate);
+        h2 / h1
+    }
+
+    fn measure_output_rms(
+        fx: &mut FxUnit,
+        drive: f32,
+        freq_hz: f32,
+        amp: f32,
+        sample_rate: f32,
+    ) -> f32 {
+        let warm = (sample_rate * 0.35) as usize;
+        let measure = (sample_rate * 0.5) as usize;
+        fx.reset();
+        fx.set_params(FxParams {
+            drive,
+            ..FxParams::default()
+        });
+        let mut lead = sine_buffer(freq_hz, amp, sample_rate, warm);
+        fx.process(&mut lead);
+        let mut buf = sine_buffer(freq_hz, amp, sample_rate, measure);
+        fx.process(&mut buf);
+        buffer_rms(&buf)
+    }
+
+    #[test]
+    fn drive_second_harmonic_rises_with_amount() {
+        let sr = 48_000.0;
+        let mut fx_lo = FxUnit::new(sr);
+        let mut fx_mid = FxUnit::new(sr);
+        let mut fx_hi = FxUnit::new(sr);
+        let amp = 0.22f32;
+        let low = measure_h2_over_h1(&mut fx_lo, 0.35, 440.0, amp, sr);
+        let mid = measure_h2_over_h1(&mut fx_mid, 0.55, 440.0, amp, sr);
+        let h2_hi = measure_h2_over_h1(&mut fx_hi, 1.0, 440.0, amp, sr);
+        let h3_hi = measure_h3_over_h1(&mut fx_hi, 1.0, 440.0, amp, sr);
+        let high = h2_hi.max(h3_hi);
+        assert!(
+            mid > low * 2.0 && high > mid * 1.2,
+            "harmonics should climb with drive: low={low:.5} mid={mid:.5} high={high:.5}"
+        );
+        assert!(
+            mid > 0.05,
+            "moderate drive must be clearly non-clean at bus levels, mid={mid:.5}"
+        );
+        assert!(
+            high > 0.22,
+            "full drive should be heavy guitar-style saturation, h2={h2_hi:.5} h3={h3_hi:.5}"
+        );
+    }
+
+    fn measure_h3_over_h1(
+        fx: &mut FxUnit,
+        drive: f32,
+        freq_hz: f32,
+        amp: f32,
+        sample_rate: f32,
+    ) -> f32 {
+        let warm = (sample_rate * 0.35) as usize;
+        let measure = (sample_rate * 0.5) as usize;
+        fx.set_params(FxParams {
+            drive,
+            ..FxParams::default()
+        });
+        let mut lead = sine_buffer(freq_hz, amp, sample_rate, warm);
+        fx.process(&mut lead);
+        let mut buf = sine_buffer(freq_hz, amp, sample_rate, measure);
+        fx.process(&mut buf);
+        let h1 = goertzel_mag(&buf, freq_hz, sample_rate).max(1e-8);
+        let h3 = goertzel_mag(&buf, freq_hz * 3.0, sample_rate);
+        h3 / h1
+    }
+
+    fn process_sine_tail(
+        fx: &mut FxUnit,
+        drive: f32,
+        freq_hz: f32,
+        amp: f32,
+        sample_rate: f32,
+    ) -> Vec<f32> {
+        let warm = (sample_rate * 0.35) as usize;
+        let measure = (sample_rate * 0.5) as usize;
+        fx.reset();
+        fx.set_params(FxParams {
+            drive,
+            ..FxParams::default()
+        });
+        let mut lead = sine_buffer(freq_hz, amp, sample_rate, warm);
+        fx.process(&mut lead);
+        let mut buf = sine_buffer(freq_hz, amp, sample_rate, measure);
+        fx.process(&mut buf);
+        buf
+    }
+
+    #[test]
+    fn drive_max_is_heavily_compressed_with_odd_harmonics() {
+        let sr = 48_000.0;
+        let amp = 0.22f32;
+        let mut fx = FxUnit::new(sr);
+        let driven = process_sine_tail(&mut fx, 1.0, 220.0, amp, sr);
+        let driven_peak = driven.iter().fold(0.0f32, |a, &v| a.max(v.abs()));
+        assert!(
+            driven_peak > 0.26 && driven_peak < 0.72,
+            "max drive should stay in a musical peak window, peak={driven_peak:.3}"
+        );
+        let h2 = measure_h2_over_h1(&mut fx, 1.0, 220.0, amp, sr);
+        let h3 = measure_h3_over_h1(&mut fx, 1.0, 220.0, amp, sr);
+        let thd = h2 + h3
+            + goertzel_mag(&driven, 220.0 * 5.0, sr) / goertzel_mag(&driven, 220.0, sr).max(1e-8);
+        assert!(
+            h3 > 0.18 || thd > 0.55,
+            "max drive should flood odd harmonics, h3/h1={h3:.3} thd={thd:.3}"
+        );
+        assert!(
+            h2 + h3 > 0.35,
+            "max drive harmonic sum, h2={h2:.3} h3={h3:.3}"
+        );
+    }
+
+    #[test]
+    fn drive_harmonics_persist_at_quiet_input() {
+        let sr = 48_000.0;
+        let drive = 0.65f32;
+        let mut fx_quiet = FxUnit::new(sr);
+        let mut fx_loud = FxUnit::new(sr);
+        let quiet = measure_h2_over_h1(&mut fx_quiet, drive, 440.0, 0.07, sr);
+        let loud = measure_h2_over_h1(&mut fx_loud, drive, 440.0, 0.28, sr);
+        assert!(
+            quiet > 0.04,
+            "quiet synth level should still distort at drive={drive}, H2/H1={quiet:.5}"
+        );
+        assert!(
+            quiet > loud * 0.35,
+            "distortion character should not collapse when level drops: quiet={quiet:.5} loud={loud:.5}"
+        );
+    }
+
+    #[test]
+    fn drive_rms_stays_level_matched_across_amount() {
+        let sr = 48_000.0;
+        let amp = 0.22f32;
+        let in_rms = amp * std::f32::consts::FRAC_1_SQRT_2;
+        let mut fx_a = FxUnit::new(sr);
+        let mut fx_b = FxUnit::new(sr);
+        let mut fx_c = FxUnit::new(sr);
+        let rms_lo = measure_output_rms(&mut fx_a, 0.35, 330.0, amp, sr);
+        let rms_mid = measure_output_rms(&mut fx_b, 0.65, 330.0, amp, sr);
+        let rms_hi = measure_output_rms(&mut fx_c, 1.0, 330.0, amp, sr);
+        let max_rms = rms_lo.max(rms_mid).max(rms_hi);
+        let min_rms = rms_lo.min(rms_mid).min(rms_hi);
+        assert!(
+            max_rms / min_rms < 1.55,
+            "drive 0.35..1.0 should stay within ~3 dB: lo={rms_lo:.4} mid={rms_mid:.4} hi={rms_hi:.4}"
+        );
+        let ref_rms = in_rms;
+        assert!(
+            rms_hi / ref_rms < 1.45 && ref_rms / rms_hi < 1.45,
+            "full drive should stay near bypass loudness: in={ref_rms:.4} out={rms_hi:.4}"
+        );
+    }
+
+    #[test]
+    fn drive_moderate_changes_waveform_from_clean() {
+        let sr = 48_000.0;
+        let frames = 4096usize;
+        let freq = 330.0f32;
+        let amp = 0.2f32;
+        let clean = sine_buffer(freq, amp, sr, frames);
+        let mut driven = clean.clone();
+        let mut fx = FxUnit::new(sr);
+        fx.set_params(FxParams {
+            drive: 0.5,
+            ..FxParams::default()
+        });
+        let warm = (sr * 0.2) as usize;
+        let mut pre = sine_buffer(freq, amp, sr, warm);
+        fx.process(&mut pre);
+        fx.process(&mut driven);
+        let mut diff_sq = 0.0f32;
+        for (a, b) in clean.iter().zip(driven.iter()) {
+            let d = a - b;
+            diff_sq += d * d;
+        }
+        let rms_diff = (diff_sq / frames as f32).sqrt();
+        assert!(
+            rms_diff > 0.008,
+            "drive 0.5 should audibly reshape a bus-level tone, rms_diff={rms_diff:.5}"
+        );
     }
 
     #[test]
@@ -636,36 +985,33 @@ mod tests {
             ..FxParams::default()
         });
         let expect = (CHORUS_BASE_SEC * 48_000.0) as usize;
-        let mut buf = vec![0.0f32; expect + 16];
+        let mut buf = vec![0.0f32; expect + 64];
         buf[0] = 1.0;
         fx.process(&mut buf);
-        let peak = buf.iter().copied().fold(0.0f32, |a, b| a.max(b.abs()));
-        assert!(peak > 0.2, "chorus should reprint the impulse, peak={peak}");
-        // Peak should land near the fixed center delay, not a flanger-short window.
-        let peak_i = buf
+        assert!(buf[0].abs() > 0.9, "dry hit stays at the attack");
+        let tail_peak = buf[expect..]
             .iter()
-            .enumerate()
-            .max_by(|(_, a), (_, b)| a.abs().partial_cmp(&b.abs()).unwrap())
-            .map(|(i, _)| i)
-            .unwrap();
+            .copied()
+            .fold(0.0f32, |a, b| a.max(b.abs()));
         assert!(
-            (peak_i as i32 - expect as i32).abs() <= 2,
-            "chorus impulse peak at {peak_i}, expected ~{expect}"
+            tail_peak > 0.12,
+            "ensemble should reprint after ~{expect} samples, tail_peak={tail_peak}"
         );
     }
 
     #[test]
     fn chorus_modulation_stays_in_chorus_delay_window() {
-        // Full depth must not collapse into the flanger-like <10 ms zone that
-        // produces a notch-sweep wobble when mixed with dry.
         let sr = 48_000.0;
-        let min_ms = (CHORUS_BASE_SEC - CHORUS_DEPTH_SEC) * 1000.0;
-        let max_ms = (CHORUS_BASE_SEC + CHORUS_DEPTH_SEC) * 1000.0;
-        assert!(min_ms >= 10.0, "chorus min delay {min_ms} ms too short (flanger territory)");
-        assert!(max_ms <= 45.0, "chorus max delay {max_ms} ms exceeds buffer window");
+        let min_ms = CHORUS_BASE_SEC * 1000.0;
+        let max_ms = (CHORUS_BASE_SEC
+            + CHORUS_VOICE_OFFSET_SEC * (CHORUS_VOICES - 1) as f32
+            + CHORUS_DEPTH_SEC)
+            * 1000.0;
+        assert!(min_ms >= 15.0, "chorus min delay {min_ms} ms too short (flanger territory)");
+        assert!(max_ms <= 50.0, "chorus max delay {max_ms} ms exceeds buffer window");
         assert!(
-            CHORUS_DEPTH_SEC <= 0.005,
-            "chorus depth {CHORUS_DEPTH_SEC}s too wide — causes whoosh"
+            CHORUS_DEPTH_SEC <= 0.002,
+            "chorus depth {CHORUS_DEPTH_SEC}s too wide — audible whoosh"
         );
 
         let mut fx = FxUnit::new(sr);
@@ -675,37 +1021,150 @@ mod tests {
             chorus_depth: 1.0,
             ..FxParams::default()
         });
-        // Drive long enough for several LFO cycles; impulse energy should never
-        // reappear in the classic flanger window (~1–8 ms).
         let flanger_end = (0.008 * sr) as usize;
-        let chorus_lo = ((CHORUS_BASE_SEC - CHORUS_DEPTH_SEC) * sr) as usize;
-        let n = ((CHORUS_BASE_SEC + CHORUS_DEPTH_SEC) * sr) as usize + 64;
-        let mut earliest_peak = usize::MAX;
+        let chorus_lo = (CHORUS_BASE_SEC * sr) as usize;
+        let n = ((CHORUS_BASE_SEC + CHORUS_DEPTH_SEC) * sr) as usize + 96;
         for _ in 0..8 {
+            fx.reset();
             let mut buf = vec![0.0f32; n];
             buf[0] = 1.0;
             fx.process(&mut buf);
-            let peak_i = buf
+            let peak_i = buf[chorus_lo..]
                 .iter()
                 .enumerate()
                 .max_by(|(_, a), (_, b)| a.abs().partial_cmp(&b.abs()).unwrap())
-                .map(|(i, _)| i)
-                .unwrap_or(0);
-            earliest_peak = earliest_peak.min(peak_i);
+                .map(|(i, _)| i + chorus_lo)
+                .unwrap_or(chorus_lo);
             assert!(
                 peak_i >= chorus_lo.saturating_sub(4),
-                "modulated chorus peak at sample {peak_i} left the chorus window"
+                "ensemble chorus peak at sample {peak_i} left the chorus window"
             );
-            let flanger_zone_peak = buf[..flanger_end]
+            // Skip the dry attack at sample 0; we're checking for short-delay leakage.
+            let flanger_zone_peak = buf[1..flanger_end]
                 .iter()
                 .copied()
                 .fold(0.0f32, |a, b| a.max(b.abs()));
             assert!(
-                flanger_zone_peak < 0.15,
+                flanger_zone_peak < 0.12,
                 "chorus leaked into flanger window, peak={flanger_zone_peak}"
             );
         }
-        assert!(earliest_peak < usize::MAX);
+    }
+
+    fn rich_saw(sr: f32, frames: usize, fund: f32) -> Vec<f32> {
+        let mut buf = vec![0.0f32; frames];
+        for (i, s) in buf.iter_mut().enumerate() {
+            let t = i as f32 / sr;
+            let mut sum = 0.0f32;
+            for h in 1..=12 {
+                sum += (t * fund * h as f32 * std::f32::consts::TAU).sin() / (h as f32 * 0.85);
+            }
+            *s = sum * 0.14;
+        }
+        buf
+    }
+
+    fn block_rms(buf: &[f32]) -> f32 {
+        (buf.iter().map(|v| v * v).sum::<f32>() / buf.len().max(1) as f32).sqrt()
+    }
+
+    #[test]
+    fn phaser_synth_swoosh_is_audible_at_bus_slider_levels() {
+        let sr = 48_000.0;
+        let params = FxParams {
+            phaser_mix: 0.72,
+            phaser_rate: 0.35,
+            phaser_depth: 0.85,
+            phaser_fb: 0.55,
+            ..FxParams::default()
+        };
+        let rate_hz = PHASER_RATE_HZ_MIN + params.phaser_rate * PHASER_RATE_HZ_SPAN;
+        let frames = (sr * 2.5) as usize;
+        let dry = rich_saw(sr, frames, 110.0);
+        let in_rms = block_rms(&dry);
+        let block = ((sr / rate_hz.max(0.08)) / 10.0) as usize;
+        let block = block.clamp(256, 4096);
+
+        let mut fx = FxUnit::new(sr);
+        fx.set_params(params);
+        let mut wet = dry.clone();
+        fx.process(&mut wet);
+        let mut blocks = Vec::new();
+        for chunk in wet.chunks(block) {
+            blocks.push(block_rms(chunk));
+        }
+        let swing = blocks
+            .iter()
+            .copied()
+            .fold(f32::NEG_INFINITY, f32::max)
+            - blocks.iter().copied().fold(f32::INFINITY, f32::min);
+        assert!(
+            swing / in_rms > 0.045,
+            "phaser should breathe on a synth saw, swing/in_rms={}",
+            swing / in_rms
+        );
+        let peak_delta = dry
+            .iter()
+            .zip(wet.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        assert!(peak_delta > 0.08, "peak sample delta too small: {peak_delta}");
+    }
+
+    #[test]
+    fn chorus_thickens_saw_without_flanger_comb_sweep() {
+        let sr = 48_000.0;
+        let frames = (sr * 1.25) as usize;
+        let src = rich_saw(sr, frames, 165.0);
+        let dry_rms = block_rms(&src);
+
+        let mut chorus_fx = FxUnit::new(sr);
+        chorus_fx.set_params(FxParams {
+            chorus_mix: 0.8,
+            chorus_rate: 0.35,
+            chorus_depth: 0.55,
+            ..FxParams::default()
+        });
+        let mut chorus_buf = src.clone();
+        chorus_fx.process(&mut chorus_buf);
+        let chorus_rms = block_rms(&chorus_buf);
+        let dry_peak = src.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
+        let chorus_peak = chorus_buf.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
+        assert!(
+            chorus_rms > dry_rms * 0.98 && chorus_peak > dry_peak * 1.02,
+            "chorus should thicken, dry_rms={dry_rms} wet_rms={chorus_rms} dry_pk={dry_peak} wet_pk={chorus_peak}"
+        );
+
+        let mut flanger_fx = FxUnit::new(sr);
+        flanger_fx.set_params(FxParams {
+            flanger_mix: 0.8,
+            flanger_rate: 0.5,
+            flanger_depth: 0.85,
+            flanger_fb: 0.4,
+            ..FxParams::default()
+        });
+        let mut flanger_buf = src.clone();
+        flanger_fx.process(&mut flanger_buf);
+
+        let block = 512usize;
+        fn mean_abs_delta(buf: &[f32], block: usize) -> f32 {
+            let mut deltas = Vec::new();
+            for w in buf.windows(block).skip(1) {
+                let prev = block_rms(&w[..block]);
+                deltas.push(prev);
+            }
+            if deltas.len() < 3 {
+                return 0.0;
+            }
+            let mean = deltas.iter().sum::<f32>() / deltas.len() as f32;
+            deltas.iter().map(|d| (d - mean).abs()).sum::<f32>() / deltas.len() as f32
+        }
+        let chorus_ripple = mean_abs_delta(&chorus_buf, block);
+        let flanger_ripple = mean_abs_delta(&flanger_buf, block);
+        assert!(
+            chorus_ripple < flanger_ripple * 0.55,
+            "chorus should wobble less than flanger: chorus={chorus_ripple} flanger={flanger_ripple}"
+        );
     }
 
     #[test]
