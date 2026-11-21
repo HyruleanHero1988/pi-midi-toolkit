@@ -323,6 +323,15 @@ pub struct SeqEvent {
     pub kind: ClipEventKind,
 }
 
+/// Loop boundary inside the current block (for the SEQ cue click).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SeqLoopCue {
+    pub slot: usize,
+    pub frame: u32,
+    /// True on downbeat of each loop pass; reserved for subdivided clicks.
+    pub accent: bool,
+}
+
 /// The phrase-pad grid.
 pub struct Sequencer {
     slots: Vec<ClipSlot>,
@@ -444,10 +453,12 @@ impl Sequencer {
         block_start: u64,
         frames: u32,
         out: &mut [SeqEvent],
-    ) -> usize {
+        mut loop_cues: Option<&mut [SeqLoopCue]>,
+    ) -> (usize, usize) {
         let block_end = block_start + frames as u64;
         let spt = transport.samples_per_tick();
         let mut n = 0;
+        let mut cue_len = 0usize;
 
         for index in 0..self.slots.len() {
             if n >= out.len() {
@@ -460,6 +471,19 @@ impl Sequencer {
                         origin: at,
                         next_index: 0,
                     };
+                    if let Some(cues) = loop_cues.as_deref_mut() {
+                        if cue_len < cues.len() {
+                            let frame = at
+                                .saturating_sub(block_start)
+                                .min(frames.saturating_sub(1) as u64) as u32;
+                            cues[cue_len] = SeqLoopCue {
+                                slot: index,
+                                frame,
+                                accent: true,
+                            };
+                            cue_len += 1;
+                        }
+                    }
                 } else {
                     continue;
                 }
@@ -501,6 +525,19 @@ impl Sequencer {
                 if next_index >= event_count {
                     if mode == LaunchMode::Loop && stop_at.is_none() {
                         origin += loop_len;
+                        if let Some(cues) = loop_cues.as_deref_mut() {
+                            if cue_len < cues.len() {
+                                let frame = origin
+                                    .saturating_sub(block_start)
+                                    .min(frames.saturating_sub(1) as u64) as u32;
+                                cues[cue_len] = SeqLoopCue {
+                                    slot: index,
+                                    frame,
+                                    accent: true,
+                                };
+                                cue_len += 1;
+                            }
+                        }
                         next_index = 0;
                         continue;
                     }
@@ -562,7 +599,7 @@ impl Sequencer {
         }
 
         out[..n].sort_by_key(|e| e.frame);
-        n
+        (n, cue_len)
     }
 }
 
@@ -606,7 +643,7 @@ mod tests {
         let mut pos = 0u64;
         while pos < total {
             let frames = block.min((total - pos) as u32);
-            let n = seq.collect(t, pos, frames, &mut out);
+            let (n, _) = seq.collect(t, pos, frames, &mut out, None);
             for ev in &out[..n] {
                 if matches!(ev.kind, ClipEventKind::NoteOn { .. }) {
                     hits.push(pos + ev.frame as u64);
@@ -748,7 +785,7 @@ mod tests {
         let mut first: [Option<u64>; 2] = [None, None];
         let mut pos = 0u64;
         while pos < bar * 2 {
-            let n = seq.collect(&t, pos, 128, &mut out);
+            let (n, _) = seq.collect(&t, pos, 128, &mut out, None);
             for ev in &out[..n] {
                 if matches!(ev.kind, ClipEventKind::NoteOn { .. }) && first[ev.slot].is_none() {
                     first[ev.slot] = Some(pos + ev.frame as u64);
@@ -796,13 +833,13 @@ mod tests {
                 note: 0,
             },
         }; 64];
-        seq.collect(&t, 0, 128, &mut out);
+        let _ = seq.collect(&t, 0, 128, &mut out, None);
         seq.stop(0, 200, Quantize::Off, &t);
 
         let mut offs = 0;
         let mut pos = 128u64;
         while pos < beat * 2 {
-            let n = seq.collect(&t, pos, 128, &mut out);
+            let (n, _) = seq.collect(&t, pos, 128, &mut out, None);
             offs += out[..n]
                 .iter()
                 .filter(|e| matches!(e.kind, ClipEventKind::NoteOff { .. }))
@@ -829,14 +866,14 @@ mod tests {
             },
         }; 64];
         // Consume the downbeat, then double the tempo.
-        seq.collect(&t, 0, 128, &mut out);
+        let _ = seq.collect(&t, 0, 128, &mut out, None);
         t.set_bpm(240.0);
         let fast_beat = t.samples_per_beat() as u64; // 12_000
 
         let mut hits = Vec::new();
         let mut pos = 128u64;
         while pos < fast_beat * 4 {
-            let n = seq.collect(&t, pos, 128, &mut out);
+            let (n, _) = seq.collect(&t, pos, 128, &mut out, None);
             for ev in &out[..n] {
                 if matches!(ev.kind, ClipEventKind::NoteOn { .. }) {
                     hits.push(pos + ev.frame as u64);

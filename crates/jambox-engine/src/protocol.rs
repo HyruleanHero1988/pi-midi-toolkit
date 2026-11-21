@@ -244,6 +244,9 @@ pub enum Request {
         slots: [u8; 16],
         latch: bool,
     },
+    SeqCueBeep {
+        enabled: bool,
+    },
     SetArp {
         enabled: bool,
         latch: bool,
@@ -1009,6 +1012,7 @@ pub fn decode(request: Request) -> Result<Decoded, String> {
             aftertouch,
         },
         Request::DrumRepeat { slots, latch } => Decoded::DrumRepeat { slots, latch },
+        Request::SeqCueBeep { enabled } => Decoded::Command(Command::SetSeqCueBeep { enabled }),
         Request::SetArp {
             enabled,
             latch,

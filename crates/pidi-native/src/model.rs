@@ -3241,6 +3241,7 @@ impl NativeModel {
         outbox.clip_gain(SEQ_CLIP_SLOT, self.seq_level);
         outbox.clip_gain(SEQ_DRUM_MIX_SLOT, self.seq_drum_level);
         outbox.clip_gain(SEQ_KAOSS_MIX_SLOT, self.seq_kaoss_level);
+        outbox.seq_cue_beep(self.seq.cue_beep);
         outbox.synth("attack", self.synth_params[3]);
         outbox.synth("decay", self.env_decay);
         outbox.synth("sustain_level", self.env_sustain);
@@ -9653,6 +9654,9 @@ impl NativeModel {
     fn apply_seq_action(&mut self, action: SeqAction, outbox: &mut Outbox) {
         match action {
             SeqAction::None => {}
+            SeqAction::CueBeep(enabled) => {
+                outbox.seq_cue_beep(enabled);
+            }
             SeqAction::Stop => {
                 outbox.clip_stop(SEQ_CLIP_SLOT, "off");
             }
@@ -9666,6 +9670,10 @@ impl NativeModel {
                 launch,
                 immediate,
             } => {
+                outbox.seq_cue_beep(self.seq.cue_beep);
+                if launch && !self.seq.is_recording() {
+                    self.clear_drum_repeats(outbox);
+                }
                 outbox.tempo(self.seq.bpm);
                 self.bpm = self.seq.bpm;
                 if self.seq.baked_tone.is_none() && self.seq.layer_count() >= 1 {
@@ -13507,6 +13515,43 @@ mod tests {
     }
 
     #[test]
+    fn seq_playback_clears_latched_note_repeat() {
+        let mut model = NativeModel::new();
+        let clav = jambox_core::DrumModel::Clave.index();
+        model.drum_repeat[clav] = RepeatDivisionChoice::Sixteenth;
+        model.drum_repeat_lock = true;
+        model.repeat_latched[clav] = true;
+        model.repeat_capture_note[clav] = 50;
+        model.seq.seed_playing_backbone(
+            vec![crate::seq::RecEvent {
+                t: 0.0,
+                on: true,
+                channel: 9,
+                note: 50,
+                velocity: 100,
+            }],
+            1.0,
+        );
+        model.seq.state = crate::seq::SeqState::Stopped;
+        let mut out = Outbox::new();
+        let action = model.seq.toggle_play();
+        model.apply_seq_action(action, &mut out);
+        let reqs = out.take();
+        assert!(
+            reqs.iter().any(|r| matches!(
+                r,
+                Request::Repeat {
+                    phase: RepeatPhase::Up,
+                    note: 50,
+                    ..
+                }
+            )),
+            "SEQ play must stop a latched repeat lane, got {reqs:?}"
+        );
+        assert!(!model.repeat_latched[clav]);
+    }
+
+    #[test]
     fn repeat_lock_survives_pad_release() {
         let mut model = NativeModel::new();
         model.set_mode(UiMode::Drums);
@@ -17017,8 +17062,12 @@ mod tests {
         assert!(model.seq.cue_beep, "BEEP should latch on");
         let reqs = out.take();
         assert!(
-            reqs.iter().any(|r| matches!(r, Request::ClipLoad { .. })),
-            "turning BEEP on should reload the looping clip, got {reqs:?}"
+            reqs.iter().any(|r| matches!(r, Request::SeqCueBeep { enabled: true })),
+            "turning BEEP on should sync the engine sine click, got {reqs:?}"
+        );
+        assert!(
+            !reqs.iter().any(|r| matches!(r, Request::ClipLoad { .. })),
+            "BEEP must not rewrite the clip, got {reqs:?}"
         );
     }
 

@@ -311,6 +311,10 @@ pub enum Request {
         slots: [u8; 16],
         latch: bool,
     },
+    /// SEQ loop-start sine click (playback only; not recorded in clips).
+    SeqCueBeep {
+        enabled: bool,
+    },
     /// Enable and configure the key-relative arpeggiator.
     SetArp {
         enabled: bool,

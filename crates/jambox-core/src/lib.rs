@@ -26,6 +26,7 @@ mod tempo_fx;
 mod mix;
 mod punch;
 mod repeat;
+mod seq_cue;
 mod transport;
 mod voice;
 mod wavetable;
@@ -35,8 +36,8 @@ pub use arp::{
     MAX_ARP_OCTAVES, MAX_ARP_POOL, MAX_ARP_STEPS,
 };
 pub use clip::{
-    Clip, ClipEvent, ClipEventKind, ClipSlot, ClipVoice, LaunchMode, Sequencer, MAX_CLIPS,
-    SEQ_CLIP_SLOT, SEQ_DRUM_MIX_SLOT, SEQ_KAOSS_MIX_SLOT,
+    Clip, ClipEvent, ClipEventKind, ClipSlot, ClipVoice, LaunchMode, SeqLoopCue, Sequencer,
+    MAX_CLIPS, SEQ_CLIP_SLOT, SEQ_DRUM_MIX_SLOT, SEQ_KAOSS_MIX_SLOT,
 };
 pub use mix::{morph_side, note_presence, note_sweep, sweep_gains, width_gains, MixSource};
 pub use command::{
@@ -83,6 +84,7 @@ pub use repeat::{
     hw_repeat_owner, note_from_hw_repeat_owner, RepeatDivision, RepeatEvent, RepeatRack,
     HW_REPEAT_OWNER_BASE, MAX_REPEAT_EVENTS_PER_BLOCK, MAX_REPEAT_LANES,
 };
+pub use seq_cue::SeqCueClick;
 pub use transport::{Quantize, Transport, PPQ};
 pub use voice::{release_drift_semis, VoicePool, MAX_VOICES};
 pub use wavetable::{WaveBank, TABLE_MASK, TABLE_PEAK, TABLE_SIZE};

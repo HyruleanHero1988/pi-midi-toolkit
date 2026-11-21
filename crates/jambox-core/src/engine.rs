@@ -8,9 +8,10 @@ use midi_core::MidiEvent;
 
 use crate::arp::{ArpDivision, ArpEvent, ArpOrder, Arpeggiator, MAX_ARP_EVENTS_PER_BLOCK};
 use crate::clip::{
-    Clip, ClipEventKind, ClipVoice, LaunchMode, SeqEvent, Sequencer, MAX_CLIPS, MAX_SLOT_RELEASES,
-    SEQ_KAOSS_MIX_SLOT,
+    Clip, ClipEventKind, ClipVoice, LaunchMode, SeqEvent, SeqLoopCue, Sequencer, MAX_CLIPS,
+    MAX_SLOT_RELEASES, SEQ_CLIP_SLOT, SEQ_KAOSS_MIX_SLOT,
 };
+use crate::seq_cue::SeqCueClick;
 use crate::command::{
     Command, EmitMode, FxParam, FxTarget, ScheduledCommand, SynthParam, MAX_BLOCK_COMMANDS,
 };
@@ -298,6 +299,9 @@ pub struct JamboxEngine {
     arp_emit: EmitMode,
     /// Last arp pitch the engine actually sounded — released before the next step.
     arp_live: Option<(u8, u8)>,
+    seq_cue_beep: bool,
+    seq_cue_click: SeqCueClick,
+    seq_loop_cues: [SeqLoopCue; 8],
     status: EngineStatus,
 }
 
@@ -470,6 +474,13 @@ impl JamboxEngine {
             kaoss_emit: EmitMode::Local,
             arp_emit: EmitMode::Both,
             arp_live: None,
+            seq_cue_beep: false,
+            seq_cue_click: SeqCueClick::new(sr),
+            seq_loop_cues: [SeqLoopCue {
+                slot: 0,
+                frame: 0,
+                accent: true,
+            }; 8],
             status: EngineStatus::default(),
         }
     }
@@ -691,12 +702,23 @@ impl JamboxEngine {
         }
 
         if self.transport.running() {
-            let n = self.sequencer.collect(
+            let (n, cue_n) = self.sequencer.collect(
                 &self.transport,
                 block_start,
                 frames as u32,
                 &mut self.seq_scratch,
+                Some(&mut self.seq_loop_cues),
             );
+            if self.seq_cue_beep {
+                for cue in self.seq_loop_cues.iter().take(cue_n) {
+                    if cue.slot == SEQ_CLIP_SLOT as usize {
+                        self.timeline.push((
+                            cue.frame.min(frames as u32 - 1),
+                            Command::SeqCueClick { accent: cue.accent },
+                        ));
+                    }
+                }
+            }
             for i in 0..n {
                 let ev = self.seq_scratch[i];
                 let frame = ev.frame.min(frames as u32 - 1);
@@ -1202,6 +1224,7 @@ impl JamboxEngine {
             }
             out[i] = 0.5 * (l + r);
         }
+        self.seq_cue_click.mix_span(out, off);
     }
 
     fn apply(
@@ -1289,6 +1312,10 @@ impl JamboxEngine {
                     self.voices.note_off_recorded(channel, note);
                     self.fm.note_off_recorded(channel, note);
                 }
+            }
+            Command::SeqCueClick { accent } => {
+                self.seq_cue_click
+                    .trigger_in_block(relative_frame, accent);
             }
             Command::AllNotesOff => {
                 self.voices.all_notes_off();
@@ -1419,6 +1446,7 @@ impl JamboxEngine {
                 let i = (slot as usize).min(MAX_CLIPS - 1);
                 self.clip_gain[i] = value.clamp(0.0, 2.0);
             }
+            Command::SetSeqCueBeep { enabled } => self.seq_cue_beep = enabled,
             Command::StartRepeat {
                 owner,
                 channel,
@@ -4579,6 +4607,114 @@ mod tests {
             "unlatched lift must release the sounding arp step"
         );
         assert!(!e.status().arp_latched);
+    }
+
+    #[test]
+    fn seq_cue_beep_is_master_sine_not_a_drum_voice() {
+        let mut e = engine();
+        apply_now(&mut e, Command::SetSeqCueBeep { enabled: true });
+        let clip = Clip::new(
+            vec![ClipEvent {
+                tick: PPQ,
+                kind: ClipEventKind::NoteOn {
+                    channel: DRUM_CHANNEL,
+                    note: 36,
+                    velocity: 100,
+                },
+            }],
+            PPQ * 4,
+        );
+        let slot = e.sequencer_mut().slot_mut(SEQ_CLIP_SLOT as usize).unwrap();
+        slot.set_clip(Some(clip));
+        slot.set_mode(LaunchMode::Loop);
+        apply_now(
+            &mut e,
+            Command::LaunchClip {
+                slot: SEQ_CLIP_SLOT,
+                quantize: Quantize::Off,
+            },
+        );
+        let mut midi = MidiOutSink::new();
+        let mut buf = vec![0.0f32; 4096];
+        e.render(&mut buf, &[], &mut midi);
+        assert!(
+            energy(&buf) > 1e-6,
+            "loop-start cue should be audible on the master bus"
+        );
+        assert_eq!(
+            e.status().active_drums,
+            0,
+            "cue must not trigger a kit voice (e.g. clave)"
+        );
+    }
+
+    #[test]
+    fn seq_clip_sixteenth_clave_is_even_across_loop_passes() {
+        use crate::repeat::RepeatDivision;
+        let mut e = engine();
+        let sixteenth = PPQ / 4;
+        let bar = PPQ * 4;
+        let events: Vec<ClipEvent> = (0..16)
+            .map(|i| ClipEvent {
+                tick: i * sixteenth,
+                kind: ClipEventKind::NoteOn {
+                    channel: DRUM_CHANNEL,
+                    note: 50,
+                    velocity: 110,
+                },
+            })
+            .collect();
+        let clip = Clip::new(events, bar);
+        let slot = e.sequencer_mut().slot_mut(SEQ_CLIP_SLOT as usize).unwrap();
+        slot.set_clip(Some(clip));
+        slot.set_mode(LaunchMode::Loop);
+        apply_now(
+            &mut e,
+            Command::StartRepeat {
+                owner: crate::hw_repeat_owner(50),
+                channel: DRUM_CHANNEL,
+                note: 50,
+                velocity: 110,
+                division: RepeatDivision::Sixteenth,
+            },
+        );
+        apply_now(&mut e, Command::StopAllRepeats);
+        apply_now(
+            &mut e,
+            Command::LaunchClip {
+                slot: SEQ_CLIP_SLOT,
+                quantize: Quantize::Off,
+            },
+        );
+        let bar_samples = e.transport().samples_per_beat() as u64 * 4;
+        let launch_skip = e.transport().samples_per_beat() as u64 * 4;
+        let mut pos = 0u64;
+        while pos < launch_skip {
+            let block = 512u32.min((launch_skip - pos) as u32);
+            let mut buf = vec![0.0f32; block as usize];
+            e.render(&mut buf, &[], &mut MidiOutSink::new());
+            pos += block as u64;
+        }
+        let mut pass_energy = Vec::new();
+        for _ in 0..4 {
+            let mut acc = 0.0f32;
+            let mut samples = 0u64;
+            while samples < bar_samples {
+                let mut buf = vec![0.0f32; 512];
+                e.render(&mut buf, &[], &mut MidiOutSink::new());
+                acc += energy(&buf);
+                samples += 512;
+            }
+            pass_energy.push(acc);
+        }
+        for pair in pass_energy.windows(2) {
+            let hi = pair[0].max(pair[1]).max(1e-12);
+            let lo = pair[0].min(pair[1]).max(1e-12);
+            assert!(
+                hi / lo < 1.12,
+                "each loop pass should carry the same 1/16 clave grid, got {pass_energy:?}"
+            );
+        }
     }
 
     #[test]
