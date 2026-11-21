@@ -169,35 +169,75 @@ impl MidiMap {
     /// and the controller's transport notes pass through untouched.
     pub fn apply_scale(&self, event: MidiEvent, profile: &ControllerProfile) -> MidiEvent {
         let (on, root, mask) = self.scale_lock();
-        let lookup = |channel: u8, note: u8| (channel as usize & 0x0f) * 128 + (note as usize & 0x7f);
+        let lookup =
+            |channel: u8, note: u8| (channel as usize & 0x0f) * 128 + (note as usize & 0x7f);
         match event {
-            MidiEvent::NoteOn { channel, note, velocity }
-                if velocity > 0 && on && channel != DRUM_CHANNEL && !profile.is_transport_note(note) =>
+            MidiEvent::NoteOn {
+                channel,
+                note,
+                velocity,
+            } if velocity > 0
+                && on
+                && channel != DRUM_CHANNEL
+                && !profile.is_transport_note(note) =>
             {
                 let snapped = snap_to_scale(note, root, mask);
                 self.scale_held[lookup(channel, note)].store(snapped, Ordering::Relaxed);
-                MidiEvent::NoteOn { channel, note: snapped, velocity }
+                MidiEvent::NoteOn {
+                    channel,
+                    note: snapped,
+                    velocity,
+                }
             }
-            MidiEvent::NoteOn { channel, note, velocity: 0 } => {
+            MidiEvent::NoteOn {
+                channel,
+                note,
+                velocity: 0,
+            } => {
                 let held = self.scale_held[lookup(channel, note)].swap(0xff, Ordering::Relaxed);
                 let note = if held == 0xff { note } else { held };
-                MidiEvent::NoteOn { channel, note, velocity: 0 }
+                MidiEvent::NoteOn {
+                    channel,
+                    note,
+                    velocity: 0,
+                }
             }
-            MidiEvent::NoteOff { channel, note, velocity } => {
+            MidiEvent::NoteOff {
+                channel,
+                note,
+                velocity,
+            } => {
                 let held = self.scale_held[lookup(channel, note)].swap(0xff, Ordering::Relaxed);
                 let note = if held == 0xff { note } else { held };
-                MidiEvent::NoteOff { channel, note, velocity }
+                MidiEvent::NoteOff {
+                    channel,
+                    note,
+                    velocity,
+                }
             }
-            MidiEvent::PolyPressure { channel, note, pressure } => {
+            MidiEvent::PolyPressure {
+                channel,
+                note,
+                pressure,
+            } => {
                 let held = self.scale_held[lookup(channel, note)].load(Ordering::Relaxed);
                 let note = if held == 0xff { note } else { held };
-                MidiEvent::PolyPressure { channel, note, pressure }
+                MidiEvent::PolyPressure {
+                    channel,
+                    note,
+                    pressure,
+                }
             }
             other => other,
         }
     }
 
-    pub fn set_assigns(&self, stick_x: Option<&str>, stick_y: Option<&str>, aftertouch: Option<&str>) {
+    pub fn set_assigns(
+        &self,
+        stick_x: Option<&str>,
+        stick_y: Option<&str>,
+        aftertouch: Option<&str>,
+    ) {
         if let Some(dest) = stick_x.and_then(MidiDest::from_id) {
             self.stick_x.store(dest.as_u8(), Ordering::Relaxed);
         }
@@ -350,12 +390,34 @@ impl MidiMap {
 
     /// One MIDI event → zero or more audio-thread commands (MPK factory map).
     pub fn interpret(&self, event: MidiEvent) -> Option<Command> {
-        self.interpret_with(&ControllerProfile::mpk_mini(), event)
+        let src = event.channel();
+        self.interpret_with(&ControllerProfile::mpk_mini(), event, src)
+    }
+
+    /// Voice channel for the engine: drums only when the **incoming** wire
+    /// channel is GM drums (index 9). MAP fan-out may rewrite `event.channel()`
+    /// for synth allocation; `src_channel` is the pre-map source.
+    #[inline]
+    fn engine_play_channel(src_channel: u8, mapped_channel: u8) -> u8 {
+        if src_channel == DRUM_CHANNEL {
+            DRUM_CHANNEL
+        } else if mapped_channel == DRUM_CHANNEL {
+            // MAP may fan ch1→ch10 for external gear; internal kit only
+            // follows the wire channel, so this stays on the key channel.
+            src_channel
+        } else {
+            mapped_channel
+        }
     }
 
     /// One MIDI event through a live controller map. Unknown devices use
     /// [`ControllerProfile::generic`] (MPK-compatible knobs/pads).
-    pub fn interpret_with(&self, profile: &ControllerProfile, event: MidiEvent) -> Option<Command> {
+    pub fn interpret_with(
+        &self,
+        profile: &ControllerProfile,
+        event: MidiEvent,
+        src_channel: u8,
+    ) -> Option<Command> {
         match event {
             MidiEvent::NoteOn {
                 channel,
@@ -365,9 +427,7 @@ impl MidiMap {
                 if profile.is_transport_note(note) {
                     return None;
                 }
-                // Remember pad hits on the profile pad channel (lab MPK: ch1)
-                // before Pads→FX may steal them for the UI.
-                if channel == profile.pad_channel_index() {
+                if src_channel == DRUM_CHANNEL {
                     self.remember_drum_note(note);
                 }
                 // Pads→FX steals profile pad notes (pad channel or GM ch10).
@@ -379,15 +439,7 @@ impl MidiMap {
                 {
                     return None;
                 }
-                // DRUMS mode: lab MPK pads on ch1 must still hit the kit.
-                let play_ch = if !self.pads_to_fx()
-                    && profile.is_punch_pad(channel, note)
-                    && channel != DRUM_CHANNEL
-                {
-                    DRUM_CHANNEL
-                } else {
-                    channel
-                };
+                let play_ch = Self::engine_play_channel(src_channel, channel);
                 if play_ch == DRUM_CHANNEL {
                     if let Some(command) = self.interpret_drum_repeat(note, velocity, true) {
                         return Some(command);
@@ -409,14 +461,7 @@ impl MidiMap {
                 {
                     return None;
                 }
-                let play_ch = if !self.pads_to_fx()
-                    && profile.is_punch_pad(channel, note)
-                    && channel != DRUM_CHANNEL
-                {
-                    DRUM_CHANNEL
-                } else {
-                    channel
-                };
+                let play_ch = Self::engine_play_channel(src_channel, channel);
                 if play_ch == DRUM_CHANNEL && self.repeat_division_for_note(note).is_some() {
                     return self.interpret_drum_repeat(note, 0, false);
                 }
@@ -814,14 +859,15 @@ pub fn ingest(
 ) {
     let event = map.apply_velocity(event);
     let event = map.apply_scale(event, profile);
-    let mask = fanout_dest_mask(dest_mask, event.channel());
+    let src_channel = event.channel();
+    let mask = fanout_dest_mask(dest_mask, src_channel);
     for dest in 0..16u8 {
         if mask & (1 << dest) == 0 {
             continue;
         }
         let mapped = event.with_channel(dest);
         hub.broadcast_midi_from(origin, mapped, Some(profile.id.as_str()));
-        if let Some(command) = map.interpret_with(profile, mapped) {
+        if let Some(command) = map.interpret_with(profile, mapped, src_channel) {
             let _ = send(command);
         }
     }
@@ -1065,7 +1111,9 @@ fn try_connect(
                 if let Some(event) = MidiEvent::parse(bytes) {
                     let dest_mask = io.dest_mask(event.channel());
                     let mut guard = side.lock().unwrap_or_else(|p| p.into_inner());
-                    ingest(event, dest_mask, None, &hub, &map, &profile, |c| guard.send(c));
+                    ingest(event, dest_mask, None, &hub, &map, &profile, |c| {
+                        guard.send(c)
+                    });
                 }
             },
             (),
@@ -1310,7 +1358,7 @@ mod tests {
         assert_eq!(snap_to_scale(62, 0, major), 64); // → E4
         assert_eq!(snap_to_scale(66, 0, major), 71); // → B4
         assert_eq!(snap_to_scale(67, 0, major), 72); // → C5
-        // A minor pentatonic (A C D E G) rooted at A.
+                                                     // A minor pentatonic (A C D E G) rooted at A.
         let pent: u16 = 1 | 1 << 3 | 1 << 5 | 1 << 7 | 1 << 10;
         assert_eq!(snap_to_scale(57, 9, pent), 57); // A3
         assert_eq!(snap_to_scale(58, 9, pent), 60); // → C4
@@ -1334,11 +1382,11 @@ mod tests {
         ];
         for id in ids {
             let scale = jambox_core::kaoss_scale(jambox_core::kaoss_scale_index_by_id(id) as usize);
-            let mask = scale
-                .degrees
-                .iter()
-                .fold(0u16, |m, d| m | 1 << (d % 12));
-            assert!(mask != 0 && mask != 0x0fff, "{id} should be a proper subset");
+            let mask = scale.degrees.iter().fold(0u16, |m, d| m | 1 << (d % 12));
+            assert!(
+                mask != 0 && mask != 0x0fff,
+                "{id} should be a proper subset"
+            );
             for root in 0..12u8 {
                 let mut prev = None;
                 // Stay clear of MIDI 0/127 clamp saturation at the extremes.
@@ -1360,22 +1408,45 @@ mod tests {
     fn scale_lock_snaps_keys_and_releases_what_it_played() {
         let map = MidiMap::default();
         let profile = ControllerProfile::mpk_mini();
-        let on = MidiEvent::NoteOn { channel: 0, note: 61, velocity: 100 };
+        let on = MidiEvent::NoteOn {
+            channel: 0,
+            note: 61,
+            velocity: 100,
+        };
         assert_eq!(map.apply_scale(on, &profile), on, "off by default");
         map.set_scale_lock(true, 0, jambox_protocol::default_scale_mask());
         assert_eq!(
             map.apply_scale(on, &profile),
-            MidiEvent::NoteOn { channel: 0, note: 62, velocity: 100 },
+            MidiEvent::NoteOn {
+                channel: 0,
+                note: 62,
+                velocity: 100
+            },
             "C♯4 walks to D4 in C major"
         );
         // Scale changes while held: the note-off still releases what note-on played.
         map.set_scale_lock(true, 1, 0b1);
         assert_eq!(
-            map.apply_scale(MidiEvent::NoteOff { channel: 0, note: 61, velocity: 0 }, &profile),
-            MidiEvent::NoteOff { channel: 0, note: 62, velocity: 0 }
+            map.apply_scale(
+                MidiEvent::NoteOff {
+                    channel: 0,
+                    note: 61,
+                    velocity: 0
+                },
+                &profile
+            ),
+            MidiEvent::NoteOff {
+                channel: 0,
+                note: 62,
+                velocity: 0
+            }
         );
         // Drum pads pass through.
-        let pad = MidiEvent::NoteOn { channel: 9, note: 37, velocity: 100 };
+        let pad = MidiEvent::NoteOn {
+            channel: 9,
+            note: 37,
+            velocity: 100,
+        };
         assert_eq!(map.apply_scale(pad, &profile), pad);
     }
 
@@ -1528,14 +1599,13 @@ mod tests {
     fn punch_page_keeps_pad_aftertouch_for_fx() {
         let map = MidiMap::default();
         map.set_punch();
-        assert!(
-            map.interpret(MidiEvent::PolyPressure {
+        assert!(map
+            .interpret(MidiEvent::PolyPressure {
                 channel: 9,
                 note: 36,
                 pressure: 80,
             })
-            .is_none()
-        );
+            .is_none());
         map.set_drums();
         assert_eq!(
             map.interpret(MidiEvent::PolyPressure {
@@ -1629,7 +1699,8 @@ mod tests {
                     channel: 0,
                     controller: 48,
                     value: 127,
-                }
+                },
+                0
             ),
             Some(Command::SetSynth {
                 param: SynthParam::Morph,
@@ -1643,7 +1714,8 @@ mod tests {
                     channel: 0,
                     controller: CC_MORPH,
                     value: 127,
-                }
+                },
+                0
             )
             .is_none(),
             "MPK CC 70 must not steal a controller that remapped knobs"
@@ -1673,7 +1745,8 @@ mod tests {
                     channel: 9,
                     note: 91,
                     velocity: 100,
-                }
+                },
+                9
             )
             .is_none());
         assert_eq!(
@@ -1683,7 +1756,8 @@ mod tests {
                     channel: 9,
                     note: 36,
                     velocity: 100,
-                }
+                },
+                9
             ),
             Some(Command::NoteOn {
                 channel: 9,
@@ -1733,7 +1807,8 @@ mod tests {
                     channel: 0,
                     controller: 64,
                     value: 127,
-                }
+                },
+                0
             ),
             Some(Command::SetSynth {
                 param: SynthParam::Sustain,
@@ -1780,7 +1855,8 @@ mod tests {
                     channel: 0,
                     controller: 56,
                     value: 127,
-                }
+                },
+                0
             )
             .is_none(),
             "MPK has no encoder bank 2"
@@ -1798,7 +1874,8 @@ mod tests {
                     channel: 0,
                     controller: 20,
                     value: 127,
-                }
+                },
+                0
             ),
             Some(Command::SetSynth {
                 param: SynthParam::Level,
@@ -1812,7 +1889,8 @@ mod tests {
                     channel: 0,
                     controller: 21,
                     value: 64,
-                }
+                },
+                0
             ),
             Some(Command::SetSynth {
                 param: SynthParam::DrumLevel,
@@ -2098,7 +2176,8 @@ mod tests {
                     channel: pad_ch,
                     note: 40,
                     velocity: 100,
-                }
+                },
+                0
             )
             .is_none());
         assert!(map
@@ -2108,7 +2187,8 @@ mod tests {
                     channel: 0,
                     controller: 70,
                     value: 64,
-                }
+                },
+                0
             )
             .is_none());
         assert!(map
@@ -2118,7 +2198,8 @@ mod tests {
                     channel: 0,
                     note: 60,
                     velocity: 100,
-                }
+                },
+                0
             )
             .is_some());
     }
@@ -2145,7 +2226,8 @@ mod tests {
                         channel: 0,
                         note,
                         velocity: 100,
-                    }
+                    },
+                    0
                 )
                 .is_none(),
                 "MPK pad channel note {note} arms FX"
@@ -2157,7 +2239,8 @@ mod tests {
                         channel: 9,
                         note,
                         velocity: 100,
-                    }
+                    },
+                    9
                 )
                 .is_none(),
                 "factory ch10 pad {note} must also arm FX, not the kit"
@@ -2169,7 +2252,8 @@ mod tests {
                         channel: 1,
                         note,
                         velocity: 100,
-                    }
+                    },
+                    1
                 ),
                 Some(Command::NoteOn {
                     channel: 1,
@@ -2189,7 +2273,8 @@ mod tests {
                     channel: 0,
                     note: 40,
                     velocity: 100,
-                }
+                },
+                0
             ),
             Some(Command::NoteOn {
                 channel: 0,
@@ -2205,32 +2290,114 @@ mod tests {
                     channel: 9,
                     note: 40,
                     velocity: 100,
-                }
+                },
+                9
             )
             .is_none());
     }
 
     #[test]
-    fn drums_mode_remaps_lab_mpk_pads_onto_drum_channel() {
+    fn midi_ch1_never_reaches_drum_engine_even_when_pad_fx_off() {
         let map = MidiMap::default();
         map.set_punch();
         map.set_pads_to_fx(false);
         let mpk = ControllerProfile::mpk_mini();
-        assert_eq!(
-            map.interpret_with(
-                &mpk,
-                MidiEvent::NoteOn {
+        for note in [40u8, 36, 60, 45] {
+            assert_eq!(
+                map.interpret_with(
+                    &mpk,
+                    MidiEvent::NoteOn {
+                        channel: 0,
+                        note,
+                        velocity: 100,
+                    },
+                    0,
+                ),
+                Some(Command::NoteOn {
                     channel: 0,
-                    note: 40,
-                    velocity: 100,
-                }
-            ),
+                    note,
+                    velocity: 100
+                }),
+                "wire ch1 note {note} must stay on synth channel 0"
+            );
+            assert_eq!(
+                map.interpret_with(
+                    &mpk,
+                    MidiEvent::NoteOff {
+                        channel: 0,
+                        note,
+                        velocity: 0,
+                    },
+                    0,
+                ),
+                Some(Command::NoteOff { channel: 0, note }),
+            );
+        }
+    }
+
+    #[test]
+    fn midi_ch10_plays_drums_keys_mode_and_after_pad_fx_off() {
+        let map = MidiMap::default();
+        let mpk = ControllerProfile::mpk_mini();
+        for pads_off in [false, true] {
+            map.set_pads_to_fx(pads_off);
+            map.set_keys();
+            assert_eq!(
+                map.interpret_with(
+                    &mpk,
+                    MidiEvent::NoteOn {
+                        channel: DRUM_CHANNEL,
+                        note: 36,
+                        velocity: 110,
+                    },
+                    DRUM_CHANNEL,
+                ),
+                Some(Command::NoteOn {
+                    channel: DRUM_CHANNEL,
+                    note: 36,
+                    velocity: 110
+                }),
+                "pads_to_fx={pads_off}"
+            );
+        }
+    }
+
+    #[test]
+    fn map_fanout_ch1_to_ch10_still_plays_synth_not_drums() {
+        let map = MidiMap::default();
+        let mpk = ControllerProfile::mpk_mini();
+        let event = MidiEvent::NoteOn {
+            channel: DRUM_CHANNEL,
+            note: 40,
+            velocity: 100,
+        };
+        assert_eq!(
+            map.interpret_with(&mpk, event, 0),
             Some(Command::NoteOn {
-                channel: DRUM_CHANNEL,
+                channel: 0,
                 note: 40,
                 velocity: 100
             }),
-            "PAD FX off must play the kit even when pads arrive on ch1"
+            "MAP onto ch10 must not arm the kit when wire source is ch1"
+        );
+    }
+
+    #[test]
+    fn map_fanout_ch10_to_ch1_still_plays_drums() {
+        let map = MidiMap::default();
+        let mpk = ControllerProfile::mpk_mini();
+        let event = MidiEvent::NoteOn {
+            channel: 0,
+            note: 36,
+            velocity: 100,
+        };
+        assert_eq!(
+            map.interpret_with(&mpk, event, DRUM_CHANNEL),
+            Some(Command::NoteOn {
+                channel: DRUM_CHANNEL,
+                note: 36,
+                velocity: 100
+            }),
         );
     }
 

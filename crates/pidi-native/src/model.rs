@@ -1186,12 +1186,18 @@ impl NativeModel {
         if self.mode == UiMode::Arp && mode != UiMode::Arp {
             self.leave_arp_mode(outbox);
         }
+        let leaving_fx = self.mode == UiMode::Fx && mode != UiMode::Fx;
         self.set_mode(mode);
         self.sync_melody_engine(outbox);
         // Re-assert Pads→FX whenever FX opens so a stale engine flag cannot
         // leave the kit firing under a green PAD FX button.
         if mode == UiMode::Fx {
             outbox.punch_pads(self.punch_pads_fx);
+        } else if leaving_fx {
+            // "pads → kit" is an FX-page choice only; never leave the engine
+            // flag off after Ray leaves FX (ch1 would have played drums).
+            self.punch_pads_fx = true;
+            outbox.punch_pads(true);
         }
         if mode == UiMode::Arp {
             self.enter_arp_mode(outbox);
@@ -3081,7 +3087,9 @@ impl NativeModel {
         self.punch_buffer_prio = jambox_core::PunchBufferPrio::from_u8(s.punch_buffer_prio);
         self.punch_rpt_mode = jambox_core::PunchRptMode::from_u8(s.punch_rpt_mode);
         self.punch_grid_mode = jambox_core::PunchGridMode::from_u8(s.punch_grid_mode);
-        self.punch_pads_fx = s.punch_pads_fx;
+        // "pads → kit" is FX-page only; a saved `false` must not survive reboot
+        // on Home with the engine still treating ch1 pads as drums.
+        self.punch_pads_fx = true;
         self.punch_aftertouch = s.punch_aftertouch;
         self.punch_dry = s.punch_dry;
         self.punch_history = s.punch_history;
@@ -5382,7 +5390,7 @@ impl NativeModel {
                 self.status_line = if self.punch_pads_fx {
                     "pads → FX".into()
                 } else {
-                    "pads → drums".into()
+                    "pads → kit (ch10)".into()
                 };
                 self.mark_dirty();
             }
@@ -15838,6 +15846,24 @@ mod tests {
             .take()
             .iter()
             .any(|r| matches!(r, Request::PunchFx { slot: 0, amount, .. } if *amount == 0.0)));
+    }
+
+    #[test]
+    fn leaving_fx_resets_pads_to_fx_and_pushes_engine() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Fx);
+        model.punch_pads_fx = false;
+        let mut out = Outbox::new();
+        model.switch_mode(UiMode::Synth, &mut out);
+        assert!(
+            model.punch_pads_fx,
+            "pads→kit is FX-only; leaving FX must restore pads→FX"
+        );
+        assert!(
+            out.take()
+                .iter()
+                .any(|r| matches!(r, Request::PunchPads { armed: true, .. })),
+        );
     }
 
     #[test]
