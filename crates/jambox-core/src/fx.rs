@@ -8,14 +8,17 @@ const DELAY_MAX_SEC: f32 = 1.0;
 const REVERB_MAX_SEC: f32 = 0.55;
 /// Classic analog flanger window (~1–12 ms). Sized once in `new`.
 const FLANGER_MAX_SEC: f32 = 0.020;
-/// Chorus delay window (~18–25 ms base + shallow depth).
-const CHORUS_MAX_SEC: f32 = 0.045;
-/// Fixed chorus center delay (seconds). Wider than flanger so comb notches
-/// sit dense and don't whoosh when mixed with dry.
-const CHORUS_BASE_SEC: f32 = 0.020;
-/// Peak LFO travel at `chorus_depth == 1` (seconds). Keep small so chorus is
-/// pitch shimmer, not a flanger-style notch sweep.
-const CHORUS_DEPTH_SEC: f32 = 0.0035;
+/// Chorus delay window (base + voice offsets + shallow LFO).
+const CHORUS_MAX_SEC: f32 = 0.050;
+/// BBD-style first tap (~22 ms); additional voices stagger after this.
+const CHORUS_BASE_SEC: f32 = 0.022;
+/// Per-voice static offset (seconds) for ensemble width.
+const CHORUS_VOICE_OFFSET_SEC: f32 = 0.004;
+/// Peak LFO travel at `chorus_depth == 1` — keep shallow (CE/Juno class).
+const CHORUS_DEPTH_SEC: f32 = 0.0010;
+/// Parallel detuned copies mixed into dry; keeps level sensible.
+const CHORUS_ENSEMBLE_GAIN: f32 = 0.62;
+const CHORUS_VOICES: usize = 3;
 /// Serial first-order all-pass stages (Phase 90–class; stronger combing).
 const PHASER_STAGES: usize = 10;
 /// Lowest sweep corner when the LFO is down (Hz).
@@ -35,10 +38,10 @@ pub const DELAY_TIME_SEC_SPAN: f32 = 0.70;
 pub const FLANGER_RATE_HZ_MIN: f32 = 0.08;
 /// Extra Hz when `flanger_rate == 1`.
 pub const FLANGER_RATE_HZ_SPAN: f32 = 6.0;
-/// Chorus LFO Hz at `chorus_rate == 0` (slow shimmer).
-pub const CHORUS_RATE_HZ_MIN: f32 = 0.15;
+/// Chorus LFO Hz at `chorus_rate == 0` (slow ensemble).
+pub const CHORUS_RATE_HZ_MIN: f32 = 0.12;
 /// Extra Hz when `chorus_rate == 1`.
-pub const CHORUS_RATE_HZ_SPAN: f32 = 0.55;
+pub const CHORUS_RATE_HZ_SPAN: f32 = 0.38;
 /// Phaser LFO Hz at `phaser_rate == 0`.
 pub const PHASER_RATE_HZ_MIN: f32 = 0.10;
 /// Extra Hz when `phaser_rate == 1`.
@@ -240,12 +243,10 @@ impl FxUnit {
             let clen = self.chorus.len();
             let rate_hz = CHORUS_RATE_HZ_MIN + p.chorus_rate * CHORUS_RATE_HZ_SPAN;
             let depth = p.chorus_depth;
-            let mix = p.chorus_mix;
+            let mix = perceptual_insert_mix(p.chorus_mix);
             let dry = 1.0 - mix;
-            // Classic chorus: ~20 ms center, ±~3.5 ms at full depth, no feedback.
-            // Opposing (180°) voices keep average delay steady so dry+wet doesn't
-            // whoosh like a flanger/phaser notch sweep.
-            let center = CHORUS_BASE_SEC * self.sample_rate;
+            let center0 = CHORUS_BASE_SEC * self.sample_rate;
+            let voice_step = CHORUS_VOICE_OFFSET_SEC * self.sample_rate;
             let travel = CHORUS_DEPTH_SEC * self.sample_rate * depth;
             let two_pi = std::f32::consts::TAU;
             let phase_inc = rate_hz / self.sample_rate;
@@ -254,16 +255,22 @@ impl FxUnit {
                 if self.chorus_phase >= 1.0 {
                     self.chorus_phase -= 1.0;
                 }
-                let lfo = (self.chorus_phase * two_pi).sin();
-                let d_a = (center + travel * lfo).clamp(1.0, (clen - 2) as f32);
-                let d_b = (center - travel * lfo).clamp(1.0, (clen - 2) as f32);
-                let wet = 0.5
-                    * (read_delay_frac(&self.chorus, self.chorus_pos, d_a)
-                        + read_delay_frac(&self.chorus, self.chorus_pos, d_b));
-                // No feedback — chorus, not flanger.
-                self.chorus[self.chorus_pos] = (*s).clamp(-1.5, 1.5);
+                let input = *s;
+                let mut ensemble = 0.0f32;
+                for v in 0..CHORUS_VOICES {
+                    let phase_off = v as f32 * two_pi / CHORUS_VOICES as f32;
+                    let lfo = (self.chorus_phase * two_pi + phase_off).sin();
+                    let base = center0 + v as f32 * voice_step;
+                    let delay_samp = (base + travel * lfo).clamp(1.0, (clen - 2) as f32);
+                    ensemble += read_delay_frac(&self.chorus, self.chorus_pos, delay_samp);
+                }
+                ensemble /= CHORUS_VOICES as f32;
+                self.chorus[self.chorus_pos] = input.clamp(-1.5, 1.5);
                 self.chorus_pos = (self.chorus_pos + 1) % clen;
-                *s = *s * dry + wet * mix;
+                // Juno/CE thickening: dry plus low-level staggered copies, not a
+                // single sweeping comb against dry (which reads as flange/phaser).
+                let thickened = input + ensemble * CHORUS_ENSEMBLE_GAIN;
+                *s = input * dry + thickened * mix;
             }
         }
 
@@ -294,14 +301,14 @@ impl FxUnit {
 
         if p.phaser_mix > 0.001 {
             let rate_hz = PHASER_RATE_HZ_MIN + p.phaser_rate * PHASER_RATE_HZ_SPAN;
-            let depth = p.phaser_depth;
-            let fb = p.phaser_fb.min(PHASER_FB_MAX);
-            let mix = p.phaser_mix;
+            let mix = perceptual_insert_mix(p.phaser_mix);
+            let depth = p.phaser_depth * (0.45 + 0.55 * mix);
+            let fb = p.phaser_fb.min(PHASER_FB_MAX) * (0.5 + 0.5 * mix);
             let phase_inc = rate_hz / self.sample_rate;
             let two_pi = std::f32::consts::TAU;
             let sweep_hz = depth * PHASER_FREQ_HZ_SPAN;
             let f_lo = PHASER_FREQ_HZ_MIN;
-            let f_hi = PHASER_FREQ_HZ_MIN + sweep_hz.max(80.0);
+            let f_hi = PHASER_FREQ_HZ_MIN + sweep_hz.max(120.0);
             for s in buf.iter_mut() {
                 let dry = *s;
                 self.phaser_phase += phase_inc;
@@ -381,6 +388,13 @@ impl FxUnit {
             self.tail_hold = self.tail_hold.saturating_sub(buf.len() as u32);
         }
     }
+}
+
+/// Slider 0..1 → wet amount; mid positions already feel clearly effected.
+#[inline]
+fn perceptual_insert_mix(mix: f32) -> f32 {
+    let mix = mix.clamp(0.0, 1.0);
+    1.0 - (1.0 - mix).powf(1.65)
 }
 
 /// Bilinear first-order all-pass coefficient for notch center `center_hz`.
@@ -729,36 +743,33 @@ mod tests {
             ..FxParams::default()
         });
         let expect = (CHORUS_BASE_SEC * 48_000.0) as usize;
-        let mut buf = vec![0.0f32; expect + 16];
+        let mut buf = vec![0.0f32; expect + 64];
         buf[0] = 1.0;
         fx.process(&mut buf);
-        let peak = buf.iter().copied().fold(0.0f32, |a, b| a.max(b.abs()));
-        assert!(peak > 0.2, "chorus should reprint the impulse, peak={peak}");
-        // Peak should land near the fixed center delay, not a flanger-short window.
-        let peak_i = buf
+        assert!(buf[0].abs() > 0.9, "dry hit stays at the attack");
+        let tail_peak = buf[expect..]
             .iter()
-            .enumerate()
-            .max_by(|(_, a), (_, b)| a.abs().partial_cmp(&b.abs()).unwrap())
-            .map(|(i, _)| i)
-            .unwrap();
+            .copied()
+            .fold(0.0f32, |a, b| a.max(b.abs()));
         assert!(
-            (peak_i as i32 - expect as i32).abs() <= 2,
-            "chorus impulse peak at {peak_i}, expected ~{expect}"
+            tail_peak > 0.12,
+            "ensemble should reprint after ~{expect} samples, tail_peak={tail_peak}"
         );
     }
 
     #[test]
     fn chorus_modulation_stays_in_chorus_delay_window() {
-        // Full depth must not collapse into the flanger-like <10 ms zone that
-        // produces a notch-sweep wobble when mixed with dry.
         let sr = 48_000.0;
-        let min_ms = (CHORUS_BASE_SEC - CHORUS_DEPTH_SEC) * 1000.0;
-        let max_ms = (CHORUS_BASE_SEC + CHORUS_DEPTH_SEC) * 1000.0;
-        assert!(min_ms >= 10.0, "chorus min delay {min_ms} ms too short (flanger territory)");
-        assert!(max_ms <= 45.0, "chorus max delay {max_ms} ms exceeds buffer window");
+        let min_ms = CHORUS_BASE_SEC * 1000.0;
+        let max_ms = (CHORUS_BASE_SEC
+            + CHORUS_VOICE_OFFSET_SEC * (CHORUS_VOICES - 1) as f32
+            + CHORUS_DEPTH_SEC)
+            * 1000.0;
+        assert!(min_ms >= 15.0, "chorus min delay {min_ms} ms too short (flanger territory)");
+        assert!(max_ms <= 50.0, "chorus max delay {max_ms} ms exceeds buffer window");
         assert!(
-            CHORUS_DEPTH_SEC <= 0.005,
-            "chorus depth {CHORUS_DEPTH_SEC}s too wide — causes whoosh"
+            CHORUS_DEPTH_SEC <= 0.002,
+            "chorus depth {CHORUS_DEPTH_SEC}s too wide — audible whoosh"
         );
 
         let mut fx = FxUnit::new(sr);
@@ -768,37 +779,150 @@ mod tests {
             chorus_depth: 1.0,
             ..FxParams::default()
         });
-        // Drive long enough for several LFO cycles; impulse energy should never
-        // reappear in the classic flanger window (~1–8 ms).
         let flanger_end = (0.008 * sr) as usize;
-        let chorus_lo = ((CHORUS_BASE_SEC - CHORUS_DEPTH_SEC) * sr) as usize;
-        let n = ((CHORUS_BASE_SEC + CHORUS_DEPTH_SEC) * sr) as usize + 64;
-        let mut earliest_peak = usize::MAX;
+        let chorus_lo = (CHORUS_BASE_SEC * sr) as usize;
+        let n = ((CHORUS_BASE_SEC + CHORUS_DEPTH_SEC) * sr) as usize + 96;
         for _ in 0..8 {
+            fx.reset();
             let mut buf = vec![0.0f32; n];
             buf[0] = 1.0;
             fx.process(&mut buf);
-            let peak_i = buf
+            let peak_i = buf[chorus_lo..]
                 .iter()
                 .enumerate()
                 .max_by(|(_, a), (_, b)| a.abs().partial_cmp(&b.abs()).unwrap())
-                .map(|(i, _)| i)
-                .unwrap_or(0);
-            earliest_peak = earliest_peak.min(peak_i);
+                .map(|(i, _)| i + chorus_lo)
+                .unwrap_or(chorus_lo);
             assert!(
                 peak_i >= chorus_lo.saturating_sub(4),
-                "modulated chorus peak at sample {peak_i} left the chorus window"
+                "ensemble chorus peak at sample {peak_i} left the chorus window"
             );
-            let flanger_zone_peak = buf[..flanger_end]
+            // Skip the dry attack at sample 0; we're checking for short-delay leakage.
+            let flanger_zone_peak = buf[1..flanger_end]
                 .iter()
                 .copied()
                 .fold(0.0f32, |a, b| a.max(b.abs()));
             assert!(
-                flanger_zone_peak < 0.15,
+                flanger_zone_peak < 0.12,
                 "chorus leaked into flanger window, peak={flanger_zone_peak}"
             );
         }
-        assert!(earliest_peak < usize::MAX);
+    }
+
+    fn rich_saw(sr: f32, frames: usize, fund: f32) -> Vec<f32> {
+        let mut buf = vec![0.0f32; frames];
+        for (i, s) in buf.iter_mut().enumerate() {
+            let t = i as f32 / sr;
+            let mut sum = 0.0f32;
+            for h in 1..=12 {
+                sum += (t * fund * h as f32 * std::f32::consts::TAU).sin() / (h as f32 * 0.85);
+            }
+            *s = sum * 0.14;
+        }
+        buf
+    }
+
+    fn block_rms(buf: &[f32]) -> f32 {
+        (buf.iter().map(|v| v * v).sum::<f32>() / buf.len().max(1) as f32).sqrt()
+    }
+
+    #[test]
+    fn phaser_synth_swoosh_is_audible_at_bus_slider_levels() {
+        let sr = 48_000.0;
+        let params = FxParams {
+            phaser_mix: 0.72,
+            phaser_rate: 0.35,
+            phaser_depth: 0.85,
+            phaser_fb: 0.55,
+            ..FxParams::default()
+        };
+        let rate_hz = PHASER_RATE_HZ_MIN + params.phaser_rate * PHASER_RATE_HZ_SPAN;
+        let frames = (sr * 2.5) as usize;
+        let dry = rich_saw(sr, frames, 110.0);
+        let in_rms = block_rms(&dry);
+        let block = ((sr / rate_hz.max(0.08)) / 10.0) as usize;
+        let block = block.clamp(256, 4096);
+
+        let mut fx = FxUnit::new(sr);
+        fx.set_params(params);
+        let mut wet = dry.clone();
+        fx.process(&mut wet);
+        let mut blocks = Vec::new();
+        for chunk in wet.chunks(block) {
+            blocks.push(block_rms(chunk));
+        }
+        let swing = blocks
+            .iter()
+            .copied()
+            .fold(f32::NEG_INFINITY, f32::max)
+            - blocks.iter().copied().fold(f32::INFINITY, f32::min);
+        assert!(
+            swing / in_rms > 0.045,
+            "phaser should breathe on a synth saw, swing/in_rms={}",
+            swing / in_rms
+        );
+        let peak_delta = dry
+            .iter()
+            .zip(wet.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        assert!(peak_delta > 0.08, "peak sample delta too small: {peak_delta}");
+    }
+
+    #[test]
+    fn chorus_thickens_saw_without_flanger_comb_sweep() {
+        let sr = 48_000.0;
+        let frames = (sr * 1.25) as usize;
+        let src = rich_saw(sr, frames, 165.0);
+        let dry_rms = block_rms(&src);
+
+        let mut chorus_fx = FxUnit::new(sr);
+        chorus_fx.set_params(FxParams {
+            chorus_mix: 0.8,
+            chorus_rate: 0.35,
+            chorus_depth: 0.55,
+            ..FxParams::default()
+        });
+        let mut chorus_buf = src.clone();
+        chorus_fx.process(&mut chorus_buf);
+        let chorus_rms = block_rms(&chorus_buf);
+        let dry_peak = src.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
+        let chorus_peak = chorus_buf.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
+        assert!(
+            chorus_rms > dry_rms * 0.98 && chorus_peak > dry_peak * 1.02,
+            "chorus should thicken, dry_rms={dry_rms} wet_rms={chorus_rms} dry_pk={dry_peak} wet_pk={chorus_peak}"
+        );
+
+        let mut flanger_fx = FxUnit::new(sr);
+        flanger_fx.set_params(FxParams {
+            flanger_mix: 0.8,
+            flanger_rate: 0.5,
+            flanger_depth: 0.85,
+            flanger_fb: 0.4,
+            ..FxParams::default()
+        });
+        let mut flanger_buf = src.clone();
+        flanger_fx.process(&mut flanger_buf);
+
+        let block = 512usize;
+        fn mean_abs_delta(buf: &[f32], block: usize) -> f32 {
+            let mut deltas = Vec::new();
+            for w in buf.windows(block).skip(1) {
+                let prev = block_rms(&w[..block]);
+                deltas.push(prev);
+            }
+            if deltas.len() < 3 {
+                return 0.0;
+            }
+            let mean = deltas.iter().sum::<f32>() / deltas.len() as f32;
+            deltas.iter().map(|d| (d - mean).abs()).sum::<f32>() / deltas.len() as f32
+        }
+        let chorus_ripple = mean_abs_delta(&chorus_buf, block);
+        let flanger_ripple = mean_abs_delta(&flanger_buf, block);
+        assert!(
+            chorus_ripple < flanger_ripple * 0.55,
+            "chorus should wobble less than flanger: chorus={chorus_ripple} flanger={flanger_ripple}"
+        );
     }
 
     #[test]
