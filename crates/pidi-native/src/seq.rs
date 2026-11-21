@@ -11,12 +11,6 @@ use crate::phrases::{seconds_to_ticks, PPQ};
 /// SEQ / songs share the clip slot after the 16 phrase pads.
 pub use jambox_core::{SEQ_CLIP_SLOT, SEQ_DRUM_MIX_SLOT, SEQ_KAOSS_MIX_SLOT};
 pub const MAX_CYCLES: usize = 8;
-/// Clave on the drum kit — short enough to mark beat 1 without becoming the groove.
-pub const CUE_NOTE: u8 = 50;
-pub const CUE_CHANNEL: u8 = jambox_core::DRUM_CHANNEL;
-const CUE_VELOCITY: u8 = 108;
-const CUE_LEN_SEC: f64 = 0.045;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SeqState {
     Empty,
@@ -329,6 +323,8 @@ pub enum SeqAction {
     },
     Stop,
     Clear,
+    /// Sync the engine-side sine loop click (not part of the clip).
+    CueBeep(bool),
 }
 
 #[derive(Debug, Clone)]
@@ -338,7 +334,7 @@ pub struct SeqModel {
     pub status: String,
     pub layer_line: String,
     pub extend_mode: bool,
-    /// Play a clave click at the start of each loop (playback only; not exported).
+    /// Engine sine click at each loop start (playback only; not in clips).
     pub cue_beep: bool,
     /// Brightness captured on the backbone take. Later overdubs don't rewrite it.
     pub baked_tone: Option<f32>,
@@ -436,12 +432,7 @@ impl SeqModel {
     }
 
     fn playback_wire(&self, include_pending: bool) -> (Vec<WireClipEvent>, u32) {
-        let (events, length_ticks) = self.sequence.to_wire(self.bpm, include_pending);
-        if self.cue_beep && !self.sequence.is_empty() {
-            (with_cue_beep(events, self.bpm, length_ticks), length_ticks)
-        } else {
-            (events, length_ticks)
-        }
+        self.sequence.to_wire(self.bpm, include_pending)
     }
 
     pub fn rec_label(&self) -> (&'static str, u32) {
@@ -834,20 +825,11 @@ impl SeqModel {
     pub fn toggle_cue_beep(&mut self) -> SeqAction {
         self.cue_beep = !self.cue_beep;
         self.status = if self.cue_beep {
-            "BEEP on — clave marks loop start".into()
+            "BEEP on — sine marks loop start".into()
         } else {
             "BEEP off".into()
         };
-        if self.sequence.is_empty() {
-            return SeqAction::None;
-        }
-        let (events, length_ticks) = self.playback_wire(self.has_pending());
-        SeqAction::Upload {
-            events,
-            length_ticks,
-            launch: self.is_playing(),
-            immediate: false,
-        }
+        SeqAction::CueBeep(self.cue_beep)
     }
 
     pub fn nudge_bpm(&mut self, delta: f32) {
@@ -881,37 +863,6 @@ impl SeqModel {
             SeqState::Stopped => format!("stopped · {span}"),
         };
     }
-}
-
-fn with_cue_beep(
-    mut events: Vec<WireClipEvent>,
-    bpm: f32,
-    length_ticks: u32,
-) -> Vec<WireClipEvent> {
-    let off_tick = seconds_to_ticks(CUE_LEN_SEC, bpm)
-        .max(1)
-        .min(length_ticks.saturating_sub(1).max(1));
-    events.push(WireClipEvent::midi(
-        0,
-        true,
-        CUE_CHANNEL,
-        CUE_NOTE,
-        CUE_VELOCITY,
-    ));
-    events.push(WireClipEvent::midi(
-        off_tick,
-        false,
-        CUE_CHANNEL,
-        CUE_NOTE,
-        0,
-    ));
-    events.sort_by(|a, b| {
-        a.tick
-            .cmp(&b.tick)
-            .then_with(|| a.on.cmp(&b.on))
-            .then_with(|| a.note.cmp(&b.note))
-    });
-    events
 }
 
 fn trim_take_with_gestures(
@@ -1209,7 +1160,7 @@ mod tests {
         assert_eq!(seq.layer_count(), 2);
     }
 
-    const DRUM: u8 = CUE_CHANNEL;
+    const DRUM: u8 = jambox_core::DRUM_CHANNEL;
 
     fn hit(t: f64, note: u8) -> [RecEvent; 2] {
         [
@@ -1539,7 +1490,7 @@ mod tests {
     }
 
     #[test]
-    fn cue_beep_injects_clave_at_loop_start() {
+    fn cue_beep_does_not_inject_clip_midi() {
         let mut seq = SeqModel::new();
         seq.sequence.set_backbone(
             vec![RecEvent {
@@ -1554,47 +1505,22 @@ mod tests {
         );
         seq.state = SeqState::Playing;
         match seq.toggle_cue_beep() {
-            SeqAction::Upload { events, .. } => {
-                assert!(
-                    events.iter().any(|e| {
-                        e.on && e.tick == 0 && e.note == CUE_NOTE && e.channel == CUE_CHANNEL
-                    }),
-                    "playback should include a clave on at tick 0, got {events:?}"
-                );
-                assert!(
-                    events.iter().any(|e| e.on && e.note == 36),
-                    "kick backbone must still be present"
-                );
-            }
-            other => panic!("expected upload with cue, got {other:?}"),
+            SeqAction::CueBeep(true) => {}
+            other => panic!("expected CueBeep, got {other:?}"),
         }
-        let snap = seq.snapshot().expect("sequence should snapshot");
-        assert!(
-            snap.0.iter().all(|e| e.note != CUE_NOTE),
-            "SAVE SEQ / >PAD must not bake the cue into the clip"
+        let (events, _) = seq.playback_wire(false);
+        assert_eq!(
+            events.iter().filter(|e| e.on).count(),
+            1,
+            "only the backbone kick should be in the wire clip"
         );
+        let snap = seq.snapshot().expect("sequence should snapshot");
+        assert_eq!(snap.0.len(), 1, "export must not add a beep note");
     }
 
     #[test]
     fn cue_beep_off_by_default() {
-        let mut seq = SeqModel::new();
-        seq.sequence.set_backbone(
-            vec![RecEvent {
-                t: 0.0,
-                on: true,
-                channel: 9,
-                note: 36,
-                velocity: 100,
-            }],
-            Vec::new(),
-            1.0,
-        );
-        seq.state = SeqState::Stopped;
-        match seq.toggle_play() {
-            SeqAction::Upload { events, .. } => {
-                assert!(events.iter().all(|e| e.note != CUE_NOTE));
-            }
-            other => panic!("expected upload, got {other:?}"),
-        }
+        let seq = SeqModel::new();
+        assert!(!seq.cue_beep);
     }
 }

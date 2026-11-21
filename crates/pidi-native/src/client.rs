@@ -435,6 +435,11 @@ impl Outbox {
         });
     }
 
+    pub fn seq_cue_beep(&mut self, enabled: bool) {
+        self.reliable
+            .push_back(Request::SeqCueBeep { enabled });
+    }
+
     pub fn drum_repeat_map(&mut self, slots: [u8; 16], latch: bool) {
         self.reliable
             .push_back(Request::DrumRepeat { slots, latch });

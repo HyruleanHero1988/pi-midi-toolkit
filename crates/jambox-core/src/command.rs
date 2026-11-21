@@ -250,6 +250,14 @@ pub enum Command {
         slot: u8,
         value: f32,
     },
+    /// SEQ mode loop-start click (sine on the master bus; not the drum kit).
+    SetSeqCueBeep {
+        enabled: bool,
+    },
+    /// Internal: fire one cue click at `frame_in_block`.
+    SeqCueClick {
+        accent: bool,
+    },
     StartRepeat {
         owner: u32,
         channel: u8,
