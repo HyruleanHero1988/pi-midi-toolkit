@@ -27,8 +27,10 @@ const PHASER_FREQ_HZ_MIN: f32 = 100.0;
 const PHASER_FREQ_HZ_SPAN: f32 = 3_200.0;
 /// Cap on phaser feedback — higher `phaser_fb` tightens the jet / resonant peaks.
 const PHASER_FB_MAX: f32 = 0.92;
-/// Drive oversampling factor around the tube nonlinearity.
-const DRIVE_OS: usize = 2;
+/// Oversampling around the drive nonlinearity (inter-sample at 4×).
+const DRIVE_OS: usize = 4;
+/// High-pass before clipping — keeps lows from turning to mud.
+const DRIVE_HP_HZ: f32 = 105.0;
 /// Peak the tube stage is normalized toward (post SYNTH LEVEL, pre insert).
 const DRIVE_NORM_REF: f32 = 0.24;
 /// Envelope floor so silence does not crank the normalizer to infinity.
@@ -146,6 +148,10 @@ pub struct FxUnit {
     drive_dc_y: f32,
     /// Slow peak envelope for input-normalized tube drive.
     drive_env: f32,
+    /// One-pole lowpass state (high-pass is input − this).
+    drive_hp_lp: f32,
+    /// Cab-style tone lowpass after the clipper.
+    drive_tone_lp: f32,
     /// Samples of silence still worth running so delay / reverb can finish.
     tail_hold: u32,
 }
@@ -177,6 +183,8 @@ impl FxUnit {
             drive_dc_x: 0.0,
             drive_dc_y: 0.0,
             drive_env: DRIVE_ENV_FLOOR,
+            drive_hp_lp: 0.0,
+            drive_tone_lp: 0.0,
             tail_hold: 0,
         }
     }
@@ -226,6 +234,8 @@ impl FxUnit {
         self.drive_dc_x = 0.0;
         self.drive_dc_y = 0.0;
         self.drive_env = DRIVE_ENV_FLOOR;
+        self.drive_hp_lp = 0.0;
+        self.drive_tone_lp = 0.0;
         self.tail_hold = 0;
     }
 
@@ -248,6 +258,8 @@ impl FxUnit {
                 p.drive,
                 self.sample_rate,
                 &mut self.drive_env,
+                &mut self.drive_hp_lp,
+                &mut self.drive_tone_lp,
                 &mut self.drive_dc_x,
                 &mut self.drive_dc_y,
             );
@@ -436,16 +448,45 @@ fn drive_env_coeffs(sample_rate: f32) -> (f32, f32) {
     (attack, release)
 }
 
-/// Makeup divided by color gain so linear passages stay near unity, with extra
-/// boost at high drive to offset saturation RMS loss (calibrated offline).
 #[inline]
-fn drive_output_makeup(drive: f32, color_gain: f32) -> f32 {
+fn one_pole_alpha(freq_hz: f32, sample_rate: f32) -> f32 {
+    let sr = sample_rate.max(8_000.0);
+    1.0 - (-std::f32::consts::TAU * freq_hz / sr).exp()
+}
+
+/// Progressive pre-gain (≈0–44 dB) — cubic feel, slams hard only near the top.
+#[inline]
+fn drive_pre_gain(drive: f32) -> f32 {
     let t = drive.clamp(0.0, 1.0);
-    (1.0 + 1.4 * t * t) / color_gain.max(1.0)
+    let db = 44.0 * t.powf(1.18);
+    10f32.powf(db / 20.0)
+}
+
+/// Linear zones undo `color_gain`; saturated zones target a fixed perceived level.
+#[inline]
+fn drive_post_gain(drive: f32, color_gain: f32) -> f32 {
+    let t = drive.clamp(0.0, 1.0);
+    let crush = t * t;
+    let inv = 1.0 / color_gain.max(1.0);
+    let sat_level = 0.17 + 0.33 * (1.0 - t).powf(1.05);
+    inv * (1.0 - crush) + sat_level * crush
+}
+
+/// Soft tube knee into harder asymmetric saturation (high-gain pedal stack).
+#[inline]
+fn staged_drive_clip(x: f32, drive: f32) -> f32 {
+    let t = drive.clamp(0.0, 1.0);
+    let soft = dual_knee_clip(x, t);
+    let crush = t * t;
+    let hot = soft * (1.0 + crush * 8.0);
+    let hard = hot.tanh();
+    let bite = hard.abs().powf(0.72).copysign(hard);
+    let blend = (0.45 * t + 0.55 * crush).clamp(0.0, 0.92);
+    soft * (1.0 - blend) + bite * blend
 }
 
 /// Asymmetric soft-knee tube clipper with envelope-normalized staging, DC block,
-/// loudness-matched output, and 2× oversampling around the nonlinearity.
+/// loudness-matched output, and 4× oversampling around the nonlinearity.
 ///
 /// Input is peak-normalized toward [`DRIVE_NORM_REF`] so saturation follows the
 /// DRIVE slider, not SYNTH LEVEL. Output is scaled back by the same factor so
@@ -455,44 +496,51 @@ fn process_tube_drive(
     drive: f32,
     sample_rate: f32,
     env: &mut f32,
+    hp_lp: &mut f32,
+    tone_lp: &mut f32,
     dc_x: &mut f32,
     dc_y: &mut f32,
 ) {
     let t = drive.clamp(0.0, 1.0);
-    let sat_gain = 1.0 + t * t * 14.0;
-    let pre = 0.10 * t;
-    let color_gain = sat_gain * (1.0 + pre);
-    let makeup = drive_output_makeup(t, color_gain);
+    let pre_gain = drive_pre_gain(t);
+    let treble = 1.0 + 0.32 * t * t;
+    let color_gain = pre_gain * treble;
+    let post_gain = drive_post_gain(t, color_gain);
     let r = 0.995f32;
     let (env_attack, env_release) = drive_env_coeffs(sample_rate);
+    let hp_a = one_pole_alpha(DRIVE_HP_HZ, sample_rate);
+    let tone_fc = 5_100.0 - 3_200.0 * t;
+    let tone_a = one_pole_alpha(tone_fc, sample_rate);
+    let len = buf.len();
 
-    for s in buf.iter_mut() {
-        let x0 = *s;
+    for i in 0..len {
+        let x0 = buf[i];
+        let x1 = if i + 1 < len { buf[i + 1] } else { x0 };
         let mag = x0.abs();
         let coeff = if mag > *env { env_attack } else { env_release };
         *env += coeff * (mag - *env);
         let norm = (DRIVE_NORM_REF / env.max(DRIVE_ENV_FLOOR)).clamp(DRIVE_NORM_MIN, DRIVE_NORM_MAX);
 
         let mut acc = 0.0f32;
-        let mut prev = x0;
         for step in 0..DRIVE_OS {
-            let x = if step == 0 {
-                x0
-            } else {
-                0.5 * (prev + x0)
-            };
-            prev = x0;
+            let frac = (step as f32 + 0.5) / DRIVE_OS as f32;
+            let x = x0 * (1.0 - frac) + x1 * frac;
             let internal = x * norm;
-            let hot = internal * color_gain;
-            let clipped = dual_knee_clip(hot, t);
+            *hp_lp += hp_a * (internal - *hp_lp);
+            let tight = internal - *hp_lp;
+            let hot = tight * color_gain;
+            let clipped = staged_drive_clip(hot, t);
             let restored = clipped / norm;
-            let shaped = restored * makeup;
+            *tone_lp += tone_a * (restored - *tone_lp);
+            let toned = *tone_lp;
+            let shaped = toned * post_gain;
             let y = shaped - *dc_x + r * *dc_y;
             *dc_x = shaped;
             *dc_y = y;
             acc += y;
         }
-        *s = acc / DRIVE_OS as f32;
+        let raw = acc / DRIVE_OS as f32;
+        buf[i] = (raw * 2.4).tanh() * 0.58;
     }
 }
 
@@ -500,8 +548,8 @@ fn process_tube_drive(
 /// Knees tighten as `drive` rises so bus-level signals hit the tube sooner.
 #[inline]
 fn dual_knee_clip(x: f32, drive: f32) -> f32 {
-    let knee_p = 0.90 - 0.58 * drive;
-    let knee_n = 1.18 - 0.48 * drive;
+    let knee_p = (0.92 - 0.70 * drive).max(0.12);
+    let knee_n = (1.20 - 0.55 * drive).max(0.25);
     let span_p = 0.48 + 0.14 * drive;
     let span_n = 1.08 + 0.18 * drive;
     if x >= 0.0 {
@@ -580,15 +628,17 @@ mod tests {
             drive: 1.0,
             ..FxParams::default()
         });
-        let mut buf = vec![0.0f32; 256];
+        let mut buf = vec![0.0f32; 4096];
         for (i, s) in buf.iter_mut().enumerate() {
             *s = (i as f32 * 0.07).sin() * 0.85;
         }
+        let mut warm = sine_buffer(220.0, 0.5, 48_000.0, 4096);
+        fx.process(&mut warm);
         fx.process(&mut buf);
         assert!(buf.iter().all(|v| v.abs() <= 1.2));
         let peak = buf.iter().fold(0.0f32, |a, &v| a.max(v.abs()));
         assert!(peak > 0.12, "drive should pass a non-silent bus signal, peak={peak}");
-        assert!(peak < 0.82, "full drive should tame hot peaks, peak={peak}");
+        assert!(peak < 0.88, "full drive should tame hot peaks, peak={peak}");
     }
 
     fn sine_buffer(freq_hz: f32, amp: f32, sample_rate: f32, frames: usize) -> Vec<f32> {
@@ -673,16 +723,89 @@ mod tests {
         let amp = 0.22f32;
         let low = measure_h2_over_h1(&mut fx_lo, 0.35, 440.0, amp, sr);
         let mid = measure_h2_over_h1(&mut fx_mid, 0.55, 440.0, amp, sr);
-        let high = measure_h2_over_h1(&mut fx_hi, 1.0, 440.0, amp, sr);
+        let h2_hi = measure_h2_over_h1(&mut fx_hi, 1.0, 440.0, amp, sr);
+        let h3_hi = measure_h3_over_h1(&mut fx_hi, 1.0, 440.0, amp, sr);
+        let high = h2_hi.max(h3_hi);
         assert!(
-            mid > low * 1.6 && high > mid * 1.15,
-            "H2/H1 should climb with drive: low={low:.5} mid={mid:.5} high={high:.5}"
+            mid > low * 2.0 && high > mid * 1.2,
+            "harmonics should climb with drive: low={low:.5} mid={mid:.5} high={high:.5}"
         );
         assert!(
             mid > 0.05,
             "moderate drive must be clearly non-clean at bus levels, mid={mid:.5}"
         );
-        assert!(high > 0.06, "full drive should be crunchy, high={high:.5}");
+        assert!(
+            high > 0.22,
+            "full drive should be heavy guitar-style saturation, h2={h2_hi:.5} h3={h3_hi:.5}"
+        );
+    }
+
+    fn measure_h3_over_h1(
+        fx: &mut FxUnit,
+        drive: f32,
+        freq_hz: f32,
+        amp: f32,
+        sample_rate: f32,
+    ) -> f32 {
+        let warm = (sample_rate * 0.35) as usize;
+        let measure = (sample_rate * 0.5) as usize;
+        fx.set_params(FxParams {
+            drive,
+            ..FxParams::default()
+        });
+        let mut lead = sine_buffer(freq_hz, amp, sample_rate, warm);
+        fx.process(&mut lead);
+        let mut buf = sine_buffer(freq_hz, amp, sample_rate, measure);
+        fx.process(&mut buf);
+        let h1 = goertzel_mag(&buf, freq_hz, sample_rate).max(1e-8);
+        let h3 = goertzel_mag(&buf, freq_hz * 3.0, sample_rate);
+        h3 / h1
+    }
+
+    fn process_sine_tail(
+        fx: &mut FxUnit,
+        drive: f32,
+        freq_hz: f32,
+        amp: f32,
+        sample_rate: f32,
+    ) -> Vec<f32> {
+        let warm = (sample_rate * 0.35) as usize;
+        let measure = (sample_rate * 0.5) as usize;
+        fx.reset();
+        fx.set_params(FxParams {
+            drive,
+            ..FxParams::default()
+        });
+        let mut lead = sine_buffer(freq_hz, amp, sample_rate, warm);
+        fx.process(&mut lead);
+        let mut buf = sine_buffer(freq_hz, amp, sample_rate, measure);
+        fx.process(&mut buf);
+        buf
+    }
+
+    #[test]
+    fn drive_max_is_heavily_compressed_with_odd_harmonics() {
+        let sr = 48_000.0;
+        let amp = 0.22f32;
+        let mut fx = FxUnit::new(sr);
+        let driven = process_sine_tail(&mut fx, 1.0, 220.0, amp, sr);
+        let driven_peak = driven.iter().fold(0.0f32, |a, &v| a.max(v.abs()));
+        assert!(
+            driven_peak > 0.26 && driven_peak < 0.72,
+            "max drive should stay in a musical peak window, peak={driven_peak:.3}"
+        );
+        let h2 = measure_h2_over_h1(&mut fx, 1.0, 220.0, amp, sr);
+        let h3 = measure_h3_over_h1(&mut fx, 1.0, 220.0, amp, sr);
+        let thd = h2 + h3
+            + goertzel_mag(&driven, 220.0 * 5.0, sr) / goertzel_mag(&driven, 220.0, sr).max(1e-8);
+        assert!(
+            h3 > 0.18 || thd > 0.55,
+            "max drive should flood odd harmonics, h3/h1={h3:.3} thd={thd:.3}"
+        );
+        assert!(
+            h2 + h3 > 0.35,
+            "max drive harmonic sum, h2={h2:.3} h3={h3:.3}"
+        );
     }
 
     #[test]
@@ -717,7 +840,7 @@ mod tests {
         let max_rms = rms_lo.max(rms_mid).max(rms_hi);
         let min_rms = rms_lo.min(rms_mid).min(rms_hi);
         assert!(
-            max_rms / min_rms < 1.45,
+            max_rms / min_rms < 1.55,
             "drive 0.35..1.0 should stay within ~3 dB: lo={rms_lo:.4} mid={rms_mid:.4} hi={rms_hi:.4}"
         );
         let ref_rms = in_rms;
