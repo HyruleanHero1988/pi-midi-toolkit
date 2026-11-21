@@ -14,9 +14,10 @@ mod stuck;
 pub use assign::{MidiDest, MidiSource};
 pub use controller::{
     apply_default_overlay_dirs, apply_knob_cc, apply_overlay_dir, builtin_profiles,
-    installed_profiles, merge_profile_json, mpk_knob_ccs, mpk_note_for_phrase_cell,
-    mpk_phrase_notes, mpk_punch_pad_notes, profile_for_port_name, profile_for_port_name_in,
-    relative_cc_delta, sequential_phrase_notes, ControllerProfile, KnobEncoding,
+    installed_profiles, is_wire_pad_channel, merge_profile_json, mpk_knob_ccs,
+    mpk_note_for_phrase_cell, mpk_phrase_notes, mpk_punch_pad_notes, profile_for_port_name,
+    profile_for_port_name_in, relative_cc_delta, sequential_phrase_notes, ControllerProfile,
+    KnobEncoding, WIRE_PAD_CHANNEL,
 };
 pub use event::{Channel, MidiEvent, Note, Velocity};
 pub use ports::{

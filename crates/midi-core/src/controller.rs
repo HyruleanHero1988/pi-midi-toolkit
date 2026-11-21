@@ -10,6 +10,15 @@ use std::sync::{Mutex, OnceLock};
 
 use serde::{Deserialize, Serialize};
 
+/// Incoming hardware pad grid — General MIDI drums (MIDI channel 10, index 9).
+/// Keybed / synth traffic on channel 1 must never arm pads or phrase cells.
+pub const WIRE_PAD_CHANNEL: u8 = 9;
+
+#[inline]
+pub fn is_wire_pad_channel(channel: u8) -> bool {
+    channel == WIRE_PAD_CHANNEL
+}
+
 /// How a rotary reports CC values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -147,9 +156,8 @@ impl ControllerProfile {
 
     /// Akai MPK mini mk3 (Prog Select → Pad 1).
     ///
-    /// Live lab unit sends Bank A pads on MIDI channel 1 (`pad_channel = 0`),
-    /// not GM drums ch10. Overlay `controllers/mpk-mini.json` if a unit keeps
-    /// factory pad channel 10 (`"pad_channel": 9`).
+    /// Keys on ch1, pads on GM ch10 (`WIRE_PAD_CHANNEL`). `pad_channel` in JSON
+    /// is a legacy hint only; inbound pad routing ignores it.
     pub fn mpk_mini() -> Self {
         Self {
             id: "mpk-mini".into(),
@@ -218,26 +226,28 @@ impl ControllerProfile {
         self.punch_pad_notes.iter().position(|&n| n == note)
     }
 
-    /// Resolved pad MIDI channel (0-based). Missing profile field → GM ch10.
+    /// Legacy / outbound hint from controller JSON (`pad_channel`). Inbound pad
+    /// routing always uses [`WIRE_PAD_CHANNEL`] regardless of this field.
     pub fn pad_channel_index(&self) -> u8 {
-        self.pad_channel.unwrap_or(9)
+        self.pad_channel.unwrap_or(WIRE_PAD_CHANNEL)
     }
 
-    /// True when this note on `channel` is a Bank A punch / kit pad for the
-    /// profile — note match **and** the profile's pad channel. Keybed pitches
-    /// that reuse pad numbers on another channel stay melody.
+    /// Bank A punch pad: correct note **and** wire ch10.
     pub fn is_punch_pad(&self, channel: u8, note: u8) -> bool {
-        self.punch_index_for_pad(note).is_some() && channel == self.pad_channel_index()
+        is_wire_pad_channel(channel) && self.punch_index_for_pad(note).is_some()
     }
 
-    /// Pads→FX steal / UI arming: profile pad channel, or GM drums ch10 when
-    /// the hardware still sends factory pad hits there (lab MPK overlay may
-    /// claim ch1 while Prog Select left pads on ch10).
+    /// Pads→FX steal / kiosk punch arming: punch map notes on wire ch10 only.
     pub fn is_fx_pad_hit(&self, channel: u8, note: u8) -> bool {
-        if self.punch_index_for_pad(note).is_none() {
-            return false;
+        self.is_punch_pad(channel, note)
+    }
+
+    /// Phrase / clip grid pad on the 4×4 map: wire ch10 + profile phrase note.
+    pub fn is_phrase_pad_hit(&self, channel: u8, note: u8) -> Option<usize> {
+        if !is_wire_pad_channel(channel) {
+            return None;
         }
-        channel == self.pad_channel_index() || channel == 9
+        self.phrase_cell_for_note(note)
     }
 
     pub fn note_for_phrase_cell(&self, cell: usize) -> u8 {
@@ -430,12 +440,21 @@ mod tests {
         assert_eq!(p.punch_index_for_pad(40), Some(0));
         assert_eq!(p.punch_index_for_knob(70), Some(0));
         assert_eq!(p.punch_index_for_knob(1), None);
-        assert_eq!(p.pad_channel_index(), 0);
-        assert!(p.is_punch_pad(0, 40));
-        assert!(!p.is_punch_pad(9, 40));
-        assert!(p.is_fx_pad_hit(0, 40));
+        assert_eq!(p.pad_channel_index(), 0, "overlay field unchanged");
+        assert!(!p.is_punch_pad(0, 40), "keys ch1 never a pad");
+        assert!(p.is_punch_pad(9, 40));
+        assert!(!p.is_fx_pad_hit(0, 40));
         assert!(p.is_fx_pad_hit(9, 40));
         assert!(!p.is_fx_pad_hit(2, 40));
+        assert_eq!(p.is_phrase_pad_hit(9, 40), Some(0));
+        assert!(p.is_phrase_pad_hit(0, 40).is_none());
+    }
+
+    #[test]
+    fn wire_pad_channel_is_gm_drums_only() {
+        assert_eq!(WIRE_PAD_CHANNEL, 9);
+        assert!(is_wire_pad_channel(9));
+        assert!(!is_wire_pad_channel(0));
     }
 
     #[test]

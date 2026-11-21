@@ -3418,6 +3418,9 @@ impl NativeModel {
         if self.apply_punch_midi(notice, outbox) {
             return;
         }
+        if self.apply_phrase_pad_midi(notice, outbox) {
+            return;
+        }
         if kind == "note_on" || kind == "noteon" {
             if vel > 0 {
                 self.note_midi_held(notice.channel, true);
@@ -3425,7 +3428,7 @@ impl NativeModel {
                     // Focus the played pad on the KIT page only. Never copy
                     // that pad's macros onto another voice — selection is
                     // display/edit target, not a broadcast.
-                    self.focus_kit_pad_for_note(note);
+                    self.focus_kit_pad_for_note(notice.channel, note);
                     if self.handle_hardware_drum_repeat(note, true, outbox) {
                         self.last_midi_activity =
                             format!("IN  ch{} n{} v{}", notice.channel + 1, note, vel);
@@ -7014,8 +7017,8 @@ impl NativeModel {
 
     /// Move KIT focus to the pad that owns `note`. Leaves every voice's macros
     /// untouched — playing snare loud must not rewrite kick's LEVEL.
-    fn focus_kit_pad_for_note(&mut self, note: u8) {
-        if self.mode != UiMode::Drums {
+    fn focus_kit_pad_for_note(&mut self, channel: u8, note: u8) {
+        if channel != DRUM_CHANNEL || self.mode != UiMode::Drums {
             return;
         }
         let Some(index) = (0..16).find(|&i| {
@@ -7586,13 +7589,33 @@ impl NativeModel {
         );
     }
 
+    /// PADS play view: hardware 4×4 phrase grid (wire ch10 only).
+    fn apply_phrase_pad_midi(&mut self, notice: &MidiNotice, outbox: &mut Outbox) -> bool {
+        if self.mode != UiMode::Pads || self.pads_edit {
+            return false;
+        }
+        let kind = notice.kind.to_ascii_lowercase();
+        if kind != "note_on" && kind != "noteon" {
+            return false;
+        }
+        if notice.velocity.unwrap_or(0) == 0 {
+            return true;
+        }
+        let note = notice.note.unwrap_or(255);
+        let profile = self.profile_for_notice(notice);
+        let Some(cell) = profile.is_phrase_pad_hit(notice.channel, note) else {
+            return false;
+        };
+        self.toggle_phrase(cell, outbox);
+        true
+    }
+
     fn apply_punch_midi(&mut self, notice: &MidiNotice, outbox: &mut Outbox) -> bool {
         if self.mode != UiMode::Fx {
             return false;
         }
         let kind = notice.kind.to_ascii_lowercase();
-        // Knobs often share the keys channel. Pads arm only on the profile's
-        // pad channel + punch_pad_notes (lab MPK: ch1, not GM ch10).
+        // Knobs often share the keys channel. Pad toggles: wire ch10 only.
         let profile = self.profile_for_notice(notice);
         if kind == "control_change" || kind == "cc" {
             let Some(index) = profile.punch_index_for_knob(notice.control.unwrap_or(255)) else {
@@ -7621,7 +7644,6 @@ impl NativeModel {
             return false;
         }
         let note = notice.note.unwrap_or(255);
-        // Accept profile pad channel or GM ch10 (factory pad hits).
         if !profile.is_fx_pad_hit(notice.channel, note) {
             return false;
         }
@@ -7639,6 +7661,9 @@ impl NativeModel {
             return true;
         }
         if kind == "poly_pressure" || kind == "polypressure" || kind == "polyaftertouch" {
+            if !profile.is_fx_pad_hit(notice.channel, note) {
+                return false;
+            }
             let Some(index) = profile.punch_index_for_pad(note) else {
                 return false;
             };
@@ -15235,8 +15260,7 @@ mod tests {
     ) -> MidiNotice {
         MidiNotice {
             kind: kind.into(),
-            // Default model profile is MPK: lab pad channel is MIDI ch1.
-            channel: midi_core::ControllerProfile::mpk_mini().pad_channel_index(),
+            channel: midi_core::WIRE_PAD_CHANNEL,
             note,
             velocity,
             control,
@@ -15263,6 +15287,44 @@ mod tests {
                 .any(|r| matches!(r, Request::PunchPads { armed: true, .. })),
             "entering FX must re-push pads→FX, got {batch:?}"
         );
+    }
+
+    #[test]
+    fn fx_punch_ch1_keys_never_arm_even_on_pad_notes() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Fx);
+        model.punch_pads_fx = true;
+        let mut out = Outbox::new();
+        for note in [40u8, 36, 60] {
+            model.on_midi_notice(
+                &MidiNotice {
+                    kind: "note_on".into(),
+                    channel: 0,
+                    note: Some(note),
+                    velocity: Some(100),
+                    control: None,
+                    value: None,
+                    controller: None,
+                },
+                &mut out,
+            );
+            assert!(
+                !model.punch_armed.iter().any(|a| *a),
+                "ch1 note {note} must not arm FX pads"
+            );
+            model.on_midi_notice(
+                &MidiNotice {
+                    kind: "note_off".into(),
+                    channel: 0,
+                    note: Some(note),
+                    velocity: Some(0),
+                    control: None,
+                    value: None,
+                    controller: None,
+                },
+                &mut out,
+            );
+        }
     }
 
     #[test]
@@ -15793,7 +15855,7 @@ mod tests {
         model.on_midi_notice(
             &MidiNotice {
                 kind: "note_on".into(),
-                channel: model.controller_profile.pad_channel_index(),
+                channel: midi_core::WIRE_PAD_CHANNEL,
                 note: Some(36),
                 velocity: Some(100),
                 control: None,
@@ -15809,6 +15871,84 @@ mod tests {
         assert!(
             !model.punch_armed[4],
             "MPK Bank A bottom-left must stay off"
+        );
+    }
+
+    #[test]
+    fn pads_play_ch10_toggles_phrase_ch1_ignored() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Pads);
+        model.phrases[0] = pad_with_one_note();
+        let mut out = Outbox::new();
+        model.on_midi_notice(
+            &MidiNotice {
+                kind: "note_on".into(),
+                channel: 0,
+                note: Some(model.controller_profile.note_for_phrase_cell(0)),
+                velocity: Some(100),
+                control: None,
+                value: None,
+                controller: None,
+            },
+            &mut out,
+        );
+        assert!(
+            !model.phrase_playing[0],
+            "ch1 must not launch phrase cell A1"
+        );
+        model.on_midi_notice(
+            &MidiNotice {
+                kind: "note_on".into(),
+                channel: midi_core::WIRE_PAD_CHANNEL,
+                note: Some(model.controller_profile.note_for_phrase_cell(0)),
+                velocity: Some(100),
+                control: None,
+                value: None,
+                controller: None,
+            },
+            &mut out,
+        );
+        assert!(model.phrase_playing[0], "wire ch10 must launch phrase A1");
+        assert!(
+            out.take()
+                .iter()
+                .any(|r| matches!(r, Request::ClipLaunch { slot: 0, .. })),
+        );
+    }
+
+    #[test]
+    fn drums_kit_focus_only_follows_ch10() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Drums);
+        model.kit_selected = 0;
+        model.on_midi_notice(
+            &MidiNotice {
+                kind: "note_on".into(),
+                channel: 0,
+                note: Some(model.controller_profile.note_for_phrase_cell(4)),
+                velocity: Some(110),
+                control: None,
+                value: None,
+                controller: None,
+            },
+            &mut Outbox::new(),
+        );
+        assert_eq!(model.kit_selected, 0, "ch1 must not move kit selection");
+        model.on_midi_notice(
+            &MidiNotice {
+                kind: "note_on".into(),
+                channel: DRUM_CHANNEL,
+                note: Some(36),
+                velocity: Some(110),
+                control: None,
+                value: None,
+                controller: None,
+            },
+            &mut Outbox::new(),
+        );
+        assert_ne!(
+            model.kit_selected, 0,
+            "wire ch10 kick should focus its kit pad"
         );
     }
 
@@ -15894,7 +16034,19 @@ mod tests {
         let mut model = NativeModel::new();
         model.set_mode(UiMode::Fx);
         let mut out = Outbox::new();
-        // Lab MPK pads are ch1 (or factory ch10). A third channel must not arm.
+        model.on_midi_notice(
+            &MidiNotice {
+                kind: "note_on".into(),
+                channel: 0,
+                note: Some(40),
+                velocity: Some(100),
+                control: None,
+                value: None,
+                controller: None,
+            },
+            &mut out,
+        );
+        assert!(!model.punch_armed[0], "ch1 must not arm punch pad 40");
         model.on_midi_notice(
             &MidiNotice {
                 kind: "note_on".into(),

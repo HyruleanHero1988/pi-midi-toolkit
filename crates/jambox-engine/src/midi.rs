@@ -2168,16 +2168,15 @@ mod tests {
         let map = MidiMap::default();
         map.set_punch();
         let profile = ControllerProfile::mpk_mini();
-        let pad_ch = profile.pad_channel_index();
         assert!(map
             .interpret_with(
                 &profile,
                 MidiEvent::NoteOn {
-                    channel: pad_ch,
+                    channel: midi_core::WIRE_PAD_CHANNEL,
                     note: 40,
                     velocity: 100,
                 },
-                0
+                midi_core::WIRE_PAD_CHANNEL
             )
             .is_none());
         assert!(map
@@ -2205,21 +2204,15 @@ mod tests {
     }
 
     #[test]
-    fn punch_mode_only_steals_profile_pad_channel() {
-        // Lab MPK: pads on ch1 (index 0). Pads→FX also steals factory ch10 pad
-        // hits so a Prog Select reset cannot leave the kit firing on FX.
-        // Keybed pitches that reuse pad numbers on a non-pad / non-drum channel
-        // still sound.
+    fn punch_mode_only_steals_wire_ch10_pads() {
         let map = MidiMap::default();
         map.set_punch();
         assert!(map.pads_to_fx());
         let mpk = ControllerProfile::mpk_mini();
-        assert_eq!(mpk.pad_channel_index(), 0);
         for note in 36u8..=43 {
-            assert!(mpk.is_punch_pad(0, note));
-            assert!(!mpk.is_punch_pad(9, note));
+            assert!(!mpk.is_punch_pad(0, note));
             assert!(mpk.is_fx_pad_hit(9, note));
-            assert!(
+            assert_eq!(
                 map.interpret_with(
                     &mpk,
                     MidiEvent::NoteOn {
@@ -2228,9 +2221,13 @@ mod tests {
                         velocity: 100,
                     },
                     0
-                )
-                .is_none(),
-                "MPK pad channel note {note} arms FX"
+                ),
+                Some(Command::NoteOn {
+                    channel: 0,
+                    note,
+                    velocity: 100
+                }),
+                "keys ch1 pad-number {note} must play synth"
             );
             assert!(
                 map.interpret_with(
@@ -2243,7 +2240,7 @@ mod tests {
                     9
                 )
                 .is_none(),
-                "factory ch10 pad {note} must also arm FX, not the kit"
+                "wire ch10 pad {note} arms FX, not the kit"
             );
             assert_eq!(
                 map.interpret_with(
@@ -2260,7 +2257,7 @@ mod tests {
                     note,
                     velocity: 100
                 }),
-                "non-pad-channel MIDI {note} must still sound"
+                "other channels keep pad-number pitches"
             );
         }
         // SMK (and factory ch10 maps): pads on drums channel; keys ch1 keep 36–43.
