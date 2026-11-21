@@ -400,57 +400,56 @@ fn read_delay_frac(buf: &[f32], write_pos: usize, delay_samp: f32) -> f32 {
     buf[i0] * (1.0 - frac) + buf[i1] * frac
 }
 
-/// Asymmetric soft-knee tube clipper (H2-rich) with mid pre-emphasis, DC block,
-/// level compensation, and 2× oversampling around the nonlinearity.
+/// Asymmetric soft-knee tube clipper (H2-rich) with mild pre-emphasis, DC block,
+/// partial level makeup, and 2× oversampling around the nonlinearity.
+///
+/// `drive` is saturation amount only (full insert). Dry/wet crossfading on this
+/// knob had made moderate bus levels sound almost clean — see PR fixing bus DRIVE.
 fn process_tube_drive(buf: &mut [f32], drive: f32, dc_x: &mut f32, dc_y: &mut f32) {
-    // Map 0..1 slider → 0..24 dB drive.
-    let drive_db = drive * 24.0;
-    let gain = 0.35 * 10f32.powf(drive_db / 20.0);
-    let inv_gain = 1.0 / gain.max(0.35);
-    // One-pole mid pre-emphasis (~2–3 dB around 1–2 kHz feel); remove after.
-    let pre = 0.18 * drive;
-    // DC blocker (R=0.995).
+    let t = drive.clamp(0.0, 1.0);
+    // Quadratic gain: warm bite by ~0.4, obvious crunch by 1.0 on typical bus levels.
+    let gain = 1.0 + t * t * 22.0;
+    // Partial makeup so level stays sensible without undoing harmonic color.
+    let makeup = 1.0 / (1.0 + 0.30 * t * t);
+    let pre = 0.14 * t;
     let r = 0.995f32;
 
     for s in buf.iter_mut() {
-        let dry = *s;
-        // Cheap 2× OS: process mid-point and current, average.
+        let x0 = *s;
         let mut acc = 0.0f32;
-        let mut prev = dry;
+        let mut prev = x0;
         for step in 0..DRIVE_OS {
             let x = if step == 0 {
-                // Linear interpolate toward next is unavailable per-sample; use
-                // hold + slight blend with previous output sample.
-                dry
+                x0
             } else {
-                0.5 * (prev + dry)
+                0.5 * (prev + x0)
             };
-            prev = dry;
-            // Mid pre-emphasis (simple high-shelf-ish boost of highs/mids).
-            let emphasized = x + pre * (x - *dc_y);
+            prev = x0;
+            let emphasized = x * (1.0 + pre);
             let hot = emphasized * gain;
-            let clipped = dual_knee_clip(hot);
-            // Remove the linear pre-emphasis contribution after the nonlinearity.
-            let shaped = clipped * inv_gain - pre * (clipped * inv_gain - x) * 0.5;
-            // DC blocker
+            let clipped = dual_knee_clip(hot, t);
+            let shaped = clipped * makeup;
             let y = shaped - *dc_x + r * *dc_y;
             *dc_x = shaped;
             *dc_y = y;
             acc += y;
         }
-        let wet = acc / DRIVE_OS as f32;
-        // Crossfade by drive amount so Drive 0 is clean (caller already gated).
-        *s = dry * (1.0 - drive) + wet * drive;
+        *s = acc / DRIVE_OS as f32;
     }
 }
 
 /// Positive half saturates earlier/firmer; negative later/softer → mostly H2.
+/// Knees tighten as `drive` rises so bus-level signals hit the tube sooner.
 #[inline]
-fn dual_knee_clip(x: f32) -> f32 {
+fn dual_knee_clip(x: f32, drive: f32) -> f32 {
+    let knee_p = 0.90 - 0.58 * drive;
+    let knee_n = 1.18 - 0.48 * drive;
+    let span_p = 0.48 + 0.14 * drive;
+    let span_n = 1.08 + 0.18 * drive;
     if x >= 0.0 {
-        soft_knee(x, 0.35, 0.56)
+        soft_knee(x, knee_p, span_p)
     } else {
-        -soft_knee(-x, 0.95, 1.20)
+        -soft_knee(-x, knee_n, span_n)
     }
 }
 
@@ -528,6 +527,100 @@ mod tests {
         assert!(buf.iter().all(|v| v.abs() <= 1.5));
         // Tube drive should still be audible / non-zero.
         assert!(buf.iter().any(|v| v.abs() > 0.1));
+    }
+
+    fn sine_buffer(freq_hz: f32, amp: f32, sample_rate: f32, frames: usize) -> Vec<f32> {
+        let mut buf = vec![0.0f32; frames];
+        for (i, s) in buf.iter_mut().enumerate() {
+            *s = (i as f32 * freq_hz / sample_rate * std::f32::consts::TAU).sin() * amp;
+        }
+        buf
+    }
+
+  /// Single-bin Goertzel magnitude at `freq_hz` (optionally a harmonic of the base tone).
+    fn goertzel_mag(buf: &[f32], freq_hz: f32, sample_rate: f32) -> f32 {
+        let n = buf.len();
+        let omega = std::f32::consts::TAU * freq_hz / sample_rate;
+        let coeff = 2.0 * omega.cos();
+        let mut s1 = 0.0f32;
+        let mut s2 = 0.0f32;
+        for &x in buf {
+            let s0 = x + coeff * s1 - s2;
+            s2 = s1;
+            s1 = s0;
+        }
+        let real = s1 - s2 * omega.cos();
+        let imag = s2 * omega.sin();
+        (real * real + imag * imag).sqrt() / n as f32 * 2.0
+    }
+
+    fn measure_h2_over_h1(
+        fx: &mut FxUnit,
+        drive: f32,
+        freq_hz: f32,
+        amp: f32,
+        sample_rate: f32,
+    ) -> f32 {
+        let frames = (sample_rate * 0.5) as usize;
+        fx.set_params(FxParams {
+            drive,
+            ..FxParams::default()
+        });
+        let mut buf = sine_buffer(freq_hz, amp, sample_rate, frames);
+        fx.process(&mut buf);
+        let h1 = goertzel_mag(&buf, freq_hz, sample_rate).max(1e-8);
+        let h2 = goertzel_mag(&buf, freq_hz * 2.0, sample_rate);
+        h2 / h1
+    }
+
+    #[test]
+    fn drive_second_harmonic_rises_with_amount() {
+        let sr = 48_000.0;
+        let mut fx_lo = FxUnit::new(sr);
+        let mut fx_mid = FxUnit::new(sr);
+        let mut fx_hi = FxUnit::new(sr);
+        let amp = 0.22f32;
+        let low = measure_h2_over_h1(&mut fx_lo, 0.35, 440.0, amp, sr);
+        let mid = measure_h2_over_h1(&mut fx_mid, 0.55, 440.0, amp, sr);
+        let high = measure_h2_over_h1(&mut fx_hi, 1.0, 440.0, amp, sr);
+        assert!(
+            mid > low * 2.5 && high > low * 6.0,
+            "H2/H1 should climb with drive: low={low:.5} mid={mid:.5} high={high:.5}"
+        );
+        assert!(
+            mid > 0.06,
+            "moderate drive must be clearly non-clean at bus levels, mid={mid:.5}"
+        );
+        assert!(
+            high > 0.07,
+            "full drive should be crunchy (compression may trim H2 vs mid), high={high:.5}"
+        );
+    }
+
+    #[test]
+    fn drive_moderate_changes_waveform_from_clean() {
+        let sr = 48_000.0;
+        let frames = 4096usize;
+        let freq = 330.0f32;
+        let amp = 0.2f32;
+        let clean = sine_buffer(freq, amp, sr, frames);
+        let mut driven = clean.clone();
+        let mut fx = FxUnit::new(sr);
+        fx.set_params(FxParams {
+            drive: 0.5,
+            ..FxParams::default()
+        });
+        fx.process(&mut driven);
+        let mut diff_sq = 0.0f32;
+        for (a, b) in clean.iter().zip(driven.iter()) {
+            let d = a - b;
+            diff_sq += d * d;
+        }
+        let rms_diff = (diff_sq / frames as f32).sqrt();
+        assert!(
+            rms_diff > 0.008,
+            "drive 0.5 should audibly reshape a bus-level tone, rms_diff={rms_diff:.5}"
+        );
     }
 
     #[test]

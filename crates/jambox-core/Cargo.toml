@@ -13,3 +13,7 @@ serde_json = { workspace = true }
 [[example]]
 name = "phaser_render"
 path = "examples/phaser_render.rs"
+
+[[example]]
+name = "drive_render"
+path = "examples/drive_render.rs"
