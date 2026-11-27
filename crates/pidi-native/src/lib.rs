@@ -34,6 +34,7 @@ pub mod smooth_font;
 pub mod song_viz;
 pub mod songs;
 pub mod throttle;
+pub mod touch_stabilize;
 pub mod voice_bake;
 pub mod wave_viz;
 pub mod waves;
