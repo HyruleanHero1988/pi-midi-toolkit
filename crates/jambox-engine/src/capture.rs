@@ -14,7 +14,7 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{BufferSize, Device, SampleFormat, StreamConfig};
 use tracing::{info, warn};
 
-use crate::audio::{AudioError, AudioHealth};
+use crate::audio::{is_hifiberry_output, AudioError, AudioHealth};
 
 const HOTPLUG_POLL: Duration = Duration::from_millis(400);
 const WATCH_POLL: Duration = Duration::from_millis(200);
@@ -259,6 +259,9 @@ pub fn skip_capture_name(name: &str, filter: &str) -> bool {
         || lower.contains("pulse")
         || lower.contains("jack")
         || lower.contains("pipewire")
+        || lower == "null"
+        || lower.starts_with("dsnoop:")
+        || lower.starts_with("dmix:")
     {
         return true;
     }
@@ -269,38 +272,124 @@ pub fn skip_capture_name(name: &str, filter: &str) -> bool {
     false
 }
 
+fn looks_usb_capture(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    if is_hifiberry_output(name) || skip_capture_name(name, "") {
+        return false;
+    }
+    lower.contains("usb")
+        || lower.contains("pnp")
+        || lower.contains("bluetr")
+        || (lower.contains("hw:card=") && !is_hifiberry_output(name))
+}
+
+fn filter_wants_hifiberry(filter: &str) -> bool {
+    let f = filter.trim().to_ascii_lowercase();
+    f.contains("hifiberry") || f.contains("dacplus") || f.contains("sndrpihifiberry")
+}
+
+fn filter_wants_usb(filter: &str) -> bool {
+    let f = filter.trim().to_ascii_lowercase();
+    !f.is_empty()
+        && !filter_wants_hifiberry(&f)
+        && (f.contains("usb") || f.contains("pnp") || looks_usb_capture(filter))
+}
+
 /// Pick a capture device. Prefers a name substring; skips HDMI / soft plugins
-/// when possible; favors USB PnP / `hw:CARD=` mics over Pulse/Jack ghosts.
-pub fn pick_input(name_filter: &str) -> Result<Device, AudioError> {
+/// when possible.
+///
+/// AUTO (empty filter): USB mic/line if present, else HiFiBerry `hw:`.
+/// Explicit `hifiberry` / USB card name: honor that. Soft `default`/`dsnoop`
+/// are skipped when playback already owns an exclusive `hw:` card.
+///
+/// Call only after output is running (or idle). cpal opens both PCM directions
+/// while building each `Device`; holding one across play open causes EBUSY.
+pub fn pick_input(name_filter: &str, output_name: &str) -> Result<Device, AudioError> {
     let host = cpal::default_host();
     let filter = name_filter.trim().to_ascii_lowercase();
+    let output_name = output_name.trim();
+    let out_lower = output_name.to_ascii_lowercase();
+    let want_hw = out_lower.starts_with("hw:card=") || is_hifiberry_output(output_name);
+    let want_hat = filter_wants_hifiberry(&filter);
+    let want_usb = filter_wants_usb(&filter);
+
+    let mut exact_hw: Option<Device> = None;
+    let mut hw_hat: Option<Device> = None;
     let mut preferred: Option<Device> = None;
     let mut fallback: Option<Device> = None;
+    let mut seen: Vec<String> = Vec::new();
     if let Ok(devices) = host.input_devices() {
         for device in devices {
             let name = device.name().unwrap_or_default();
             let lower = name.to_ascii_lowercase();
+            seen.push(name.clone());
             if skip_capture_name(&name, &filter) {
                 continue;
             }
-            if !filter.is_empty() && lower.contains(&filter) {
-                return Ok(device);
+            // While exclusive hw: play is up, ignore soft plugins entirely.
+            if want_hw
+                && (lower == "default"
+                    || lower.starts_with("default:")
+                    || lower.starts_with("sysdefault")
+                    || lower.starts_with("dsnoop:")
+                    || lower.starts_with("dmix:")
+                    || lower.starts_with("plughw:"))
+            {
+                continue;
             }
-            let looks_usb = lower.contains("usb")
-                || lower.contains("pnp")
-                || lower.contains("hw:card=")
-                || lower.contains("bluetr");
-            if looks_usb && preferred.is_none() {
+            if !output_name.is_empty() && name == output_name {
+                exact_hw = Some(device);
+                continue;
+            }
+            if !filter.is_empty() && lower.contains(&filter) {
+                // Prefer hw: matches when the filter names the HAT.
+                if want_hat && lower.starts_with("hw:card=") {
+                    return Ok(device);
+                }
+                if preferred.is_none() {
+                    preferred = Some(device);
+                }
+                continue;
+            }
+            if is_hifiberry_output(&name) && lower.starts_with("hw:card=") {
+                if hw_hat.is_none() {
+                    hw_hat = Some(device);
+                }
+                continue;
+            }
+            if is_hifiberry_output(&name) {
+                // Soft HAT name while play holds hw: — skip.
+                continue;
+            }
+            if looks_usb_capture(&name) && preferred.is_none() {
                 preferred = Some(device);
             } else if fallback.is_none() {
                 fallback = Some(device);
             }
         }
     }
-    preferred
-        .or(fallback)
-        .or_else(|| host.default_input_device())
-        .ok_or(AudioError::NoDevice)
+    // Explicit HAT → shared I2S peer. Explicit USB → USB only. AUTO → USB then HAT.
+    let chosen = if want_hat {
+        exact_hw.or(hw_hat).or(preferred)
+    } else if want_usb {
+        preferred.or(fallback)
+    } else if !filter.is_empty() {
+        preferred.or(exact_hw).or(fallback).or(hw_hat)
+    } else {
+        preferred.or(exact_hw).or(hw_hat).or(fallback)
+    };
+    if let Some(d) = chosen {
+        return Ok(d);
+    }
+    if want_hw && (want_hat || filter.is_empty()) {
+        warn!(
+            output = %output_name,
+            inputs = ?seen,
+            "audio: no hw: capture peer for output; line-in deferred"
+        );
+        return Err(AudioError::NoDevice);
+    }
+    host.default_input_device().ok_or(AudioError::NoDevice)
 }
 
 pub fn list_inputs() -> Vec<String> {
@@ -316,47 +405,81 @@ pub fn list_inputs() -> Vec<String> {
     out
 }
 
-/// Own the input stream while `running`. Reopens with SET → AUDIO.
+/// Own the input stream while `running`. Reopens with SET → AUDIO / `audio_select`.
 pub fn spawn_input(
     filter: String,
     ring: Arc<CaptureRing>,
     health: Arc<AudioHealth>,
     running: Arc<AtomicBool>,
 ) {
+    health.set_input_filter(&filter);
     let _ = std::thread::Builder::new()
         .name("jambox-audio-in".into())
-        .spawn(move || input_supervisor(filter, ring, health, running));
+        .spawn(move || input_supervisor(ring, health, running));
 }
 
 fn input_supervisor(
-    filter: String,
     ring: Arc<CaptureRing>,
     health: Arc<AudioHealth>,
     running: Arc<AtomicBool>,
 ) {
     let mut backoff = BACKOFF_START;
     let mut announced_wait = false;
-    // Held across failed opens. Re-listing inputs opens every ALSA plugin
-    // (JACK, Pulse, OSS) and POLLERRs the live headphone stream.
+    // Held across failed opens. Do not enumerate while output is still
+    // opening — cpal's Device list opens every soft plugin and races play.
     let mut device: Option<Device> = None;
     let mut last_gen = health.reopen_gen();
-    if filter.trim().is_empty() {
-        info!("audio: watching for capture (USB mic / line)");
-    } else {
-        info!(filter = %filter, "audio: watching for capture");
+    {
+        let filter = health.input_filter();
+        if filter.trim().is_empty() {
+            info!("audio: watching for capture (USB mic / line)");
+        } else {
+            info!(filter = %filter, "audio: watching for capture");
+        }
     }
 
     while running.load(Ordering::Relaxed) {
         let gen = health.reopen_gen();
         if gen != last_gen {
             device = None;
+            health.set_input_device("");
             last_gen = gen;
             backoff = BACKOFF_START;
         }
+        let filter = health.input_filter();
+        // HiFiBerry duplex needs play first (matched rate, no probe). USB can
+        // open once we know the output clock for resampling.
+        let out_rate = health.output_sample_rate();
+        if out_rate == 0 {
+            if !announced_wait {
+                info!("audio: capture waiting for output stream");
+                announced_wait = true;
+            }
+            std::thread::sleep(HOTPLUG_POLL);
+            continue;
+        }
+        let out_dev = health.output_device();
         if device.is_none() {
-            match pick_input(&filter) {
+            match pick_input(&filter, &out_dev) {
                 Ok(d) => {
+                    let name = d.name().unwrap_or_default();
+                    let lower = name.to_ascii_lowercase();
+                    // Soft HAT plugins cannot duplex beside exclusive hw: play.
+                    if is_hifiberry_output(&name) && !lower.starts_with("hw:card=") {
+                        drop(d);
+                        if !announced_wait {
+                            info!("audio: waiting for hw: HiFiBerry capture peer");
+                            announced_wait = true;
+                        }
+                        std::thread::sleep(HOTPLUG_POLL);
+                        continue;
+                    }
                     announced_wait = false;
+                    // Refresh Settings picker names without a second full scan
+                    // when we already have a live list.
+                    if health.listed_inputs().is_empty() {
+                        health.set_listed_inputs(vec![name]);
+                    }
                     device = Some(d);
                 }
                 Err(_) => {
@@ -373,16 +496,22 @@ fn input_supervisor(
             continue;
         };
 
-        match open_input_stream(device_ref, Arc::clone(&ring), &health) {
+        match open_input_stream(device_ref, Arc::clone(&ring), &health, out_rate) {
             Ok(stream) => {
+                let name = device_ref.name().unwrap_or_default();
                 info!(
-                    device = %device_ref.name().unwrap_or_default(),
+                    device = %name,
                     sample_rate = stream.sample_rate,
                     channels = stream.channels,
                     "audio: capture running"
                 );
+                // Same cpal ALSA quirk as output: Device keeps the unused
+                // direction open. Drop it so play reopen is not EBUSY.
+                drop(device.take());
+                health.set_input_device(&name);
                 backoff = BACKOFF_START;
                 watch_input(&running, &health);
+                health.set_input_device("");
                 drop(stream);
                 ring.clear();
                 ring.set_sample_rate(0);
@@ -391,7 +520,9 @@ fn input_supervisor(
                 }
             }
             Err(err) => {
+                health.set_input_device("");
                 warn!(%err, "audio: capture stream failed; retrying");
+                device = None;
                 std::thread::sleep(backoff);
                 backoff = (backoff.saturating_mul(2)).min(BACKOFF_MAX);
             }
@@ -402,8 +533,14 @@ fn input_supervisor(
 fn watch_input(running: &AtomicBool, health: &AudioHealth) {
     health.capture_error.store(false, Ordering::Relaxed);
     let start_gen = health.reopen_gen();
+    let start_rate = health.output_sample_rate();
     while running.load(Ordering::Relaxed) {
         if health.reopen_gen() != start_gen {
+            break;
+        }
+        // Shared I2S: drop capture when playback stops or changes rate.
+        let rate = health.output_sample_rate();
+        if rate == 0 || rate != start_rate {
             break;
         }
         // POLLERR / USB unplug sets this; reopen instead of spinning warn spam.
@@ -425,16 +562,31 @@ fn open_input_stream(
     device: &Device,
     ring: Arc<CaptureRing>,
     health: &Arc<AudioHealth>,
+    forced_rate: u32,
 ) -> Result<RunningInput, AudioError> {
-    let supported = device
-        .default_input_config()
-        .map_err(|e| AudioError::Config(e.to_string()))?;
-    // cpal already picks 44.1 kHz when the mic lists it. A second
-    // supported-config probe on this USB device returns EPIPE on the open
-    // that follows, so use the default config as-is.
-    let sample_rate = supported.sample_rate().0;
-    let channels = supported.channels();
-    let format = supported.sample_format();
+    let name = device.name().unwrap_or_default();
+    // Shared I2S (HiFiBerry): probing default_input_config while playback holds
+    // the multicodec fails. Mirror the output clock with no ALSA config probe.
+    // USB mics keep their native format/channels; we only nudge the rate.
+    let (sample_rate, channels, format) =
+        if forced_rate > 0 && is_hifiberry_output(&name) {
+            info!(
+                device = %name,
+                forced_rate,
+                "audio: capture matching output rate (no config probe)"
+            );
+            (forced_rate, 2u16, SampleFormat::I16)
+        } else {
+            let supported = device
+                .default_input_config()
+                .map_err(|e| AudioError::Config(e.to_string()))?;
+            let rate = if forced_rate > 0 {
+                forced_rate
+            } else {
+                supported.sample_rate().0
+            };
+            (rate, supported.channels(), supported.sample_format())
+        };
     ring.set_sample_rate(sample_rate);
     ring.clear();
 
@@ -447,7 +599,7 @@ fn open_input_stream(
         buffer_size: BufferSize::Default,
     };
     info!(
-        device = %device.name().unwrap_or_default(),
+        device = %name,
         sample_rate,
         channels,
         format = ?format,

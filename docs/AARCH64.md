@@ -25,7 +25,14 @@ sudo bash deploy/setup-pi.sh
 
 `setup-pi.sh` installs ALSA + SDL/KMSDRM runtime packages, realtime limits,
 and enables `midi-engine` / `jambox-engine` / `pidi-native` units (rewritten
-for `$USER` / `$HOME` when not `pi`).
+for `$USER` / `$HOME` when not `pi`). On **aarch64** it also runs
+`deploy/enable-hifiberry.sh` (exclusive I2S for the DAC+ADC Pro HAT). Override
+with `ENABLE_HIFIBERRY=0` on a headless aarch64 box without the HAT, or
+`ENABLE_HIFIBERRY=1` on armv7 if you ever attach one.
+
+After setup (or after SD firstboot), **reboot once** so `aplay -l` shows
+`sndrpihifiberry` only (no Headphones). The unit ships with `--output hifiberry`;
+the engine opens play+capture duplex on that `hw:CARD=` device.
 
 ## Build aarch64 engines (PC)
 
@@ -57,17 +64,28 @@ PI_DIST_ARCH=aarch64 USE_STAGED=1 WITH_JAMBOX=1 ./deploy/deploy.sh <user>@<pi-ip
 After first deploy, mask LightDM so KMSDRM can own the panel (see
 `setup-pi.sh` output), then restart the units.
 
+## HiFiBerry (DAC+ADC Pro)
+
+Canonical script: `deploy/enable-hifiberry.sh` (idempotent).
+
+| Path | What runs it |
+|------|----------------|
+| Fresh Pi after `setup-pi.sh` | auto on aarch64 |
+| Pi 4 SD firstboot | `_pidi_pi4_firstboot.sh` |
+| SD image prep | `_prepare_pi4_sd*.sh` patches `config.txt` offline (`SKIP_RUNTIME=1`) |
+| Manual / repair | `sudo bash deploy/enable-hifiberry.sh` |
+
+It sets `dtparam=audio=off`, `dtoverlay=vc4-kms-v3d,noaudio`,
+`dtoverlay=hifiberry-dacplusadcpro`, forces `--output hifiberry` on the unit,
+and unmutes Digital when the card is already loaded.
+
 ## Still open (later OS-image tickets)
 
-These are **not** part of the dual-arch toolchain slice:
+These are **not** part of the dual-arch / HiFiBerry bring-up:
 
-- HiFiBerry DAC2 ADC Pro overlays / 48 kHz / HW volume
 - Geekworm X728 battery monitoring and `x728off`
 - Seamless Plymouth → UI boot (no cursor flash)
 - Minimal Buildroot/Yocto image
-
-Hardware acceptance (touch, audio, MIDI under load) waits until the Pi 4 card
-is flashed and the aarch64 bins are running on it.
 
 ## Arch cheat sheet
 

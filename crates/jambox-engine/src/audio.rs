@@ -11,7 +11,7 @@
 //! opens every ALSA plugin (JACK, Pulse, OSS, dmix). On this Pi that pegs a
 //! core and returns POLLERR on the live headphone PCM.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -37,6 +37,8 @@ const BACKOFF_START: Duration = Duration::from_millis(250);
 const BACKOFF_MAX: Duration = Duration::from_secs(4);
 
 const RANK_FILTER: i32 = 1_000;
+/// Prefer HiFiBerry / HAT I2S over bcm2835 Headphones when both are present.
+const RANK_HIFIBERRY: i32 = 200;
 const RANK_ANALOG: i32 = 100;
 
 #[derive(Debug, thiserror::Error)]
@@ -58,6 +60,23 @@ pub struct AudioHealth {
     pub(crate) capture_error: AtomicBool,
     /// Bumped by SET → AUDIO so both output and capture supervisors reopen.
     reopen_gen: AtomicU64,
+    /// Live output sample rate (Hz). 0 = output not running.
+    /// Capture waits for this and opens at the same rate (HiFiBerry duplex).
+    output_sample_rate: AtomicU32,
+    /// cpal name of the live output device (e.g. `hw:CARD=sndrpihifiberry,DEV=0`).
+    output_device: std::sync::Mutex<String>,
+    /// Name substring used by [`pick_output`]. Empty = ranked AUTO.
+    /// Changed live from Settings via `audio_select`.
+    output_filter: std::sync::Mutex<String>,
+    /// Name substring used by capture [`pick_input`]. Empty = AUTO
+    /// (USB mic if present, else HiFiBerry line-in).
+    input_filter: std::sync::Mutex<String>,
+    /// cpal name of the live capture device.
+    input_device: std::sync::Mutex<String>,
+    /// Device names from the last safe enumeration. Re-listing while hw: play
+    /// is up opens soft plugins and breaks duplex — Settings reads these.
+    listed_outputs: std::sync::Mutex<Vec<String>>,
+    listed_inputs: std::sync::Mutex<Vec<String>>,
 }
 
 impl AudioHealth {
@@ -67,6 +86,13 @@ impl AudioHealth {
             error: AtomicBool::new(false),
             capture_error: AtomicBool::new(false),
             reopen_gen: AtomicU64::new(0),
+            output_sample_rate: AtomicU32::new(0),
+            output_device: std::sync::Mutex::new(String::new()),
+            output_filter: std::sync::Mutex::new(String::new()),
+            input_filter: std::sync::Mutex::new(String::new()),
+            input_device: std::sync::Mutex::new(String::new()),
+            listed_outputs: std::sync::Mutex::new(Vec::new()),
+            listed_inputs: std::sync::Mutex::new(Vec::new()),
         }
     }
 
@@ -76,6 +102,92 @@ impl AudioHealth {
 
     pub(crate) fn reopen_gen(&self) -> u64 {
         self.reopen_gen.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn set_output_sample_rate(&self, rate: u32) {
+        self.output_sample_rate.store(rate, Ordering::Relaxed);
+    }
+
+    pub(crate) fn output_sample_rate(&self) -> u32 {
+        self.output_sample_rate.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn set_output_device(&self, name: &str) {
+        if let Ok(mut guard) = self.output_device.lock() {
+            *guard = name.to_string();
+        }
+    }
+
+    pub(crate) fn output_device(&self) -> String {
+        self.output_device
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn set_output_filter(&self, filter: &str) {
+        if let Ok(mut guard) = self.output_filter.lock() {
+            *guard = filter.to_string();
+        }
+    }
+
+    pub fn output_filter(&self) -> String {
+        self.output_filter
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn set_input_filter(&self, filter: &str) {
+        if let Ok(mut guard) = self.input_filter.lock() {
+            *guard = filter.to_string();
+        }
+    }
+
+    pub fn input_filter(&self) -> String {
+        self.input_filter
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn set_input_device(&self, name: &str) {
+        if let Ok(mut guard) = self.input_device.lock() {
+            *guard = name.to_string();
+        }
+    }
+
+    pub fn input_device(&self) -> String {
+        self.input_device
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn set_listed_outputs(&self, names: Vec<String>) {
+        if let Ok(mut guard) = self.listed_outputs.lock() {
+            *guard = names;
+        }
+    }
+
+    pub fn listed_outputs(&self) -> Vec<String> {
+        self.listed_outputs
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn set_listed_inputs(&self, names: Vec<String>) {
+        if let Ok(mut guard) = self.listed_inputs.lock() {
+            *guard = names;
+        }
+    }
+
+    pub fn listed_inputs(&self) -> Vec<String> {
+        self.listed_inputs
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or_default()
     }
 }
 
@@ -177,6 +289,12 @@ pub fn is_analog_output(name: &str) -> bool {
     n.contains("headphone") || n.contains("bcm2835") || n.contains("analog")
 }
 
+/// HiFiBerry DAC / DAC+ADC (and similar I2S HATs).
+pub fn is_hifiberry_output(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    n.contains("hifiberry") || n.contains("dacplus") || n.contains("sndrpihifiberry")
+}
+
 fn filter_names_controller(filter: &str) -> bool {
     let filter = filter.trim();
     !filter.is_empty() && midi_core::port_looks_like_controller_io(filter)
@@ -186,7 +304,9 @@ fn filter_names_controller(filter: &str) -> bool {
 pub fn output_rank(name: &str, filter: &str) -> i32 {
     let n = name.to_ascii_lowercase();
     let mut rank = 1;
-    if is_analog_output(name) {
+    if is_hifiberry_output(name) {
+        rank += RANK_HIFIBERRY;
+    } else if is_analog_output(name) {
         rank += RANK_ANALOG;
     }
     let filter = filter.trim().to_ascii_lowercase();
@@ -223,6 +343,13 @@ pub fn select_output_name<'a>(names: &[&'a str], filter: &str) -> Option<&'a str
 /// Pick an output device, preferring a name substring (e.g. `headphone`).
 /// HDMI is skipped while any analog/USB output exists.
 pub fn pick_output(name_filter: &str) -> Result<Device, AudioError> {
+    pick_output_tracked(name_filter, None)
+}
+
+pub fn pick_output_tracked(
+    name_filter: &str,
+    health: Option<&AudioHealth>,
+) -> Result<Device, AudioError> {
     let host = cpal::default_host();
     let mut named: Vec<(String, Device)> = Vec::new();
     if let Ok(devices) = host.output_devices() {
@@ -230,6 +357,9 @@ pub fn pick_output(name_filter: &str) -> Result<Device, AudioError> {
             let name = device.name().unwrap_or_default();
             named.push((name, device));
         }
+    }
+    if let Some(h) = health {
+        h.set_listed_outputs(named.iter().map(|(n, _)| n.clone()).collect());
     }
     let names: Vec<&str> = named.iter().map(|(n, _)| n.as_str()).collect();
     let Some(chosen) = select_output_name(&names, name_filter) else {
@@ -274,7 +404,7 @@ pub struct RunningStream {
     pub buffer_label: String,
 }
 
-/// Own the output for the life of `running`. Reopens only on SET → AUDIO.
+/// Own the output for the life of `running`. Reopens on SET → AUDIO / `audio_select`.
 pub fn spawn_output(
     filter: String,
     audio: AudioSide,
@@ -285,11 +415,11 @@ pub fn spawn_output(
     scope: Arc<ScopeTap>,
     running: Arc<AtomicBool>,
 ) {
+    health.set_output_filter(&filter);
     let _ = std::thread::Builder::new()
         .name("jambox-audio-out".into())
         .spawn(move || {
             supervisor(
-                filter,
                 audio,
                 bank,
                 preferred_frames,
@@ -302,7 +432,6 @@ pub fn spawn_output(
 }
 
 fn supervisor(
-    filter: String,
     audio: AudioSide,
     bank: WaveBank,
     preferred_frames: u32,
@@ -317,14 +446,18 @@ fn supervisor(
     let mut backoff = BACKOFF_START;
     let mut announced_wait = false;
 
-    if !filter.trim().is_empty() {
-        info!(filter = %filter, "audio: opening output (SET → AUDIO to reopen)");
-    } else {
-        info!("audio: opening output (SET → AUDIO to reopen)");
+    {
+        let filter = health.output_filter();
+        if !filter.trim().is_empty() {
+            info!(filter = %filter, "audio: opening output (SET → AUDIO to reopen)");
+        } else {
+            info!("audio: opening output (SET → AUDIO to reopen)");
+        }
     }
 
     while running.load(Ordering::Relaxed) {
-        let device = match pick_output(&filter) {
+        let filter = health.output_filter();
+        let device = match pick_output_tracked(&filter, Some(&health)) {
             Ok(d) => d,
             Err(err) => {
                 if !announced_wait {
@@ -370,21 +503,33 @@ fn supervisor(
 
         match open_stream(&device, render, &health, preferred_frames) {
             Ok(stream) => {
+                let out_name = device.name().unwrap_or_default();
                 info!(
-                    device = %device.name().unwrap_or_default(),
+                    device = %out_name,
                     sample_rate = stream.sample_rate,
                     channels = stream.channels,
                     buffer = %stream.buffer_label,
                     "audio: running"
                 );
+                // cpal's ALSA Device opens BOTH playback and capture PCMs at
+                // enumerate time. build_output_stream takes playback; the idle
+                // capture handle stays held and blocks HiFiBerry line-in duplex.
+                // Stream owns playback — drop Device so capture is released.
+                drop(device);
+                health.set_output_device(&out_name);
+                health.set_output_sample_rate(stream.sample_rate);
                 backoff = BACKOFF_START;
                 watch_stream(&running, &health);
+                health.set_output_sample_rate(0);
+                health.set_output_device("");
                 drop(stream);
                 if running.load(Ordering::Relaxed) {
                     info!("audio: reopening output");
                 }
             }
             Err(err) => {
+                health.set_output_sample_rate(0);
+                health.set_output_device("");
                 warn!(%err, "audio: stream failed; retrying");
                 std::thread::sleep(backoff);
                 backoff = next_backoff(backoff);
@@ -472,7 +617,13 @@ fn restore_mixer() {
                 // load does not trip the Pi jack-detect pin.
                 quiet(Command::new("amixer").args(["-q", "-c", &card, "cset", "numid=3", "1"]));
             }
-            for ctrl in ["Headphone", "Headphones", "PCM", "Master", "Speaker"] {
+            // HiFiBerry DAC2 ADC Pro uses Digital (and Analogue) rather than Headphone.
+            let ctrls = if info.contains("hifiberry") || info.contains("dacplus") {
+                ["Digital", "Analogue", "PCM", "Master", "Speaker"].as_slice()
+            } else {
+                ["Headphone", "Headphones", "PCM", "Master", "Speaker"].as_slice()
+            };
+            for ctrl in ctrls {
                 quiet(Command::new("amixer").args(["-q", "-c", &card, "sset", ctrl, "unmute"]));
                 for level in ["0dB", "85%"] {
                     let ok = Command::new("amixer")

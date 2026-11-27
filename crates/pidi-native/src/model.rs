@@ -29,8 +29,8 @@ use jambox_core::{
     DRUM_PREVIEW_SR,
 };
 use jambox_protocol::{
-    MidiNotice, MidiPortsReply, RepeatDivision, RepeatPhase, StatusReply, TouchPhase,
-    WireClipEvent, WireClipVoice,
+    AudioDevicesReply, MidiNotice, MidiPortsReply, RepeatDivision, RepeatPhase, StatusReply,
+    TouchPhase, WireClipEvent, WireClipVoice,
 };
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, TryRecvError};
@@ -56,6 +56,8 @@ pub enum SettingsPicker {
     ArpGate,
     MapIn,
     MapOut,
+    AudioOut,
+    AudioIn,
 }
 
 const KAOSS_Y_BEND_STEPS: [u8; 5] = [12, 7, 5, 2, 1];
@@ -501,6 +503,14 @@ pub struct NativeModel {
     pub midi_out_connected: String,
     pub midi_inputs: Vec<String>,
     pub midi_outputs: Vec<String>,
+    /// ALSA/cpal output name substring. Empty = AUTO ranked pick.
+    pub audio_out_filter: String,
+    pub audio_out_connected: String,
+    pub audio_outputs: Vec<String>,
+    /// ALSA/cpal capture name substring. Empty = AUTO (USB else HiFiBerry).
+    pub audio_in_filter: String,
+    pub audio_in_connected: String,
+    pub audio_inputs: Vec<String>,
     /// Map for the live keybed (MPK, SMK-37, …). Unknown ports stay MPK-compatible.
     pub controller_profile: midi_core::ControllerProfile,
     pub last_midi_activity: String,
@@ -909,6 +919,12 @@ impl NativeModel {
             midi_out_connected: String::new(),
             midi_inputs: Vec::new(),
             midi_outputs: Vec::new(),
+            audio_out_filter: String::new(),
+            audio_out_connected: String::new(),
+            audio_outputs: Vec::new(),
+            audio_in_filter: String::new(),
+            audio_in_connected: String::new(),
+            audio_inputs: Vec::new(),
             controller_profile: midi_core::ControllerProfile::mpk_mini(),
             last_midi_activity: String::new(),
             channel_map_bits: [0; 16],
@@ -1123,6 +1139,7 @@ impl NativeModel {
         self.status_line.clear();
         self.kaoss_picker = None;
         self.kaoss_picker_scroll = 0;
+        self.sync_kaoss_prog_favs_layout();
         self.kaoss_settings_open = false;
         self.kaoss_settings_scroll = 0;
         self.kaoss_color_picker_open = false;
@@ -1156,6 +1173,7 @@ impl NativeModel {
             self.kaoss_full = false;
             self.kaoss_full_exit_since = None;
             self.layout.apply_kaoss_full(false);
+            self.sync_kaoss_prog_favs_layout();
         }
     }
 
@@ -1357,6 +1375,7 @@ impl NativeModel {
         self.kaoss_bpm_numpad = false;
         self.kaoss_bpm_digits.clear();
         self.kaoss_picker = None;
+        self.sync_kaoss_prog_favs_layout();
         if self.kaoss_full {
             self.leave_kaoss_full();
         }
@@ -1506,6 +1525,7 @@ impl NativeModel {
             self.leave_kaoss_full();
         }
         self.kaoss_picker = None;
+        self.sync_kaoss_prog_favs_layout();
         self.kaoss_color_picker_open = false;
         self.kaoss_bpm_open = false;
         self.kaoss_bpm_numpad = false;
@@ -1602,6 +1622,7 @@ impl NativeModel {
             self.leave_kaoss_full();
         }
         self.kaoss_picker = None;
+        self.sync_kaoss_prog_favs_layout();
         self.kaoss_settings_open = false;
         self.kaoss_settings_scroll = 0;
         self.kaoss_color_picker_open = false;
@@ -1667,6 +1688,8 @@ impl NativeModel {
             SettingsPicker::ArpGate => "pick ARP gate".into(),
             SettingsPicker::MapIn => "pick MIDI in".into(),
             SettingsPicker::MapOut => "pick MIDI out".into(),
+            SettingsPicker::AudioOut => "pick audio out".into(),
+            SettingsPicker::AudioIn => "pick audio in".into(),
         };
         self.mark_dirty();
     }
@@ -1676,6 +1699,118 @@ impl NativeModel {
         self.settings_picker_scroll = 0;
         self.status_line.clear();
         self.mark_dirty();
+    }
+
+    fn audio_picker_outputs(names: &[String]) -> Vec<&String> {
+        let skip = |lower: &str| -> bool {
+            lower == "null"
+                || lower.starts_with("dmix:")
+                || lower.starts_with("dsnoop:")
+                || lower.contains("pulse")
+                || lower.contains("jack")
+                || lower.contains("pipewire")
+                || lower.contains("hdmi")
+                || lower.contains("monitor")
+        };
+        let card_token = |lower: &str| -> Option<String> {
+            lower.split("card=").nth(1).map(|c| {
+                c.split([',', ':'])
+                    .next()
+                    .unwrap_or(c)
+                    .to_string()
+            })
+        };
+        let mut seen_hw_cards: Vec<String> = Vec::new();
+        for name in names {
+            let lower = name.to_ascii_lowercase();
+            if skip(&lower) {
+                continue;
+            }
+            if lower.starts_with("hw:card=") {
+                if let Some(card) = card_token(&lower) {
+                    seen_hw_cards.push(card);
+                }
+            }
+        }
+        let mut out: Vec<&String> = Vec::new();
+        for name in names {
+            let lower = name.to_ascii_lowercase();
+            if skip(&lower) {
+                continue;
+            }
+            // Prefer direct hw: over default/sysdefault/plughw for the same card.
+            if lower.starts_with("default")
+                || lower.starts_with("sysdefault")
+                || lower.starts_with("plughw:")
+            {
+                if let Some(card) = card_token(&lower) {
+                    if seen_hw_cards.iter().any(|c| c == &card) {
+                        continue;
+                    }
+                }
+            }
+            out.push(name);
+        }
+        out
+    }
+
+    /// Compact label for Settings AUDIO / the picker sheet.
+    pub fn short_audio_label(name: &str) -> String {
+        let lower = name.to_ascii_lowercase();
+        if lower.contains("hifiberry")
+            || lower.contains("dacplus")
+            || lower.contains("sndrpihifiberry")
+        {
+            return "HIFIBERRY".into();
+        }
+        if lower.contains("headphone") || lower.contains("bcm2835") {
+            return "HEADPHONE".into();
+        }
+        if lower == "usb" || lower.contains("usb") || lower.contains("pnp") {
+            if let Some(rest) = lower.split("card=").nth(1) {
+                let card = rest.split([',', ':']).next().unwrap_or(rest);
+                if !card.is_empty() && card != "usb" {
+                    return card.to_ascii_uppercase();
+                }
+            }
+            return "USB".into();
+        }
+        if let Some(rest) = lower.split("card=").nth(1) {
+            let card = rest.split([',', ':']).next().unwrap_or(rest);
+            if !card.is_empty() {
+                return card.to_ascii_uppercase();
+            }
+        }
+        let trimmed = name.trim();
+        if trimmed.len() > 18 {
+            format!("{}…", &trimmed[..17])
+        } else if trimmed.is_empty() {
+            "AUTO".into()
+        } else {
+            trimmed.to_ascii_uppercase()
+        }
+    }
+
+    pub fn audio_out_button_label(&self) -> String {
+        let name = if !self.audio_out_connected.trim().is_empty() {
+            Self::short_audio_label(&self.audio_out_connected)
+        } else if self.audio_out_filter.trim().is_empty() {
+            "AUTO".into()
+        } else {
+            Self::short_audio_label(&self.audio_out_filter)
+        };
+        format!("OUT {name}")
+    }
+
+    pub fn audio_in_button_label(&self) -> String {
+        let name = if !self.audio_in_connected.trim().is_empty() {
+            Self::short_audio_label(&self.audio_in_connected)
+        } else if self.audio_in_filter.trim().is_empty() {
+            "AUTO".into()
+        } else {
+            Self::short_audio_label(&self.audio_in_filter)
+        };
+        format!("IN {name}")
     }
 
     fn map_picker_ports(names: &[String]) -> Vec<&String> {
@@ -1701,6 +1836,8 @@ impl NativeModel {
             SettingsPicker::ArpGate => crate::arp::GATE_PRESETS.len(),
             SettingsPicker::MapIn => 1 + Self::map_picker_ports(&self.midi_inputs).len(),
             SettingsPicker::MapOut => 1 + Self::map_picker_ports(&self.midi_outputs).len(),
+            SettingsPicker::AudioOut => 1 + Self::audio_picker_outputs(&self.audio_outputs).len(),
+            SettingsPicker::AudioIn => 1 + Self::audio_picker_outputs(&self.audio_inputs).len(),
         }
     }
 
@@ -1715,6 +1852,8 @@ impl NativeModel {
             SettingsPicker::ArpGate => "ARP GATE",
             SettingsPicker::MapIn => "MIDI IN",
             SettingsPicker::MapOut => "MIDI OUT",
+            SettingsPicker::AudioOut => "AUDIO OUT",
+            SettingsPicker::AudioIn => "AUDIO IN",
         }
     }
 
@@ -1729,6 +1868,8 @@ impl NativeModel {
             SettingsPicker::ArpGate => "note length as % of the step",
             SettingsPicker::MapIn => "ALL = every hardware USB MIDI in",
             SettingsPicker::MapOut => "AUTO = first non-keybed out",
+            SettingsPicker::AudioOut => "AUTO = HiFiBerry / headphone / first card",
+            SettingsPicker::AudioIn => "AUTO = USB mic if present, else HiFiBerry line-in",
         }
     }
 
@@ -1780,6 +1921,28 @@ impl NativeModel {
                     ports
                         .get(index - 1)
                         .map(|n| midi_core::short_port_label(n).to_string())
+                        .unwrap_or_else(|| "—".into())
+                }
+            }
+            SettingsPicker::AudioOut => {
+                if index == 0 {
+                    "AUTO".into()
+                } else {
+                    let ports = Self::audio_picker_outputs(&self.audio_outputs);
+                    ports
+                        .get(index - 1)
+                        .map(|n| Self::short_audio_label(n))
+                        .unwrap_or_else(|| "—".into())
+                }
+            }
+            SettingsPicker::AudioIn => {
+                if index == 0 {
+                    "AUTO".into()
+                } else {
+                    let ports = Self::audio_picker_outputs(&self.audio_inputs);
+                    ports
+                        .get(index - 1)
+                        .map(|n| Self::short_audio_label(n))
                         .unwrap_or_else(|| "—".into())
                 }
             }
@@ -1841,6 +2004,38 @@ impl NativeModel {
                     ports
                         .iter()
                         .position(|n| n.to_ascii_lowercase().contains(&cur))
+                        .map(|i| i + 1)
+                        .unwrap_or(0)
+                }
+            }
+            SettingsPicker::AudioOut => {
+                if self.audio_out_filter.trim().is_empty() {
+                    0
+                } else {
+                    let ports = Self::audio_picker_outputs(&self.audio_outputs);
+                    let cur = self.audio_out_filter.trim().to_ascii_lowercase();
+                    ports
+                        .iter()
+                        .position(|n| {
+                            let n = n.to_ascii_lowercase();
+                            n.contains(&cur) || cur.contains(&n)
+                        })
+                        .map(|i| i + 1)
+                        .unwrap_or(0)
+                }
+            }
+            SettingsPicker::AudioIn => {
+                if self.audio_in_filter.trim().is_empty() {
+                    0
+                } else {
+                    let ports = Self::audio_picker_outputs(&self.audio_inputs);
+                    let cur = self.audio_in_filter.trim().to_ascii_lowercase();
+                    ports
+                        .iter()
+                        .position(|n| {
+                            let n = n.to_ascii_lowercase();
+                            n.contains(&cur) || cur.contains(&n)
+                        })
                         .map(|i| i + 1)
                         .unwrap_or(0)
                 }
@@ -1937,8 +2132,67 @@ impl NativeModel {
                 }
                 self.apply_midi_select(outbox);
             }
+            SettingsPicker::AudioOut => {
+                if index == 0 {
+                    self.audio_out_filter.clear();
+                } else {
+                    let ports = Self::audio_picker_outputs(&self.audio_outputs);
+                    if let Some(name) = ports.get(index - 1) {
+                        self.audio_out_filter = Self::audio_filter_for_device(name);
+                    }
+                }
+                self.apply_audio_out_select(outbox);
+            }
+            SettingsPicker::AudioIn => {
+                if index == 0 {
+                    self.audio_in_filter.clear();
+                } else {
+                    let ports = Self::audio_picker_outputs(&self.audio_inputs);
+                    if let Some(name) = ports.get(index - 1) {
+                        self.audio_in_filter = Self::audio_filter_for_device(name);
+                    }
+                }
+                self.apply_audio_in_select(outbox);
+            }
         }
         self.mark_dirty();
+    }
+
+    fn audio_filter_for_device(name: &str) -> String {
+        let lower = name.to_ascii_lowercase();
+        if lower.contains("hifiberry")
+            || lower.contains("sndrpihifiberry")
+            || lower.contains("dacplus")
+        {
+            return "hifiberry".into();
+        }
+        if lower.contains("headphone") || lower.contains("bcm2835") {
+            return "headphone".into();
+        }
+        if lower.contains("usb") || lower.contains("pnp") {
+            if let Some(rest) = name
+                .split("CARD=")
+                .nth(1)
+                .or_else(|| name.split("card=").nth(1))
+            {
+                let card = rest.split([',', ':']).next().unwrap_or(rest).trim();
+                if !card.is_empty() {
+                    return card.to_string();
+                }
+            }
+            return "usb".into();
+        }
+        if let Some(rest) = name
+            .split("CARD=")
+            .nth(1)
+            .or_else(|| name.split("card=").nth(1))
+        {
+            let card = rest.split([',', ':']).next().unwrap_or(rest).trim();
+            if !card.is_empty() {
+                return card.to_string();
+            }
+        }
+        name.to_string()
     }
 
     fn nav_back(&mut self, outbox: &mut Outbox) {
@@ -1956,7 +2210,10 @@ impl NativeModel {
             Some("kaoss_bpm_numpad") => self.close_kaoss_bpm_numpad(),
             Some("kaoss_bpm") => self.close_kaoss_bpm(),
             Some("kaoss_settings") => self.close_kaoss_settings(),
-            Some("kaoss_picker") => self.kaoss_picker = None,
+            Some("kaoss_picker") => {
+                self.kaoss_picker = None;
+                self.sync_kaoss_prog_favs_layout();
+            }
             Some("morph") => {
                 self.synth_pick_a = None;
                 self.synth_pick_scroll = 0;
@@ -2370,6 +2627,7 @@ impl NativeModel {
         }
         self.mode_before_power = self.mode;
         self.kaoss_picker = None;
+        self.sync_kaoss_prog_favs_layout();
         self.kaoss_settings_open = false;
         self.kaoss_color_picker_open = false;
         self.kaoss_bpm_open = false;
@@ -3154,6 +3412,8 @@ impl NativeModel {
         }
         self.midi_in_filter = s.midi_in.clone();
         self.midi_out_filter = s.midi_out.clone();
+        self.audio_out_filter = s.audio_out.clone();
+        self.audio_in_filter = s.audio_in.clone();
         self.channel_map_bits = s.channel_map;
         self.probe = s.probe;
         self.power_warn = s.power_warn;
@@ -3208,6 +3468,21 @@ impl NativeModel {
         );
         outbox.channel_map(self.channel_map_bits);
         outbox.midi_ports();
+        // Empty = keep the service CLI defaults. Only push saved preferences.
+        let out = if self.audio_out_filter.is_empty() {
+            None
+        } else {
+            Some(self.audio_out_filter.clone())
+        };
+        let inn = if self.audio_in_filter.is_empty() {
+            None
+        } else {
+            Some(self.audio_in_filter.clone())
+        };
+        if out.is_some() || inn.is_some() {
+            outbox.audio_select(out, inn);
+        }
+        outbox.audio_devices();
         self.write_midi_ports_file();
         crate::host::write_live_thru_preset(
             &self.midi_in_filter,
@@ -3364,6 +3639,8 @@ impl NativeModel {
             seq_cue_beep: self.seq.cue_beep,
             midi_in: self.midi_in_filter.clone(),
             midi_out: self.midi_out_filter.clone(),
+            audio_out: self.audio_out_filter.clone(),
+            audio_in: self.audio_in_filter.clone(),
             channel_map: self.channel_map_bits,
             probe: self.probe,
             power_warn: self.power_warn,
@@ -3573,6 +3850,51 @@ impl NativeModel {
             midi_core::short_port_label(&self.midi_out_filter).to_string()
         };
         self.status_line = format!("MIDI in={inn}  out={out}");
+        self.push_log(self.status_line.clone());
+    }
+
+    pub fn apply_audio_devices(&mut self, reply: &AudioDevicesReply) {
+        if !reply.outputs.is_empty() {
+            self.audio_outputs = reply.outputs.clone();
+        }
+        if !reply.inputs.is_empty() {
+            self.audio_inputs = reply.inputs.clone();
+        }
+        if !reply.output_connected.trim().is_empty() {
+            self.audio_out_connected = reply.output_connected.clone();
+        } else {
+            self.audio_out_connected.clear();
+        }
+        if !reply.input_connected.trim().is_empty() {
+            self.audio_in_connected = reply.input_connected.clone();
+        } else {
+            self.audio_in_connected.clear();
+        }
+        self.mark_dirty();
+    }
+
+    fn apply_audio_out_select(&mut self, outbox: &mut Outbox) {
+        outbox.all_notes_off();
+        outbox.audio_select(Some(self.audio_out_filter.clone()), None);
+        self.mark_dirty();
+        let label = if self.audio_out_filter.trim().is_empty() {
+            "AUTO".into()
+        } else {
+            Self::short_audio_label(&self.audio_out_filter)
+        };
+        self.status_line = format!("audio out={label}");
+        self.push_log(self.status_line.clone());
+    }
+
+    fn apply_audio_in_select(&mut self, outbox: &mut Outbox) {
+        outbox.audio_select(None, Some(self.audio_in_filter.clone()));
+        self.mark_dirty();
+        let label = if self.audio_in_filter.trim().is_empty() {
+            "AUTO".into()
+        } else {
+            Self::short_audio_label(&self.audio_in_filter)
+        };
+        self.status_line = format!("audio in={label}");
         self.push_log(self.status_line.clone());
     }
 
@@ -4690,6 +5012,7 @@ impl NativeModel {
             Hit::KaossFull => {
                 self.tap_ui(slot, id, gesture, px, py);
                 self.kaoss_picker = None;
+                self.sync_kaoss_prog_favs_layout();
                 if self.kaoss_full {
                     self.leave_kaoss_full();
                 } else {
@@ -4836,6 +5159,7 @@ impl NativeModel {
             Hit::KaossPickerClose => {
                 self.tap_ui(slot, id, gesture, px, py);
                 self.kaoss_picker = None;
+                self.sync_kaoss_prog_favs_layout();
             }
             Hit::SeqRec => {
                 self.fingers[slot] = Finger {
@@ -5259,22 +5583,14 @@ impl NativeModel {
                 }
             }
             Hit::SettingsAudio => {
-                self.fingers[slot] = Finger {
-                    active: true,
-                    id,
-                    gesture,
-                    x: 0.0,
-                    y: 0.0,
-                    px,
-                    py,
-                    surface: Surface::UiTap,
-                    gate_on: false,
-                };
-                // Clear hanging notes, then reopen ALSA after a jack swap.
-                outbox.all_notes_off();
-                outbox.audio_reopen();
-                self.status_line = "audio reopen".into();
-                self.push_log("audio reopen");
+                self.tap_ui(slot, id, gesture, px, py);
+                outbox.audio_devices();
+                self.open_settings_picker(SettingsPicker::AudioOut);
+            }
+            Hit::SettingsAudioIn => {
+                self.tap_ui(slot, id, gesture, px, py);
+                outbox.audio_devices();
+                self.open_settings_picker(SettingsPicker::AudioIn);
             }
             Hit::FxTarget => {
                 self.tap_ui(slot, id, gesture, px, py);
@@ -8234,12 +8550,22 @@ impl NativeModel {
         };
     }
 
+    /// Fav strip + pad height track program-select UI (not Scale/Key/etc.).
+    fn sync_kaoss_prog_favs_layout(&mut self) {
+        if self.kaoss_full {
+            return;
+        }
+        let show = matches!(self.kaoss_picker, Some(KaossPicker::Program));
+        self.layout.apply_kaoss_prog_favs(show);
+    }
+
     fn toggle_kaoss_picker(&mut self, kind: KaossPicker) {
         self.kaoss_picker = match self.kaoss_picker {
             Some(open) if open == kind => None,
             _ => Some(kind),
         };
         self.kaoss_picker_scroll = 0;
+        self.sync_kaoss_prog_favs_layout();
         if self.kaoss_picker.is_some() {
             self.status_line = match kind {
                 KaossPicker::Program => "pick program".into(),
@@ -8302,6 +8628,7 @@ impl NativeModel {
                 self.mark_dirty();
             }
         }
+        self.sync_kaoss_prog_favs_layout();
     }
 
     fn push_kaoss_scale(&mut self, outbox: &mut Outbox) {
@@ -10044,6 +10371,7 @@ impl NativeModel {
         self.kaoss_full = false;
         self.kaoss_full_exit_since = None;
         self.layout.apply_kaoss_full(false);
+        self.sync_kaoss_prog_favs_layout();
         self.status_line = "split pad".into();
         self.mark_dirty();
     }
@@ -18255,6 +18583,8 @@ mod tests {
         let mut model = NativeModel::new();
         let mut out = Outbox::new();
         model.set_mode(UiMode::Kaoss);
+        // Fav chips only hit while program select is open.
+        model.toggle_kaoss_picker(KaossPicker::Program);
         // Clear F1 so assign path is exercised.
         model.kaoss_prog_favs[0] = kaoss_ui::KAOSS_FAV_EMPTY;
         let lead = kaoss_ui::KAOSS_PROGRAMS

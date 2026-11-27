@@ -288,6 +288,7 @@ pub enum Hit {
     SettingsPanic,
     SettingsAllOff,
     SettingsAudio,
+    SettingsAudioIn,
     FxTarget,
     FxSlider(usize),
     PunchPad(usize),
@@ -552,6 +553,7 @@ pub struct Layout {
     pub settings_panic: Rect,
     pub settings_all_off: Rect,
     pub settings_audio: Rect,
+    pub settings_audio_in: Rect,
     pub settings_fx_target: Rect,
     pub settings_fx: Rect,
     pub settings_wifi: Rect,
@@ -677,13 +679,14 @@ impl Layout {
             },
             // Full-width Kaoss pad like Tk (drums live on SEQ / kit, not here).
             // Leave headroom above footer chrome so axis labels (drawn after
-            // button fills) never sit on PROG/KEY/GATE controls. Fav strip
-            // sits between pad and footer (SPIKE 4 instant PROG slots).
+            // button fills) never sit on PROG/KEY/GATE controls. Default play
+            // pad grows to the Scale/Key row; fav strip only appears while the
+            // program picker is open (`apply_kaoss_prog_favs`).
             kaoss: Rect {
                 x: 8,
                 y: HUD_H + 8,
                 w: SCREEN_W - 16,
-                h: content_h - 168,
+                h: content_h - 120,
             },
             drums: Rect {
                 x: 0,
@@ -706,10 +709,10 @@ impl Layout {
                 h: 44,
             },
             kaoss_favs: Rect {
-                x: 8,
-                y: HUD_H + content_h - 156,
-                w: SCREEN_W - 16,
-                h: 36,
+                x: 0,
+                y: 0,
+                w: 0,
+                h: 0,
             },
             kaoss_scale: Rect {
                 x: 136,
@@ -1286,7 +1289,13 @@ impl Layout {
             settings_audio: Rect {
                 x: 536,
                 y: HUD_H + 24,
-                w: 240,
+                w: 116,
+                h: 72,
+            },
+            settings_audio_in: Rect {
+                x: 660,
+                y: HUD_H + 24,
+                w: 116,
                 h: 72,
             },
             settings_midi: Rect {
@@ -1668,6 +1677,44 @@ impl Layout {
             return Hit::PowerScreenOff;
         }
         Hit::None
+    }
+
+    /// Instant PROG favorites between pad and footer — only while the program
+    /// picker is open. When hidden, the pad expands down to the Scale/Key row
+    /// with the same 12px clearance used by `layout_audit_kaoss_pad_clears_footer`.
+    pub fn apply_kaoss_prog_favs(&mut self, show: bool) {
+        // Fullscreen (or any layout with chrome cleared) owns these rects.
+        if self.kaoss_prog.w == 0 {
+            return;
+        }
+        let content_h = SCREEN_H - HUD_H - NAV_H;
+        if show {
+            self.kaoss = Rect {
+                x: 8,
+                y: HUD_H + 8,
+                w: SCREEN_W - 16,
+                h: content_h - 168,
+            };
+            self.kaoss_favs = Rect {
+                x: 8,
+                y: HUD_H + content_h - 156,
+                w: SCREEN_W - 16,
+                h: 36,
+            };
+        } else {
+            self.kaoss = Rect {
+                x: 8,
+                y: HUD_H + 8,
+                w: SCREEN_W - 16,
+                h: content_h - 120,
+            };
+            self.kaoss_favs = Rect {
+                x: 0,
+                y: 0,
+                w: 0,
+                h: 0,
+            };
+        }
     }
 
     /// Performance layout when FULL PAD hides the drum chrome.
@@ -4321,6 +4368,9 @@ impl Layout {
         if self.settings_audio.contains(px, py) {
             return Hit::SettingsAudio;
         }
+        if self.settings_audio_in.contains(px, py) {
+            return Hit::SettingsAudioIn;
+        }
         if self.settings_midi.contains(px, py) {
             return Hit::SettingsMidi;
         }
@@ -4799,7 +4849,9 @@ mod tests {
 
     #[test]
     fn layout_audit_kaoss_favs_between_pad_and_footer() {
-        let layout = Layout::new();
+        let mut layout = Layout::new();
+        assert_eq!(layout.kaoss_favs.w, 0, "favs hidden in normal play");
+        layout.apply_kaoss_prog_favs(true);
         assert!(layout.kaoss_favs.w > 0 && layout.kaoss_favs.h >= 32);
         assert!(
             gap_below(layout.kaoss, layout.kaoss_favs) >= 0,
@@ -4817,6 +4869,18 @@ mod tests {
         assert_eq!(
             layout.hit(crate::mode::UiMode::Kaoss, f0.x + 4, f0.y + 4),
             Hit::KaossFav(0)
+        );
+        layout.apply_kaoss_prog_favs(false);
+        assert_eq!(layout.kaoss_favs.w, 0);
+        assert!(
+            gap_below(layout.kaoss, layout.kaoss_prog) >= 12,
+            "play pad expands to Scale/Key row when favs hide"
+        );
+        let (x, y) = layout.kaoss.pad_xy(f0.x + 4, f0.y + 4);
+        assert_eq!(
+            layout.hit(crate::mode::UiMode::Kaoss, f0.x + 4, f0.y + 4),
+            Hit::Kaoss { x, y },
+            "former fav band becomes pad hit area"
         );
     }
 

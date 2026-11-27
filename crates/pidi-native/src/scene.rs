@@ -1322,7 +1322,10 @@ fn draw_kaoss(scene: &mut Scene, model: &NativeModel) {
     );
     let gate = kaoss_ui::gate(model.kaoss_gate).label;
 
-    if layout.kaoss_favs.w > 0 {
+    // Fav chips only while the program picker is open (layout synced to match).
+    if layout.kaoss_favs.w > 0
+        && matches!(model.kaoss_picker, Some(kaoss_ui::KaossPicker::Program))
+    {
         for i in 0..kaoss_ui::KAOSS_FAV_SLOTS {
             let cell = layout.kaoss_fav_cell(i);
             let fav = model.kaoss_prog_favs[i];
@@ -4348,7 +4351,19 @@ fn draw_settings(scene: &mut Scene, model: &NativeModel) {
     scene.fill_rect(layout.settings_all_off, 0x504945);
     scene.text_centered(layout.settings_all_off, "NOTES OFF", 0xffffff, 2);
     scene.fill_rect(layout.settings_audio, 0x458588);
-    scene.text_centered(layout.settings_audio, "AUDIO", 0xffffff, 2);
+    scene.text_centered(
+        layout.settings_audio,
+        &model.audio_out_button_label(),
+        0xffffff,
+        2,
+    );
+    scene.fill_rect(layout.settings_audio_in, 0x689d6a);
+    scene.text_centered(
+        layout.settings_audio_in,
+        &model.audio_in_button_label(),
+        0xffffff,
+        2,
+    );
     scene.fill_rect(
         layout.settings_midi,
         0x83a598,
@@ -5395,6 +5410,7 @@ mod tests {
         let mut model = NativeModel::new();
         model.set_mode(UiMode::Kaoss);
         model.kaoss_picker = Some(kaoss_ui::KaossPicker::Program);
+        model.layout.apply_kaoss_prog_favs(true);
         model.kaoss_show_all = true;
         // Default NOTE filter — only teal tiles in the grid.
         assert_eq!(model.kaoss_prog_filter, kaoss_ui::KaossProgramFilter::Note);
@@ -5431,6 +5447,7 @@ mod tests {
         let mut model = NativeModel::new();
         model.set_mode(UiMode::Kaoss);
         model.kaoss_picker = Some(kaoss_ui::KaossPicker::Program);
+        model.layout.apply_kaoss_prog_favs(true);
         let fx = model.layout.kaoss_prog_filter_chip(1);
         assert_eq!(
             model.layout.hit_kaoss_prog_filter(fx.x + 2, fx.y + 2),

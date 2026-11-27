@@ -182,6 +182,7 @@ fn main() {
         copy_wave(&client.last_scope.sub, &mut model.wave_sub);
         model.sync_arp_pattern_from_status();
         model.apply_midi_ports_with(&client.last_midi_ports, Some(&mut client.outbox));
+        model.apply_audio_devices(&client.last_audio_devices);
         model.tick(dt, &mut client.outbox);
         model.maybe_autosave();
         if model.take_reexec() {

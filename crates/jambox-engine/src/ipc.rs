@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 use jambox_core::{pack_xy, Command, LatestTouch};
 use tracing::{debug, info, warn};
 
-use crate::audio::AudioHealth;
+use crate::audio::{self, AudioHealth};
 use crate::bus::{ClipUpdate, ControlSide, MidiInSide};
 use crate::midi::{ingest, MidiIo, MidiMap};
 use crate::protocol::{decode, Decoded, MidiNotice, Request, Response, StatusReply};
@@ -415,6 +415,24 @@ pub fn handle_line(
             health.request_reopen();
             Response::Ok
         }
+        Ok(Decoded::AudioDevices) => Response::AudioDevices(audio_devices_reply(health)),
+        Ok(Decoded::AudioSelect { output, input }) => {
+            let mut reopen = false;
+            if let Some(filter) = output {
+                info!(filter = %filter, "audio: output filter from kiosk");
+                health.set_output_filter(&filter);
+                reopen = true;
+            }
+            if let Some(filter) = input {
+                info!(filter = %filter, "audio: input filter from kiosk");
+                health.set_input_filter(&filter);
+                reopen = true;
+            }
+            if reopen {
+                health.request_reopen();
+            }
+            Response::AudioDevices(audio_devices_reply(health))
+        }
         Ok(Decoded::MidiPorts) => Response::MidiPorts(midi_io.snapshot()),
         Ok(Decoded::MidiSelect { input, output }) => {
             if let Some(filter) = input {
@@ -717,6 +735,56 @@ fn spawn_client<S: ClientStream>(
             }
         }
     });
+}
+
+fn audio_devices_reply(health: &AudioHealth) -> jambox_protocol::AudioDevicesReply {
+    // Never re-enumerate ALSA while exclusive hw: play/capture may be live —
+    // cpal's device list opens every soft plugin and breaks duplex.
+    let outputs = {
+        let mut cached = health.listed_outputs();
+        if cached.is_empty() {
+            if health.output_sample_rate() == 0 {
+                let live = audio::list_outputs();
+                health.set_listed_outputs(live.clone());
+                cached = live;
+            } else {
+                let connected = health.output_device();
+                if !connected.is_empty() {
+                    cached.push(connected);
+                }
+            }
+        }
+        cached
+    };
+    let inputs = {
+        let mut cached = health.listed_inputs();
+        if cached.is_empty() {
+            if health.output_sample_rate() == 0 {
+                let live = crate::capture::list_inputs();
+                health.set_listed_inputs(live.clone());
+                cached = live;
+            } else {
+                let connected = health.input_device();
+                if !connected.is_empty() {
+                    cached.push(connected);
+                }
+                // Always offer the live play card as a line-in choice for duplex HATs.
+                let out = health.output_device();
+                if !out.is_empty() && !cached.iter().any(|n| n == &out) {
+                    cached.push(out);
+                }
+            }
+        }
+        cached
+    };
+    jambox_protocol::AudioDevicesReply {
+        outputs,
+        inputs,
+        output_filter: health.output_filter(),
+        input_filter: health.input_filter(),
+        output_connected: health.output_device(),
+        input_connected: health.input_device(),
+    }
 }
 
 #[cfg(test)]

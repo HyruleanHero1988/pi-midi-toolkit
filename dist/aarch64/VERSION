@@ -1,7 +1,7 @@
 target=aarch64-unknown-linux-gnu
 arch=aarch64
-built_utc=2026-11-27T17:04:30Z
+built_utc=2026-11-27T19:07:43Z
 host=Linux x86_64
 host_glibc=2.35
-git_sha=3ac23c32b50291e255d8446e5efa5da2d2c84b1b
+git_sha=cfce3d54d5dd3b9fdf46ddea9522537b247ea899
 crates=pidi-native

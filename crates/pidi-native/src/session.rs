@@ -334,6 +334,14 @@ pub struct SessionState {
     /// USB MIDI output name substring. Empty = first hardware port.
     #[serde(default)]
     pub midi_out: String,
+    /// ALSA/cpal output name substring (e.g. `hifiberry`, `headphone`, USB card).
+    /// Empty = AUTO ranked pick.
+    #[serde(default)]
+    pub audio_out: String,
+    /// ALSA/cpal capture name substring (e.g. `hifiberry`, `usb`, mic card).
+    /// Empty = AUTO (USB mic if present, else HiFiBerry line-in).
+    #[serde(default)]
+    pub audio_in: String,
     /// Per-input MIDI channel fan-out. `0` = identity for that input (0–15).
     #[serde(default)]
     pub channel_map: [u16; 16],
@@ -662,6 +670,8 @@ impl Default for SessionState {
             seq_cue_beep: false,
             midi_in: String::new(),
             midi_out: String::new(),
+            audio_out: String::new(),
+            audio_in: String::new(),
             channel_map: [0; 16],
             clip_quantize: ClipQuantize::Bar,
             probe: false,

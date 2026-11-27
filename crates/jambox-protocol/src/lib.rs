@@ -19,6 +19,7 @@ pub const NATIVE_FEATURES: &[&str] = &[
     "sample_clock_repeat",
     "runtime_diagnostics",
     "audio_reopen",
+    "audio_devices",
     "midi_ports",
     "channel_map",
     "arp",
@@ -256,6 +257,17 @@ pub enum Request {
     /// Drop and reopen the ALSA/cpal output stream without resetting engine state.
     /// Used after a headphone jack swap leaves the PCM open but silent.
     AudioReopen,
+    /// List live audio output/input devices and the filters / connected cards.
+    AudioDevices,
+    /// Change audio output and/or capture name filters and reopen streams.
+    /// Empty `output` = AUTO ranked play device. Empty `input` = AUTO capture
+    /// (USB mic if present, else HiFiBerry line-in). Omitted fields stay as-is.
+    AudioSelect {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        input: Option<String>,
+    },
     /// List live MIDI ports and the filters the engine is watching.
     MidiPorts,
     /// Change IN/OUT name filters. Empty input = every class-compliant USB MIDI
@@ -462,7 +474,24 @@ pub enum Response {
     Status(StatusReply),
     Midi(MidiNotice),
     MidiPorts(MidiPortsReply),
+    AudioDevices(AudioDevicesReply),
     Scope(ScopeReply),
+}
+
+/// Live ALSA/cpal devices for the Settings OUT / IN pickers.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct AudioDevicesReply {
+    pub outputs: Vec<String>,
+    #[serde(default)]
+    pub inputs: Vec<String>,
+    #[serde(default)]
+    pub output_filter: String,
+    #[serde(default)]
+    pub input_filter: String,
+    #[serde(default)]
+    pub output_connected: String,
+    #[serde(default)]
+    pub input_connected: String,
 }
 
 /// One triggered view of the master mix. Each column is the min and max sample
