@@ -19,6 +19,7 @@ pub const NATIVE_FEATURES: &[&str] = &[
     "sample_clock_repeat",
     "runtime_diagnostics",
     "audio_reopen",
+    "audio_devices",
     "midi_ports",
     "channel_map",
     "arp",
@@ -87,7 +88,7 @@ pub enum Request {
         value: f32,
     },
     /// EP-style punch-in pad. `slot` 0..7, `amount` 0 = off.
-    /// `source` 0 keys, 1 drums, 2 mic. Missing → keys.
+    /// `source` 0 keys, 1 drums, 2 mic, 3 SEQ clip voice. Missing → keys.
     PunchFx {
         #[serde(default)]
         source: u8,
@@ -256,6 +257,17 @@ pub enum Request {
     /// Drop and reopen the ALSA/cpal output stream without resetting engine state.
     /// Used after a headphone jack swap leaves the PCM open but silent.
     AudioReopen,
+    /// List live audio output/input devices and the filters / connected cards.
+    AudioDevices,
+    /// Change audio output and/or capture name filters and reopen streams.
+    /// Empty `output` = AUTO ranked play device. Empty `input` = AUTO capture
+    /// (USB mic if present, else HiFiBerry line-in). Omitted fields stay as-is.
+    AudioSelect {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        input: Option<String>,
+    },
     /// List live MIDI ports and the filters the engine is watching.
     MidiPorts,
     /// Change IN/OUT name filters. Empty input = every class-compliant USB MIDI
@@ -305,7 +317,8 @@ pub enum Request {
         aftertouch: Option<String>,
     },
     /// Per kit-voice note-repeat map for hardware pads. `slots[i]`: 0 = off,
-    /// 1 = 1/4, 2 = 1/8, 3 = 1/8T, 4 = 1/16, 5 = triple. `latch` keeps the
+    /// 1 = 1/4, 2 = 1/8, 3 = 1/8T, 4 = 1/16, 5 = legacy (→ 1/8), 6 = 1/2, 7 = 1.
+    /// `latch` keeps the
     /// grid running after the pad is released.
     DrumRepeat {
         slots: [u8; 16],
@@ -380,6 +393,7 @@ pub enum FxTargetSpec {
     Drum { index: u8 },
     DrumGroup,
     Bus,
+    Clip { slot: u8 },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -426,10 +440,12 @@ impl WireClipEvent {
 }
 
 /// Morph + voice-insert snapshot carried on `clip_load`.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Default)]
 pub struct WireClipVoice {
     #[serde(default)]
     pub locked: bool,
+    #[serde(default)]
+    pub fm: bool,
     #[serde(default)]
     pub morph_a: u16,
     #[serde(default)]
@@ -462,7 +478,24 @@ pub enum Response {
     Status(StatusReply),
     Midi(MidiNotice),
     MidiPorts(MidiPortsReply),
+    AudioDevices(AudioDevicesReply),
     Scope(ScopeReply),
+}
+
+/// Live ALSA/cpal devices for the Settings OUT / IN pickers.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct AudioDevicesReply {
+    pub outputs: Vec<String>,
+    #[serde(default)]
+    pub inputs: Vec<String>,
+    #[serde(default)]
+    pub output_filter: String,
+    #[serde(default)]
+    pub input_filter: String,
+    #[serde(default)]
+    pub output_connected: String,
+    #[serde(default)]
+    pub input_connected: String,
 }
 
 /// One triggered view of the master mix. Each column is the min and max sample

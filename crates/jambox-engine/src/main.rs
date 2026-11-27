@@ -209,6 +209,9 @@ fn run(
         });
     } else {
         let capture = Arc::new(capture::CaptureRing::new());
+        // Do not hold a cpal Device across play open — enumeration opens both
+        // PCM directions and exclusive HiFiBerry play then fails with EBUSY.
+        // Capture waits for output_sample_rate, then opens hw: (capture-only).
         // Stays on the first successful stream. SET → AUDIO sends audio_reopen.
         audio::spawn_output(
             output,

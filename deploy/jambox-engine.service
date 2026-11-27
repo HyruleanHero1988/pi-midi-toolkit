@@ -14,7 +14,7 @@ WorkingDirectory=/home/pi/pi-midi-toolkit
 ExecStart=/home/pi/pi-midi-toolkit/bin/jambox-engine run \
   --midi-in "" \
   --midi-out "" \
-  --output headphone \
+  --output hifiberry \
   --control /tmp/jambox.sock \
   --waves /home/pi/pi-midi-toolkit/apps/pidi/wavetables \
   --user-waves %h/.local/share/pidi/user-wavetables \

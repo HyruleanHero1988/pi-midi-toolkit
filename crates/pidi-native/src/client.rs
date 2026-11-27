@@ -6,8 +6,8 @@ use std::net::TcpStream;
 use std::time::{Duration, Instant};
 
 use jambox_protocol::{
-    MidiNotice, MidiPortsReply, RepeatDivision, RepeatPhase, Request, Response, ScopeReply,
-    StatusReply, TouchPhase, WireClipEvent, WireClipVoice, PROTOCOL_VERSION,
+    AudioDevicesReply, MidiNotice, MidiPortsReply, RepeatDivision, RepeatPhase, Request, Response,
+    ScopeReply, StatusReply, TouchPhase, WireClipEvent, WireClipVoice, PROTOCOL_VERSION,
 };
 use tracing::{info, warn};
 
@@ -234,6 +234,15 @@ impl Outbox {
         self.reliable.push_back(Request::AudioReopen);
     }
 
+    pub fn audio_devices(&mut self) {
+        self.reliable.push_back(Request::AudioDevices);
+    }
+
+    pub fn audio_select(&mut self, output: Option<String>, input: Option<String>) {
+        self.reliable
+            .push_back(Request::AudioSelect { output, input });
+    }
+
     pub fn fx_bus(&mut self, param: &str, value: f32) {
         self.reliable.push_back(Request::Fx {
             target: jambox_protocol::FxTargetSpec::Bus,
@@ -253,6 +262,14 @@ impl Outbox {
     pub fn fx_drum_group(&mut self, param: &str, value: f32) {
         self.reliable.push_back(Request::Fx {
             target: jambox_protocol::FxTargetSpec::DrumGroup,
+            param: param.to_string(),
+            value,
+        });
+    }
+
+    pub fn fx_clip(&mut self, slot: u8, param: &str, value: f32) {
+        self.reliable.push_back(Request::Fx {
+            target: jambox_protocol::FxTargetSpec::Clip { slot },
             param: param.to_string(),
             value,
         });
@@ -488,6 +505,7 @@ pub struct NativeClient {
     pub scope_waiting: bool,
     pub scope_sent: Instant,
     pub last_midi_ports: MidiPortsReply,
+    pub last_audio_devices: AudioDevicesReply,
     pub midi_inbox: Vec<MidiNotice>,
     pub connected: bool,
     address: String,
@@ -505,6 +523,7 @@ impl NativeClient {
             scope_waiting: false,
             scope_sent: Instant::now(),
             last_midi_ports: MidiPortsReply::default(),
+            last_audio_devices: AudioDevicesReply::default(),
             midi_inbox: Vec::new(),
             connected: false,
             address,
@@ -603,6 +622,7 @@ impl NativeClient {
                             }
                             Response::Midi(notice) => self.midi_inbox.push(notice),
                             Response::MidiPorts(ports) => self.last_midi_ports = ports,
+                            Response::AudioDevices(devs) => self.last_audio_devices = devs,
                             _ => {}
                         }
                     }

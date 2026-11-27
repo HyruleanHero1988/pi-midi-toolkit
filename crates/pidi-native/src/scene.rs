@@ -15,7 +15,8 @@ use crate::render::{SCREEN_H, SCREEN_W};
 use crate::screensaver;
 use crate::song_viz;
 use crate::waves;
-use jambox_core::drum_model_for_note;
+use jambox_core::{drum_model_for_note, DrumModel};
+use crate::seq::BACKBONE_GRID_STEPS;
 use jambox_protocol::SCOPE_COLUMNS;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1322,7 +1323,10 @@ fn draw_kaoss(scene: &mut Scene, model: &NativeModel) {
     );
     let gate = kaoss_ui::gate(model.kaoss_gate).label;
 
-    if layout.kaoss_favs.w > 0 {
+    // Fav chips only while the program picker is open (layout synced to match).
+    if layout.kaoss_favs.w > 0
+        && matches!(model.kaoss_picker, Some(kaoss_ui::KaossPicker::Program))
+    {
         for i in 0..kaoss_ui::KAOSS_FAV_SLOTS {
             let cell = layout.kaoss_fav_cell(i);
             let fav = model.kaoss_prog_favs[i];
@@ -3389,6 +3393,11 @@ fn draw_seq(scene: &mut Scene, model: &NativeModel) {
     let layout = model.layout;
     let seq = &model.seq;
 
+    if seq.backbone_grid_screen_open() {
+        draw_seq_backbone_grid_fullscreen(scene, model);
+        return;
+    }
+
     scene.text(16, HUD_H + 10, "Sequencer", 0xfbf1c7);
     let status = if seq.status.chars().count() > 38 {
         format!("{}…", seq.status.chars().take(38).collect::<String>())
@@ -3420,6 +3429,9 @@ fn draw_seq(scene: &mut Scene, model: &NativeModel) {
     scene.text_centered(layout.seq_drop, "DROP", 0xffffff, 2);
     scene.fill_rect(layout.seq_undo, undo_bg);
     scene.text_centered(layout.seq_undo, "UNDO", 0xffffff, 2);
+
+    let grid_screen = seq.backbone_grid_screen_open();
+    let grid_offer = seq.backbone_grid_allowed();
 
     scene.fill_rect(layout.seq_len_double, 0x504945);
     scene.text_centered(layout.seq_len_double, "LEN x2", 0xffffff, 2);
@@ -3454,18 +3466,139 @@ fn draw_seq(scene: &mut Scene, model: &NativeModel) {
     scene.text_centered(layout.seq_bpm_up, "+ BPM", 0xffffff, 2);
     scene.fill_rect(layout.seq_qnt, model.clip_quantize.color());
     scene.text_centered(layout.seq_qnt, model.clip_quantize.label(), 0xffffff, 2);
-    if model.seq_to_pad_armed {
-        scene.text_scaled(520, HUD_H + 42, "tap a PAD slot", 0xfabd2f, 1);
-    } else {
-        scene.text_scaled(520, HUD_H + 42, ">PAD assigns loop", 0x83a598, 1);
+
+    if grid_offer {
+        let (label, bg) = if grid_screen {
+            ("BACK", 0x689d6a)
+        } else {
+            ("GRID", 0x458588)
+        };
+        scene.fill_rect(layout.seq_grid_mode, bg);
+        scene.text_centered(layout.seq_grid_mode, label, 0xffffff, 2);
+    }
+
+    if !grid_screen {
+        if model.seq_to_pad_armed {
+            scene.text_scaled(520, HUD_H + 42, "tap a PAD slot", 0xfabd2f, 1);
+        } else if grid_offer {
+            scene.text_scaled(340, HUD_H + 42, "GRID edits backbone drums", 0x83a598, 1);
+        } else {
+            scene.text_scaled(520, HUD_H + 42, ">PAD assigns loop", 0x83a598, 1);
+        }
     }
 
     scene.text(
         12,
         HUD_H + layout.content.h - 18,
-        "REC locks loop · overdub · BEEP marks 1 · >PAD assigns",
+        if grid_offer {
+            "REC locks loop · overdub · tap GRID for backbone drums"
+        } else {
+            "REC locks loop · overdub · BEEP marks 1 · >PAD assigns"
+        },
         0x83a598,
     );
+}
+
+fn seq_drum_abbrev(model: DrumModel) -> &'static str {
+    match model {
+        DrumModel::Kick => "KK",
+        DrumModel::Snare => "SN",
+        DrumModel::Clap => "CL",
+        DrumModel::HatClosed => "HC",
+        DrumModel::HatOpen => "HO",
+        DrumModel::TomLo => "T1",
+        DrumModel::TomMid => "T2",
+        DrumModel::Rim => "RM",
+        DrumModel::KickTight => "KT",
+        DrumModel::Rimshot => "RS",
+        DrumModel::Shaker => "SH",
+        DrumModel::HatPedal => "HP",
+        DrumModel::TomHi => "T3",
+        DrumModel::Cowbell => "CB",
+        DrumModel::Clave => "CV",
+        DrumModel::Ride => "RD",
+    }
+}
+
+fn draw_seq_backbone_grid_fullscreen(scene: &mut Scene, model: &NativeModel) {
+    let layout = model.layout;
+    let overlay = layout.seq_backbone_grid_overlay();
+    scene.fill_rect(overlay, 0x101010);
+
+    scene.text(overlay.x + 10, overlay.y + 14, "BACKBONE GRID", 0xfabd2f);
+
+    let exit = layout.seq_backbone_grid_exit();
+    scene.fill_rect(exit, 0x689d6a);
+    scene.text_centered(exit, "DONE → SEQ", 0xffffff, 2);
+
+    let seq = &model.seq;
+    let (play_label, play_bg) = seq.play_label();
+    let transport = layout.seq_backbone_grid_transport();
+    scene.fill_rect(transport, play_bg);
+    scene.text_centered(transport, play_label, 0xffffff, 2);
+
+    scene.text_scaled(
+        overlay.x + 10,
+        overlay.y + overlay.h - 14,
+        "16 drums × 16 steps · PLAY/STOP · DONE or ← BACK returns to SEQ",
+        0x665c54,
+        1,
+    );
+
+    let grid = layout.seq_backbone_grid();
+    let profile = &model.controller_profile;
+
+    for step in 0..BACKBONE_GRID_STEPS {
+        let cell = layout.seq_backbone_grid_cell(step, 0);
+        if step % 4 == 0 {
+            scene.text_scaled(
+                cell.x + 1,
+                grid.y + 1,
+                &format!("{}", step + 1),
+                0x665c54,
+                1,
+            );
+        }
+    }
+
+    for row in 0..model.seq.backbone_grid_row_models().len() {
+        let note = crate::seq::backbone_grid_midi_for_row(row, profile);
+        let voice = drum_model_for_note(note);
+        let row_top = layout.seq_backbone_grid_cell(0, row);
+        let pad = phrases::pad_label(row);
+        let label = format!("{} {}", pad, seq_drum_abbrev(voice));
+        scene.text_scaled(
+            grid.x + 2,
+            row_top.y + (row_top.h / 2) - 4,
+            &label,
+            0x83a598,
+            1,
+        );
+        for step in 0..BACKBONE_GRID_STEPS {
+            let cell = layout.seq_backbone_grid_cell(step, row);
+            let on = model
+                .seq
+                .backbone_grid_cell_on(step, row, profile);
+            let beat = step % 4 == 0;
+            let bg = if on {
+                0x98971a
+            } else if beat {
+                0x2a2a28
+            } else {
+                0x1d2021
+            };
+            scene.fill_rect(cell, bg);
+            if on && cell.w > 3 && cell.h > 3 {
+                scene.fill(
+                    cell.x as f32 + 1.0,
+                    cell.y as f32 + 1.0,
+                    (cell.w - 2) as f32,
+                    (cell.h - 2) as f32,
+                    0xb8bb26,
+                );
+            }
+        }
+    }
 }
 
 fn draw_presets(scene: &mut Scene, model: &NativeModel) {
@@ -4348,7 +4481,19 @@ fn draw_settings(scene: &mut Scene, model: &NativeModel) {
     scene.fill_rect(layout.settings_all_off, 0x504945);
     scene.text_centered(layout.settings_all_off, "NOTES OFF", 0xffffff, 2);
     scene.fill_rect(layout.settings_audio, 0x458588);
-    scene.text_centered(layout.settings_audio, "AUDIO", 0xffffff, 2);
+    scene.text_centered(
+        layout.settings_audio,
+        &model.audio_out_button_label(),
+        0xffffff,
+        2,
+    );
+    scene.fill_rect(layout.settings_audio_in, 0x689d6a);
+    scene.text_centered(
+        layout.settings_audio_in,
+        &model.audio_in_button_label(),
+        0xffffff,
+        2,
+    );
     scene.fill_rect(
         layout.settings_midi,
         0x83a598,
@@ -4474,6 +4619,25 @@ fn draw_fx(scene: &mut Scene, model: &NativeModel) {
         0xffffff,
         2,
     );
+    let scope_on = model.fx_target == crate::model::FxEditTarget::Voice;
+    scene.fill_rect(
+        layout.settings_fx_voice_scope,
+        if scope_on {
+            model.fx_voice_scope.color()
+        } else {
+            0x3c3836
+        },
+    );
+    scene.text_centered(
+        layout.settings_fx_voice_scope,
+        if scope_on {
+            model.fx_voice_scope.label()
+        } else {
+            "VOX"
+        },
+        0xffffff,
+        2,
+    );
     let clear = layout.punch_clear();
     let lock = layout.punch_lock();
     let source = layout.punch_source();
@@ -4498,6 +4662,7 @@ fn draw_fx(scene: &mut Scene, model: &NativeModel) {
             jambox_core::PunchSource::Keys => 0x689d6a,
             jambox_core::PunchSource::Drums => 0xd79921,
             jambox_core::PunchSource::Mic => 0x458588,
+            jambox_core::PunchSource::Seq => 0x689d6a,
         },
     );
     scene.text_centered(source, buf.label(), 0xffffff, 2);
@@ -4535,7 +4700,7 @@ fn draw_fx(scene: &mut Scene, model: &NativeModel) {
     ];
     let inserts = match model.fx_target {
         crate::model::FxEditTarget::Bus => &model.fx_bus,
-        crate::model::FxEditTarget::Voice => &model.fx_voice,
+        crate::model::FxEditTarget::Voice => model.voice_fx_sliders(),
         crate::model::FxEditTarget::DrumGroup => &model.fx_drum,
     };
     let insert_color = match model.fx_target {
@@ -5395,6 +5560,7 @@ mod tests {
         let mut model = NativeModel::new();
         model.set_mode(UiMode::Kaoss);
         model.kaoss_picker = Some(kaoss_ui::KaossPicker::Program);
+        model.layout.apply_kaoss_prog_favs(true);
         model.kaoss_show_all = true;
         // Default NOTE filter — only teal tiles in the grid.
         assert_eq!(model.kaoss_prog_filter, kaoss_ui::KaossProgramFilter::Note);
@@ -5431,6 +5597,7 @@ mod tests {
         let mut model = NativeModel::new();
         model.set_mode(UiMode::Kaoss);
         model.kaoss_picker = Some(kaoss_ui::KaossPicker::Program);
+        model.layout.apply_kaoss_prog_favs(true);
         let fx = model.layout.kaoss_prog_filter_chip(1);
         assert_eq!(
             model.layout.hit_kaoss_prog_filter(fx.x + 2, fx.y + 2),

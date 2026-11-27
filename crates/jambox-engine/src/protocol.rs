@@ -199,6 +199,15 @@ pub enum Request {
     },
     /// Drop and reopen the ALSA/cpal output stream without resetting engine state.
     AudioReopen,
+    /// List live audio outputs + current filter / connected card.
+    AudioDevices,
+    /// Change audio output and/or capture filter and reopen.
+    AudioSelect {
+        #[serde(default)]
+        output: Option<String>,
+        #[serde(default)]
+        input: Option<String>,
+    },
     /// List live MIDI ports and the filters the engine is watching.
     MidiPorts,
     /// Change IN/OUT name filters. Empty input = every class-compliant USB MIDI device.
@@ -310,6 +319,7 @@ pub enum FxTargetSpec {
     Drum { index: u8 },
     DrumGroup,
     Bus,
+    Clip { slot: u8 },
 }
 
 impl From<FxTargetSpec> for FxTarget {
@@ -319,6 +329,7 @@ impl From<FxTargetSpec> for FxTarget {
             FxTargetSpec::Drum { index } => FxTarget::Drum(index),
             FxTargetSpec::DrumGroup => FxTarget::DrumGroup,
             FxTargetSpec::Bus => FxTarget::Bus,
+            FxTargetSpec::Clip { slot } => FxTarget::Clip(slot),
         }
     }
 }
@@ -391,6 +402,7 @@ pub enum Response {
     /// Unsolicited: a MIDI event the engine heard (notes already went to DSP).
     Midi(MidiNotice),
     MidiPorts(jambox_protocol::MidiPortsReply),
+    AudioDevices(jambox_protocol::AudioDevicesReply),
     Scope(jambox_protocol::ScopeReply),
 }
 
@@ -585,6 +597,11 @@ pub enum Decoded {
     },
     /// Rebuild the host audio device stream (engine + rings stay up).
     AudioReopen,
+    AudioDevices,
+    AudioSelect {
+        output: Option<String>,
+        input: Option<String>,
+    },
     MidiPorts,
     MidiSelect {
         input: Option<String>,
@@ -639,6 +656,7 @@ pub fn parse_mode(value: &str) -> LaunchMode {
 fn clip_voice_from_wire(voice: jambox_protocol::WireClipVoice) -> jambox_core::ClipVoice {
     jambox_core::ClipVoice {
         locked: voice.locked,
+        fm: voice.fm,
         morph_a: voice.morph_a,
         morph_b: voice.morph_b,
         morph: voice.morph,
@@ -992,6 +1010,8 @@ pub fn decode(request: Request) -> Result<Decoded, String> {
             division: map_repeat_division(division),
         },
         Request::AudioReopen => Decoded::AudioReopen,
+        Request::AudioDevices => Decoded::AudioDevices,
+        Request::AudioSelect { output, input } => Decoded::AudioSelect { output, input },
         Request::MidiPorts => Decoded::MidiPorts,
         Request::MidiSelect { input, output } => Decoded::MidiSelect { input, output },
         Request::ChannelMap { bits } => Decoded::ChannelMap { bits },

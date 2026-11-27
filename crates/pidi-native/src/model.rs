@@ -23,14 +23,14 @@ use crate::songs::{self, SONG_CLIP_SLOT};
 use crate::voice_bake;
 use crate::waves;
 use jambox_core::{
-    drum_model_for_note, kaoss_scale, note_at_x, scale_notes, stick_note_x,
+    drum_model_for_note, hw_repeat_owner, kaoss_scale, note_at_x, scale_notes, stick_note_x,
     tempo_fx_delay_unit, tempo_fx_flanger_rate_unit, tempo_fx_grid_label, tempo_fx_tone_lfo_unit,
     velocity_at_y, DrumKit, DrumMacros, DrumModel, DRUM_MODEL_COUNT, DRUM_PREVIEW_SAMPLES,
     DRUM_PREVIEW_SR,
 };
 use jambox_protocol::{
-    MidiNotice, MidiPortsReply, RepeatDivision, RepeatPhase, StatusReply, TouchPhase,
-    WireClipEvent, WireClipVoice,
+    AudioDevicesReply, MidiNotice, MidiPortsReply, RepeatDivision, RepeatPhase, StatusReply,
+    TouchPhase, WireClipEvent, WireClipVoice,
 };
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, TryRecvError};
@@ -56,6 +56,8 @@ pub enum SettingsPicker {
     ArpGate,
     MapIn,
     MapOut,
+    AudioOut,
+    AudioIn,
 }
 
 const KAOSS_Y_BEND_STEPS: [u8; 5] = [12, 7, 5, 2, 1];
@@ -63,8 +65,6 @@ const KAOSS_Y_VEL_SPANS: [(u8, u8); 5] = [(72, 127), (1, 127), (40, 127), (100, 
 #[allow(dead_code)]
 pub const KICK_NOTE: u8 = 36;
 pub const DRUM_CHANNEL: u8 = 9;
-/// Repeat-lane owners for locked on-screen pads (`0x2000 | note`).
-const LOCK_REPEAT_OWNER: u32 = 0x2000;
 pub const MAX_FINGERS: usize = 5;
 /// Hold still on the bottom edge this long to leave FULL PAD (Tk uses ~700ms).
 pub const KAOSS_PLAY_EXIT_MS: u64 = 500;
@@ -90,26 +90,28 @@ pub enum RepeatDivisionChoice {
     Eighth,
     EighthTriplet,
     Sixteenth,
-    Triple,
     Half,
     Whole,
 }
 
 impl RepeatDivisionChoice {
-    /// New entries go at the end: grid cell indices are stable (tests use 0/4/5).
-    pub const ALL: [Self; 8] = [
+    /// NOTE REPEAT picker cells (stable indices: tests use 0 / 4).
+    pub const ALL: [Self; 7] = [
         Self::Off,
         Self::Quarter,
         Self::Eighth,
         Self::EighthTriplet,
         Self::Sixteenth,
-        Self::Triple,
         Self::Half,
         Self::Whole,
     ];
 
     /// Inverse of `as_slot`; unknown slots (newer files) → Off.
+    /// Slot 5 was the removed quarter-triplet (“TRIPLE”) — map to 1/8.
     pub fn from_slot(slot: u8) -> Self {
+        if slot == 5 {
+            return Self::Eighth;
+        }
         Self::ALL
             .iter()
             .copied()
@@ -132,7 +134,6 @@ impl RepeatDivisionChoice {
             Self::Eighth => 2,
             Self::EighthTriplet => 3,
             Self::Sixteenth => 4,
-            Self::Triple => 5,
             Self::Half => 6,
             Self::Whole => 7,
         }
@@ -144,7 +145,6 @@ impl RepeatDivisionChoice {
             Self::Eighth => RepeatDivision::Eighth,
             Self::EighthTriplet => RepeatDivision::EighthTriplet,
             Self::Sixteenth => RepeatDivision::Sixteenth,
-            Self::Triple => RepeatDivision::QuarterTriplet,
             Self::Half => RepeatDivision::Half,
             Self::Whole => RepeatDivision::Whole,
         }
@@ -157,7 +157,6 @@ impl RepeatDivisionChoice {
             Self::Eighth => "1/8",
             Self::EighthTriplet => "1/8T",
             Self::Sixteenth => "1/16",
-            Self::Triple => "TRIPLE",
             Self::Half => "1/2",
             Self::Whole => "1",
         }
@@ -170,7 +169,6 @@ impl RepeatDivisionChoice {
             Self::Eighth => Some("1/8"),
             Self::EighthTriplet => Some("1/8T"),
             Self::Sixteenth => Some("1/16"),
-            Self::Triple => Some("TRIP"),
             Self::Half => Some("1/2"),
             Self::Whole => Some("1"),
         }
@@ -191,7 +189,6 @@ impl RepeatDivisionChoice {
             Self::Eighth => jambox_core::PPQ as u64 / 2,
             Self::EighthTriplet => jambox_core::PPQ as u64 / 3,
             Self::Sixteenth => jambox_core::PPQ as u64 / 4,
-            Self::Triple => jambox_core::PPQ as u64 * 2 / 3,
             Self::Half => jambox_core::PPQ as u64 * 2,
             Self::Whole => jambox_core::PPQ as u64 * 4,
         }
@@ -347,6 +344,9 @@ pub struct NativeModel {
     pub fm_glide: f32,
     /// True while the heard graph is the saved user patch, not a recipe.
     pub fm_user_live: bool,
+    /// Live melody on keys / Kaoss: FM when true, morph synth when false.
+    /// Set only when entering SYN or FM pages; leaving those pages does not flip it.
+    pub melody_fm: bool,
     pub fm_user_index: Option<usize>,
     /// Name shown on the play-screen patch button.
     pub fm_patch_name: String,
@@ -369,7 +369,7 @@ pub struct NativeModel {
     pub kit_all_drums: bool,
     /// WAVE drill-down: sliders + CRT one-shot for the current edit target.
     pub kit_edit_open: bool,
-    /// NOTE REPEAT drill-down: none / 1/4 / 1/8 / 1/8T / 1/16 / triple.
+    /// NOTE REPEAT drill-down: none / 1/4 / 1/8 / 1/8T / 1/16 / 1/2 / 1.
     pub kit_repeat_open: bool,
     pub kit_wave: [f32; KIT_WAVE_POINTS],
     kit_wave_dirty: bool,
@@ -437,10 +437,13 @@ pub struct NativeModel {
     song_elapsed_ticks: f64,
     pub fx_bus: [f32; 6],
     pub fx_voice: [f32; 6],
+    /// SEQ clip voice insert snapshot (slot [`SEQ_CLIP_SLOT`]).
+    pub fx_seq: [f32; 6],
     /// Voice flanger LFO rate (0..1). Independent of SYNTH FLANGE mix.
     pub fx_flanger_rate: f32,
     pub fx_drum: [f32; 6],
     pub fx_target: FxEditTarget,
+    pub fx_voice_scope: session::VoiceFxScope,
     pub punch_amount: [f32; Layout::PUNCH_PAD_COUNT],
     pub punch_armed: [bool; Layout::PUNCH_PAD_COUNT],
     /// FX GRAB: freeze loop is playing (committed after a hold).
@@ -501,6 +504,14 @@ pub struct NativeModel {
     pub midi_out_connected: String,
     pub midi_inputs: Vec<String>,
     pub midi_outputs: Vec<String>,
+    /// ALSA/cpal output name substring. Empty = AUTO ranked pick.
+    pub audio_out_filter: String,
+    pub audio_out_connected: String,
+    pub audio_outputs: Vec<String>,
+    /// ALSA/cpal capture name substring. Empty = AUTO (USB else HiFiBerry).
+    pub audio_in_filter: String,
+    pub audio_in_connected: String,
+    pub audio_inputs: Vec<String>,
     /// Map for the live keybed (MPK, SMK-37, …). Unknown ports stay MPK-compatible.
     pub controller_profile: midi_core::ControllerProfile,
     pub last_midi_activity: String,
@@ -796,6 +807,7 @@ impl NativeModel {
                 fm_patch.ops[3].env,
             ],
             fm_user_live: false,
+            melody_fm: false,
             fm_user_index: None,
             fm_patch_name: "BELL".into(),
             fm_patches: Vec::new(),
@@ -870,9 +882,11 @@ impl NativeModel {
             song_elapsed_ticks: 0.0,
             fx_bus: [0.0; 6],
             fx_voice: [0.0; 6],
+            fx_seq: [0.0; 6],
             fx_flanger_rate: 0.35,
             fx_drum: [0.0; 6],
             fx_target: FxEditTarget::Bus,
+            fx_voice_scope: session::VoiceFxScope::Live,
             punch_amount: [0.0; Layout::PUNCH_PAD_COUNT],
             punch_armed: [false; Layout::PUNCH_PAD_COUNT],
             punch_locked: false,
@@ -909,6 +923,12 @@ impl NativeModel {
             midi_out_connected: String::new(),
             midi_inputs: Vec::new(),
             midi_outputs: Vec::new(),
+            audio_out_filter: String::new(),
+            audio_out_connected: String::new(),
+            audio_outputs: Vec::new(),
+            audio_in_filter: String::new(),
+            audio_in_connected: String::new(),
+            audio_inputs: Vec::new(),
             controller_profile: midi_core::ControllerProfile::mpk_mini(),
             last_midi_activity: String::new(),
             channel_map_bits: [0; 16],
@@ -1123,6 +1143,7 @@ impl NativeModel {
         self.status_line.clear();
         self.kaoss_picker = None;
         self.kaoss_picker_scroll = 0;
+        self.sync_kaoss_prog_favs_layout();
         self.kaoss_settings_open = false;
         self.kaoss_settings_scroll = 0;
         self.kaoss_color_picker_open = false;
@@ -1156,23 +1177,25 @@ impl NativeModel {
             self.kaoss_full = false;
             self.kaoss_full_exit_since = None;
             self.layout.apply_kaoss_full(false);
+            self.sync_kaoss_prog_favs_layout();
         }
     }
 
     fn sync_melody_engine(&mut self, outbox: &mut Outbox) {
-        if self.mode == UiMode::Fm {
+        if self.melody_fm {
             self.push_fm_params(outbox);
             outbox.synth("fm_enable", 1.0);
-            outbox.knob_map("fm");
         } else {
             outbox.synth("fm_enable", 0.0);
-            if self.mode == UiMode::Drums {
-                outbox.knob_map("drums");
-            } else if self.mode == UiMode::Fx {
-                outbox.knob_map("punch");
-            } else {
-                outbox.knob_map("keys");
-            }
+        }
+        if self.mode == UiMode::Fm {
+            outbox.knob_map("fm");
+        } else if self.mode == UiMode::Drums {
+            outbox.knob_map("drums");
+        } else if self.mode == UiMode::Fx {
+            outbox.knob_map("punch");
+        } else {
+            outbox.knob_map("keys");
         }
     }
 
@@ -1187,6 +1210,11 @@ impl NativeModel {
             self.leave_arp_mode(outbox);
         }
         let leaving_fx = self.mode == UiMode::Fx && mode != UiMode::Fx;
+        if mode == UiMode::Fm {
+            self.melody_fm = true;
+        } else if mode == UiMode::Synth {
+            self.melody_fm = false;
+        }
         self.set_mode(mode);
         self.sync_melody_engine(outbox);
         // Re-assert Pads→FX whenever FX opens so a stale engine flag cannot
@@ -1347,6 +1375,9 @@ impl NativeModel {
         if self.fm_patches_open {
             return Some("fm_patches");
         }
+        if self.mode == UiMode::Seq && self.seq.backbone_grid_screen_open() {
+            return Some("seq_backbone_grid");
+        }
         None
     }
 
@@ -1357,6 +1388,7 @@ impl NativeModel {
         self.kaoss_bpm_numpad = false;
         self.kaoss_bpm_digits.clear();
         self.kaoss_picker = None;
+        self.sync_kaoss_prog_favs_layout();
         if self.kaoss_full {
             self.leave_kaoss_full();
         }
@@ -1506,6 +1538,7 @@ impl NativeModel {
             self.leave_kaoss_full();
         }
         self.kaoss_picker = None;
+        self.sync_kaoss_prog_favs_layout();
         self.kaoss_color_picker_open = false;
         self.kaoss_bpm_open = false;
         self.kaoss_bpm_numpad = false;
@@ -1602,6 +1635,7 @@ impl NativeModel {
             self.leave_kaoss_full();
         }
         self.kaoss_picker = None;
+        self.sync_kaoss_prog_favs_layout();
         self.kaoss_settings_open = false;
         self.kaoss_settings_scroll = 0;
         self.kaoss_color_picker_open = false;
@@ -1667,6 +1701,8 @@ impl NativeModel {
             SettingsPicker::ArpGate => "pick ARP gate".into(),
             SettingsPicker::MapIn => "pick MIDI in".into(),
             SettingsPicker::MapOut => "pick MIDI out".into(),
+            SettingsPicker::AudioOut => "pick audio out".into(),
+            SettingsPicker::AudioIn => "pick audio in".into(),
         };
         self.mark_dirty();
     }
@@ -1676,6 +1712,118 @@ impl NativeModel {
         self.settings_picker_scroll = 0;
         self.status_line.clear();
         self.mark_dirty();
+    }
+
+    fn audio_picker_outputs(names: &[String]) -> Vec<&String> {
+        let skip = |lower: &str| -> bool {
+            lower == "null"
+                || lower.starts_with("dmix:")
+                || lower.starts_with("dsnoop:")
+                || lower.contains("pulse")
+                || lower.contains("jack")
+                || lower.contains("pipewire")
+                || lower.contains("hdmi")
+                || lower.contains("monitor")
+        };
+        let card_token = |lower: &str| -> Option<String> {
+            lower.split("card=").nth(1).map(|c| {
+                c.split([',', ':'])
+                    .next()
+                    .unwrap_or(c)
+                    .to_string()
+            })
+        };
+        let mut seen_hw_cards: Vec<String> = Vec::new();
+        for name in names {
+            let lower = name.to_ascii_lowercase();
+            if skip(&lower) {
+                continue;
+            }
+            if lower.starts_with("hw:card=") {
+                if let Some(card) = card_token(&lower) {
+                    seen_hw_cards.push(card);
+                }
+            }
+        }
+        let mut out: Vec<&String> = Vec::new();
+        for name in names {
+            let lower = name.to_ascii_lowercase();
+            if skip(&lower) {
+                continue;
+            }
+            // Prefer direct hw: over default/sysdefault/plughw for the same card.
+            if lower.starts_with("default")
+                || lower.starts_with("sysdefault")
+                || lower.starts_with("plughw:")
+            {
+                if let Some(card) = card_token(&lower) {
+                    if seen_hw_cards.iter().any(|c| c == &card) {
+                        continue;
+                    }
+                }
+            }
+            out.push(name);
+        }
+        out
+    }
+
+    /// Compact label for Settings AUDIO / the picker sheet.
+    pub fn short_audio_label(name: &str) -> String {
+        let lower = name.to_ascii_lowercase();
+        if lower.contains("hifiberry")
+            || lower.contains("dacplus")
+            || lower.contains("sndrpihifiberry")
+        {
+            return "HIFIBERRY".into();
+        }
+        if lower.contains("headphone") || lower.contains("bcm2835") {
+            return "HEADPHONE".into();
+        }
+        if lower == "usb" || lower.contains("usb") || lower.contains("pnp") {
+            if let Some(rest) = lower.split("card=").nth(1) {
+                let card = rest.split([',', ':']).next().unwrap_or(rest);
+                if !card.is_empty() && card != "usb" {
+                    return card.to_ascii_uppercase();
+                }
+            }
+            return "USB".into();
+        }
+        if let Some(rest) = lower.split("card=").nth(1) {
+            let card = rest.split([',', ':']).next().unwrap_or(rest);
+            if !card.is_empty() {
+                return card.to_ascii_uppercase();
+            }
+        }
+        let trimmed = name.trim();
+        if trimmed.len() > 18 {
+            format!("{}…", &trimmed[..17])
+        } else if trimmed.is_empty() {
+            "AUTO".into()
+        } else {
+            trimmed.to_ascii_uppercase()
+        }
+    }
+
+    pub fn audio_out_button_label(&self) -> String {
+        let name = if !self.audio_out_connected.trim().is_empty() {
+            Self::short_audio_label(&self.audio_out_connected)
+        } else if self.audio_out_filter.trim().is_empty() {
+            "AUTO".into()
+        } else {
+            Self::short_audio_label(&self.audio_out_filter)
+        };
+        format!("OUT {name}")
+    }
+
+    pub fn audio_in_button_label(&self) -> String {
+        let name = if !self.audio_in_connected.trim().is_empty() {
+            Self::short_audio_label(&self.audio_in_connected)
+        } else if self.audio_in_filter.trim().is_empty() {
+            "AUTO".into()
+        } else {
+            Self::short_audio_label(&self.audio_in_filter)
+        };
+        format!("IN {name}")
     }
 
     fn map_picker_ports(names: &[String]) -> Vec<&String> {
@@ -1701,6 +1849,8 @@ impl NativeModel {
             SettingsPicker::ArpGate => crate::arp::GATE_PRESETS.len(),
             SettingsPicker::MapIn => 1 + Self::map_picker_ports(&self.midi_inputs).len(),
             SettingsPicker::MapOut => 1 + Self::map_picker_ports(&self.midi_outputs).len(),
+            SettingsPicker::AudioOut => 1 + Self::audio_picker_outputs(&self.audio_outputs).len(),
+            SettingsPicker::AudioIn => 1 + Self::audio_picker_outputs(&self.audio_inputs).len(),
         }
     }
 
@@ -1715,6 +1865,8 @@ impl NativeModel {
             SettingsPicker::ArpGate => "ARP GATE",
             SettingsPicker::MapIn => "MIDI IN",
             SettingsPicker::MapOut => "MIDI OUT",
+            SettingsPicker::AudioOut => "AUDIO OUT",
+            SettingsPicker::AudioIn => "AUDIO IN",
         }
     }
 
@@ -1729,6 +1881,8 @@ impl NativeModel {
             SettingsPicker::ArpGate => "note length as % of the step",
             SettingsPicker::MapIn => "ALL = every hardware USB MIDI in",
             SettingsPicker::MapOut => "AUTO = first non-keybed out",
+            SettingsPicker::AudioOut => "AUTO = HiFiBerry / headphone / first card",
+            SettingsPicker::AudioIn => "AUTO = USB mic if present, else HiFiBerry line-in",
         }
     }
 
@@ -1780,6 +1934,28 @@ impl NativeModel {
                     ports
                         .get(index - 1)
                         .map(|n| midi_core::short_port_label(n).to_string())
+                        .unwrap_or_else(|| "—".into())
+                }
+            }
+            SettingsPicker::AudioOut => {
+                if index == 0 {
+                    "AUTO".into()
+                } else {
+                    let ports = Self::audio_picker_outputs(&self.audio_outputs);
+                    ports
+                        .get(index - 1)
+                        .map(|n| Self::short_audio_label(n))
+                        .unwrap_or_else(|| "—".into())
+                }
+            }
+            SettingsPicker::AudioIn => {
+                if index == 0 {
+                    "AUTO".into()
+                } else {
+                    let ports = Self::audio_picker_outputs(&self.audio_inputs);
+                    ports
+                        .get(index - 1)
+                        .map(|n| Self::short_audio_label(n))
                         .unwrap_or_else(|| "—".into())
                 }
             }
@@ -1841,6 +2017,38 @@ impl NativeModel {
                     ports
                         .iter()
                         .position(|n| n.to_ascii_lowercase().contains(&cur))
+                        .map(|i| i + 1)
+                        .unwrap_or(0)
+                }
+            }
+            SettingsPicker::AudioOut => {
+                if self.audio_out_filter.trim().is_empty() {
+                    0
+                } else {
+                    let ports = Self::audio_picker_outputs(&self.audio_outputs);
+                    let cur = self.audio_out_filter.trim().to_ascii_lowercase();
+                    ports
+                        .iter()
+                        .position(|n| {
+                            let n = n.to_ascii_lowercase();
+                            n.contains(&cur) || cur.contains(&n)
+                        })
+                        .map(|i| i + 1)
+                        .unwrap_or(0)
+                }
+            }
+            SettingsPicker::AudioIn => {
+                if self.audio_in_filter.trim().is_empty() {
+                    0
+                } else {
+                    let ports = Self::audio_picker_outputs(&self.audio_inputs);
+                    let cur = self.audio_in_filter.trim().to_ascii_lowercase();
+                    ports
+                        .iter()
+                        .position(|n| {
+                            let n = n.to_ascii_lowercase();
+                            n.contains(&cur) || cur.contains(&n)
+                        })
                         .map(|i| i + 1)
                         .unwrap_or(0)
                 }
@@ -1937,8 +2145,67 @@ impl NativeModel {
                 }
                 self.apply_midi_select(outbox);
             }
+            SettingsPicker::AudioOut => {
+                if index == 0 {
+                    self.audio_out_filter.clear();
+                } else {
+                    let ports = Self::audio_picker_outputs(&self.audio_outputs);
+                    if let Some(name) = ports.get(index - 1) {
+                        self.audio_out_filter = Self::audio_filter_for_device(name);
+                    }
+                }
+                self.apply_audio_out_select(outbox);
+            }
+            SettingsPicker::AudioIn => {
+                if index == 0 {
+                    self.audio_in_filter.clear();
+                } else {
+                    let ports = Self::audio_picker_outputs(&self.audio_inputs);
+                    if let Some(name) = ports.get(index - 1) {
+                        self.audio_in_filter = Self::audio_filter_for_device(name);
+                    }
+                }
+                self.apply_audio_in_select(outbox);
+            }
         }
         self.mark_dirty();
+    }
+
+    fn audio_filter_for_device(name: &str) -> String {
+        let lower = name.to_ascii_lowercase();
+        if lower.contains("hifiberry")
+            || lower.contains("sndrpihifiberry")
+            || lower.contains("dacplus")
+        {
+            return "hifiberry".into();
+        }
+        if lower.contains("headphone") || lower.contains("bcm2835") {
+            return "headphone".into();
+        }
+        if lower.contains("usb") || lower.contains("pnp") {
+            if let Some(rest) = name
+                .split("CARD=")
+                .nth(1)
+                .or_else(|| name.split("card=").nth(1))
+            {
+                let card = rest.split([',', ':']).next().unwrap_or(rest).trim();
+                if !card.is_empty() {
+                    return card.to_string();
+                }
+            }
+            return "usb".into();
+        }
+        if let Some(rest) = name
+            .split("CARD=")
+            .nth(1)
+            .or_else(|| name.split("card=").nth(1))
+        {
+            let card = rest.split([',', ':']).next().unwrap_or(rest).trim();
+            if !card.is_empty() {
+                return card.to_string();
+            }
+        }
+        name.to_string()
     }
 
     fn nav_back(&mut self, outbox: &mut Outbox) {
@@ -1956,7 +2223,10 @@ impl NativeModel {
             Some("kaoss_bpm_numpad") => self.close_kaoss_bpm_numpad(),
             Some("kaoss_bpm") => self.close_kaoss_bpm(),
             Some("kaoss_settings") => self.close_kaoss_settings(),
-            Some("kaoss_picker") => self.kaoss_picker = None,
+            Some("kaoss_picker") => {
+                self.kaoss_picker = None;
+                self.sync_kaoss_prog_favs_layout();
+            }
             Some("morph") => {
                 self.synth_pick_a = None;
                 self.synth_pick_scroll = 0;
@@ -1994,6 +2264,10 @@ impl NativeModel {
             Some("fm_patches") => {
                 self.fm_patches_open = false;
                 self.status_line = self.fm_patch_name.clone();
+            }
+            Some("seq_backbone_grid") => {
+                self.seq.close_backbone_grid_screen();
+                self.status_line = self.seq.status.clone();
             }
             _ => {
                 if let Some(prev) = self.nav_stack.pop() {
@@ -2370,6 +2644,7 @@ impl NativeModel {
         }
         self.mode_before_power = self.mode;
         self.kaoss_picker = None;
+        self.sync_kaoss_prog_favs_layout();
         self.kaoss_settings_open = false;
         self.kaoss_color_picker_open = false;
         self.kaoss_bpm_open = false;
@@ -3084,6 +3359,7 @@ impl NativeModel {
         self.kaoss_hold = s.kaoss_hold;
         self.kaoss_fx_hold = s.kaoss_fx_hold;
         self.kaoss_fx_target = s.kaoss_fx_target;
+        self.fx_voice_scope = s.fx_voice_scope;
         self.punch_buffer_prio = jambox_core::PunchBufferPrio::from_u8(s.punch_buffer_prio);
         self.punch_rpt_mode = jambox_core::PunchRptMode::from_u8(s.punch_rpt_mode);
         self.punch_grid_mode = jambox_core::PunchGridMode::from_u8(s.punch_grid_mode);
@@ -3154,6 +3430,8 @@ impl NativeModel {
         }
         self.midi_in_filter = s.midi_in.clone();
         self.midi_out_filter = s.midi_out.clone();
+        self.audio_out_filter = s.audio_out.clone();
+        self.audio_in_filter = s.audio_in.clone();
         self.channel_map_bits = s.channel_map;
         self.probe = s.probe;
         self.power_warn = s.power_warn;
@@ -3208,6 +3486,21 @@ impl NativeModel {
         );
         outbox.channel_map(self.channel_map_bits);
         outbox.midi_ports();
+        // Empty = keep the service CLI defaults. Only push saved preferences.
+        let out = if self.audio_out_filter.is_empty() {
+            None
+        } else {
+            Some(self.audio_out_filter.clone())
+        };
+        let inn = if self.audio_in_filter.is_empty() {
+            None
+        } else {
+            Some(self.audio_in_filter.clone())
+        };
+        if out.is_some() || inn.is_some() {
+            outbox.audio_select(out, inn);
+        }
+        outbox.audio_devices();
         self.write_midi_ports_file();
         crate::host::write_live_thru_preset(
             &self.midi_in_filter,
@@ -3306,6 +3599,7 @@ impl NativeModel {
             kaoss_hold: self.kaoss_hold,
             kaoss_fx_hold: self.kaoss_fx_hold,
             kaoss_fx_target: self.kaoss_fx_target,
+            fx_voice_scope: self.fx_voice_scope,
             punch_buffer_prio: self.punch_buffer_prio.as_u8(),
             punch_rpt_mode: self.punch_rpt_mode.as_u8(),
             punch_grid_mode: self.punch_grid_mode.as_u8(),
@@ -3364,6 +3658,8 @@ impl NativeModel {
             seq_cue_beep: self.seq.cue_beep,
             midi_in: self.midi_in_filter.clone(),
             midi_out: self.midi_out_filter.clone(),
+            audio_out: self.audio_out_filter.clone(),
+            audio_in: self.audio_in_filter.clone(),
             channel_map: self.channel_map_bits,
             probe: self.probe,
             power_warn: self.power_warn,
@@ -3417,6 +3713,9 @@ impl NativeModel {
         }
         let vel = self.maybe_full_vel(notice.channel, notice.velocity.unwrap_or(0) as u8);
         if self.apply_punch_midi(notice, outbox) {
+            return;
+        }
+        if self.apply_fm_midi(notice, outbox) {
             return;
         }
         if self.apply_phrase_pad_midi(notice, outbox) {
@@ -3573,6 +3872,51 @@ impl NativeModel {
             midi_core::short_port_label(&self.midi_out_filter).to_string()
         };
         self.status_line = format!("MIDI in={inn}  out={out}");
+        self.push_log(self.status_line.clone());
+    }
+
+    pub fn apply_audio_devices(&mut self, reply: &AudioDevicesReply) {
+        if !reply.outputs.is_empty() {
+            self.audio_outputs = reply.outputs.clone();
+        }
+        if !reply.inputs.is_empty() {
+            self.audio_inputs = reply.inputs.clone();
+        }
+        if !reply.output_connected.trim().is_empty() {
+            self.audio_out_connected = reply.output_connected.clone();
+        } else {
+            self.audio_out_connected.clear();
+        }
+        if !reply.input_connected.trim().is_empty() {
+            self.audio_in_connected = reply.input_connected.clone();
+        } else {
+            self.audio_in_connected.clear();
+        }
+        self.mark_dirty();
+    }
+
+    fn apply_audio_out_select(&mut self, outbox: &mut Outbox) {
+        outbox.all_notes_off();
+        outbox.audio_select(Some(self.audio_out_filter.clone()), None);
+        self.mark_dirty();
+        let label = if self.audio_out_filter.trim().is_empty() {
+            "AUTO".into()
+        } else {
+            Self::short_audio_label(&self.audio_out_filter)
+        };
+        self.status_line = format!("audio out={label}");
+        self.push_log(self.status_line.clone());
+    }
+
+    fn apply_audio_in_select(&mut self, outbox: &mut Outbox) {
+        outbox.audio_select(None, Some(self.audio_in_filter.clone()));
+        self.mark_dirty();
+        let label = if self.audio_in_filter.trim().is_empty() {
+            "AUTO".into()
+        } else {
+            Self::short_audio_label(&self.audio_in_filter)
+        };
+        self.status_line = format!("audio in={label}");
         self.push_log(self.status_line.clone());
     }
 
@@ -4007,6 +4351,32 @@ impl NativeModel {
             }
         } else if self.mode == UiMode::Chords && self.chords_overlay.is_some() {
             self.hit_chords_overlay(px, py)
+        } else if self.mode == UiMode::Seq && self.seq.backbone_grid_screen_open() {
+            let base = if self.layout.nav.contains(px, py) {
+                self.layout.hit(self.mode, px, py)
+            } else {
+                Hit::None
+            };
+            if matches!(
+                base,
+                Hit::Nav(_) | Hit::NavBack | Hit::Power | Hit::HomeTile(_)
+            ) {
+                base
+            } else {
+                self.layout.hit_seq(
+                    px,
+                    py,
+                    true,
+                    self.seq.backbone_grid_allowed(),
+                )
+            }
+        } else if self.mode == UiMode::Seq {
+            self.layout.hit_seq(
+                px,
+                py,
+                self.seq.backbone_grid_screen_open(),
+                self.seq.backbone_grid_allowed(),
+            )
         } else {
             self.layout.hit(self.mode, px, py)
         };
@@ -4690,6 +5060,7 @@ impl NativeModel {
             Hit::KaossFull => {
                 self.tap_ui(slot, id, gesture, px, py);
                 self.kaoss_picker = None;
+                self.sync_kaoss_prog_favs_layout();
                 if self.kaoss_full {
                     self.leave_kaoss_full();
                 } else {
@@ -4836,6 +5207,7 @@ impl NativeModel {
             Hit::KaossPickerClose => {
                 self.tap_ui(slot, id, gesture, px, py);
                 self.kaoss_picker = None;
+                self.sync_kaoss_prog_favs_layout();
             }
             Hit::SeqRec => {
                 self.fingers[slot] = Finger {
@@ -4866,6 +5238,8 @@ impl NativeModel {
                 };
                 let action = self.seq.toggle_play();
                 self.apply_seq_action(action, outbox);
+                self.status_line = self.seq.status.clone();
+                self.mark_dirty();
             }
             Hit::SeqKeep => {
                 self.fingers[slot] = Finger {
@@ -5036,6 +5410,31 @@ impl NativeModel {
                 self.seq.nudge_bpm(-1.0);
                 outbox.tempo(self.seq.bpm);
                 self.bpm = self.seq.bpm;
+                self.status_line = self.seq.status.clone();
+                self.mark_dirty();
+            }
+            Hit::SeqBackboneGridMode => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.seq.toggle_backbone_grid_screen();
+                self.status_line = self.seq.status.clone();
+                self.mark_dirty();
+            }
+            Hit::SeqBackboneGrid { step, model: row } => {
+                let profile = &self.controller_profile;
+                self.fingers[slot] = Finger {
+                    active: true,
+                    id,
+                    gesture,
+                    x: 0.0,
+                    y: 0.0,
+                    px,
+                    py,
+                    surface: Surface::UiTap,
+                    gate_on: false,
+                };
+                let row = row.min(self.seq.backbone_grid_row_models().len().saturating_sub(1));
+                let action = self.seq.toggle_backbone_grid_cell(step, row, profile);
+                self.apply_seq_action(action, outbox);
                 self.status_line = self.seq.status.clone();
                 self.mark_dirty();
             }
@@ -5259,26 +5658,22 @@ impl NativeModel {
                 }
             }
             Hit::SettingsAudio => {
-                self.fingers[slot] = Finger {
-                    active: true,
-                    id,
-                    gesture,
-                    x: 0.0,
-                    y: 0.0,
-                    px,
-                    py,
-                    surface: Surface::UiTap,
-                    gate_on: false,
-                };
-                // Clear hanging notes, then reopen ALSA after a jack swap.
-                outbox.all_notes_off();
-                outbox.audio_reopen();
-                self.status_line = "audio reopen".into();
-                self.push_log("audio reopen");
+                self.tap_ui(slot, id, gesture, px, py);
+                outbox.audio_devices();
+                self.open_settings_picker(SettingsPicker::AudioOut);
+            }
+            Hit::SettingsAudioIn => {
+                self.tap_ui(slot, id, gesture, px, py);
+                outbox.audio_devices();
+                self.open_settings_picker(SettingsPicker::AudioIn);
             }
             Hit::FxTarget => {
                 self.tap_ui(slot, id, gesture, px, py);
                 self.cycle_fx_target();
+            }
+            Hit::FxVoiceScope => {
+                self.tap_ui(slot, id, gesture, px, py);
+                self.cycle_fx_voice_scope();
             }
             Hit::FxSlider(index) => {
                 self.fingers[slot] = Finger {
@@ -5325,14 +5720,14 @@ impl NativeModel {
                 if releasing {
                     self.punch_locked = false;
                     self.punch_grabbing = false;
-                    outbox.punch_lock(source, false);
+                    self.each_keys_punch_source(outbox, |o, src| o.punch_lock(src, false));
                     self.status_line = format!(
                         "{} GRAB off — live",
                         jambox_core::PunchSource::from_u8(source).label()
                     );
                 } else {
                     self.punch_grabbing = true;
-                    outbox.punch_grab(source, true);
+                    self.each_keys_punch_source(outbox, |o, src| o.punch_grab(src, true));
                     self.status_line = format!(
                         "{} GRAB — hold to capture",
                         jambox_core::PunchSource::from_u8(source).label()
@@ -6122,7 +6517,7 @@ impl NativeModel {
             Surface::PunchLock { releasing } => {
                 if !releasing && self.punch_grabbing {
                     self.punch_grabbing = false;
-                    outbox.punch_grab(self.punch_source, false);
+                    self.each_keys_punch_source(outbox, |o, src| o.punch_grab(src, false));
                     self.punch_locked = true;
                     self.sync_punch_bank();
                     self.status_line = format!(
@@ -6528,6 +6923,7 @@ impl NativeModel {
 
     fn phrase_clip_voice(pad: &PhrasePad) -> WireClipVoice {
         WireClipVoice {
+            fm: false,
             locked: pad.voice_locked,
             morph_a: pad.morph_a,
             morph_b: pad.morph_b,
@@ -6957,8 +7353,17 @@ impl NativeModel {
             return;
         }
         let track = self.layout.fm_slider(index);
-        let y = 1.0 - ((py - track.y) as f32 / track.h.max(1) as f32);
-        let value = y.clamp(0.0, 1.0);
+        let Some(value) = Self::vertical_slider_t(track, py) else {
+            return;
+        };
+        self.set_fm_slider_unit(index, value, outbox);
+    }
+
+    fn set_fm_slider_unit(&mut self, index: usize, value: f32, outbox: &mut Outbox) {
+        if index >= Layout::FM_SLIDER_COUNT {
+            return;
+        }
+        let value = value.clamp(0.0, 1.0);
         if index == 4 {
             self.fm_width = value;
             outbox.synth("fm_width", value);
@@ -7073,7 +7478,7 @@ impl NativeModel {
     }
 
     fn lock_repeat_owner(note: u8) -> u32 {
-        LOCK_REPEAT_OWNER | u32::from(note)
+        hw_repeat_owner(note)
     }
 
     fn drum_repeat_slots(&self) -> [u8; 16] {
@@ -7254,16 +7659,14 @@ impl NativeModel {
         self.push_pad_rec(false, DRUM_CHANNEL, note, 0);
     }
 
-    fn handle_hardware_drum_repeat(&mut self, note: u8, on: bool, _outbox: &mut Outbox) -> bool {
+    fn handle_hardware_drum_repeat(&mut self, note: u8, on: bool, outbox: &mut Outbox) -> bool {
         if !self.drum_repeat_for_note(note).is_on() {
             return false;
         }
         let index = drum_model_for_note(note).index();
         if on {
             if self.drum_repeat_lock && self.repeat_latched[index] {
-                self.repeat_latched[index] = false;
-                self.repeat_held[index] = 0;
-                self.repeat_capture_due[index] = None;
+                self.stop_repeat_voice(index, outbox);
                 self.push_log(format!("midi lock off n{note}"));
                 return true;
             }
@@ -7553,9 +7956,13 @@ impl NativeModel {
                 self.status_line = format!("bus {name} {:.2}", value);
             }
             FxEditTarget::Voice => {
-                self.fx_voice[index] = value;
-                self.push_voice_fx(name, value, outbox);
-                self.status_line = format!("voice {name} {:.2}", value);
+                self.apply_voice_insert_fx(index, name, value, outbox);
+                self.status_line = format!(
+                    "voice {} {} {:.2}",
+                    self.fx_voice_scope.label(),
+                    name,
+                    value
+                );
             }
             FxEditTarget::DrumGroup => {
                 self.fx_drum[index] = value;
@@ -7574,14 +7981,14 @@ impl NativeModel {
     fn clear_punch(&mut self, outbox: &mut Outbox) {
         for i in 0..Layout::PUNCH_PAD_COUNT {
             if self.punch_armed[i] {
-                outbox.punch_fx(self.punch_source, i as u8, 0.0);
+                self.push_punch_fx_amount(i as u8, 0.0, outbox);
             }
             self.punch_armed[i] = false;
         }
         if self.punch_locked || self.punch_grabbing {
             self.punch_locked = false;
             self.punch_grabbing = false;
-            outbox.punch_lock(self.punch_source, false);
+            self.each_keys_punch_source(outbox, |o, src| o.punch_lock(src, false));
         }
         self.sync_punch_bank();
         self.status_line = format!(
@@ -7608,6 +8015,40 @@ impl NativeModel {
             return false;
         };
         self.toggle_phrase(cell, outbox);
+        true
+    }
+
+    /// MPK K1–K6 (and profile equivalents) drive the FM slider row on the FM page.
+    fn apply_fm_midi(&mut self, notice: &MidiNotice, outbox: &mut Outbox) -> bool {
+        if self.mode != UiMode::Fm || self.fm_patches_open || self.fm_name_open {
+            return false;
+        }
+        let kind = notice.kind.to_ascii_lowercase();
+        if kind != "control_change" && kind != "cc" {
+            return false;
+        }
+        let cc = notice.control.unwrap_or(255);
+        if cc == 1 {
+            return false;
+        }
+        let profile = self.profile_for_notice(notice);
+        if !profile.knobs_on_channel(notice.channel) {
+            return false;
+        }
+        let Some(index) = profile.knob_index(cc) else {
+            return false;
+        };
+        if index >= Layout::FM_SLIDER_COUNT {
+            return false;
+        }
+        let raw = notice.value.unwrap_or(0).min(127) as u8;
+        let prev = match index {
+            4 => self.fm_width,
+            5 => self.fm_glide,
+            i => self.fm_params[i],
+        };
+        let unit = midi_core::apply_knob_cc(profile.knob_encoding, prev, raw);
+        self.set_fm_slider_unit(index, unit, outbox);
         true
     }
 
@@ -7696,7 +8137,7 @@ impl NativeModel {
         self.punch_amount[index] = amount;
         self.sync_punch_bank();
         if self.punch_armed[index] {
-            outbox.punch_fx(self.punch_source, index as u8, amount);
+            self.push_punch_fx_amount(index as u8, amount, outbox);
         }
         let division = if self.punch_grid_mode == jambox_core::PunchGridMode::Beat
             && jambox_core::punch_slot_has_grid(index)
@@ -7726,7 +8167,7 @@ impl NativeModel {
             0.0
         };
         self.sync_punch_bank();
-        outbox.punch_fx(self.punch_source, index as u8, amount);
+        self.push_punch_fx_amount(index as u8, amount, outbox);
         self.status_line = format!(
             "{} {} {} {:.0}%",
             jambox_core::PunchSource::from_u8(self.punch_source).label(),
@@ -7792,7 +8233,7 @@ impl NativeModel {
         if self.kaoss_punch_strip_momentary {
             self.kaoss_punch_strip_momentary = false;
             self.punch_armed[index] = false;
-            outbox.punch_fx(self.punch_source, index as u8, 0.0);
+            self.push_kaoss_voice_punch_fx(index as u8, 0.0, outbox);
             self.sync_punch_bank();
             self.status_line = format!(
                 "pad strip · {} off (amount kept {:.0}%)",
@@ -7834,7 +8275,7 @@ impl NativeModel {
         }
         self.punch_amount[index] = amount;
         self.sync_punch_bank();
-        outbox.punch_fx(self.punch_source, index as u8, amount);
+        self.push_kaoss_voice_punch_fx(index as u8, amount, outbox);
     }
 
     fn apply_kaoss_punch_destroy(&mut self, name: &str, value: f32, outbox: &mut Outbox) {
@@ -7892,7 +8333,7 @@ impl NativeModel {
             } else {
                 0.0
             };
-            outbox.punch_fx(self.punch_source, i as u8, send);
+            self.push_kaoss_voice_punch_fx(i as u8, send, outbox);
         }
         self.sync_punch_bank();
         self.kaoss_destroy_punch_mask = 0;
@@ -8018,10 +8459,118 @@ impl NativeModel {
         };
         self.status_line = match self.fx_target {
             FxEditTarget::Bus => "FX target: BUS".into(),
-            FxEditTarget::Voice => "FX target: VOICE 0".into(),
+            FxEditTarget::Voice => format!(
+                "FX target: VOICE — {}",
+                self.fx_voice_scope.label()
+            ),
             FxEditTarget::DrumGroup => "FX target: DRUM GROUP".into(),
         };
         self.mark_dirty();
+    }
+
+    fn cycle_fx_voice_scope(&mut self) {
+        self.fx_target = FxEditTarget::Voice;
+        let i = session::VoiceFxScope::ALL
+            .iter()
+            .position(|s| *s == self.fx_voice_scope)
+            .unwrap_or(0);
+        self.fx_voice_scope =
+            session::VoiceFxScope::ALL[(i + 1) % session::VoiceFxScope::ALL.len()];
+        self.status_line = format!("VOICE FX → {}", self.fx_voice_scope.label());
+        self.mark_dirty();
+    }
+
+    pub fn voice_fx_sliders(&self) -> &[f32; 6] {
+        match self.fx_voice_scope {
+            session::VoiceFxScope::Seq => &self.fx_seq,
+            session::VoiceFxScope::Live | session::VoiceFxScope::Both => &self.fx_voice,
+        }
+    }
+
+    fn apply_voice_insert_fx(&mut self, index: usize, name: &str, value: f32, outbox: &mut Outbox) {
+        if self.fx_voice_scope.includes_live() {
+            self.fx_voice[index] = value;
+        }
+        if self.fx_voice_scope.includes_seq() {
+            self.fx_seq[index] = value;
+        }
+        self.push_scoped_voice_fx(name, value, outbox);
+    }
+
+    fn push_scoped_voice_fx(&mut self, name: &str, value: f32, outbox: &mut Outbox) {
+        if self.fx_voice_scope.includes_live() {
+            let a = self.morph_a;
+            let b = self.morph_b;
+            outbox.fx_voice(a, name, value);
+            if b != a {
+                outbox.fx_voice(b, name, value);
+            }
+        }
+        if self.fx_voice_scope.includes_seq() {
+            outbox.fx_clip(SEQ_CLIP_SLOT, name, value);
+        }
+    }
+
+    /// SLICE / destroy pads: live KEYS bus vs SEQ clip bus per VOICE scope.
+    fn push_scoped_voice_punch_fx(&self, slot: u8, amount: f32, outbox: &mut Outbox) {
+        if self.fx_voice_scope.includes_live() {
+            outbox.punch_fx(jambox_core::PunchSource::Keys.as_u8(), slot, amount);
+        }
+        if self.fx_voice_scope.includes_seq() {
+            outbox.punch_fx(jambox_core::PunchSource::Seq.as_u8(), slot, amount);
+        }
+    }
+
+    fn push_legacy_keys_punch_fx(&self, slot: u8, amount: f32, outbox: &mut Outbox) {
+        outbox.punch_fx(jambox_core::PunchSource::Keys.as_u8(), slot, amount);
+        outbox.punch_fx(jambox_core::PunchSource::Seq.as_u8(), slot, amount);
+    }
+
+    fn push_punch_fx_amount(&self, slot: u8, amount: f32, outbox: &mut Outbox) {
+        if self.punch_source == jambox_core::PunchSource::Keys.as_u8() {
+            if self.fx_target == FxEditTarget::Voice {
+                self.push_scoped_voice_punch_fx(slot, amount, outbox);
+            } else {
+                self.push_legacy_keys_punch_fx(slot, amount, outbox);
+            }
+        } else {
+            outbox.punch_fx(self.punch_source, slot, amount);
+        }
+    }
+
+    fn push_kaoss_voice_punch_fx(&self, slot: u8, amount: f32, outbox: &mut Outbox) {
+        if self.kaoss_fx_target.includes_voice() {
+            self.push_scoped_voice_punch_fx(slot, amount, outbox);
+        } else {
+            outbox.punch_fx(self.punch_source, slot, amount);
+        }
+    }
+
+    fn each_keys_punch_source<F: Fn(&mut Outbox, u8)>(&self, outbox: &mut Outbox, f: F) {
+        if self.punch_source == jambox_core::PunchSource::Keys.as_u8() {
+            if self.fx_target == FxEditTarget::Voice {
+                if self.fx_voice_scope.includes_live() {
+                    f(outbox, jambox_core::PunchSource::Keys.as_u8());
+                }
+                if self.fx_voice_scope.includes_seq() {
+                    f(outbox, jambox_core::PunchSource::Seq.as_u8());
+                }
+            } else {
+                f(outbox, jambox_core::PunchSource::Keys.as_u8());
+                f(outbox, jambox_core::PunchSource::Seq.as_u8());
+            }
+        } else {
+            f(outbox, self.punch_source);
+        }
+    }
+
+    fn sync_seq_clip_fx(&self, outbox: &mut Outbox) {
+        for (i, name) in Self::FX_PARAM_NAMES.iter().enumerate() {
+            outbox.fx_clip(SEQ_CLIP_SLOT, name, self.fx_seq[i]);
+        }
+        if self.fx_flanger_rate > 0.001 {
+            outbox.fx_clip(SEQ_CLIP_SLOT, "flanger_rate", self.fx_flanger_rate);
+        }
     }
 
     fn sync_punch_bank(&mut self) {
@@ -8146,14 +8695,9 @@ impl NativeModel {
         self.mark_dirty();
     }
 
-    /// Apply an insert FX param to both morph endpoints so flange survives the 50% nearer flip.
+    /// Apply an insert FX param to the selected VOICE scope (live / SEQ / both).
     fn push_voice_fx(&mut self, name: &str, value: f32, outbox: &mut Outbox) {
-        let a = self.morph_a;
-        let b = self.morph_b;
-        outbox.fx_voice(a, name, value);
-        if b != a {
-            outbox.fx_voice(b, name, value);
-        }
+        self.push_scoped_voice_fx(name, value, outbox);
     }
 
 
@@ -8234,12 +8778,22 @@ impl NativeModel {
         };
     }
 
+    /// Fav strip + pad height track program-select UI (not Scale/Key/etc.).
+    fn sync_kaoss_prog_favs_layout(&mut self) {
+        if self.kaoss_full {
+            return;
+        }
+        let show = matches!(self.kaoss_picker, Some(KaossPicker::Program));
+        self.layout.apply_kaoss_prog_favs(show);
+    }
+
     fn toggle_kaoss_picker(&mut self, kind: KaossPicker) {
         self.kaoss_picker = match self.kaoss_picker {
             Some(open) if open == kind => None,
             _ => Some(kind),
         };
         self.kaoss_picker_scroll = 0;
+        self.sync_kaoss_prog_favs_layout();
         if self.kaoss_picker.is_some() {
             self.status_line = match kind {
                 KaossPicker::Program => "pick program".into(),
@@ -8302,6 +8856,7 @@ impl NativeModel {
                 self.mark_dirty();
             }
         }
+        self.sync_kaoss_prog_favs_layout();
     }
 
     fn push_kaoss_scale(&mut self, outbox: &mut Outbox) {
@@ -9270,12 +9825,17 @@ impl NativeModel {
         }
         if self.kaoss_fx_target.includes_voice() {
             if let Some(i) = Self::voice_fx_slider_index(name) {
-                self.fx_voice[i] = value;
+                if self.fx_voice_scope.includes_live() {
+                    self.fx_voice[i] = value;
+                }
+                if self.fx_voice_scope.includes_seq() {
+                    self.fx_seq[i] = value;
+                }
             }
             if name == "flanger_rate" {
                 self.fx_flanger_rate = value;
             }
-            self.push_voice_fx(name, value, outbox);
+            self.push_scoped_voice_fx(name, value, outbox);
         }
         if self.kaoss_fx_target.includes_drums() {
             if let Some(i) = Self::voice_fx_slider_index(name) {
@@ -9537,9 +10097,18 @@ impl NativeModel {
 
     fn apply_fx_mix_sextet(&mut self, voice: [f32; 6], drum: [f32; 6], outbox: &mut Outbox) {
         for i in 0..6 {
-            if (self.fx_voice[i] - voice[i]).abs() > 0.0005 {
+            let live_changed =
+                self.fx_voice_scope.includes_live() && (self.fx_voice[i] - voice[i]).abs() > 0.0005;
+            let seq_changed =
+                self.fx_voice_scope.includes_seq() && (self.fx_seq[i] - voice[i]).abs() > 0.0005;
+            if live_changed {
                 self.fx_voice[i] = voice[i];
-                self.push_voice_fx(Self::FX_PARAM_NAMES[i], voice[i], outbox);
+            }
+            if seq_changed {
+                self.fx_seq[i] = voice[i];
+            }
+            if live_changed || seq_changed {
+                self.push_scoped_voice_fx(Self::FX_PARAM_NAMES[i], voice[i], outbox);
             }
             if (self.fx_drum[i] - drum[i]).abs() > 0.0005 {
                 self.fx_drum[i] = drum[i];
@@ -9684,6 +10253,9 @@ impl NativeModel {
             }
             SeqAction::Stop => {
                 outbox.clip_stop(SEQ_CLIP_SLOT, "off");
+                if !self.seq.is_recording() {
+                    self.clear_drum_repeats(outbox);
+                }
             }
             SeqAction::Clear => {
                 outbox.clip_clear(SEQ_CLIP_SLOT);
@@ -9694,6 +10266,7 @@ impl NativeModel {
                 length_ticks,
                 launch,
                 immediate,
+                voice_commit,
             } => {
                 outbox.seq_cue_beep(self.seq.cue_beep);
                 if launch && !self.seq.is_recording() {
@@ -9701,19 +10274,32 @@ impl NativeModel {
                 }
                 outbox.tempo(self.seq.bpm);
                 self.bpm = self.seq.bpm;
-                if self.seq.baked_tone.is_none() && self.seq.layer_count() >= 1 {
+                let melody = crate::seq::SeqModel::wire_has_melody_keys(&events);
+                if voice_commit && melody {
+                    if self.seq.state == crate::seq::SeqState::Review {
+                        self.seq.stage_voice_fm(self.melody_fm);
+                    } else if self.seq.baked_tone.is_none() && self.seq.layer_count() >= 1 {
+                        self.seq.baked_tone = Some(self.synth_params[1].clamp(0.0, 1.0));
+                        self.seq.baked_fm = Some(self.melody_fm);
+                    }
+                } else if self.seq.baked_tone.is_none() && self.seq.layer_count() >= 1 {
                     self.seq.baked_tone = Some(self.synth_params[1].clamp(0.0, 1.0));
                 }
-                outbox.clip_load(
+                outbox.clip_load_voice(
                     SEQ_CLIP_SLOT,
                     length_ticks,
                     "loop",
                     events,
                     self.seq.baked_tone.unwrap_or(1.0),
+                    Some(jambox_protocol::WireClipVoice {
+                        fm: melody && self.seq.clip_melody_fm(),
+                        ..Default::default()
+                    }),
                 );
                 outbox.clip_gain(SEQ_CLIP_SLOT, self.seq_level);
                 outbox.clip_gain(SEQ_DRUM_MIX_SLOT, self.seq_drum_level);
                 outbox.clip_gain(SEQ_KAOSS_MIX_SLOT, self.seq_kaoss_level);
+                self.sync_seq_clip_fx(outbox);
                 if launch {
                     let grid = if immediate {
                         "off"
@@ -10044,6 +10630,7 @@ impl NativeModel {
         self.kaoss_full = false;
         self.kaoss_full_exit_since = None;
         self.layout.apply_kaoss_full(false);
+        self.sync_kaoss_prog_favs_layout();
         self.status_line = "split pad".into();
         self.mark_dirty();
     }
@@ -12366,6 +12953,72 @@ mod tests {
         )));
     }
 
+    #[test]
+    fn fx_voice_scope_seq_routes_to_seq_clip_insert() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Fx);
+        model.fx_target = FxEditTarget::Voice;
+        model.fx_voice_scope = session::VoiceFxScope::Seq;
+        let mut out = Outbox::new();
+        let track = model.layout.settings_fx_slider(1);
+        model.finger_down(1, track.x + 4, track.y + track.h / 2, &mut out);
+        let batch = out.take();
+        assert!(
+            !batch.iter().any(|r| matches!(
+                r,
+                Request::Fx {
+                    target: jambox_protocol::FxTargetSpec::Voice { .. },
+                    ..
+                }
+            )),
+            "SEQ scope must not hit live voice insert"
+        );
+        assert!(batch.iter().any(|r| matches!(
+            r,
+            Request::Fx {
+                target: jambox_protocol::FxTargetSpec::Clip { slot },
+                param,
+                ..
+            } if *slot == SEQ_CLIP_SLOT && param == "delay_mix"
+        )));
+    }
+
+    #[test]
+    fn fx_voice_scope_seq_routes_slice_punch_to_seq_bus() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Fx);
+        model.fx_target = FxEditTarget::Voice;
+        model.fx_voice_scope = session::VoiceFxScope::Seq;
+        model.punch_armed[jambox_core::PUNCH_SLICE as usize] = true;
+        let mut out = Outbox::new();
+        let track = model.layout.punch_pad_track(jambox_core::PUNCH_SLICE as usize);
+        model.finger_down(1, track.x + 4, track.y + 8, &mut out);
+        let batch = out.take();
+        assert!(
+            !batch.iter().any(|r| matches!(
+                r,
+                Request::PunchFx {
+                    source: 0,
+                    slot,
+                    ..
+                } if *slot == jambox_core::PUNCH_SLICE
+            )),
+            "SEQ scope must not punch live KEYS bus: {batch:?}"
+        );
+        assert!(
+            batch.iter().any(|r| matches!(
+                r,
+                Request::PunchFx {
+                    source: 3,
+                    slot,
+                    amount,
+                    ..
+                } if *slot == jambox_core::PUNCH_SLICE && *amount > 0.5
+            )),
+            "SEQ scope should punch SEQ clip bus: {batch:?}"
+        );
+    }
+
     fn midi_ccs(batch: &[Request], cc: u8) -> Vec<u16> {
         batch
             .iter()
@@ -13416,7 +14069,7 @@ mod tests {
     }
 
     #[test]
-    fn note_repeat_none_and_triple_are_in_the_picker() {
+    fn note_repeat_picker_half_then_off() {
         let mut model = NativeModel::new();
         model.set_mode(UiMode::Drums);
         let mut out = Outbox::new();
@@ -13426,12 +14079,12 @@ mod tests {
         let repeat_btn = model.layout.kit_note_repeat;
         model.finger_down(2, repeat_btn.x + 4, repeat_btn.y + 4, &mut out);
         model.finger_up(2, &mut out);
-        let triple = model.layout.kit_repeat_choice_cell(5);
-        model.finger_down(2, triple.x + 4, triple.y + 4, &mut out);
+        let half = model.layout.kit_repeat_choice_cell(5);
+        model.finger_down(2, half.x + 4, half.y + 4, &mut out);
         model.finger_up(2, &mut out);
         assert_eq!(
             model.drum_repeat[jambox_core::DrumModel::Kick.index()],
-            RepeatDivisionChoice::Triple
+            RepeatDivisionChoice::Half
         );
         out.take();
         model.finger_down(3, kick.x + 4, kick.y + 4, &mut out);
@@ -13440,11 +14093,11 @@ mod tests {
             r,
             Request::Repeat {
                 note: 36,
-                division: RepeatDivision::QuarterTriplet,
+                division: RepeatDivision::Half,
                 ..
             }
         )));
-        assert_eq!(model.note_repeat_button_label(), "NOTE REPEAT: TRIPLE");
+        assert_eq!(model.note_repeat_button_label(), "NOTE REPEAT: 1/2");
         model.finger_down(4, repeat_btn.x + 4, repeat_btn.y + 4, &mut out);
         model.finger_up(4, &mut out);
         let none = model.layout.kit_repeat_choice_cell(0);
@@ -13511,6 +14164,11 @@ mod tests {
         assert!(model.drum_repeat.iter().all(|d| !d.is_on()));
         // Unknown future slot values degrade to Off instead of panicking.
         assert_eq!(RepeatDivisionChoice::from_slot(200), RepeatDivisionChoice::Off);
+        assert_eq!(
+            RepeatDivisionChoice::from_slot(5),
+            RepeatDivisionChoice::Eighth,
+            "legacy TRIPLE slot maps to 1/8"
+        );
         for c in RepeatDivisionChoice::ALL {
             assert_eq!(RepeatDivisionChoice::from_slot(c.as_slot()), c);
         }
@@ -13525,12 +14183,12 @@ mod tests {
         model.apply_preset_drum_repeat(&p, &mut out);
         assert!(model.drum_repeat.iter().all(|d| *d == RepeatDivisionChoice::Quarter));
         assert!(out.take().is_empty(), "old preset sends nothing");
-        p.drum_repeat = Some(vec![RepeatDivisionChoice::Triple.as_slot()]);
+        p.drum_repeat = Some(vec![5]);
         p.drum_repeat_lock = Some(true);
         let p: PresetSnapshot =
             serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
         model.apply_preset_drum_repeat(&p, &mut out);
-        assert_eq!(model.drum_repeat[0], RepeatDivisionChoice::Triple);
+        assert_eq!(model.drum_repeat[0], RepeatDivisionChoice::Eighth);
         assert!(model.drum_repeat[1..].iter().all(|d| !d.is_on()));
         assert!(model.drum_repeat_lock);
         assert!(out
@@ -13572,6 +14230,43 @@ mod tests {
                 }
             )),
             "SEQ play must stop a latched repeat lane, got {reqs:?}"
+        );
+        assert!(!model.repeat_latched[clav]);
+    }
+
+    #[test]
+    fn seq_stop_clears_latched_note_repeat() {
+        let mut model = NativeModel::new();
+        let clav = jambox_core::DrumModel::Clave.index();
+        model.drum_repeat[clav] = RepeatDivisionChoice::Sixteenth;
+        model.drum_repeat_lock = true;
+        model.repeat_latched[clav] = true;
+        model.repeat_capture_note[clav] = 50;
+        model.seq.seed_playing_backbone(
+            vec![crate::seq::RecEvent {
+                t: 0.0,
+                on: true,
+                channel: 9,
+                note: 50,
+                velocity: 100,
+            }],
+            1.0,
+        );
+        let mut out = Outbox::new();
+        let action = model.seq.toggle_play();
+        assert!(matches!(action, crate::seq::SeqAction::Stop));
+        model.apply_seq_action(action, &mut out);
+        let reqs = out.take();
+        assert!(
+            reqs.iter().any(|r| matches!(
+                r,
+                Request::Repeat {
+                    phase: RepeatPhase::Up,
+                    note: 50,
+                    ..
+                }
+            )),
+            "SEQ stop must end latched repeat lanes, got {reqs:?}"
         );
         assert!(!model.repeat_latched[clav]);
     }
@@ -13724,9 +14419,9 @@ mod tests {
         match model.seq.toggle_record() {
             crate::seq::SeqAction::Upload { events, .. } => {
                 let kick_ons = events.iter().filter(|e| e.on && e.note == 36).count();
-                assert!(
-                    kick_ons >= 3,
-                    "uploaded backbone should keep the repeated kicks, got {events:?}"
+                assert_eq!(
+                    kick_ons, 1,
+                    "backbone quantize should collapse note-repeat to one hit per 16th, got {events:?}"
                 );
             }
             _ => panic!("expected seq upload after repeat take"),
@@ -16534,8 +17229,47 @@ mod tests {
             &mut out,
         );
         assert!((model.fx_voice[3] - 64.0 / 127.0).abs() < 0.02);
-        model.set_mode(UiMode::Fm);
-        let before = model.synth_params[1];
+    }
+
+    #[test]
+    fn fm_knobs_move_the_on_screen_sliders() {
+        let mut model = NativeModel::new();
+        let mut out = Outbox::new();
+        model.switch_mode(UiMode::Fm, &mut out);
+        out.take();
+        model.on_midi_notice(
+            &MidiNotice {
+                kind: "cc".into(),
+                channel: 0,
+                note: None,
+                velocity: None,
+                control: Some(70),
+                value: Some(127),
+                controller: None,
+            },
+            &mut out,
+        );
+        assert!((model.fm_params[0] - 1.0).abs() < 0.01);
+        let batch = out.take();
+        assert!(batch.iter().any(|r| matches!(
+            r,
+            Request::Synth { param, value, .. } if param == "fm_clang" && *value > 0.99
+        )));
+        model.on_midi_notice(
+            &MidiNotice {
+                kind: "cc".into(),
+                channel: 0,
+                note: None,
+                velocity: None,
+                control: Some(74),
+                value: Some(64),
+                controller: None,
+            },
+            &mut out,
+        );
+        assert!((model.fm_width - 64.0 / 127.0).abs() < 0.02);
+        model.fm_patches_open = true;
+        let before = model.fm_params[1];
         model.on_midi_notice(
             &MidiNotice {
                 kind: "cc".into(),
@@ -16548,7 +17282,7 @@ mod tests {
             },
             &mut out,
         );
-        assert!((model.synth_params[1] - before).abs() < 0.001);
+        assert!((model.fm_params[1] - before).abs() < 0.001);
     }
 
     #[test]
@@ -16738,17 +17472,124 @@ mod tests {
     }
 
     #[test]
-    fn leaving_fm_disables_the_playground() {
+    fn leaving_fm_keeps_fm_voice_until_synth_page() {
         let mut model = NativeModel::new();
         let mut out = Outbox::new();
         model.switch_mode(UiMode::Fm, &mut out);
         out.take();
+        model.switch_mode(UiMode::Kaoss, &mut out);
+        let batch = out.take();
+        assert!(
+            batch.iter().any(|r| matches!(
+                r,
+                Request::Synth { param, value, .. } if param == "fm_enable" && *value > 0.5
+            )),
+            "FM melody must stick after leaving the FM page: {batch:?}"
+        );
         model.switch_mode(UiMode::Synth, &mut out);
         let batch = out.take();
         assert!(batch.iter().any(|r| matches!(
             r,
             Request::Synth { param, value, .. } if param == "fm_enable" && *value < 0.5
         )));
+    }
+
+    #[test]
+    fn seq_fm_take_uploads_fm_clip_voice() {
+        let mut model = NativeModel::new();
+        let mut out = Outbox::new();
+        model.switch_mode(UiMode::Fm, &mut out);
+        out.take();
+        model.seq.bpm = 120.0;
+        assert!(matches!(
+            model.seq.toggle_record(),
+            crate::seq::SeqAction::Stop
+        ));
+        let key = model.layout.synth_keyboard_white_rect(0);
+        model.finger_down(1, key.x + 4, key.y + 4, &mut out);
+        model.finger_up(1, &mut out);
+        let action = model.seq.toggle_record();
+        model.apply_seq_action(action, &mut out);
+        let voice = clip_load_voice_for(&out.take(), SEQ_CLIP_SLOT).expect("seq clip");
+        assert!(
+            voice.fm,
+            "FM backbone must bake fm=true on the SEQ clip"
+        );
+        assert!(model.seq.baked_fm == Some(true));
+    }
+
+    #[test]
+    fn leaving_drums_keeps_latched_note_repeat() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Drums);
+        model.drum_repeat[jambox_core::DrumModel::Kick.index()] = RepeatDivisionChoice::Eighth;
+        model.drum_repeat_lock = true;
+        model.repeat_latched[jambox_core::DrumModel::Kick.index()] = true;
+        model.repeat_capture_note[jambox_core::DrumModel::Kick.index()] = 36;
+        let mut out = Outbox::new();
+        model.switch_mode(UiMode::Kaoss, &mut out);
+        let batch = out.take();
+        assert!(
+            !batch.iter().any(|r| matches!(r, Request::Repeat { .. })),
+            "leaving KIT must not stop latched repeats: {batch:?}"
+        );
+        assert!(model.repeat_latched[jambox_core::DrumModel::Kick.index()]);
+    }
+
+    #[test]
+    fn repeat_lock_two_pads_retap_independently() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Drums);
+        model.drum_repeat[jambox_core::DrumModel::Kick.index()] = RepeatDivisionChoice::Eighth;
+        model.drum_repeat[jambox_core::DrumModel::Snare.index()] = RepeatDivisionChoice::Eighth;
+        let mut out = Outbox::new();
+        let lock = model.layout.kit_repeat_lock;
+        model.finger_down(1, lock.x + 4, lock.y + 4, &mut out);
+        model.finger_up(1, &mut out);
+        out.take();
+        let kick = model.layout.kit_pad_cell(4);
+        let kick_note = 36u8;
+        let snare_note = 45u8;
+        let snare = (0..16)
+            .map(|i| model.layout.kit_pad_cell(i))
+            .find(|cell| {
+                matches!(
+                    model.layout.hit(UiMode::Drums, cell.x + 4, cell.y + 4),
+                    Hit::Drum { note, .. } if note == snare_note
+                )
+            })
+            .expect("snare pad cell");
+        for (finger, pad) in [(2, kick), (3, snare)] {
+            model.finger_down(finger, pad.x + 4, pad.y + 4, &mut out);
+            model.finger_up(finger, &mut out);
+        }
+        out.take();
+        assert!(model.repeat_latched[jambox_core::DrumModel::Kick.index()]);
+        assert!(model.repeat_latched[jambox_core::DrumModel::Snare.index()]);
+        model.finger_down(4, snare.x + 4, snare.y + 4, &mut out);
+        model.finger_up(4, &mut out);
+        let batch = out.take();
+        assert!(batch.iter().any(|r| matches!(
+            r,
+            Request::Repeat {
+                phase: RepeatPhase::Up,
+                note: snare_note,
+                ..
+            }
+        )));
+        assert!(!model.repeat_latched[jambox_core::DrumModel::Snare.index()]);
+        assert!(model.repeat_latched[jambox_core::DrumModel::Kick.index()]);
+        model.finger_down(5, kick.x + 4, kick.y + 4, &mut out);
+        model.finger_up(5, &mut out);
+        assert!(out.take().iter().any(|r| matches!(
+            r,
+            Request::Repeat {
+                phase: RepeatPhase::Up,
+                note: kick_note,
+                ..
+            }
+        )));
+        assert!(!model.repeat_latched[jambox_core::DrumModel::Kick.index()]);
     }
 
     #[test]
@@ -18255,6 +19096,8 @@ mod tests {
         let mut model = NativeModel::new();
         let mut out = Outbox::new();
         model.set_mode(UiMode::Kaoss);
+        // Fav chips only hit while program select is open.
+        model.toggle_kaoss_picker(KaossPicker::Program);
         // Clear F1 so assign path is exercised.
         model.kaoss_prog_favs[0] = kaoss_ui::KAOSS_FAV_EMPTY;
         let lead = kaoss_ui::KAOSS_PROGRAMS

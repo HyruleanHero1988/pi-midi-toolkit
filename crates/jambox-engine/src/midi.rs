@@ -284,6 +284,17 @@ impl MidiMap {
     }
 
     /// Rewrite keyboard note-ons to 127 when FULL VEL is on. Drums / note-offs stay.
+    /// Mirror UI latched repeats so hardware re-tap toggles the same lane.
+    pub fn set_hw_repeat_latched(&self, note: u8, latched: bool) {
+        let model = drum_model_for_note(note).index();
+        if latched {
+            self.hw_note[model].store(note, Ordering::Relaxed);
+            self.hw_latched[model].store(true, Ordering::Relaxed);
+        } else {
+            self.hw_latched[model].store(false, Ordering::Relaxed);
+        }
+    }
+
     pub fn set_drum_repeat(&self, slots: [u8; 16], latch: bool) -> [u32; DRUM_MODEL_COUNT] {
         let was_latch = self.repeat_latch.swap(latch, Ordering::Relaxed);
         let mut stops = [0u32; DRUM_MODEL_COUNT];
@@ -336,7 +347,7 @@ impl MidiMap {
             2 => Some(RepeatDivision::Eighth),
             3 => Some(RepeatDivision::EighthTriplet),
             4 => Some(RepeatDivision::Sixteenth),
-            5 => Some(RepeatDivision::QuarterTriplet),
+            5 => Some(RepeatDivision::Eighth), // legacy “triple” slot
             6 => Some(RepeatDivision::Half),
             7 => Some(RepeatDivision::Whole),
             _ => None,
@@ -639,20 +650,9 @@ impl MidiMap {
             return drum_express(param, unit, self.last_drum_note());
         }
         if mode == MODE_FM {
-            let param = match knob {
-                0 => SynthParam::FmBright,
-                1 => SynthParam::FmClang,
-                2 => SynthParam::FmHit,
-                3 => SynthParam::FmTail,
-                7 => {
-                    return Some(Command::SetSynth {
-                        param: SynthParam::Level,
-                        value: unit.powf(1.15),
-                    });
-                }
-                _ => return None,
-            };
-            return Some(Command::SetSynth { param, value: unit });
+            // Operator / width / glide live in the kiosk (like punch amounts) so
+            // hardware knobs move the on-screen FM sliders and session state.
+            return None;
         }
         // Bank-1 knobs on the synth page follow the slider row: morph, tone,
         // level, attack, release, drift, flange mix, flange rate. Drum / FM /
@@ -1346,6 +1346,72 @@ mod tests {
                 velocity: 100,
             }),
             Some(Command::StopRepeat { owner: 0x1000 | 36 })
+        );
+    }
+
+    #[test]
+    fn hardware_pad_lock_two_pads_toggle_independently() {
+        let map = MidiMap::default();
+        let mut slots = [0u8; 16];
+        slots[jambox_core::DrumModel::Kick.index()] = 2;
+        slots[jambox_core::DrumModel::Snare.index()] = 2;
+        map.set_drum_repeat(slots, true);
+        assert!(matches!(
+            map.interpret(MidiEvent::NoteOn {
+                channel: 9,
+                note: 36,
+                velocity: 100,
+            }),
+            Some(Command::StartRepeat { note: 36, .. })
+        ));
+        assert!(matches!(
+            map.interpret(MidiEvent::NoteOn {
+                channel: 9,
+                note: 45,
+                velocity: 100,
+            }),
+            Some(Command::StartRepeat { note: 45, .. })
+        ));
+        assert_eq!(
+            map.interpret(MidiEvent::NoteOn {
+                channel: 9,
+                note: 45,
+                velocity: 100,
+            }),
+            Some(Command::StopRepeat { owner: 0x1000 | 45 })
+        );
+        assert!(matches!(
+            map.interpret(MidiEvent::NoteOn {
+                channel: 9,
+                note: 36,
+                velocity: 100,
+            }),
+            Some(Command::StartRepeat { note: 36, .. })
+        ));
+        assert_eq!(
+            map.interpret(MidiEvent::NoteOn {
+                channel: 9,
+                note: 36,
+                velocity: 100,
+            }),
+            Some(Command::StopRepeat { owner: 0x1000 | 36 })
+        );
+    }
+
+    #[test]
+    fn ui_latched_repeat_syncs_hw_state_for_midi_retap() {
+        let map = MidiMap::default();
+        let mut slots = [0u8; 16];
+        slots[jambox_core::DrumModel::Snare.index()] = 2;
+        map.set_drum_repeat(slots, true);
+        map.set_hw_repeat_latched(45, true);
+        assert_eq!(
+            map.interpret(MidiEvent::NoteOn {
+                channel: 9,
+                note: 45,
+                velocity: 100,
+            }),
+            Some(Command::StopRepeat { owner: 0x1000 | 45 })
         );
     }
 
@@ -2129,37 +2195,26 @@ mod tests {
     }
 
     #[test]
-    fn fm_mode_rebinds_knobs_to_the_playground() {
+    fn fm_mode_knobs_are_owned_by_the_kiosk() {
         let map = MidiMap::default();
         map.set_fm();
-        let command = map
-            .interpret(MidiEvent::ControlChange {
+        assert!(
+            map.interpret(MidiEvent::ControlChange {
                 channel: 0,
                 controller: CC_MORPH,
                 value: 127,
             })
-            .unwrap();
-        assert_eq!(
-            command,
-            Command::SetSynth {
-                param: SynthParam::FmBright,
-                value: 1.0
-            }
+            .is_none(),
+            "FM knobs update kiosk sliders; DSP follows kiosk synth msgs"
         );
         map.apply_knob_map("fm", None, 0);
-        let clang = map
-            .interpret(MidiEvent::ControlChange {
+        assert!(
+            map.interpret(MidiEvent::ControlChange {
                 channel: 0,
                 controller: CC_TONE,
                 value: 0,
             })
-            .unwrap();
-        assert_eq!(
-            clang,
-            Command::SetSynth {
-                param: SynthParam::FmClang,
-                value: 0.0
-            }
+            .is_none()
         );
     }
 

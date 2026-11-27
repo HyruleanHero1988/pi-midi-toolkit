@@ -31,7 +31,8 @@ struct Cli {
     #[arg(long, default_value = "auto")]
     display: String,
     /// Touch source: auto, sdl, evdev, or none.
-    /// auto uses SDL FingerId when the presenter is SDL, otherwise evdev.
+    /// auto prefers evdev (stable MT slots) when a panel is open; SDL FingerId
+    /// is the fallback for --touch sdl or when evdev is unavailable.
     #[arg(long, default_value = "auto")]
     touch: String,
     /// Linux framebuffer device (only for --display fb).
@@ -86,16 +87,28 @@ fn main() {
     let mut frame = Frame::new();
     let mut client = NativeClient::new(cli.control.clone(), cli.tcp);
     let mut presenter = Presenter::open(&cli);
-    let sdl_touch = presenter.is_sdl() && matches!(cli.touch.as_str(), "auto" | "sdl");
-    let mut input = if matches!(cli.touch.as_str(), "evdev") || (cli.touch == "auto" && !sdl_touch)
-    {
-        Input::open(&cli.evdev)
-    } else {
-        Input::None
+    let mut input = match cli.touch.as_str() {
+        "none" | "sdl" => Input::None,
+        _ => Input::open(&cli.evdev),
     };
+    let evdev_live = input.is_evdev();
+    let sdl_touch = presenter.is_sdl()
+        && (cli.touch == "sdl" || (cli.touch == "auto" && !evdev_live));
     if cli.touch == "sdl" && !presenter.is_sdl() {
         warn!("native: --touch sdl ignored without an SDL presenter");
     }
+    if cli.touch == "evdev" && !evdev_live {
+        warn!("native: --touch evdev requested but no capacitive panel opened");
+    }
+    // SDL FingerId can change across FT5x06 rebinds; evdev already stabilizes slots.
+    #[cfg(target_os = "linux")]
+    let mut touch_filter = if sdl_touch {
+        Some(pidi_native::touch_stabilize::TouchFilter::default())
+    } else {
+        None
+    };
+    #[cfg(not(target_os = "linux"))]
+    let mut touch_filter: Option<pidi_native::touch_stabilize::TouchFilter> = None;
     info!(
         display = presenter.name(),
         input = if sdl_touch { "sdl" } else { input.name() },
@@ -127,6 +140,11 @@ fn main() {
             break;
         }
         events.extend(input.poll());
+        #[cfg(target_os = "linux")]
+        if let Some(filter) = touch_filter.as_mut() {
+            events.extend(filter.expire(now));
+            events = filter.ingest(events, now);
+        }
         for event in events {
             match event {
                 TouchEvent::Down { id, x, y } => model.finger_down(id, x, y, &mut client.outbox),
@@ -182,6 +200,7 @@ fn main() {
         copy_wave(&client.last_scope.sub, &mut model.wave_sub);
         model.sync_arp_pattern_from_status();
         model.apply_midi_ports_with(&client.last_midi_ports, Some(&mut client.outbox));
+        model.apply_audio_devices(&client.last_audio_devices);
         model.tick(dt, &mut client.outbox);
         model.maybe_autosave();
         if model.take_reexec() {
@@ -367,6 +386,16 @@ enum Input {
 }
 
 impl Input {
+    #[cfg(target_os = "linux")]
+    fn is_evdev(&self) -> bool {
+        matches!(self, Self::Evdev(_))
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn is_evdev(&self) -> bool {
+        false
+    }
+
     fn open(path: &str) -> Self {
         #[cfg(target_os = "linux")]
         {
@@ -586,8 +615,10 @@ mod linux_evdev {
     use std::io::Read;
     use std::os::unix::io::AsRawFd;
     use std::path::PathBuf;
+    use std::time::Instant;
 
     use pidi_native::input::TouchEvent;
+    use pidi_native::touch_stabilize::SlotStabilizer;
 
     const EV_SYN: u16 = 0;
     const EV_ABS: u16 = 3;
@@ -620,6 +651,7 @@ mod linux_evdev {
     pub struct Device {
         file: File,
         slots: [Slot; 10],
+        stabilizer: [SlotStabilizer; 10],
         current: usize,
         min_x: i32,
         max_x: i32,
@@ -644,21 +676,32 @@ mod linux_evdev {
                 let flags = libc::fcntl(fd, libc::F_GETFL);
                 libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
             }
-            tracing::info!(path = %path.display(), "native: evdev");
+            let (min_x, max_x) = read_abs_range(fd, ABS_MT_POSITION_X, (0, 800));
+            let (min_y, max_y) = read_abs_range(fd, ABS_MT_POSITION_Y, (0, 480));
+            tracing::info!(
+                path = %path.display(),
+                min_x,
+                max_x,
+                min_y,
+                max_y,
+                "native: evdev"
+            );
             Ok(Self {
                 file,
                 slots: [Slot::new(); 10],
+                stabilizer: [SlotStabilizer::default(); 10],
                 current: 0,
-                min_x: 0,
-                max_x: 800,
-                min_y: 0,
-                max_y: 480,
+                min_x,
+                max_x,
+                min_y,
+                max_y,
                 buf: vec![0; 16 * 64],
                 pending: Vec::new(),
             })
         }
 
         pub fn poll(&mut self) -> Vec<TouchEvent> {
+            let now = Instant::now();
             let mut out = Vec::new();
             loop {
                 match self.file.read(&mut self.buf) {
@@ -676,6 +719,7 @@ mod linux_evdev {
                     Err(_) => break,
                 }
             }
+            self.expire_stabilizers(now, &mut out);
             out
         }
 
@@ -714,6 +758,7 @@ mod linux_evdev {
         }
 
         fn flush_slots(&mut self, out: &mut Vec<TouchEvent>) {
+            let now = Instant::now();
             for (i, slot) in self.slots.iter_mut().enumerate() {
                 if !slot.dirty {
                     continue;
@@ -722,21 +767,50 @@ mod linux_evdev {
                 let id = i as i32;
                 let x = map(slot.x, self.min_x, self.max_x, 800);
                 let y = map(slot.y, self.min_y, self.max_y, 480);
+                let stab = &mut self.stabilizer[i];
                 if slot.tracking < 0 {
                     if slot.was_active {
-                        out.push(TouchEvent::Up {
-                            id,
-                            x: Some(x),
-                            y: Some(y),
-                        });
+                        stab.note_move(now, x, y);
+                        if !stab.defer_lift(now) {
+                            out.push(TouchEvent::Up {
+                                id,
+                                x: Some(x),
+                                y: Some(y),
+                            });
+                            slot.was_active = false;
+                            stab.reset();
+                        }
                     }
-                    slot.was_active = false;
+                } else if stab.pending_up().is_some() {
+                    stab.absorb_rebind();
+                    stab.note_move(now, x, y);
+                    out.push(TouchEvent::Move { id, x, y });
                 } else if !slot.was_active {
+                    stab.note_down(now, x, y);
                     out.push(TouchEvent::Down { id, x, y });
                     slot.was_active = true;
                 } else {
+                    stab.note_move(now, x, y);
                     out.push(TouchEvent::Move { id, x, y });
                 }
+            }
+        }
+
+        fn expire_stabilizers(&mut self, now: Instant, out: &mut Vec<TouchEvent>) {
+            for (i, slot) in self.slots.iter_mut().enumerate() {
+                let stab = &mut self.stabilizer[i];
+                if !stab.expire(now) || !slot.was_active {
+                    continue;
+                }
+                let id = i as i32;
+                let (x, y) = stab.pos();
+                out.push(TouchEvent::Up {
+                    id,
+                    x: Some(x),
+                    y: Some(y),
+                });
+                slot.was_active = false;
+                stab.reset();
             }
         }
     }
@@ -793,5 +867,32 @@ mod linux_evdev {
         let mut ev = std::mem::MaybeUninit::<libc::input_event>::uninit();
         std::ptr::copy_nonoverlapping(bytes.as_ptr(), ev.as_mut_ptr() as *mut u8, bytes.len());
         ev.assume_init()
+    }
+
+    fn read_abs_range(fd: libc::c_int, axis: u16, fallback: (i32, i32)) -> (i32, i32) {
+        #[repr(C)]
+        struct InputAbsinfo {
+            value: i32,
+            minimum: i32,
+            maximum: i32,
+            fuzz: i32,
+            flat: i32,
+            resolution: i32,
+        }
+        let mut info = InputAbsinfo {
+            value: 0,
+            minimum: 0,
+            maximum: 0,
+            fuzz: 0,
+            flat: 0,
+            resolution: 0,
+        };
+        let ioc = 0x8018_4500u32 | (0x40 + axis as u32);
+        let rc = unsafe { libc::ioctl(fd, ioc as libc::c_ulong, &mut info) };
+        if rc == 0 && info.maximum > info.minimum {
+            (info.minimum, info.maximum)
+        } else {
+            fallback
+        }
     }
 }

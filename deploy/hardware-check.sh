@@ -32,13 +32,23 @@ if command -v libinput >/dev/null 2>&1; then
   libinput list-devices 2>/dev/null | sed -n '1,80p' || true
 fi
 echo
-echo "== audio (bcm2835 headphones) =="
+echo "== audio =="
 if command -v aplay >/dev/null 2>&1; then
   aplay -l || true
+  arecord -l 2>/dev/null || true
   echo
-  echo "Try explicit periods after jambox-engine is running:"
-  echo "  journalctl -u jambox-engine -n 40 --no-pager | grep audio"
-  echo "Speaker cable swap should log 'output died; reopening' and unmute Headphone."
+  if aplay -l 2>/dev/null | grep -qiE 'hifiberry|DAC\+ADC'; then
+    echo "HiFiBerry HAT detected. Expect jambox logs:"
+    echo "  audio: running device=hw:CARD=sndrpihifiberry,... "
+    echo "  audio: capture running device=hw:CARD=sndrpihifiberry,..."
+    echo "Digital mixer should be unmuted (enable-hifiberry.sh / setup-pi.sh)."
+  else
+    echo "No HiFiBerry card yet — on Pi 4 run: sudo bash deploy/enable-hifiberry.sh && sudo reboot"
+    echo "On Pi 2 / headphones, speaker cable swap should log 'output died; reopening'."
+  fi
+  echo
+  echo "Recent engine audio lines:"
+  echo "  journalctl -u jambox-engine -n 40 --no-pager | grep -iE 'audio:|hifiberry|Digital'"
 fi
 echo
 echo "== MIDI =="

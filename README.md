@@ -135,6 +135,8 @@ Channels are **0–15** (MIDI channels 1–16). Example forces everything to cha
 ```bash
 # After scp'ing this repo's deploy/ folder, or cloning:
 sudo bash deploy/setup-pi.sh
+# Pi 4 + HiFiBerry: setup-pi enables the HAT on aarch64; reboot once after.
+# Manual / repair: sudo bash deploy/enable-hifiberry.sh && sudo reboot
 ```
 
 ### From the PC (daily)

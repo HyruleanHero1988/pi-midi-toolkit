@@ -163,6 +163,44 @@ impl KaossFxTarget {
     pub const ALL: [KaossFxTarget; 3] = [Self::Voice, Self::Drums, Self::Both];
 }
 
+/// When FX→VOICE is selected, whether insert edits hit live keys, the SEQ clip bus, or both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum VoiceFxScope {
+    #[default]
+    Live,
+    Seq,
+    Both,
+}
+
+impl VoiceFxScope {
+    pub const ALL: [Self; 3] = [Self::Live, Self::Seq, Self::Both];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Live => "LIVE",
+            Self::Seq => "SEQ",
+            Self::Both => "BOTH",
+        }
+    }
+
+    pub fn includes_live(self) -> bool {
+        matches!(self, Self::Live | Self::Both)
+    }
+
+    pub fn includes_seq(self) -> bool {
+        matches!(self, Self::Seq | Self::Both)
+    }
+
+    pub fn color(self) -> u32 {
+        match self {
+            Self::Live => 0xb16286,
+            Self::Seq => 0x689d6a,
+            Self::Both => 0xd79921,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionState {
     pub version: u32,
@@ -242,6 +280,9 @@ pub struct SessionState {
     /// KAOSS pad FX destination: voice insert, kit-group insert, or both.
     #[serde(default)]
     pub kaoss_fx_target: KaossFxTarget,
+    /// FX page VOICE insert scope: live keys vs SEQ clip insert.
+    #[serde(default)]
+    pub fx_voice_scope: VoiceFxScope,
     /// Buffer FX precedence for TAPE / RPT / DROP. Missing → T>R>D.
     #[serde(default)]
     pub punch_buffer_prio: u8,
@@ -334,6 +375,14 @@ pub struct SessionState {
     /// USB MIDI output name substring. Empty = first hardware port.
     #[serde(default)]
     pub midi_out: String,
+    /// ALSA/cpal output name substring (e.g. `hifiberry`, `headphone`, USB card).
+    /// Empty = AUTO ranked pick.
+    #[serde(default)]
+    pub audio_out: String,
+    /// ALSA/cpal capture name substring (e.g. `hifiberry`, `usb`, mic card).
+    /// Empty = AUTO (USB mic if present, else HiFiBerry line-in).
+    #[serde(default)]
+    pub audio_in: String,
     /// Per-input MIDI channel fan-out. `0` = identity for that input (0–15).
     #[serde(default)]
     pub channel_map: [u16; 16],
@@ -625,6 +674,7 @@ impl Default for SessionState {
             fx_bus_chorus: 0.0,
             fx_bus_phaser: 0.0,
             kaoss_fx_target: KaossFxTarget::Voice,
+            fx_voice_scope: VoiceFxScope::Live,
             punch_buffer_prio: 0,
             punch_rpt_mode: 0,
             punch_grid_mode: 0,
@@ -662,6 +712,8 @@ impl Default for SessionState {
             seq_cue_beep: false,
             midi_in: String::new(),
             midi_out: String::new(),
+            audio_out: String::new(),
+            audio_in: String::new(),
             channel_map: [0; 16],
             clip_quantize: ClipQuantize::Bar,
             probe: false,

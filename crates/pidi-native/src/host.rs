@@ -1018,53 +1018,61 @@ pub fn pi_power(action: &str) -> (String, Vec<String>) {
     }
     #[cfg(target_os = "linux")]
     {
+        // Prefer the appliance script (force watchdog), but never hard-require it —
+        // thin Pi 4 deploys may only ship bin/ + units until the first OTA overlay.
         let candidates = [
             find_repo_root().join("apps/pidi/scripts/session/pi-power.sh"),
             PathBuf::from("apps/pidi/scripts/session/pi-power.sh"),
         ];
-        let Some(script) = candidates.into_iter().find(|p| p.is_file()) else {
-            return (
-                format!("POWER: pi-power.sh missing ({action})"),
-                vec!["expected apps/pidi/scripts/session/pi-power.sh".into()],
-            );
-        };
-        let script_arg = script.to_str().unwrap_or("pi-power.sh");
-        let attempts: &[(&str, &[&str])] = &[
-            ("pi-power.sh", &["sudo", "-n", script_arg, action]),
-            ("systemctl", &["sudo", "-n", "systemctl", action]),
-            (
-                "bin",
-                if action == "poweroff" {
-                    &["sudo", "-n", "poweroff"]
-                } else {
-                    &["sudo", "-n", "reboot"]
-                },
-            ),
-        ];
+        let script = candidates.into_iter().find(|p| p.is_file());
         let mut lines = Vec::new();
-        for (label, args) in attempts {
-            let (code, stdout, stderr) = run_capture(
-                Command::new(args[0]).args(&args[1..]),
-                25,
-            );
-            if code == 0 {
-                return (
-                    format!("POWER: {action}…"),
-                    vec![format!("{label} ok")],
-                );
-            }
-            lines.push(format!("{label} exit {code}"));
-            if !stdout.is_empty() {
-                lines.push(truncate_lines(&stdout, 2, 240));
-            }
-            if !stderr.is_empty() {
-                lines.push(truncate_lines(&stderr, 2, 240));
+        if script.is_none() {
+            lines.push("pi-power.sh missing; trying systemctl/poweroff".into());
+        }
+
+        let try_one =
+            |label: &str, args: &[&str], lines: &mut Vec<String>| -> Option<(String, Vec<String>)> {
+                let (code, stdout, stderr) =
+                    run_capture(Command::new(args[0]).args(&args[1..]), 25);
+                if code == 0 {
+                    return Some((format!("POWER: {action}…"), vec![format!("{label} ok")]));
+                }
+                lines.push(format!("{label} exit {code}"));
+                if !stdout.is_empty() {
+                    lines.push(truncate_lines(&stdout, 2, 240));
+                }
+                if !stderr.is_empty() {
+                    lines.push(truncate_lines(&stderr, 2, 240));
+                }
+                None
+            };
+
+        if let Some(ref script) = script {
+            let script_arg = script.to_str().unwrap_or("pi-power.sh");
+            if let Some(ok) = try_one(
+                "pi-power.sh",
+                &["sudo", "-n", script_arg, action],
+                &mut lines,
+            ) {
+                return ok;
             }
         }
-        (
-            format!("POWER: {action} failed (see LOG)"),
-            lines,
-        )
+        if let Some(ok) = try_one(
+            "systemctl",
+            &["sudo", "-n", "systemctl", action],
+            &mut lines,
+        ) {
+            return ok;
+        }
+        let bin_args: &[&str] = if action == "poweroff" {
+            &["sudo", "-n", "poweroff"]
+        } else {
+            &["sudo", "-n", "reboot"]
+        };
+        if let Some(ok) = try_one("bin", bin_args, &mut lines) {
+            return ok;
+        }
+        (format!("POWER: {action} failed (see LOG)"), lines)
     }
 }
 

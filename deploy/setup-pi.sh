@@ -3,7 +3,8 @@
 # Run on the Pi:  scp + sudo bash setup-pi.sh
 #
 # Works on 32-bit Bookworm (lab Pi 2) and 64-bit Bookworm (Pi 4B).
-# Does not configure HiFiBerry / X728 / splash — those are later OS-image tickets.
+# On aarch64 (Pi 4), also enables HiFiBerry DAC+ADC Pro via enable-hifiberry.sh
+# (override with ENABLE_HIFIBERRY=0|1). X728 / splash remain later OS-image tickets.
 set -euo pipefail
 
 USER_NAME="${SUDO_USER:-${USER:-pi}}"
@@ -11,6 +12,13 @@ HOME_DIR="$(getent passwd "$USER_NAME" | cut -d: -f6)"
 HOME_DIR="${HOME_DIR:-/home/$USER_NAME}"
 APP_DIR="${APP_DIR:-$HOME_DIR/pi-midi-toolkit}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+ARCH_NOW="$(uname -m)"
+case "$ARCH_NOW" in
+  aarch64|arm64) DEFAULT_HIFIBERRY=1 ;;
+  *) DEFAULT_HIFIBERRY=0 ;;
+esac
+ENABLE_HIFIBERRY="${ENABLE_HIFIBERRY:-$DEFAULT_HIFIBERRY}"
 
 echo "==> packages (ALSA + SDL/KMSDRM runtime)"
 sudo apt-get update
@@ -27,6 +35,14 @@ sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
 echo "==> directories"
 sudo mkdir -p "$APP_DIR/bin" "$APP_DIR/presets"
 sudo chown -R "$USER_NAME:$USER_NAME" "$APP_DIR"
+
+# POWER / OTA helpers live in the repo tree (or land after the first SET→UPDATE).
+if [[ -f "$APP_DIR/apps/pidi/scripts/session/pi-power.sh" ]]; then
+  sudo chmod +x "$APP_DIR/apps/pidi/scripts/session/pi-power.sh"
+fi
+if [[ -f "$APP_DIR/apps/pidi/scripts/session/pi-wifi-power.sh" ]]; then
+  sudo chmod +x "$APP_DIR/apps/pidi/scripts/session/pi-wifi-power.sh"
+fi
 
 echo "==> realtime limits for $USER_NAME"
 # Allow SCHED_FIFO up to 95 and unlimited mlock for the engine user.
@@ -53,6 +69,17 @@ done
 sudo systemctl daemon-reload
 sudo systemctl enable midi-engine.service jambox-engine.service pidi-native.service || true
 
+if [[ "$ENABLE_HIFIBERRY" == "1" ]]; then
+  echo "==> HiFiBerry DAC+ADC Pro (exclusive I2S)"
+  if [[ -f "$SCRIPT_DIR/enable-hifiberry.sh" ]]; then
+    sudo bash "$SCRIPT_DIR/enable-hifiberry.sh"
+  else
+    echo "WARNING: $SCRIPT_DIR/enable-hifiberry.sh missing" >&2
+  fi
+else
+  echo "==> HiFiBerry skipped (ENABLE_HIFIBERRY=$ENABLE_HIFIBERRY)"
+fi
+
 echo "==> display note (KMSDRM kiosk)"
 echo "    pidi-native needs the DRM master. After first deploy of bins:"
 echo "      sudo systemctl stop lightdm || true"
@@ -60,7 +87,7 @@ echo "      sudo systemctl disable lightdm || true"
 echo "      sudo systemctl mask lightdm || true"
 echo "    Then: sudo systemctl restart jambox-engine pidi-native"
 
-ARCH="$(uname -m)"
+ARCH="$ARCH_NOW"
 case "$ARCH" in
   aarch64|arm64) DIST_HINT=aarch64; TARGET_HINT=aarch64-unknown-linux-gnu ;;
   *) DIST_HINT=armv7; TARGET_HINT=armv7-unknown-linux-gnueabihf ;;
@@ -74,5 +101,11 @@ echo "  2. Deploy staged bins:"
 echo "       python deploy_master.py --arch $DIST_HINT"
 echo "       # or: PI_DIST_ARCH=$DIST_HINT USE_STAGED=1 ./deploy/deploy.sh $USER_NAME@<pi-ip>"
 echo "  3. Mask LightDM if the panel stays black under KMSDRM (see above)."
-echo "  4. See docs/AARCH64.md for Pi 4B 64-bit bring-up."
+if [[ "$ENABLE_HIFIBERRY" == "1" ]]; then
+  echo "  4. Reboot once so the HiFiBerry overlay owns the sound card:"
+  echo "       sudo reboot"
+  echo "  5. See docs/AARCH64.md for Pi 4B 64-bit bring-up."
+else
+  echo "  4. See docs/AARCH64.md for Pi 4B 64-bit bring-up."
+fi
 echo "TARGET hint for cargo: $TARGET_HINT"

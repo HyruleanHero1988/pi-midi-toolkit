@@ -42,16 +42,19 @@ pub enum PunchSource {
     Keys = 0,
     Drums = 1,
     Mic = 2,
+    /// SEQ clip voice bus (stereo). Not cycled on the FX punch-source chip.
+    Seq = 3,
 }
 
 impl PunchSource {
-    pub const COUNT: usize = 3;
-    pub const ALL: [Self; 3] = [Self::Keys, Self::Drums, Self::Mic];
+    pub const COUNT: usize = 4;
+    pub const ALL: [Self; 4] = [Self::Keys, Self::Drums, Self::Mic, Self::Seq];
 
     pub fn from_u8(v: u8) -> Self {
         match v {
             1 => Self::Drums,
             2 => Self::Mic,
+            3 => Self::Seq,
             _ => Self::Keys,
         }
     }
@@ -65,11 +68,12 @@ impl PunchSource {
             Self::Keys => "KEYS",
             Self::Drums => "DRM",
             Self::Mic => "MIC",
+            Self::Seq => "SEQ",
         }
     }
 
     pub fn next(self) -> Self {
-        Self::from_u8((self.as_u8() + 1) % Self::COUNT as u8)
+        Self::from_u8((self.as_u8() + 1) % 3)
     }
 }
 
