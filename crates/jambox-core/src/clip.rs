@@ -87,6 +87,8 @@ pub enum LaunchMode {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ClipVoice {
     pub locked: bool,
+    /// Melody events in this clip use the FM engine, not the wavetable path.
+    pub fm: bool,
     pub morph_a: u16,
     pub morph_b: u16,
     pub morph: f32,
@@ -106,6 +108,7 @@ impl Default for ClipVoice {
     fn default() -> Self {
         Self {
             locked: false,
+            fm: false,
             morph_a: 0,
             morph_b: 1,
             morph: 0.5,

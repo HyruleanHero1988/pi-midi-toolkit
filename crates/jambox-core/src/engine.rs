@@ -248,6 +248,8 @@ pub struct JamboxEngine {
 
     key_bus: Vec<f32>,
     key_bus_r: Vec<f32>,
+    seq_key_bus: Vec<f32>,
+    seq_key_bus_r: Vec<f32>,
     drum_bus: Vec<f32>,
     group_buf: Vec<f32>,
     group_buf_r: Vec<f32>,
@@ -308,12 +310,44 @@ pub struct JamboxEngine {
 /// Keys carry a stereo image (`key_bus` / `key_bus_r`); kit and mic punch run mono.
 fn new_punch_racks(sr: f32) -> [PunchRack; PunchSource::COUNT] {
     std::array::from_fn(|i| {
-        if i == PunchSource::Keys as usize {
+        if i == PunchSource::Keys as usize || i == PunchSource::Seq as usize {
             PunchRack::new_stereo(sr)
         } else {
             PunchRack::new(sr)
         }
     })
+}
+
+/// Wet clip-insert tails — route SEQ slot onto the SEQ punch bus.
+fn flush_clip_fx_tails(
+    units: &mut [FxUnit],
+    already: &[usize],
+    already_n: usize,
+    scratch: &mut [f32],
+    live_l: &mut [f32],
+    live_r: &mut [f32],
+    seq_l: &mut [f32],
+    seq_r: &mut [f32],
+    n: usize,
+) {
+    for (slot, fx) in units.iter_mut().enumerate() {
+        if already[..already_n].contains(&slot) || !fx.has_tail() {
+            continue;
+        }
+        scratch[..n].iter_mut().for_each(|s| *s = 0.0);
+        fx.process(&mut scratch[..n]);
+        if slot == SEQ_CLIP_SLOT as usize {
+            for j in 0..n {
+                seq_l[j] += scratch[j];
+                seq_r[j] += scratch[j];
+            }
+        } else {
+            for j in 0..n {
+                live_l[j] += scratch[j];
+                live_r[j] += scratch[j];
+            }
+        }
+    }
 }
 
 /// Keep wet insert tanks moving after the last voice in a group goes idle,
@@ -410,6 +444,8 @@ impl JamboxEngine {
             clip_baked: [false; MAX_CLIPS],
             key_bus: vec![0.0; MAX_BLOCK],
             key_bus_r: vec![0.0; MAX_BLOCK],
+            seq_key_bus: vec![0.0; MAX_BLOCK],
+            seq_key_bus_r: vec![0.0; MAX_BLOCK],
             drum_bus: vec![0.0; MAX_BLOCK],
             group_buf: vec![0.0; MAX_BLOCK],
             group_buf_r: vec![0.0; MAX_BLOCK],
@@ -673,6 +709,11 @@ impl JamboxEngine {
                 .unwrap_or_default(),
             FxTarget::DrumGroup => self.drum_group_fx.params(),
             FxTarget::Bus => self.bus_fx.params(),
+            FxTarget::Clip(i) => self
+                .clip_fx
+                .get(i as usize)
+                .map(|f| f.params())
+                .unwrap_or_default(),
         }
     }
 
@@ -915,6 +956,8 @@ impl JamboxEngine {
             clip_baked,
             key_bus,
             key_bus_r,
+            ref mut seq_key_bus,
+            ref mut seq_key_bus_r,
             drum_bus,
             group_buf,
             group_buf_r,
@@ -951,6 +994,8 @@ impl JamboxEngine {
         let sr = transport.sample_rate() as f32;
         key_bus[..n].iter_mut().for_each(|s| *s = 0.0);
         key_bus_r[..n].iter_mut().for_each(|s| *s = 0.0);
+        seq_key_bus[..n].iter_mut().for_each(|s| *s = 0.0);
+        seq_key_bus_r[..n].iter_mut().for_each(|s| *s = 0.0);
         drum_bus[..n].iter_mut().for_each(|s| *s = 0.0);
 
         // Wheel or screen — whichever asks for more, matching Python `max(_mod, _vib_always)`.
@@ -1059,7 +1104,8 @@ impl JamboxEngine {
                 &mut group_buf_r[..n],
                 ctx,
             );
-            let fx = if locked {
+            let seq_clip = slot == SEQ_CLIP_SLOT as usize;
+            let fx = if locked || seq_clip {
                 used_clip_fx[used_clip_fx_n] = slot;
                 used_clip_fx_n += 1;
                 clip_fx.get_mut(slot)
@@ -1067,12 +1113,17 @@ impl JamboxEngine {
                 unlocked_voice_fx = Some(bank.nearer_index());
                 voice_fx.get_mut(bank.nearer_index())
             };
+            let (dest_l, dest_r) = if seq_clip {
+                (&mut seq_key_bus[..n], &mut seq_key_bus_r[..n])
+            } else {
+                (&mut key_bus[..n], &mut key_bus_r[..n])
+            };
             mix_group_fx(
                 fx,
                 &mut group_buf[..n],
                 &mut group_buf_r[..n],
-                key_bus,
-                key_bus_r,
+                dest_l,
+                dest_r,
                 n,
             );
         }
@@ -1086,14 +1137,15 @@ impl JamboxEngine {
             Some(key_bus_r),
             n,
         );
-        flush_fx_tails(
+        flush_clip_fx_tails(
             clip_fx,
             &used_clip_fx,
             used_clip_fx_n,
-            None,
             group_buf,
             key_bus,
-            Some(key_bus_r),
+            key_bus_r,
+            seq_key_bus,
+            seq_key_bus_r,
             n,
         );
 
@@ -1146,6 +1198,15 @@ impl JamboxEngine {
             &mut key_bus_r[..n],
             bpm,
         );
+        punch[PunchSource::Seq as usize].process_stereo(
+            &mut seq_key_bus[..n],
+            &mut seq_key_bus_r[..n],
+            bpm,
+        );
+        for i in 0..n {
+            key_bus[i] += seq_key_bus[i];
+            key_bus_r[i] += seq_key_bus_r[i];
+        }
         punch[PunchSource::Drums as usize].process(&mut drum_bus[..n], bpm);
         let input_gain = *input_level;
         let off = *span_off;
@@ -1288,8 +1349,16 @@ impl JamboxEngine {
                 } else if channel == DRUM_CHANNEL {
                     self.drums
                         .trigger_mix(drum_model_for_note(note), velocity, mix);
+                } else if self
+                    .sequencer
+                    .slot(slot as usize)
+                    .map(|s| s.voice().fm)
+                    .unwrap_or(false)
+                {
+                    self.fm
+                        .note_on_recorded(channel, note, velocity, tone);
                 } else {
-                    // Clips stay on the wavetable path so FM mode cannot rewrite a take.
+                    // Wavetable clips ignore live fm_enable so a FOLLOW take is stable.
                     let group = self.bank.nearer_index();
                     let drift_semis = self
                         .sequencer
@@ -1970,6 +2039,7 @@ impl JamboxEngine {
             FxTarget::Drum(i) => self.drum_fx.get_mut(i as usize),
             FxTarget::DrumGroup => Some(&mut self.drum_group_fx),
             FxTarget::Bus => Some(&mut self.bus_fx),
+            FxTarget::Clip(i) => self.clip_fx.get_mut(i as usize),
         };
         let Some(slot) = slot else { return };
         let mut params = slot.params();
@@ -4338,6 +4408,63 @@ mod tests {
     }
 
     #[test]
+    fn seq_clip_uses_clip_insert_even_when_not_locked() {
+        let mut e = engine();
+        let voice = ClipVoice {
+            locked: false,
+            morph_a: 0,
+            morph_b: 0,
+            delay_mix: 0.75,
+            ..ClipVoice::default()
+        };
+        let clip = Clip::new(
+            vec![ClipEvent {
+                tick: 0,
+                kind: ClipEventKind::NoteOn {
+                    channel: 0,
+                    note: 60,
+                    velocity: 120,
+                },
+            }],
+            PPQ * 4,
+        );
+        let _ = e.apply_clip_update(
+            SEQ_CLIP_SLOT as usize,
+            Some(Box::new(clip)),
+            Some(LaunchMode::Loop),
+            None,
+            Some(voice),
+        );
+        apply_now(
+            &mut e,
+            Command::SetFx {
+                target: FxTarget::Clip(SEQ_CLIP_SLOT),
+                param: FxParam::DelayMix,
+                value: 0.75,
+            },
+        );
+        apply_now(
+            &mut e,
+            Command::SetFx {
+                target: FxTarget::Voice(0),
+                param: FxParam::DelayMix,
+                value: 0.0,
+            },
+        );
+        apply_now(
+            &mut e,
+            Command::LaunchClip {
+                slot: SEQ_CLIP_SLOT,
+                quantize: Quantize::Off,
+            },
+        );
+        assert!(
+            (e.clip_fx[SEQ_CLIP_SLOT as usize].params().delay_mix - 0.75).abs() < 1e-6,
+            "SEQ insert must be independent of live voice FX"
+        );
+    }
+
+    #[test]
     fn locked_clip_fx_ignores_live_voice_fx() {
         let mut e = engine();
         let voice = ClipVoice {
@@ -4440,6 +4567,61 @@ mod tests {
 
     fn zero_crossings(buf: &[f32]) -> usize {
         buf.windows(2).filter(|w| w[0] <= 0.0 && w[1] > 0.0).count()
+    }
+
+    #[test]
+    fn fm_baked_clip_plays_fm_even_when_live_fm_is_off() {
+        let mut e = engine();
+        apply_now(
+            &mut e,
+            Command::SetSynth {
+                param: SynthParam::FmEnable,
+                value: 0.0,
+            },
+        );
+        let clip = Clip::new(
+            vec![ClipEvent {
+                tick: 0,
+                kind: ClipEventKind::NoteOn {
+                    channel: 0,
+                    note: 60,
+                    velocity: 120,
+                },
+            }],
+            PPQ * 4,
+        );
+        e.apply_clip_update(
+            0,
+            Some(Box::new(clip)),
+            Some(LaunchMode::Loop),
+            Some(0.8),
+            Some(ClipVoice {
+                fm: true,
+                tone: 0.8,
+                ..ClipVoice::default()
+            }),
+        );
+        apply_now(
+            &mut e,
+            Command::LaunchClip {
+                slot: 0,
+                quantize: Quantize::Off,
+            },
+        );
+        let mut out = vec![0.0f32; 4096];
+        let mut midi = MidiOutSink::new();
+        for _ in 0..3 {
+            e.render(&mut out, &[], &mut midi);
+        }
+        assert!(
+            e.fm.active_count() >= 1,
+            "baked-FM clip should route melody through FM"
+        );
+        assert!(
+            e.voices.active_count() == 0,
+            "baked-FM clip should not start wavetable clip voices"
+        );
+        assert!(energy(&out) > 0.01);
     }
 
     #[test]

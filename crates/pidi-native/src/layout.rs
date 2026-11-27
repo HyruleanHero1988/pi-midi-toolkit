@@ -269,6 +269,11 @@ pub enum Hit {
     SeqBpmDown,
     SeqToPad,
     SeqAllOff,
+    SeqBackboneGridMode,
+    SeqBackboneGrid {
+        step: usize,
+        model: usize,
+    },
     PresetSlot(usize),
     PresetLoad,
     PresetSave,
@@ -290,6 +295,7 @@ pub enum Hit {
     SettingsAudio,
     SettingsAudioIn,
     FxTarget,
+    FxVoiceScope,
     FxSlider(usize),
     PunchPad(usize),
     PunchClear,
@@ -535,6 +541,7 @@ pub struct Layout {
     pub seq_bpm_down: Rect,
     pub seq_drums: Rect,
     pub seq_qnt: Rect,
+    pub seq_grid_mode: Rect,
     pub preset_grid: Rect,
     pub preset_load: Rect,
     pub preset_save: Rect,
@@ -555,6 +562,7 @@ pub struct Layout {
     pub settings_audio: Rect,
     pub settings_audio_in: Rect,
     pub settings_fx_target: Rect,
+    pub settings_fx_voice_scope: Rect,
     pub settings_fx: Rect,
     pub settings_wifi: Rect,
     pub settings_wifi_usb: Rect,
@@ -1173,15 +1181,21 @@ impl Layout {
                 h: 44,
             },
             seq_drums: Rect {
-                x: 0,
-                y: 0,
-                w: 0,
-                h: 0,
+                x: 12,
+                y: HUD_H + 198,
+                w: SCREEN_W - 24,
+                h: SCREEN_H - (HUD_H + 198) - 20,
             },
             seq_qnt: Rect {
                 x: 12,
                 y: HUD_H + 306,
                 w: 160,
+                h: 44,
+            },
+            seq_grid_mode: Rect {
+                x: 180,
+                y: HUD_H + 306,
+                w: 140,
                 h: 44,
             },
             preset_grid: Rect {
@@ -1333,7 +1347,13 @@ impl Layout {
             settings_fx_target: Rect {
                 x: 16,
                 y: HUD_H + 10,
-                w: 268,
+                w: 130,
+                h: 44,
+            },
+            settings_fx_voice_scope: Rect {
+                x: 154,
+                y: HUD_H + 10,
+                w: 130,
                 h: 44,
             },
             settings_fx: Rect {
@@ -2772,6 +2792,78 @@ impl Layout {
         self.kit_pad_cell(index)
     }
 
+    /// Full-screen backbone editor under top chrome (800×404).
+    pub fn seq_backbone_grid_overlay(&self) -> Rect {
+        Rect {
+            x: 0,
+            y: HUD_H,
+            w: SCREEN_W,
+            h: SCREEN_H - HUD_H,
+        }
+    }
+
+    /// Large DONE tap target on the overlay header.
+    pub fn seq_backbone_grid_exit(&self) -> Rect {
+        let o = self.seq_backbone_grid_overlay();
+        Rect {
+            x: o.w - 132,
+            y: o.y + 6,
+            w: 124,
+            h: 30,
+        }
+    }
+
+    /// PLAY / STOP on the grid overlay header (left of DONE).
+    pub fn seq_backbone_grid_transport(&self) -> Rect {
+        let o = self.seq_backbone_grid_overlay();
+        Rect {
+            x: o.w - 268,
+            y: o.y + 6,
+            w: 124,
+            h: 30,
+        }
+    }
+
+    pub fn seq_backbone_grid(&self) -> Rect {
+        let o = self.seq_backbone_grid_overlay();
+        const HEADER: i32 = 40;
+        Rect {
+            x: 6,
+            y: o.y + HEADER,
+            w: o.w - 12,
+            h: o.h - HEADER - 6,
+        }
+    }
+
+    pub fn seq_backbone_grid_cell(&self, step: usize, row: usize) -> Rect {
+        let grid = self.seq_backbone_grid();
+        let label_w = 40;
+        let header_h = 14;
+        let step_w = (grid.w - label_w) / crate::seq::BACKBONE_GRID_STEPS as i32;
+        let row_h = (grid.h - header_h) / crate::seq::BACKBONE_GRID_MAX_ROWS as i32;
+        Rect {
+            x: grid.x + label_w + step as i32 * step_w,
+            y: grid.y + header_h + row as i32 * row_h,
+            w: step_w.saturating_sub(1).max(1),
+            h: row_h.saturating_sub(1).max(1),
+        }
+    }
+
+    pub fn hit_seq_backbone_grid(&self, px: i32, py: i32) -> Option<(usize, usize)> {
+        let grid = self.seq_backbone_grid();
+        if !grid.contains(px, py) {
+            return None;
+        }
+        for row in 0..crate::seq::BACKBONE_GRID_MAX_ROWS {
+            for step in 0..crate::seq::BACKBONE_GRID_STEPS {
+                if self.seq_backbone_grid_cell(step, row).contains(px, py) {
+                    return Some((step, row));
+                }
+            }
+        }
+        None
+    }
+
     pub fn arp_banner(&self) -> Rect {
         Rect {
             x: self.content.x + 8,
@@ -3044,7 +3136,7 @@ impl Layout {
             UiMode::Synth => self.hit_synth(px, py),
             UiMode::Fm => self.hit_fm(px, py),
             UiMode::Drums => self.hit_drums(px, py),
-            UiMode::Seq => self.hit_seq(px, py),
+            UiMode::Seq => self.hit_seq(px, py, false, false),
             UiMode::Presets => self.hit_presets(px, py),
             UiMode::Songs => self.hit_songs(px, py),
             UiMode::Settings => self.hit_settings(px, py),
@@ -4417,6 +4509,9 @@ impl Layout {
         if self.settings_fx_target.contains(px, py) {
             return Hit::FxTarget;
         }
+        if self.settings_fx_voice_scope.contains(px, py) {
+            return Hit::FxVoiceScope;
+        }
         if self.punch_lock().contains(px, py) {
             return Hit::PunchLock;
         }
@@ -4550,7 +4645,13 @@ impl Layout {
         Hit::None
     }
 
-    fn hit_seq(&self, px: i32, py: i32) -> Hit {
+    pub fn hit_seq(
+        &self,
+        px: i32,
+        py: i32,
+        grid_screen: bool,
+        grid_offer: bool,
+    ) -> Hit {
         if self.seq_rec.contains(px, py) {
             return Hit::SeqRec;
         }
@@ -4565,6 +4666,21 @@ impl Layout {
         }
         if self.seq_undo.contains(px, py) {
             return Hit::SeqUndo;
+        }
+        if grid_screen {
+            if self.seq_backbone_grid_exit().contains(px, py) {
+                return Hit::SeqBackboneGridMode;
+            }
+            if self.seq_backbone_grid_transport().contains(px, py) {
+                return Hit::SeqPlay;
+            }
+            if let Some((step, row)) = self.hit_seq_backbone_grid(px, py) {
+                return Hit::SeqBackboneGrid { step, model: row };
+            }
+            if self.seq_grid_mode.contains(px, py) {
+                return Hit::SeqBackboneGridMode;
+            }
+            return Hit::None;
         }
         if self.seq_len_double.contains(px, py) {
             return Hit::SeqLenDouble;
@@ -4598,6 +4714,9 @@ impl Layout {
         }
         if self.seq_qnt.contains(px, py) {
             return Hit::ClipQuantize;
+        }
+        if grid_offer && self.seq_grid_mode.contains(px, py) {
+            return Hit::SeqBackboneGridMode;
         }
         Hit::None
     }
@@ -5128,9 +5247,9 @@ mod tests {
             layout.hit_kit_repeat(none.x + 4, none.y + 4),
             Hit::Division(0)
         );
-        let triple = layout.kit_repeat_choice_cell(5);
+        let half = layout.kit_repeat_choice_cell(5);
         assert_eq!(
-            layout.hit_kit_repeat(triple.x + 4, triple.y + 4),
+            layout.hit_kit_repeat(half.x + 4, half.y + 4),
             Hit::Division(5)
         );
     }

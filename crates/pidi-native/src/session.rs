@@ -163,6 +163,44 @@ impl KaossFxTarget {
     pub const ALL: [KaossFxTarget; 3] = [Self::Voice, Self::Drums, Self::Both];
 }
 
+/// When FX→VOICE is selected, whether insert edits hit live keys, the SEQ clip bus, or both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum VoiceFxScope {
+    #[default]
+    Live,
+    Seq,
+    Both,
+}
+
+impl VoiceFxScope {
+    pub const ALL: [Self; 3] = [Self::Live, Self::Seq, Self::Both];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Live => "LIVE",
+            Self::Seq => "SEQ",
+            Self::Both => "BOTH",
+        }
+    }
+
+    pub fn includes_live(self) -> bool {
+        matches!(self, Self::Live | Self::Both)
+    }
+
+    pub fn includes_seq(self) -> bool {
+        matches!(self, Self::Seq | Self::Both)
+    }
+
+    pub fn color(self) -> u32 {
+        match self {
+            Self::Live => 0xb16286,
+            Self::Seq => 0x689d6a,
+            Self::Both => 0xd79921,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionState {
     pub version: u32,
@@ -242,6 +280,9 @@ pub struct SessionState {
     /// KAOSS pad FX destination: voice insert, kit-group insert, or both.
     #[serde(default)]
     pub kaoss_fx_target: KaossFxTarget,
+    /// FX page VOICE insert scope: live keys vs SEQ clip insert.
+    #[serde(default)]
+    pub fx_voice_scope: VoiceFxScope,
     /// Buffer FX precedence for TAPE / RPT / DROP. Missing → T>R>D.
     #[serde(default)]
     pub punch_buffer_prio: u8,
@@ -633,6 +674,7 @@ impl Default for SessionState {
             fx_bus_chorus: 0.0,
             fx_bus_phaser: 0.0,
             kaoss_fx_target: KaossFxTarget::Voice,
+            fx_voice_scope: VoiceFxScope::Live,
             punch_buffer_prio: 0,
             punch_rpt_mode: 0,
             punch_grid_mode: 0,

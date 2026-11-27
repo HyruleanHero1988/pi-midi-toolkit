@@ -24,6 +24,8 @@ pub enum FxTarget {
     DrumGroup,
     /// Master mix bus.
     Bus,
+    /// Clip slot insert (phrase pad or SEQ).
+    Clip(u8),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

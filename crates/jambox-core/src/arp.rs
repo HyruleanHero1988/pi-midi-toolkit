@@ -120,10 +120,12 @@ pub enum ArpDivision {
     SixteenthTriplet,
     ThirtySecond,
     ThirtySecondTriplet,
+    /// Whole note — one 4/4 bar between steps (same grid as drum note-repeat `1`).
+    Whole,
 }
 
 impl ArpDivision {
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::Quarter,
         Self::QuarterTriplet,
         Self::Eighth,
@@ -132,6 +134,7 @@ impl ArpDivision {
         Self::SixteenthTriplet,
         Self::ThirtySecond,
         Self::ThirtySecondTriplet,
+        Self::Whole,
     ];
 
     pub fn from_u8(value: u8) -> Self {
@@ -155,6 +158,7 @@ impl ArpDivision {
             Self::SixteenthTriplet => "1/16T",
             Self::ThirtySecond => "1/32",
             Self::ThirtySecondTriplet => "1/32T",
+            Self::Whole => "1",
         }
     }
 
@@ -167,6 +171,7 @@ impl ArpDivision {
             "sixteenth_triplet" | "1/16t" => Self::SixteenthTriplet,
             "thirty_second" | "1/32" => Self::ThirtySecond,
             "thirty_second_triplet" | "1/32t" => Self::ThirtySecondTriplet,
+            "whole" | "1" => Self::Whole,
             _ => Self::Sixteenth,
         }
     }
@@ -181,6 +186,7 @@ impl ArpDivision {
             Self::SixteenthTriplet => "sixteenth_triplet",
             Self::ThirtySecond => "thirty_second",
             Self::ThirtySecondTriplet => "thirty_second_triplet",
+            Self::Whole => "whole",
         }
     }
 
@@ -194,6 +200,7 @@ impl ArpDivision {
             Self::SixteenthTriplet => PPQ as u64 / 6,
             Self::ThirtySecond => PPQ as u64 / 8,
             Self::ThirtySecondTriplet => PPQ as u64 / 12,
+            Self::Whole => PPQ as u64 * 4,
         }
     }
 }
@@ -934,6 +941,15 @@ mod tests {
             events.iter().take(n).any(|e| !e.on && e.note == 60),
             "a gate-off that landed in the previous block must still be emitted, got {:?}",
             &events[..n]
+        );
+    }
+
+    #[test]
+    fn whole_step_is_one_bar() {
+        use crate::repeat::RepeatDivision;
+        assert_eq!(
+            ArpDivision::Whole.ticks(),
+            RepeatDivision::Whole.ticks()
         );
     }
 

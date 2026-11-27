@@ -267,6 +267,14 @@ impl Outbox {
         });
     }
 
+    pub fn fx_clip(&mut self, slot: u8, param: &str, value: f32) {
+        self.reliable.push_back(Request::Fx {
+            target: jambox_protocol::FxTargetSpec::Clip { slot },
+            param: param.to_string(),
+            value,
+        });
+    }
+
     pub fn punch_fx(&mut self, source: u8, slot: u8, amount: f32) {
         self.reliable.push_back(Request::PunchFx {
             source,

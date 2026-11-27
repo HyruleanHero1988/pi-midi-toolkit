@@ -11,7 +11,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
-use jambox_core::{pack_xy, Command, LatestTouch};
+use jambox_core::{note_from_hw_repeat_owner, pack_xy, Command, LatestTouch, DRUM_CHANNEL};
 use tracing::{debug, info, warn};
 
 use crate::audio::{self, AudioHealth};
@@ -408,7 +408,7 @@ pub fn handle_line(
             velocity,
             division,
         }) => handle_repeat(
-            control, cache, session, gesture, phase, note, channel, velocity, division,
+            control, cache, session, map, gesture, phase, note, channel, velocity, division,
         ),
         Ok(Decoded::AudioReopen) => {
             info!("control: audio reopen requested");
@@ -553,6 +553,7 @@ fn handle_repeat(
     control: &mut ControlSide,
     cache: &mut StatusCache,
     session: &mut ClientSession,
+    map: &MidiMap,
     gesture: u32,
     phase: RepeatPhase,
     note: u8,
@@ -560,8 +561,12 @@ fn handle_repeat(
     velocity: u8,
     division: jambox_core::RepeatDivision,
 ) -> Response {
+    let hw_owner = note_from_hw_repeat_owner(gesture).is_some();
     match phase {
         RepeatPhase::Down => {
+            if hw_owner && channel == DRUM_CHANNEL {
+                map.set_hw_repeat_latched(note, true);
+            }
             session.track_repeat(gesture);
             if send_or_drop(
                 control,
@@ -582,6 +587,9 @@ fn handle_repeat(
             }
         }
         RepeatPhase::Up | RepeatPhase::Cancel => {
+            if hw_owner && channel == DRUM_CHANNEL {
+                map.set_hw_repeat_latched(note, false);
+            }
             session.untrack_repeat(gesture);
             if send_or_drop(control, cache, Command::StopRepeat { owner: gesture }) {
                 Response::Ok

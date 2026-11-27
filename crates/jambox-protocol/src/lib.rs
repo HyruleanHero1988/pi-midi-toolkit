@@ -88,7 +88,7 @@ pub enum Request {
         value: f32,
     },
     /// EP-style punch-in pad. `slot` 0..7, `amount` 0 = off.
-    /// `source` 0 keys, 1 drums, 2 mic. Missing → keys.
+    /// `source` 0 keys, 1 drums, 2 mic, 3 SEQ clip voice. Missing → keys.
     PunchFx {
         #[serde(default)]
         source: u8,
@@ -317,7 +317,8 @@ pub enum Request {
         aftertouch: Option<String>,
     },
     /// Per kit-voice note-repeat map for hardware pads. `slots[i]`: 0 = off,
-    /// 1 = 1/4, 2 = 1/8, 3 = 1/8T, 4 = 1/16, 5 = triple. `latch` keeps the
+    /// 1 = 1/4, 2 = 1/8, 3 = 1/8T, 4 = 1/16, 5 = legacy (→ 1/8), 6 = 1/2, 7 = 1.
+    /// `latch` keeps the
     /// grid running after the pad is released.
     DrumRepeat {
         slots: [u8; 16],
@@ -392,6 +393,7 @@ pub enum FxTargetSpec {
     Drum { index: u8 },
     DrumGroup,
     Bus,
+    Clip { slot: u8 },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -438,10 +440,12 @@ impl WireClipEvent {
 }
 
 /// Morph + voice-insert snapshot carried on `clip_load`.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Default)]
 pub struct WireClipVoice {
     #[serde(default)]
     pub locked: bool,
+    #[serde(default)]
+    pub fm: bool,
     #[serde(default)]
     pub morph_a: u16,
     #[serde(default)]

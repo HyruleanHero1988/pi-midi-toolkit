@@ -4,9 +4,41 @@
 //! Flattened layers tile across the cycle. Playback is uploaded as one looping
 //! clip so jambox-engine owns musical time.
 
+use jambox_core::{drum_model_for_note, DrumModel, DRUM_CHANNEL, DRUM_MODEL_COUNT};
 use jambox_protocol::WireClipEvent;
+use std::collections::HashMap;
 
 use crate::phrases::{seconds_to_ticks, PPQ};
+
+/// Sixteenth steps across one backbone loop (one bar at the recorded length).
+pub const BACKBONE_GRID_STEPS: usize = 16;
+pub const BACKBONE_GRID_MAX_ROWS: usize = DRUM_MODEL_COUNT;
+
+/// Screen 4×4 pad order (factory MPK row-swap — same as DRUMS).
+const BACKBONE_GRID_ROWS: [DrumModel; BACKBONE_GRID_MAX_ROWS] = [
+    DrumModel::HatOpen,
+    DrumModel::TomLo,
+    DrumModel::TomMid,
+    DrumModel::Rim,
+    DrumModel::Kick,
+    DrumModel::Rimshot,
+    DrumModel::Clap,
+    DrumModel::HatClosed,
+    DrumModel::TomHi,
+    DrumModel::Cowbell,
+    DrumModel::Clave,
+    DrumModel::Ride,
+    DrumModel::KickTight,
+    DrumModel::Snare,
+    DrumModel::Shaker,
+    DrumModel::HatPedal,
+];
+
+/// Pad row → the MIDI note backbone events use (profile-aware for live controllers).
+pub fn backbone_grid_midi_for_row(row: usize, profile: &midi_core::ControllerProfile) -> u8 {
+    let pad = row.min(BACKBONE_GRID_MAX_ROWS.saturating_sub(1));
+    profile.note_for_phrase_cell(pad)
+}
 
 /// SEQ / songs share the clip slot after the 16 phrase pads.
 pub use jambox_core::{SEQ_CLIP_SLOT, SEQ_DRUM_MIX_SLOT, SEQ_KAOSS_MIX_SLOT};
@@ -223,6 +255,114 @@ impl Sequence {
         (wire, length_ticks)
     }
 
+    fn normalize_backbone_drums(&mut self, bpm: f32) {
+        let Some(layer) = self.layers.first_mut() else {
+            return;
+        };
+        if self.cycle_len <= 0.0 {
+            return;
+        }
+        collapse_drum_repeat_bursts(&mut layer.events, bpm);
+        let step_dt = self.cycle_len / BACKBONE_GRID_STEPS as f64;
+        let mut cells: HashMap<(u8, u8, usize), u8> = HashMap::new();
+        let mut keep: Vec<RecEvent> = Vec::new();
+        for ev in &layer.events {
+            if ev.channel == DRUM_CHANNEL {
+                if ev.on {
+                    let step = quantize_step(ev.t, step_dt);
+                    let key = (ev.channel, ev.note, step);
+                    cells
+                        .entry(key)
+                        .and_modify(|v| *v = (*v).max(ev.velocity))
+                        .or_insert(ev.velocity.max(1));
+                }
+            } else {
+                keep.push(ev.clone());
+            }
+        }
+        let mut drums: Vec<RecEvent> = Vec::new();
+        for ((channel, note, step), velocity) in cells {
+            let t = step as f64 * step_dt;
+            drums.push(RecEvent {
+                t,
+                on: true,
+                channel,
+                note,
+                velocity,
+            });
+            drums.push(RecEvent {
+                t: (t + 0.02).min(self.cycle_len),
+                on: false,
+                channel,
+                note,
+                velocity: 0,
+            });
+        }
+        drums.sort_by(event_order);
+        keep.extend(drums);
+        keep.sort_by(event_order);
+        layer.events = keep;
+    }
+
+    fn backbone_grid_cell_on(&self, step: usize, _row: usize, midi: u8) -> bool {
+        let Some(layer) = self.layers.first() else {
+            return false;
+        };
+        if self.cycle_len <= 0.0 || step >= BACKBONE_GRID_STEPS {
+            return false;
+        }
+        let step_dt = self.cycle_len / BACKBONE_GRID_STEPS as f64;
+        let t0 = step as f64 * step_dt;
+        let t1 = t0 + step_dt - 1e-6;
+        layer.events.iter().any(|e| {
+            e.on && e.channel == DRUM_CHANNEL && e.note == midi && e.t >= t0 - 1e-6 && e.t <= t1
+        })
+    }
+
+    fn toggle_backbone_grid_cell(&mut self, step: usize, row: usize, midi: u8) -> bool {
+        let _ = row;
+        let Some(layer) = self.layers.first_mut() else {
+            return false;
+        };
+        if self.cycle_len <= 0.0 || step >= BACKBONE_GRID_STEPS {
+            return false;
+        }
+        let step_dt = self.cycle_len / BACKBONE_GRID_STEPS as f64;
+        let t_hit = step as f64 * step_dt;
+        let on_now = layer
+            .events
+            .iter()
+            .any(|e| e.on && e.channel == DRUM_CHANNEL && e.note == midi && {
+                let s = quantize_step(e.t, step_dt);
+                s == step
+            });
+        if on_now {
+            layer.events.retain(|e| {
+                !(e.channel == DRUM_CHANNEL && e.note == midi && {
+                    let s = quantize_step(e.t, step_dt);
+                    s == step
+                })
+            });
+        } else {
+            layer.events.push(RecEvent {
+                t: t_hit,
+                on: true,
+                channel: DRUM_CHANNEL,
+                note: midi,
+                velocity: 110,
+            });
+            layer.events.push(RecEvent {
+                t: (t_hit + 0.02).min(self.cycle_len),
+                on: false,
+                channel: DRUM_CHANNEL,
+                note: midi,
+                velocity: 0,
+            });
+            layer.events.sort_by(event_order);
+        }
+        true
+    }
+
     fn layer_line(&self) -> String {
         let mut parts = Vec::new();
         for (i, layer) in self.layers.iter().enumerate() {
@@ -249,6 +389,74 @@ impl Sequence {
             parts.join(" · ")
         }
     }
+}
+
+/// One finger-held note-repeat flood becomes a single onset per burst; intentional
+/// slow rolls stay separate because their gaps exceed a 1/8-note threshold.
+fn collapse_drum_repeat_bursts(events: &mut Vec<RecEvent>, bpm: f32) {
+    // Hits closer than one eighth note (plus tiny jitter) belong to one repeat burst.
+    let burst_gap = (60.0 / bpm as f64 / 2.0) * 1.05;
+    let mut per_note: HashMap<(u8, u8), Vec<(f64, u8)>> = HashMap::new();
+    for ev in events.iter() {
+        if ev.on && ev.channel == DRUM_CHANNEL {
+            per_note
+                .entry((ev.channel, ev.note))
+                .or_default()
+                .push((ev.t, ev.velocity));
+        }
+    }
+    let mut kept: Vec<RecEvent> = Vec::new();
+    for ((channel, note), mut ons) in per_note {
+        ons.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        let mut prev_on = f64::NEG_INFINITY;
+        for (t, velocity) in ons {
+            if prev_on < 0.0 || t - prev_on >= burst_gap {
+                kept.push(RecEvent {
+                    t,
+                    on: true,
+                    channel,
+                    note,
+                    velocity,
+                });
+            }
+            prev_on = t;
+        }
+    }
+    let mut other: Vec<RecEvent> = events
+        .iter()
+        .filter(|e| e.channel != DRUM_CHANNEL)
+        .cloned()
+        .collect();
+    for on in &kept {
+        other.push(on.clone());
+        other.push(RecEvent {
+            t: on.t + 0.02,
+            on: false,
+            channel: on.channel,
+            note: on.note,
+            velocity: 0,
+        });
+    }
+    other.sort_by(event_order);
+    *events = other;
+}
+
+fn quantize_step(t: f64, step_dt: f64) -> usize {
+    if step_dt <= 0.0 {
+        return 0;
+    }
+    ((t / step_dt).round() as isize)
+        .clamp(0, BACKBONE_GRID_STEPS as isize - 1) as usize
+}
+
+fn event_order(a: &RecEvent, b: &RecEvent) -> std::cmp::Ordering {
+    a.t.partial_cmp(&b.t)
+        .unwrap_or(std::cmp::Ordering::Equal)
+        .then_with(|| match (a.on, b.on) {
+            (false, true) => std::cmp::Ordering::Less,
+            (true, false) => std::cmp::Ordering::Greater,
+            _ => a.channel.cmp(&b.channel).then(a.note.cmp(&b.note)),
+        })
 }
 
 fn tile_layer(layer: &SeqLayer, cycle_len: f64, cycles: usize) -> Vec<RecEvent> {
@@ -320,6 +528,8 @@ pub enum SeqAction {
         /// a bar-quantized launch would play it up to a bar late and every
         /// recorded hit would land that far from where it was played.
         immediate: bool,
+        /// True when this upload ends a REC pass with new melody content.
+        voice_commit: bool,
     },
     Stop,
     Clear,
@@ -338,6 +548,12 @@ pub struct SeqModel {
     pub cue_beep: bool,
     /// Brightness captured on the backbone take. Later overdubs don't rewrite it.
     pub baked_tone: Option<f32>,
+    /// FM vs wavetable for melody notes in the loop clip (captured on REC commit).
+    pub baked_fm: Option<bool>,
+    /// FM voice for the overdub in REVIEW; applied on KEEP, cleared on DROP.
+    staged_voice_fm: Option<bool>,
+    /// Full-screen backbone drum grid overlay (explicit GRID / BACK).
+    backbone_grid_open: bool,
     sequence: Sequence,
     take: Vec<RecEvent>,
     take_gestures: Vec<RecGesture>,
@@ -361,6 +577,9 @@ impl SeqModel {
             extend_mode: false,
             cue_beep: false,
             baked_tone: None,
+            baked_fm: None,
+            staged_voice_fm: None,
+            backbone_grid_open: false,
             sequence: Sequence::default(),
             take: Vec::new(),
             take_gestures: Vec::new(),
@@ -417,6 +636,24 @@ impl SeqModel {
 
     pub fn layer_count(&self) -> usize {
         self.sequence.layers.len()
+    }
+
+    pub fn stage_voice_fm(&mut self, fm: bool) {
+        self.staged_voice_fm = Some(fm);
+    }
+
+    /// FM engine for SEQ clip melody playback (staged overdub or baked take).
+    pub fn clip_melody_fm(&self) -> bool {
+        self.staged_voice_fm
+            .or(self.baked_fm)
+            .unwrap_or(false)
+    }
+
+    pub fn wire_has_melody_keys(events: &[WireClipEvent]) -> bool {
+        use jambox_core::DRUM_CHANNEL;
+        events
+            .iter()
+            .any(|e| e.touch.is_none() && e.channel != DRUM_CHANNEL)
     }
 
     /// Flattened clip for SEQ → PAD / song export. Pending layers included.
@@ -529,6 +766,7 @@ impl SeqModel {
         self.take_gestures.clear();
         self.last_gesture_t = -1.0;
         self.take_started = Some(std::time::Instant::now());
+        self.backbone_grid_open = false;
         self.state = SeqState::RecBackbone;
         self.refresh_lines();
         SeqAction::Stop
@@ -559,6 +797,7 @@ impl SeqModel {
         let trimmed = close_open_notes(trimmed, length);
         let gestures = close_open_gestures(gestures, length);
         self.sequence.set_backbone(trimmed, gestures, length);
+        self.sequence.normalize_backbone_drums(self.bpm);
         self.state = SeqState::Playing;
         self.refresh_lines();
         let (events, length_ticks) = self.playback_wire(false);
@@ -567,6 +806,7 @@ impl SeqModel {
             length_ticks,
             launch: true,
             immediate: false,
+            voice_commit: true,
         }
     }
 
@@ -587,6 +827,7 @@ impl SeqModel {
             span: self.sequence.cycles.max(1),
             label: "pending".into(),
         });
+        self.backbone_grid_open = false;
         self.state = SeqState::Overdub;
         self.refresh_lines();
         let (events, length_ticks) = self.playback_wire(false);
@@ -595,6 +836,7 @@ impl SeqModel {
             length_ticks,
             launch: true,
             immediate: true,
+            voice_commit: false,
         }
     }
 
@@ -657,6 +899,7 @@ impl SeqModel {
             span,
             label: "pending".into(),
         });
+        self.backbone_grid_open = false;
         self.state = SeqState::Review;
         self.refresh_lines();
         let (wire, length_ticks) = self.playback_wire(true);
@@ -665,6 +908,7 @@ impl SeqModel {
             length_ticks,
             launch: true,
             immediate: false,
+            voice_commit: true,
         }
     }
 
@@ -676,6 +920,9 @@ impl SeqModel {
             self.status = "nothing to KEEP".into();
             return SeqAction::None;
         }
+        if let Some(fm) = self.staged_voice_fm.take() {
+            self.baked_fm = Some(fm);
+        }
         self.state = SeqState::Playing;
         self.refresh_lines();
         let (events, length_ticks) = self.playback_wire(false);
@@ -684,6 +931,7 @@ impl SeqModel {
             length_ticks,
             launch: true,
             immediate: false,
+            voice_commit: false,
         }
     }
 
@@ -693,6 +941,7 @@ impl SeqModel {
             self.take.clear();
         }
         let had = self.sequence.drop_pending();
+        self.staged_voice_fm = None;
         self.state = if self.sequence.is_empty() {
             SeqState::Empty
         } else {
@@ -713,6 +962,7 @@ impl SeqModel {
                 length_ticks,
                 launch: true,
                 immediate: false,
+                voice_commit: false,
             }
         }
     }
@@ -730,6 +980,7 @@ impl SeqModel {
             length_ticks,
             launch: true,
             immediate: false,
+            voice_commit: false,
         }
     }
 
@@ -754,6 +1005,7 @@ impl SeqModel {
             length_ticks,
             launch: true,
             immediate: false,
+            voice_commit: false,
         }
     }
 
@@ -778,6 +1030,9 @@ impl SeqModel {
         self.take_gestures.clear();
         self.take_started = None;
         self.baked_tone = None;
+        self.baked_fm = None;
+        self.staged_voice_fm = None;
+        self.backbone_grid_open = false;
         self.state = SeqState::Empty;
         self.refresh_lines();
         SeqAction::Clear
@@ -795,6 +1050,7 @@ impl SeqModel {
             length_ticks,
             launch: self.is_playing(),
             immediate: false,
+            voice_commit: false,
         }
     }
 
@@ -810,6 +1066,7 @@ impl SeqModel {
             length_ticks,
             launch: self.is_playing(),
             immediate: false,
+            voice_commit: false,
         }
     }
 
@@ -837,7 +1094,105 @@ impl SeqModel {
         self.status = format!("tempo {:.0}", self.bpm);
     }
 
+    pub fn has_backbone(&self) -> bool {
+        !self.sequence.is_empty()
+    }
+
+    /// Backbone exists and grid editing is allowed (not while REC / REVIEW).
+    pub fn backbone_grid_allowed(&self) -> bool {
+        if !self.has_backbone() || self.is_recording() {
+            return false;
+        }
+        matches!(self.state, SeqState::Playing | SeqState::Stopped)
+    }
+
+    /// User opened the backbone drum-grid overlay.
+    pub fn backbone_grid_screen_open(&self) -> bool {
+        self.backbone_grid_open && self.backbone_grid_allowed()
+    }
+
+    pub fn open_backbone_grid_screen(&mut self) {
+        if !self.backbone_grid_allowed() {
+            self.backbone_grid_open = false;
+            return;
+        }
+        self.backbone_grid_open = true;
+        self.status =
+            "BACKBONE GRID — tap cells · PLAY/STOP · DONE or ← BACK exits".into();
+    }
+
+    pub fn close_backbone_grid_screen(&mut self) {
+        if !self.backbone_grid_open {
+            return;
+        }
+        self.backbone_grid_open = false;
+        self.refresh_lines();
+    }
+
+    pub fn toggle_backbone_grid_screen(&mut self) {
+        if self.backbone_grid_screen_open() {
+            self.close_backbone_grid_screen();
+        } else {
+            self.open_backbone_grid_screen();
+        }
+    }
+
+
+    pub fn backbone_grid_row_models(&self) -> &'static [DrumModel] {
+        &BACKBONE_GRID_ROWS
+    }
+
+    pub fn backbone_grid_cell_on(
+        &self,
+        step: usize,
+        row: usize,
+        profile: &midi_core::ControllerProfile,
+    ) -> bool {
+        let midi = backbone_grid_midi_for_row(row, profile);
+        self.sequence.backbone_grid_cell_on(step, row, midi)
+    }
+
+    /// Toggle one sixteenth cell on the backbone drum grid; re-uploads the clip.
+    pub fn toggle_backbone_grid_cell(
+        &mut self,
+        step: usize,
+        row: usize,
+        profile: &midi_core::ControllerProfile,
+    ) -> SeqAction {
+        if !self.backbone_grid_screen_open() {
+            self.status = "open GRID first".into();
+            return SeqAction::None;
+        }
+        if step >= BACKBONE_GRID_STEPS || row >= BACKBONE_GRID_MAX_ROWS {
+            return SeqAction::None;
+        }
+        let midi = backbone_grid_midi_for_row(row, profile);
+        let voice = drum_model_for_note(midi);
+        let changed = self.sequence.toggle_backbone_grid_cell(step, row, midi);
+        if !changed {
+            return SeqAction::None;
+        }
+        self.status = format!(
+            "grid · {} step {}",
+            voice.name(),
+            step + 1
+        );
+        let was_playing = self.state == SeqState::Playing;
+        self.refresh_lines();
+        let (events, length_ticks) = self.playback_wire(false);
+        SeqAction::Upload {
+            events,
+            length_ticks,
+            launch: was_playing,
+            immediate: was_playing,
+            voice_commit: false,
+        }
+    }
+
     fn refresh_lines(&mut self) {
+        if !self.backbone_grid_allowed() {
+            self.backbone_grid_open = false;
+        }
         self.layer_line = self.sequence.layer_line();
         let span = format!(
             "{:.2}s x {} = {:.2}s",
@@ -1114,6 +1469,109 @@ mod tests {
     use super::*;
 
     #[test]
+    fn collapse_strips_tight_repeat_burst() {
+        let mut ev = vec![
+            RecEvent {
+                t: 0.0,
+                on: true,
+                channel: DRUM,
+                note: 36,
+                velocity: 100,
+            },
+            RecEvent {
+                t: 0.24,
+                on: true,
+                channel: DRUM,
+                note: 36,
+                velocity: 100,
+            },
+            RecEvent {
+                t: 0.49,
+                on: true,
+                channel: DRUM,
+                note: 36,
+                velocity: 100,
+            },
+        ];
+        collapse_drum_repeat_bursts(&mut ev, 120.0);
+        let ons = ev.iter().filter(|e| e.on).count();
+        assert_eq!(ons, 1);
+    }
+
+    #[test]
+    fn backbone_quantize_collapses_repeated_drums_on_one_sixteenth() {
+        let mut seq = SeqModel::new();
+        assert!(matches!(seq.toggle_record(), SeqAction::Stop));
+        for t in [0.0_f64, 0.24, 0.49] {
+            seq.push_note_at(true, DRUM, 36, 100, t);
+            seq.push_note_at(false, DRUM, 36, 0, t + 0.02);
+        }
+        match seq.toggle_record() {
+            SeqAction::Upload { events, .. } => {
+                let kicks = events.iter().filter(|e| e.on && e.note == 36).count();
+                assert_eq!(
+                    kicks, 1,
+                    "held repeat bursts should collapse before quantize, got {events:?}"
+                );
+            }
+            other => panic!("expected upload, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn backbone_grid_screen_requires_open() {
+        let seq = seeded_backbone();
+        assert_eq!(seq.state, SeqState::Playing);
+        assert!(seq.backbone_grid_allowed());
+        assert!(!seq.backbone_grid_screen_open());
+    }
+
+    #[test]
+    fn backbone_grid_toggle_after_stop() {
+        let mut seq = seeded_backbone();
+        seq.state = SeqState::Stopped;
+        seq.open_backbone_grid_screen();
+        let profile = midi_core::ControllerProfile::generic();
+        let snare_row = 13;
+        assert!(!seq.backbone_grid_cell_on(4, snare_row, &profile));
+        assert!(matches!(
+            seq.toggle_backbone_grid_cell(4, snare_row, &profile),
+            SeqAction::Upload {
+                launch: false,
+                immediate: false,
+                ..
+            }
+        ));
+        assert!(seq.backbone_grid_cell_on(4, snare_row, &profile));
+        assert!(matches!(
+            seq.toggle_backbone_grid_cell(4, snare_row, &profile),
+            SeqAction::Upload {
+                launch: false,
+                immediate: false,
+                ..
+            }
+        ));
+        assert!(!seq.backbone_grid_cell_on(4, snare_row, &profile));
+    }
+
+    #[test]
+    fn backbone_grid_toggle_while_playing_relaunches_clip() {
+        let mut seq = seeded_backbone();
+        assert_eq!(seq.state, SeqState::Playing);
+        seq.open_backbone_grid_screen();
+        let profile = midi_core::ControllerProfile::generic();
+        let snare_row = 13;
+        assert!(matches!(
+            seq.toggle_backbone_grid_cell(4, snare_row, &profile),
+            SeqAction::Upload {
+                launch: true,
+                immediate: true,
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn kaoss_gesture_backbone_uploads_touch_events() {
         let mut seq = SeqModel::new();
         assert!(matches!(seq.toggle_record(), SeqAction::Stop));
@@ -1132,6 +1590,10 @@ mod tests {
             other => panic!("expected upload, got {other:?}"),
         }
         assert_eq!(seq.state, SeqState::Playing);
+        assert!(
+            seq.backbone_grid_allowed(),
+            "grid should be openable as soon as backbone is locked"
+        );
     }
 
     #[test]
@@ -1143,6 +1605,8 @@ mod tests {
         seq.push_note(false, 9, 36, 0);
         assert!(matches!(seq.toggle_record(), SeqAction::Upload { .. }));
         assert_eq!(seq.state, SeqState::Playing);
+        assert!(seq.backbone_grid_allowed());
+        assert!(!seq.backbone_grid_screen_open());
         assert_eq!(
             seq.chrome_rec_label(),
             ("REC", 0x9d0006),

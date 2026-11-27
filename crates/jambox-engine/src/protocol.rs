@@ -319,6 +319,7 @@ pub enum FxTargetSpec {
     Drum { index: u8 },
     DrumGroup,
     Bus,
+    Clip { slot: u8 },
 }
 
 impl From<FxTargetSpec> for FxTarget {
@@ -328,6 +329,7 @@ impl From<FxTargetSpec> for FxTarget {
             FxTargetSpec::Drum { index } => FxTarget::Drum(index),
             FxTargetSpec::DrumGroup => FxTarget::DrumGroup,
             FxTargetSpec::Bus => FxTarget::Bus,
+            FxTargetSpec::Clip { slot } => FxTarget::Clip(slot),
         }
     }
 }
@@ -654,6 +656,7 @@ pub fn parse_mode(value: &str) -> LaunchMode {
 fn clip_voice_from_wire(voice: jambox_protocol::WireClipVoice) -> jambox_core::ClipVoice {
     jambox_core::ClipVoice {
         locked: voice.locked,
+        fm: voice.fm,
         morph_a: voice.morph_a,
         morph_b: voice.morph_b,
         morph: voice.morph,
