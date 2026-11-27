@@ -114,6 +114,8 @@ pub fn looks_like_repo_root(path: &Path) -> bool {
     path.join("crates").join("pidi-native").is_dir()
         || path.join("dist").join("armv7").join("pidi-native").is_file()
         || path.join("dist").join("armv7").join("jambox-engine").is_file()
+        || path.join("dist").join("aarch64").join("pidi-native").is_file()
+        || path.join("dist").join("aarch64").join("jambox-engine").is_file()
 }
 
 pub fn find_extracted_root(extract_dir: &Path) -> Result<PathBuf, String> {
@@ -250,23 +252,33 @@ pub fn atomic_install(src: &Path, dest: &Path) -> Result<(), String> {
 }
 
 pub fn install_staged_bins(repo: &Path) -> Result<Vec<String>, String> {
+    let arch = staged_dist_dirname();
     let src_dir = staged_dist_dir(repo);
     let dest_dir = repo.join("bin");
     if !src_dir.is_dir() {
-        return Ok(Vec::new());
+        return Err(format!(
+            "missing dist/{arch}/ — OTA archive has no staged engines for this device"
+        ));
     }
     let mut installed = Vec::new();
+    let mut present = 0usize;
     for name in ENGINE_BINS {
         let src = src_dir.join(name);
         if !src.is_file() {
             continue;
         }
+        present += 1;
         let dest = dest_dir.join(name);
         if files_identical(&src, &dest) {
             continue;
         }
         atomic_install(&src, &dest)?;
         installed.push((*name).to_string());
+    }
+    if present == 0 {
+        return Err(format!(
+            "dist/{arch}/ has no midi-engine/jambox-engine/pidi-native binaries"
+        ));
     }
     Ok(installed)
 }
@@ -693,6 +705,31 @@ mod tests {
         write(&dir.join("Cargo.toml"), "[workspace]\n");
         assert!(!looks_like_repo_root(&dir));
         assert!(find_extracted_root(&dir).is_err());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn aarch64_dist_alone_counts_as_repo_root() {
+        let dir = uniq_dir("a64-dist");
+        write(&dir.join("Cargo.toml"), "[workspace]\n");
+        write(&dir.join("dist/aarch64/pidi-native"), "A64");
+        assert!(looks_like_repo_root(&dir));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn install_staged_bins_errors_when_arch_stage_missing() {
+        let _guard = dist_arch_lock().lock().unwrap();
+        std::env::set_var("PIDI_DIST_ARCH", "aarch64");
+        let dir = uniq_dir("no-stage");
+        write(&dir.join("Cargo.toml"), "[workspace]\n");
+        write(&dir.join("crates/pidi-native/Cargo.toml"), "[package]\nname=\"x\"\n");
+        let err = install_staged_bins(&dir).unwrap_err();
+        assert!(
+            err.contains("missing dist/aarch64"),
+            "unexpected err: {err}"
+        );
+        std::env::remove_var("PIDI_DIST_ARCH");
         let _ = fs::remove_dir_all(dir);
     }
 

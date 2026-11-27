@@ -28,6 +28,14 @@ echo "==> directories"
 sudo mkdir -p "$APP_DIR/bin" "$APP_DIR/presets"
 sudo chown -R "$USER_NAME:$USER_NAME" "$APP_DIR"
 
+# POWER / OTA helpers live in the repo tree (or land after the first SET→UPDATE).
+if [[ -f "$APP_DIR/apps/pidi/scripts/session/pi-power.sh" ]]; then
+  sudo chmod +x "$APP_DIR/apps/pidi/scripts/session/pi-power.sh"
+fi
+if [[ -f "$APP_DIR/apps/pidi/scripts/session/pi-wifi-power.sh" ]]; then
+  sudo chmod +x "$APP_DIR/apps/pidi/scripts/session/pi-wifi-power.sh"
+fi
+
 echo "==> realtime limits for $USER_NAME"
 # Allow SCHED_FIFO up to 95 and unlimited mlock for the engine user.
 LIMITS=/etc/security/limits.d/99-pi-midi-toolkit.conf
