@@ -3,6 +3,7 @@
 Native SDL/KMSDRM kiosk (`pidi-native`), 800×480.
 
 - **[Screen reference](index.html)** — labeled captures of every mode and overlay (HOME, SYNTH, SEQ, PADS, KAOSS, CHORDS, …).
+- **[HARDWARE.md](HARDWARE.md)** — physical build plan (board stack, power, audio, enclosure).
 - **[NATIVE_KIOSK.md](../NATIVE_KIOSK.md)** — architecture, run, and Pi appliance.
 - **[README.md](../README.md)** — repo overview, engines, deploy.
 
