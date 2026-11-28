@@ -241,19 +241,13 @@ pub fn chrome(content: Rect) -> WaveChrome {
     }
 }
 
-/// The draggable part of a slider row, to the right of its label.
+/// Full row is the slider track.
 pub fn track(row: Rect) -> Rect {
-    Rect {
-        x: row.x + 56,
-        y: row.y + 6,
-        w: (row.w - 64).max(20),
-        h: (row.h - 12).max(8),
-    }
+    row
 }
 
 pub fn unit_at(row: Rect, px: i32) -> f32 {
-    let t = track(row);
-    ((px - t.x) as f32 / t.w.max(1) as f32).clamp(0.0, 1.0)
+    ((px - row.x) as f32 / row.w.max(1) as f32).clamp(0.0, 1.0)
 }
 
 pub fn hit(content: Rect, px: i32, py: i32, setup: bool) -> Hit {

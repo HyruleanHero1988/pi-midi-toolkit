@@ -307,6 +307,9 @@ pub struct NativeModel {
     pub synth_width: f32,
     /// Last synth-slider tap (index, time) for double-tap-to-neutral.
     synth_slider_tap: Option<(usize, Instant)>,
+    fx_slider_tap: Option<(usize, Instant)>,
+    fm_slider_tap: Option<(usize, Instant)>,
+    env_slider_tap: Option<(usize, Instant)>,
     /// Last wave-viz horizontal slider tap (signal, param, time).
     wave_slider_tap: Option<(usize, u8, Instant)>,
     pub vibrato_always: f32,
@@ -764,6 +767,9 @@ impl NativeModel {
             release_drift: 0.5,
             synth_width: 0.6,
             synth_slider_tap: None,
+            fx_slider_tap: None,
+            fm_slider_tap: None,
+            env_slider_tap: None,
             wave_slider_tap: None,
             vibrato_always: 0.0,
             vibrato_depth: 0.5,
@@ -3472,8 +3478,8 @@ impl NativeModel {
             let cc = notice.control.unwrap_or(0);
             let raw = notice.value.unwrap_or(0);
             self.last_midi_activity = format!("IN  ch{} cc{} v{}", notice.channel + 1, cc, raw);
-            if self.mode == UiMode::Synth && cc != 1 {
-                self.apply_synth_knob(cc, raw.min(127) as u8, outbox);
+            if cc != 1 && self.apply_page_slider_knobs(notice, outbox) {
+                return;
             }
         }
     }
@@ -4462,17 +4468,16 @@ impl NativeModel {
                 self.status_line.clear();
             }
             Hit::SynthSlider(index) => {
-                const DOUBLE_TAP: Duration = Duration::from_millis(300);
                 let now = Instant::now();
                 let double = matches!(
                     self.synth_slider_tap,
-                    Some((prev, at)) if prev == index && now.duration_since(at) <= DOUBLE_TAP
+                    Some((prev, at))
+                        if prev == index && now.duration_since(at) <= Self::SLIDER_DOUBLE_TAP
                 );
                 if double {
-                    // Double-tap: snap to neutral (drift's centre is 0.5, the rest 0).
                     self.synth_slider_tap = None;
                     self.tap_ui(slot, id, gesture, px, py);
-                    let neutral = if index == 5 { 0.5 } else { 0.0 };
+                    let neutral = Self::synth_slider_neutral(index);
                     self.set_synth_slider_unit(index, neutral, false, outbox);
                 } else {
                     self.synth_slider_tap = Some((index, now));
@@ -4552,18 +4557,30 @@ impl NativeModel {
                 self.open_fm_patches();
             }
             Hit::FmSlider(index) => {
-                self.fingers[slot] = Finger {
-                    active: true,
-                    id,
-                    gesture,
-                    x: 0.0,
-                    y: 0.0,
-                    px,
-                    py,
-                    surface: Surface::FmSlider { index },
-                    gate_on: false,
-                };
-                self.apply_fm_slider(index, py, outbox);
+                let now = Instant::now();
+                let double = matches!(
+                    self.fm_slider_tap,
+                    Some((prev, at)) if prev == index && now.duration_since(at) <= Self::SLIDER_DOUBLE_TAP
+                );
+                if double {
+                    self.fm_slider_tap = None;
+                    self.tap_ui(slot, id, gesture, px, py);
+                    self.set_fm_slider_unit(index, 0.0, outbox);
+                } else {
+                    self.fm_slider_tap = Some((index, now));
+                    self.fingers[slot] = Finger {
+                        active: true,
+                        id,
+                        gesture,
+                        x: 0.0,
+                        y: 0.0,
+                        px,
+                        py,
+                        surface: Surface::FmSlider { index },
+                        gate_on: false,
+                    };
+                    self.apply_fm_slider(index, py, outbox);
+                }
             }
             Hit::SynthKey { note } => {
                 if self.hardware_keybed_connected() {
@@ -5281,18 +5298,30 @@ impl NativeModel {
                 self.cycle_fx_target();
             }
             Hit::FxSlider(index) => {
-                self.fingers[slot] = Finger {
-                    active: true,
-                    id,
-                    gesture,
-                    x: 0.0,
-                    y: 0.0,
-                    px,
-                    py,
-                    surface: Surface::FxSlider { index },
-                    gate_on: false,
-                };
-                self.apply_fx_slider(index, px, py, outbox);
+                let now = Instant::now();
+                let double = matches!(
+                    self.fx_slider_tap,
+                    Some((prev, at)) if prev == index && now.duration_since(at) <= Self::SLIDER_DOUBLE_TAP
+                );
+                if double {
+                    self.fx_slider_tap = None;
+                    self.tap_ui(slot, id, gesture, px, py);
+                    self.set_fx_slider_unit(index, 0.0, outbox);
+                } else {
+                    self.fx_slider_tap = Some((index, now));
+                    self.fingers[slot] = Finger {
+                        active: true,
+                        id,
+                        gesture,
+                        x: 0.0,
+                        y: 0.0,
+                        px,
+                        py,
+                        surface: Surface::FxSlider { index },
+                        gate_on: false,
+                    };
+                    self.apply_fx_slider(index, px, py, false, outbox);
+                }
             }
             Hit::PunchPad(index) => {
                 self.fingers[slot] = Finger {
@@ -5418,18 +5447,30 @@ impl NativeModel {
                 self.apply_mix_bus(index, py, outbox);
             }
             Hit::EnvSlider(index) => {
-                self.fingers[slot] = Finger {
-                    active: true,
-                    id,
-                    gesture,
-                    x: 0.0,
-                    y: 0.0,
-                    px,
-                    py,
-                    surface: Surface::EnvSlider { index },
-                    gate_on: false,
-                };
-                self.apply_env_slider(index, py, outbox);
+                let now = Instant::now();
+                let double = matches!(
+                    self.env_slider_tap,
+                    Some((prev, at)) if prev == index && now.duration_since(at) <= Self::SLIDER_DOUBLE_TAP
+                );
+                if double {
+                    self.env_slider_tap = None;
+                    self.tap_ui(slot, id, gesture, px, py);
+                    self.set_env_slider_unit(index, Self::env_slider_neutral(index), outbox);
+                } else {
+                    self.env_slider_tap = Some((index, now));
+                    self.fingers[slot] = Finger {
+                        active: true,
+                        id,
+                        gesture,
+                        x: 0.0,
+                        y: 0.0,
+                        px,
+                        py,
+                        surface: Surface::EnvSlider { index },
+                        gate_on: false,
+                    };
+                    self.apply_env_slider(index, py, outbox);
+                }
             }
             Hit::MixPad(index) => {
                 self.fingers[slot] = Finger {
@@ -5926,7 +5967,7 @@ impl NativeModel {
             }
             Surface::FxSlider { index } => {
                 let px = self.fingers[slot].px;
-                self.apply_fx_slider(index, px, py, outbox);
+                self.apply_fx_slider(index, px, py, true, outbox);
             }
             Surface::EnvSlider { index } => {
                 self.apply_env_slider(index, py, outbox);
@@ -6559,28 +6600,108 @@ impl NativeModel {
         !moving || (next - prev).abs() <= Self::SLIDER_JUMP
     }
 
-    /// MPK mini K1–K8 (CC 70–77) while the synth page is up.
-    fn apply_synth_knob(&mut self, cc: u8, value: u8, outbox: &mut Outbox) {
-        let index = match cc {
-            70 => 0,
-            71 => 1,
-            72 => 2,
-            73 => 3,
-            74 => 4,
-            75 => 5,
-            76 => 6,
-            77 => 7,
-            _ => return,
+    const SLIDER_DOUBLE_TAP: Duration = Duration::from_millis(300);
+
+    pub fn synth_slider_value(&self, index: usize) -> f32 {
+        match index {
+            0 => self.synth_params[0],
+            1 => self.synth_params[1],
+            2 => self.synth_params[2],
+            3 => self.release_drift,
+            4 => self.fx_flanger_rate,
+            5 => self.synth_width,
+            _ => 0.0,
+        }
+    }
+
+    fn synth_slider_neutral(index: usize) -> f32 {
+        if index == 3 { 0.5 } else { 0.0 }
+    }
+
+    fn fm_slider_value(&self, index: usize) -> f32 {
+        match index {
+            4 => self.fm_width,
+            5 => self.fm_glide,
+            i if i < Layout::FM_SLIDER_COUNT => self.fm_params[i],
+            _ => 0.0,
+        }
+    }
+
+    fn env_slider_value(&self, index: usize) -> f32 {
+        match index % Layout::ENV_SLIDER_COUNT {
+            0 => self.synth_params[3],
+            1 => self.env_decay,
+            2 => self.env_sustain,
+            _ => self.synth_params[4],
+        }
+    }
+
+    fn env_slider_neutral(index: usize) -> f32 {
+        match index % Layout::ENV_SLIDER_COUNT {
+            0 => 0.05,
+            1 => 0.0,
+            2 => 1.0,
+            _ => 0.3,
+        }
+    }
+
+    fn apply_page_slider_knobs(&mut self, notice: &MidiNotice, outbox: &mut Outbox) -> bool {
+        if self.mode == UiMode::Fx && !self.fx_settings_open {
+            return false;
+        }
+        let profile = self.profile_for_notice(notice);
+        if !profile.knobs_on_channel(notice.channel) {
+            return false;
+        }
+        let cc = notice.control.unwrap_or(255);
+        let Some(knob) = profile.knob_index(cc) else {
+            return false;
         };
-        let unit = (value as f32 / 127.0).clamp(0.0, 1.0);
-        self.set_synth_slider_unit(index, unit, false, outbox);
+        let raw = notice.value.unwrap_or(0).min(127) as u8;
+        match self.mode {
+            UiMode::Synth => {
+                if knob >= Layout::SYNTH_SLIDER_COUNT {
+                    return false;
+                }
+                let cur = self.synth_slider_value(knob);
+                let unit = midi_core::apply_knob_cc(profile.knob_encoding, cur, raw);
+                self.set_synth_slider_unit(knob, unit, false, outbox);
+                true
+            }
+            UiMode::Fm if !self.fm_patches_open && !self.fm_name_open => {
+                if knob >= Layout::FM_SLIDER_COUNT {
+                    return false;
+                }
+                let cur = self.fm_slider_value(knob);
+                let unit = midi_core::apply_knob_cc(profile.knob_encoding, cur, raw);
+                self.set_fm_slider_unit(knob, unit, outbox);
+                true
+            }
+            UiMode::Env => {
+                if knob >= Layout::ENV_SLIDER_COUNT {
+                    return false;
+                }
+                let cur = self.env_slider_value(knob);
+                let unit = midi_core::apply_knob_cc(profile.knob_encoding, cur, raw);
+                self.set_env_slider_unit(knob, unit, outbox);
+                true
+            }
+            UiMode::Drums if self.kit_edit_open => {
+                if knob >= Self::DRUM_MACRO_NAMES.len() {
+                    return false;
+                }
+                let cur = self.edit_drum_macros()[knob];
+                let unit = midi_core::apply_knob_cc(profile.knob_encoding, cur, raw);
+                self.apply_kit_slider_value(knob, unit, None, outbox);
+                true
+            }
+            UiMode::Fx if self.fx_settings_open => false,
+            _ => false,
+        }
     }
 
     fn horizontal_slider_t(track: Rect, px: i32, py: i32) -> Option<f32> {
-        if py < track.y - 20 || py >= track.y + track.h + 12 {
-            return None;
-        }
-        if px < track.x || px >= track.x + track.w {
+        if !track.contains(px, py) {
             return None;
         }
         let x = (px - track.x) as f32 / track.w.max(1) as f32;
@@ -6609,59 +6730,48 @@ impl NativeModel {
         moving: bool,
         outbox: &mut Outbox,
     ) {
-        if index == 5 {
-            if !Self::accept_slider_value(self.release_drift, value, moving) {
-                return;
+        if index >= Layout::SYNTH_SLIDER_COUNT {
+            return;
+        }
+        match index {
+            0..=2 => {
+                if !Self::accept_slider_value(self.synth_params[index], value, moving) {
+                    return;
+                }
+                self.synth_params[index] = value;
+                outbox.synth(Self::SYNTH_PARAM_NAMES[index], value);
+                if index == 0 {
+                    self.sync_wave_bank();
+                }
+                self.status_line = format!("{} {:.2}", Self::SYNTH_PARAM_NAMES[index], value);
             }
-            self.release_drift = value;
-            outbox.synth("release_drift", value);
-            let semis = jambox_core::release_drift_semis(value);
-            self.status_line = format!("release drift {semis:+.1} st");
-            self.mark_dirty();
-            return;
-        }
-        if index == 6 {
-            if !Self::accept_slider_value(self.fx_voice[3], value, moving) {
-                return;
+            3 => {
+                if !Self::accept_slider_value(self.release_drift, value, moving) {
+                    return;
+                }
+                self.release_drift = value;
+                outbox.synth("release_drift", value);
+                let semis = jambox_core::release_drift_semis(value);
+                self.status_line = format!("release drift {semis:+.1} st");
             }
-            self.fx_voice[3] = value;
-            self.push_voice_fx("flanger_mix", value, outbox);
-            self.status_line = format!("voice flange {:.2}", value);
-            self.mark_dirty();
-            return;
-        }
-        if index == 7 {
-            if !Self::accept_slider_value(self.fx_flanger_rate, value, moving) {
-                return;
+            4 => {
+                if !Self::accept_slider_value(self.fx_flanger_rate, value, moving) {
+                    return;
+                }
+                self.fx_flanger_rate = value;
+                self.push_voice_fx("flanger_rate", value, outbox);
+                self.status_line = format!("flange rate {:.2}", value);
             }
-            self.fx_flanger_rate = value;
-            self.push_voice_fx("flanger_rate", value, outbox);
-            self.status_line = format!("flange rate {:.2}", value);
-            self.mark_dirty();
-            return;
-        }
-        if index == 8 {
-            if !Self::accept_slider_value(self.synth_width, value, moving) {
-                return;
+            5 => {
+                if !Self::accept_slider_value(self.synth_width, value, moving) {
+                    return;
+                }
+                self.synth_width = value;
+                outbox.synth("width", value);
+                self.status_line = format!("width {:.2}", value);
             }
-            self.synth_width = value;
-            outbox.synth("width", value);
-            self.status_line = format!("width {:.2}", value);
-            self.mark_dirty();
-            return;
+            _ => return,
         }
-        if index >= 5 {
-            return;
-        }
-        if !Self::accept_slider_value(self.synth_params[index], value, moving) {
-            return;
-        }
-        self.synth_params[index] = value;
-        outbox.synth(Self::SYNTH_PARAM_NAMES[index], value);
-        if index == 0 {
-            self.sync_wave_bank();
-        }
-        self.status_line = format!("{} {:.2}", Self::SYNTH_PARAM_NAMES[index], value);
         self.mark_dirty();
     }
 
@@ -6957,8 +7067,17 @@ impl NativeModel {
             return;
         }
         let track = self.layout.fm_slider(index);
-        let y = 1.0 - ((py - track.y) as f32 / track.h.max(1) as f32);
-        let value = y.clamp(0.0, 1.0);
+        let Some(value) = Self::vertical_slider_t(track, py) else {
+            return;
+        };
+        self.set_fm_slider_unit(index, value, outbox);
+    }
+
+    fn set_fm_slider_unit(&mut self, index: usize, value: f32, outbox: &mut Outbox) {
+        if index >= Layout::FM_SLIDER_COUNT {
+            return;
+        }
+        let value = value.clamp(0.0, 1.0);
         if index == 4 {
             self.fm_width = value;
             outbox.synth("fm_width", value);
@@ -7464,6 +7583,21 @@ impl NativeModel {
         if !Self::accept_slider_value(prev, value, moving) {
             return;
         }
+        self.apply_kit_slider_value(index, value, locked_drum, outbox);
+    }
+
+    fn apply_kit_slider_value(
+        &mut self,
+        index: usize,
+        value: f32,
+        locked_drum: Option<u8>,
+        outbox: &mut Outbox,
+    ) {
+        if index >= Self::DRUM_MACRO_NAMES.len() {
+            return;
+        }
+        let value = value.clamp(0.0, 1.0);
+        let all_drums = locked_drum.is_none();
         let name = Self::DRUM_MACRO_NAMES[index];
         if all_drums {
             self.kit_all_drums = true;
@@ -7510,41 +7644,37 @@ impl NativeModel {
         self.mark_dirty();
     }
 
-    fn apply_fx_slider(&mut self, index: usize, px: i32, py: i32, outbox: &mut Outbox) {
+    fn apply_fx_slider(
+        &mut self,
+        index: usize,
+        px: i32,
+        py: i32,
+        moving: bool,
+        outbox: &mut Outbox,
+    ) {
         if index >= Layout::FX_SLIDER_COUNT {
             return;
         }
         let track = self.layout.settings_fx_slider(index);
-        let value = if index < Layout::FX_INSERT_COUNT {
-            let Some(v) = Self::horizontal_slider_t(track, px, py) else {
-                return;
-            };
-            v
-        } else {
-            let y = 1.0 - ((py - track.y) as f32 / track.h.max(1) as f32);
-            y.clamp(0.0, 1.0)
+        let Some(value) = Self::horizontal_slider_t(track, px, py) else {
+            return;
         };
-        if index == Layout::FX_KEYS_LEVEL {
-            self.synth_params[2] = value;
-            outbox.synth("level", value);
-            self.status_line = format!("keys {:.2}", value);
-            self.mark_dirty();
+        let prev = match self.fx_target {
+            FxEditTarget::Bus => self.fx_bus[index],
+            FxEditTarget::Voice => self.fx_voice[index],
+            FxEditTarget::DrumGroup => self.fx_drum[index],
+        };
+        if !Self::accept_slider_value(prev, value, moving) {
             return;
         }
-        if index == Layout::FX_DRUMS_LEVEL {
-            self.drum_level = value;
-            outbox.synth("drum_level", value);
-            self.status_line = format!("drums {:.2}", value);
-            self.mark_dirty();
+        self.set_fx_slider_unit(index, value, outbox);
+    }
+
+    fn set_fx_slider_unit(&mut self, index: usize, value: f32, outbox: &mut Outbox) {
+        if index >= Layout::FX_INSERT_COUNT {
             return;
         }
-        if index == Layout::FX_MIC_LEVEL {
-            self.input_level = value;
-            outbox.synth("input_level", value);
-            self.status_line = format!("mic {:.2}", value);
-            self.mark_dirty();
-            return;
-        }
+        let value = value.clamp(0.0, 1.0);
         let name = Self::FX_PARAM_NAMES[index];
         match self.fx_target {
             FxEditTarget::Bus => {
@@ -8048,7 +8178,14 @@ impl NativeModel {
     /// voices share one envelope for now (future: bass vs melody targets).
     fn apply_env_slider(&mut self, index: usize, py: i32, outbox: &mut Outbox) {
         let track = self.layout.env_slider(index);
-        let t = Self::mix_slider_value(track, py);
+        let Some(t) = Self::vertical_slider_t(track, py) else {
+            return;
+        };
+        self.set_env_slider_unit(index, t, outbox);
+    }
+
+    fn set_env_slider_unit(&mut self, index: usize, t: f32, outbox: &mut Outbox) {
+        let t = t.clamp(0.0, 1.0);
         match index % Layout::ENV_SLIDER_COUNT {
             0 => {
                 self.synth_params[3] = t;
@@ -14691,42 +14828,13 @@ mod tests {
     }
 
     #[test]
-    fn synth_flange_slider_sends_voice_flanger_mix() {
-        let mut model = NativeModel::new();
-        model.set_mode(UiMode::Synth);
-        model.morph_a = 2;
-        model.morph_b = 5;
-        let mut out = Outbox::new();
-        let track = model.layout.synth_slider(6);
-        model.finger_down(1, track.x + track.w - 6, track.y + track.h / 2, &mut out);
-        let batch = out.take();
-        assert!(batch.iter().any(|r| matches!(
-            r,
-            Request::Fx {
-                target: jambox_protocol::FxTargetSpec::Voice { index: 2 },
-                param,
-                ..
-            } if param == "flanger_mix"
-        )));
-        assert!(batch.iter().any(|r| matches!(
-            r,
-            Request::Fx {
-                target: jambox_protocol::FxTargetSpec::Voice { index: 5 },
-                param,
-                ..
-            } if param == "flanger_mix"
-        )));
-        assert!(model.fx_voice[3] > 0.5);
-    }
-
-    #[test]
     fn synth_rate_slider_sends_voice_flanger_rate() {
         let mut model = NativeModel::new();
         model.set_mode(UiMode::Synth);
         model.morph_a = 2;
         model.morph_b = 5;
         let mut out = Outbox::new();
-        let track = model.layout.synth_slider(7);
+        let track = model.layout.synth_slider(4);
         model.finger_down(1, track.x + track.w - 6, track.y + track.h / 2, &mut out);
         let batch = out.take();
         assert!(
@@ -14741,13 +14849,6 @@ mod tests {
             "RATE should write voice flanger_rate, got {batch:?}"
         );
         assert!(model.fx_flanger_rate > 0.5);
-        assert!(
-            batch.iter().all(|r| !matches!(
-                r,
-                Request::Fx { param, .. } if param == "flanger_mix"
-            )),
-            "RATE must not change mix"
-        );
     }
 
     #[test]
@@ -14793,11 +14894,11 @@ mod tests {
     }
 
     #[test]
-    fn fx_menu_level_sends_keys_gain() {
+    fn mix_live_bus_sets_keys_gain() {
         let mut model = NativeModel::new();
-        model.set_mode(UiMode::Fx);
+        model.set_mode(UiMode::Mix);
         let mut out = Outbox::new();
-        let track = model.layout.settings_fx_slider(Layout::FX_KEYS_LEVEL);
+        let track = model.layout.mix_bus_slider(Layout::MIX_LIVE);
         model.finger_down(1, track.x + 8, track.y + 4, &mut out);
         let batch = out.take();
         assert!(
@@ -14806,18 +14907,17 @@ mod tests {
                 Request::Synth { param, value, .. }
                     if param == "level" && *value > 0.9
             )),
-            "expected keys level, got {batch:?}"
+            "expected keys level on MIX LIVE, got {batch:?}"
         );
         assert!(model.synth_params[2] > 0.9);
     }
 
     #[test]
-    fn fx_menu_drums_sends_kit_gain() {
+    fn mix_kit_bus_sets_drum_gain() {
         let mut model = NativeModel::new();
-        model.set_mode(UiMode::Fx);
+        model.set_mode(UiMode::Mix);
         let mut out = Outbox::new();
-        let track = model.layout.settings_fx_slider(Layout::FX_DRUMS_LEVEL);
-        // Bottom of the slider → near 0.
+        let track = model.layout.mix_bus_slider(Layout::MIX_KIT);
         model.finger_down(1, track.x + 8, track.y + track.h - 4, &mut out);
         let batch = out.take();
         assert!(
@@ -14826,18 +14926,18 @@ mod tests {
                 Request::Synth { param, value, .. }
                     if param == "drum_level" && *value < 0.1
             )),
-            "expected drum_level, got {batch:?}"
+            "expected drum_level on MIX KIT, got {batch:?}"
         );
         assert!(model.drum_level < 0.1);
     }
 
     #[test]
-    fn fx_mic_sends_input_level() {
+    fn mix_mic_bus_sets_input_level() {
         let mut model = NativeModel::new();
-        model.set_mode(UiMode::Fx);
+        model.set_mode(UiMode::Mix);
         assert!((model.input_level - 0.0).abs() < 1e-5);
         let mut out = Outbox::new();
-        let track = model.layout.settings_fx_slider(Layout::FX_MIC_LEVEL);
+        let track = model.layout.mix_bus_slider(Layout::MIX_MIC);
         model.finger_down(1, track.x + 8, track.y + 4, &mut out);
         let batch = out.take();
         assert!(
@@ -14846,7 +14946,7 @@ mod tests {
                 Request::Synth { param, value, .. }
                     if param == "input_level" && *value > 0.9
             )),
-            "expected FX MIC input_level, got {batch:?}"
+            "expected MIC level on MIX, got {batch:?}"
         );
         assert!(model.input_level > 0.9);
     }
@@ -15245,7 +15345,7 @@ mod tests {
         model.fx_target = FxEditTarget::Voice;
         for (index, param) in [(4, "chorus_mix"), (5, "phaser_mix")] {
             let track = model.layout.settings_fx_slider(index);
-            model.apply_fx_slider(index, track.x + track.w - 1, track.y + track.h / 2, &mut out);
+            model.apply_fx_slider(index, track.x + track.w - 1, track.y + track.h / 2, false, &mut out);
             assert!(out.take().iter().any(|r| matches!(
                 r,
                 Request::Fx { param: p, .. } if p == param
@@ -15272,6 +15372,60 @@ mod tests {
             model.synth_params[1] < 0.01,
             "second tap within window must zero the horizontal slider"
         );
+    }
+
+    #[test]
+    fn full_synth_row_maps_horizontal_tap_to_value() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Synth);
+        let mut out = Outbox::new();
+        let row = model.layout.synth_slider(2);
+        model.finger_down(1, row.x + row.w * 3 / 4, row.y + 2, &mut out);
+        assert!(
+            model.synth_params[2] > 0.6,
+            "tap high in the thick row must snap level"
+        );
+    }
+
+    #[test]
+    fn fx_insert_slider_double_tap_neutral() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Fx);
+        model.fx_target = FxEditTarget::Voice;
+        model.fx_voice[0] = 0.9;
+        let mut out = Outbox::new();
+        let row = model.layout.settings_fx_slider(0);
+        let x = row.x + row.w - 4;
+        let y = row.y + row.h / 2;
+        model.finger_down(1, x, y, &mut out);
+        model.finger_up(1, &mut out);
+        model.finger_down(2, x, y, &mut out);
+        model.finger_up(2, &mut out);
+        assert!(
+            model.fx_voice[0] < 0.02,
+            "double-tap must zero voice insert, got {}",
+            model.fx_voice[0]
+        );
+    }
+
+    #[test]
+    fn env_knob_moves_attack_fader() {
+        let mut model = NativeModel::new();
+        model.set_mode(UiMode::Env);
+        let mut out = Outbox::new();
+        model.on_midi_notice(
+            &MidiNotice {
+                kind: "cc".into(),
+                channel: 0,
+                note: None,
+                velocity: None,
+                control: Some(70),
+                value: Some(127),
+                controller: None,
+            },
+            &mut out,
+        );
+        assert!(model.synth_params[3] > 0.9);
     }
 
     #[test]
@@ -16527,13 +16681,13 @@ mod tests {
                 channel: 0,
                 note: None,
                 velocity: None,
-                control: Some(76),
+                control: Some(75),
                 value: Some(64),
                 controller: None,
             },
             &mut out,
         );
-        assert!((model.fx_voice[3] - 64.0 / 127.0).abs() < 0.02);
+        assert!((model.synth_width - 64.0 / 127.0).abs() < 0.02);
         model.set_mode(UiMode::Fm);
         let before = model.synth_params[1];
         model.on_midi_notice(

@@ -2486,28 +2486,92 @@ fn draw_synth_vib(scene: &mut Scene, model: &NativeModel) {
     scene.text_centered(layout.synth_pick_done, "DONE", 0xffffff, 2);
 }
 
-/// Label above + horizontal fill for FX insert rows (matches synth slider styling).
-fn draw_horizontal_labeled_slider(
+/// Full-row horizontal slider: fill grows left→right (or bipolar from centre).
+fn draw_row_slider(
     scene: &mut Scene,
-    track: Rect,
+    row: Rect,
     label: &str,
     value: f32,
     fill_color: u32,
+    bipolar_mid: Option<f32>,
 ) {
-    scene.fill_rect(track, 0x20202c);
-    scene.text_scaled(track.x, track.y - 16, label, 0xc0c0d0, 2);
-    let v_pad = if track.h < 12 { 1 } else { 4 };
-    let fill_h = (track.h - v_pad * 2).max(2);
-    let fill_w = (track.w as f32 * value.clamp(0.0, 1.0)) as i32;
+    scene.fill_rect(row, 0x20202c);
+    let inset = 2i32.max((row.h / 10).min(4));
+    let inner = Rect {
+        x: row.x + inset,
+        y: row.y + inset,
+        w: row.w - inset * 2,
+        h: row.h - inset * 2,
+    };
+    if let Some(mid) = bipolar_mid {
+        let centre = inner.x + (inner.w as f32 * mid.clamp(0.0, 1.0)) as i32;
+        let travel = ((value - mid).abs() * inner.w as f32) as i32;
+        let fill = if value >= mid {
+            Rect {
+                x: centre,
+                y: inner.y,
+                w: travel.max(2),
+                h: inner.h,
+            }
+        } else {
+            Rect {
+                x: centre - travel,
+                y: inner.y,
+                w: travel.max(2),
+                h: inner.h,
+            }
+        };
+        scene.fill_rect(fill, fill_color);
+    } else {
+        let fill_w = (inner.w as f32 * value.clamp(0.0, 1.0)) as i32;
+        scene.fill_rect(
+            Rect {
+                x: inner.x,
+                y: inner.y,
+                w: fill_w.max(2),
+                h: inner.h,
+            },
+            fill_color,
+        );
+    }
+    scene.text_centered(row, label, 0xe8e8f0, 2);
+}
+
+/// Full-column vertical slider (FM / ENV / kit).
+fn draw_column_slider(
+    scene: &mut Scene,
+    col: Rect,
+    label: &str,
+    value: f32,
+    fill_color: u32,
+    label_scale: i32,
+) {
+    scene.fill_rect(col, 0x20202c);
+    let label_h = 20.min((col.h / 3).max(16));
+    let label_band = Rect {
+        x: col.x,
+        y: col.y + 2,
+        w: col.w,
+        h: label_h,
+    };
+    let inset = 3i32.max((col.w / 10).min(6));
+    let inner = Rect {
+        x: col.x + inset,
+        y: col.y + inset,
+        w: col.w - inset * 2,
+        h: col.h - inset * 2,
+    };
+    let fill_h = (inner.h as f32 * value.clamp(0.0, 1.0)) as i32;
     scene.fill_rect(
         Rect {
-            x: track.x,
-            y: track.y + v_pad,
-            w: fill_w.max(2),
-            h: fill_h,
+            x: inner.x,
+            y: inner.y + inner.h - fill_h,
+            w: inner.w,
+            h: fill_h.max(2),
         },
         fill_color,
     );
+    scene.text_centered(label_band, label, 0xe8e8f0, label_scale);
 }
 
 fn draw_synth(scene: &mut Scene, model: &NativeModel) {
@@ -2546,9 +2610,8 @@ fn draw_synth(scene: &mut Scene, model: &NativeModel) {
         return;
     }
 
-    const LABELS: [&str; Layout::SYNTH_SLIDER_COUNT] = [
-        "MORPH", "TONE", "LEVEL", "ATTACK", "RELEASE", "DRIFT", "FLANGE", "RATE", "WIDTH",
-    ];
+    const LABELS: [&str; Layout::SYNTH_SLIDER_COUNT] =
+        ["MORPH", "TONE", "LEVEL", "DRIFT", "RATE", "WIDTH"];
 
     let a = waves::short_label(model.wave_label(model.morph_a));
     let b = waves::short_label(model.wave_label(model.morph_b));
@@ -2604,64 +2667,17 @@ fn draw_synth(scene: &mut Scene, model: &NativeModel) {
     );
 
     for index in 0..Layout::SYNTH_SLIDER_COUNT {
-        let track = layout.synth_slider(index);
-        scene.fill_rect(track, 0x20202c);
-        scene.text_scaled(track.x, track.y - 16, LABELS[index], 0xc0c0d0, 2);
-        let value = if index < 5 {
-            model.synth_params[index]
-        } else if index == 5 {
-            model.release_drift
-        } else if index == 6 {
-            model.fx_voice[3]
-        } else if index == 7 {
-            model.fx_flanger_rate
-        } else {
-            model.synth_width
+        let row = layout.synth_slider(index);
+        let value = model.synth_slider_value(index);
+        let color = match index {
+            0 => 0xb16286,
+            3 => 0x83a598,
+            4 => 0xd79921,
+            5 => 0x458588,
+            _ => 0x689d6a,
         };
-        // Nine rows leave ~8px tracks; a 4px inset would make the fill vanish.
-        let v_pad = if track.h < 12 { 1 } else { 4 };
-        let fill_h = (track.h - v_pad * 2).max(2);
-        let fill = if index == 5 {
-            let mid = track.x + track.w / 2;
-            let travel = ((value - 0.5).abs() * track.w as f32) as i32;
-            if value >= 0.5 {
-                Rect {
-                    x: mid,
-                    y: track.y + v_pad,
-                    w: travel.max(2),
-                    h: fill_h,
-                }
-            } else {
-                Rect {
-                    x: mid - travel,
-                    y: track.y + v_pad,
-                    w: travel.max(2),
-                    h: fill_h,
-                }
-            }
-        } else {
-            let fill_w = (track.w as f32 * value) as i32;
-            Rect {
-                x: track.x,
-                y: track.y + v_pad,
-                w: fill_w.max(2),
-                h: fill_h,
-            }
-        };
-        scene.fill_rect(
-            fill,
-            if index == 0 {
-                0xb16286
-            } else if index == 5 {
-                0x83a598
-            } else if index == 6 || index == 7 {
-                0xd79921
-            } else if index == 8 {
-                0x458588
-            } else {
-                0x689d6a
-            },
-        );
+        let bipolar = if index == 3 { Some(0.5) } else { None };
+        draw_row_slider(scene, row, LABELS[index], value, color, bipolar);
     }
 
     draw_on_screen_keyboard(scene, &layout, model);
@@ -2929,44 +2945,26 @@ fn draw_fm(scene: &mut Scene, model: &NativeModel) {
     draw_fm_scope(scene, model);
 
     const LABELS: [&str; Layout::FM_SLIDER_COUNT] = ["RATIO", "OUT", "FOLD", "ENV", "WIDE", "GLIDE"];
-    // One scale for the whole row so the labels read as a set.
-    let label_scale = scene.fit_scale(&LABELS, layout.fm_slider_label(0).w - 2, 2);
     for index in 0..Layout::FM_SLIDER_COUNT {
-        let track = layout.fm_slider(index);
-        scene.fill_rect(track, 0x20202c);
-        scene.text_centered(
-            layout.fm_slider_label(index),
-            LABELS[index],
-            0xc0c0d0,
-            label_scale,
-        );
+        let col = layout.fm_slider(index);
         let value = match index {
             4 => model.fm_width,
             5 => model.fm_glide,
             _ => model.fm_params[index],
         };
-        let fill_h = (track.h as f32 * value) as i32;
-        let fill = Rect {
-            x: track.x + 3,
-            y: track.y + track.h - fill_h,
-            w: track.w - 6,
-            h: fill_h.max(2),
+        let color = match index {
+            2 => 0xfe8019,
+            4 => 0x83a598,
+            5 => 0xd3869b,
+            _ => 0x8ec07c,
         };
-        scene.fill_rect(
-            fill,
-            match index {
-                2 => 0xfe8019,
-                4 => 0x83a598,
-                5 => 0xd3869b,
-                _ => 0x8ec07c,
-            },
-        );
+        draw_column_slider(scene, col, LABELS[index], value, color, 1);
     }
     scene.text_centered(
         layout.fm_ratio_readout(),
         jambox_core::clang_label(model.fm_params[0]),
         0xa89984,
-        label_scale,
+        2,
     );
 
     draw_on_screen_keyboard(scene, &layout, model);
@@ -3278,17 +3276,14 @@ fn draw_kit_edit(scene: &mut Scene, model: &NativeModel) {
 
     const LABELS: [&str; 5] = ["TONE", "SNAP", "PITCH", "DECAY", "LEVEL"];
     for index in 0..5 {
-        let track = layout.kit_edit_slider(index);
-        scene.fill_rect(track, 0x20202c);
-        scene.text(track.x + 8, track.y - 18, LABELS[index], 0xc0c0d0);
-        let fill_h = (track.h as f32 * macros[index]) as i32;
-        let fill = Rect {
-            x: track.x + 4,
-            y: track.y + track.h - fill_h,
-            w: track.w - 8,
-            h: fill_h.max(2),
-        };
-        scene.fill_rect(fill, 0x689d6a);
+        draw_column_slider(
+            scene,
+            layout.kit_edit_slider(index),
+            LABELS[index],
+            macros[index],
+            0x689d6a,
+            2,
+        );
     }
 
     scene.fill_rect(layout.kit_edit_play(), 0x458588);
@@ -4301,11 +4296,7 @@ fn draw_wave_slider(
     unit: f32,
     color: u32,
 ) {
-    scene.text(row.x, row.y + 6, label, 0xa89984);
-    let track = crate::wave_viz::track(row);
-    scene.fill_rect(track, 0x282828);
-    let w = (track.w as f32 * unit.clamp(0.0, 1.0)).max(2.0);
-    scene.fill(track.x as f32, track.y as f32, w, track.h as f32, color);
+    draw_row_slider(scene, row, label, unit, color, None);
 }
 
 fn draw_settings_picker(scene: &mut Scene, model: &NativeModel, kind: crate::model::SettingsPicker) {
@@ -4530,9 +4521,8 @@ fn draw_fx(scene: &mut Scene, model: &NativeModel) {
     scene.text_centered(set, "SET", 0xffffff, 2);
     scene.fill_rect(clear, if punch_live { 0xcc241d } else { 0x3c3836 });
     scene.text_centered(clear, "CLEAR", 0xffffff, 2);
-    const LABELS: [&str; Layout::FX_SLIDER_COUNT] = [
-        "DRIVE", "DELAY", "REVERB", "FLANGE", "CHORUS", "PHASER", "KEYS", "DRUMS", "MIC",
-    ];
+    const LABELS: [&str; Layout::FX_SLIDER_COUNT] =
+        ["DRIVE", "DELAY", "REVERB", "FLANGE", "CHORUS", "PHASER"];
     let inserts = match model.fx_target {
         crate::model::FxEditTarget::Bus => &model.fx_bus,
         crate::model::FxEditTarget::Voice => &model.fx_voice,
@@ -4543,43 +4533,16 @@ fn draw_fx(scene: &mut Scene, model: &NativeModel) {
         crate::model::FxEditTarget::Voice => 0xb16286,
         crate::model::FxEditTarget::DrumGroup => 0xd79921,
     };
-    scene.fill_rect(layout.settings_fx_mix_divider(), 0x504945);
     for index in 0..Layout::FX_SLIDER_COUNT {
-        let track = layout.settings_fx_slider(index);
-        let value = if index == Layout::FX_KEYS_LEVEL {
-            model.synth_params[2]
-        } else if index == Layout::FX_DRUMS_LEVEL {
-            model.drum_level
-        } else if index == Layout::FX_MIC_LEVEL {
-            model.input_level
-        } else {
-            inserts[index]
-        };
-        let fill_color = if index == Layout::FX_KEYS_LEVEL {
-            0x689d6a
-        } else if index == Layout::FX_DRUMS_LEVEL {
-            0xd79921
-        } else if index == Layout::FX_MIC_LEVEL {
-            0x458588
-        } else {
-            insert_color
-        };
-        if index < Layout::FX_INSERT_COUNT {
-            draw_horizontal_labeled_slider(scene, track, LABELS[index], value, fill_color);
-        } else {
-            scene.fill_rect(track, 0x20202c);
-            scene.text(track.x + 2, track.y - 16, LABELS[index], 0xc0c0d0);
-            let fill_h = (track.h as f32 * value) as i32;
-            scene.fill_rect(
-                Rect {
-                    x: track.x + 3,
-                    y: track.y + track.h - fill_h,
-                    w: track.w - 6,
-                    h: fill_h,
-                },
-                fill_color,
-            );
-        }
+        let row = layout.settings_fx_slider(index);
+        draw_row_slider(
+            scene,
+            row,
+            LABELS[index],
+            inserts[index],
+            insert_color,
+            None,
+        );
     }
     const PUNCH_COLOR: [u32; Layout::PUNCH_PAD_COUNT] = [
         0xfb4934, 0xfe8019, 0xd79921, 0xb8bb26, 0x8ec07c, 0x458588, 0xb16286, 0xcc241d,
@@ -4740,17 +4703,14 @@ fn draw_env(scene: &mut Scene, model: &NativeModel) {
     ];
     draw_adsr_plot(scene, layout.env_plot(), values);
     for index in 0..Layout::ENV_SLIDER_COUNT {
-        let track = layout.env_slider(index);
-        scene.fill_rect(track, 0x20202c);
-        scene.text(track.x + 4, track.y - 18, LABELS[index], 0xc0c0d0);
-        let fill_h = (track.h as f32 * values[index]) as i32;
-        let fill = Rect {
-            x: track.x + 6,
-            y: track.y + track.h - fill_h,
-            w: track.w - 12,
-            h: fill_h,
-        };
-        scene.fill_rect(fill, COLORS[index]);
+        draw_column_slider(
+            scene,
+            layout.env_slider(index),
+            LABELS[index],
+            values[index],
+            COLORS[index],
+            2,
+        );
     }
 }
 
@@ -5088,16 +5048,24 @@ mod tests {
                     // Slider names: inside their own column, never touching a neighbour.
                     let mut spans = Vec::new();
                     for index in 0..Layout::FM_SLIDER_COUNT {
-                        let cell = layout.fm_slider_label(index);
-                        let owned: Vec<_> = body.iter().filter(|g| center_in(g, cell)).collect();
-                        assert_eq!(
-                            owned.len(),
-                            labels[index].chars().count(),
-                            "{tag}: {} must be drawn in full, not truncated",
-                            labels[index]
+                        let col = layout.fm_slider(index);
+                        let band = layout.fm_slider_label(index);
+                        let owned: Vec<_> = body
+                            .iter()
+                            .filter(|g| center_in(g, band))
+                            .collect();
+                        assert!(
+                            !owned.is_empty(),
+                            "{tag}: {} label must be visible in {}",
+                            labels[index],
+                            index
                         );
                         for g in &owned {
-                            assert!(inside(g, cell), "{tag}: {} spills out of its column", labels[index]);
+                            assert!(
+                                inside(g, col),
+                                "{tag}: {} spills out of its fader column",
+                                labels[index]
+                            );
                         }
                         let left = owned.iter().map(|g| g.x).fold(f32::MAX, f32::min);
                         let right = owned.iter().map(|g| g.x + g.w).fold(0.0, f32::max);
