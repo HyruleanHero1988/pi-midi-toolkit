@@ -38,6 +38,19 @@ pub fn port_looks_like_keybed(name: &str) -> bool {
     KEYBED_HINTS.iter().any(|hint| n.contains(hint))
 }
 
+/// True when any live input looks like a keybed (open connection or ALSA listing).
+pub fn hardware_keybed_present(connected: &str, inputs: &[String]) -> bool {
+    if port_looks_like_keybed(connected) {
+        return true;
+    }
+    inputs.iter().any(|name| port_looks_like_keybed(name))
+}
+
+/// On-screen piano keys show only when no hardware keybed is present.
+pub fn on_screen_keys_visible(connected: &str, inputs: &[String]) -> bool {
+    !hardware_keybed_present(connected, inputs)
+}
+
 /// USB MIDI or composite USB audio that belongs to a keyboard, not the DIN
 /// synth or the Pi headphone jack. Auto-pick skips these unless the user
 /// filter names them.
@@ -213,6 +226,34 @@ mod tests {
         assert!(port_looks_like_keybed("Starrykey 37 Play"));
         assert!(port_looks_like_keybed("MKE-P37"));
         assert!(!port_looks_like_keybed("U2MIDI PRO:U2MIDI PRO MIDI 1 20:0"));
+    }
+
+    #[test]
+    fn on_screen_keys_track_hotplug_without_restart() {
+        assert!(on_screen_keys_visible("", &[]));
+        let din_only = vec!["U2MIDI PRO:U2MIDI PRO MIDI 1 20:0".into()];
+        assert!(on_screen_keys_visible("", &din_only));
+        assert!(on_screen_keys_visible(
+            "U2MIDI PRO:U2MIDI PRO MIDI 1 20:0",
+            &din_only
+        ));
+
+        let listed_mpk = vec![
+            "U2MIDI PRO:U2MIDI PRO MIDI 1 20:0".into(),
+            "MPK mini 3".into(),
+        ];
+        assert!(
+            !on_screen_keys_visible("", &listed_mpk),
+            "enumerated MPK should hide the piano strip before connect completes"
+        );
+        assert!(!on_screen_keys_visible("MPK mini 3", &listed_mpk));
+
+        let unplugged = vec!["U2MIDI PRO:U2MIDI PRO MIDI 1 20:0".into()];
+        assert!(
+            on_screen_keys_visible("", &unplugged),
+            "keys return after the controller disappears from the listing"
+        );
+        assert!(on_screen_keys_visible("", &[]));
     }
 
     #[test]

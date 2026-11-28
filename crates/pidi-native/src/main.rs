@@ -114,6 +114,9 @@ fn main() {
     let frame_time = Duration::from_secs_f64(1.0 / cli.hz.max(1) as f64);
     let mut last = Instant::now();
     let mut status_tick = Instant::now();
+    // Match jambox-engine MIDI hotplug poll (~400 ms) so piano visibility tracks USB plug/unplug.
+    const MIDI_PORTS_POLL: Duration = Duration::from_millis(400);
+    let mut midi_ports_tick = Instant::now();
     let mut n = 0u64;
     let mut ota_reload = false;
 
@@ -137,10 +140,11 @@ fn main() {
 
         if status_tick.elapsed() > Duration::from_millis(50) {
             client.outbox.status();
-            if model.mode == pidi_native::mode::UiMode::Ports {
-                client.outbox.midi_ports();
-            }
             status_tick = Instant::now();
+        }
+        if client.connected && midi_ports_tick.elapsed() >= MIDI_PORTS_POLL {
+            client.outbox.midi_ports();
+            midi_ports_tick = Instant::now();
         }
         if client.scope_waiting && client.scope_sent.elapsed() > Duration::from_millis(100) {
             client.scope_waiting = false;

@@ -3483,10 +3483,8 @@ impl NativeModel {
     }
 
     pub fn apply_midi_ports_with(&mut self, ports: &MidiPortsReply, outbox: Option<&mut Outbox>) {
-        if !ports.inputs.is_empty() || !ports.outputs.is_empty() {
-            self.midi_inputs = ports.inputs.clone();
-            self.midi_outputs = ports.outputs.clone();
-        }
+        self.midi_inputs = ports.inputs.clone();
+        self.midi_outputs = ports.outputs.clone();
         self.midi_in_connected = ports.input_connected.clone();
         self.midi_out_connected = ports.output_connected.clone();
         let next = self.live_controller_profile();
@@ -3501,7 +3499,12 @@ impl NativeModel {
         }
         self.controller_profile = next;
         self.layout.pad_notes = self.controller_profile.phrase_notes;
-        self.layout.show_on_screen_keys = !self.hardware_keybed_connected();
+        self.sync_on_screen_keys_from_ports();
+    }
+
+    fn sync_on_screen_keys_from_ports(&mut self) {
+        self.layout.show_on_screen_keys =
+            midi_core::on_screen_keys_visible(&self.midi_in_connected, &self.midi_inputs);
     }
 
     fn live_controller_profile(&self) -> midi_core::ControllerProfile {
@@ -3529,12 +3532,7 @@ impl NativeModel {
 
     /// Hide on-screen piano keys when a known keybed is plugged in.
     pub fn hardware_keybed_connected(&self) -> bool {
-        if midi_core::port_looks_like_keybed(&self.midi_in_connected) {
-            return true;
-        }
-        self.midi_inputs
-            .iter()
-            .any(|name| midi_core::port_looks_like_keybed(name))
+        midi_core::hardware_keybed_present(&self.midi_in_connected, &self.midi_inputs)
     }
 
     fn write_midi_ports_file(&self) {
@@ -13838,6 +13836,60 @@ mod tests {
         model.finger_down(2, home.x + 4, home.y + 4, &mut out);
         assert_eq!(model.mode, UiMode::Home);
         host::set_dry_run(false);
+    }
+
+    #[test]
+    fn on_screen_keys_follow_midi_hotplug_port_snapshots() {
+        let mut model = NativeModel::new();
+        assert!(model.layout.show_on_screen_keys);
+
+        model.apply_midi_ports(&MidiPortsReply {
+            inputs: vec!["U2MIDI PRO:U2MIDI PRO MIDI 1 20:0".into()],
+            ..MidiPortsReply::default()
+        });
+        assert!(model.layout.show_on_screen_keys);
+
+        model.apply_midi_ports(&MidiPortsReply {
+            inputs: vec![
+                "U2MIDI PRO:U2MIDI PRO MIDI 1 20:0".into(),
+                "MPK mini 3".into(),
+            ],
+            ..MidiPortsReply::default()
+        });
+        assert!(
+            !model.layout.show_on_screen_keys,
+            "MPK listed on the bus should hide keys off the MAP screen"
+        );
+
+        model.apply_midi_ports(&MidiPortsReply {
+            inputs: vec![
+                "U2MIDI PRO:U2MIDI PRO MIDI 1 20:0".into(),
+                "MPK mini 3".into(),
+            ],
+            input_connected: "MPK mini 3".into(),
+            ..MidiPortsReply::default()
+        });
+        assert!(!model.layout.show_on_screen_keys);
+
+        model.apply_midi_ports(&MidiPortsReply {
+            inputs: vec!["U2MIDI PRO:U2MIDI PRO MIDI 1 20:0".into()],
+            input_connected: String::new(),
+            ..MidiPortsReply::default()
+        });
+        assert!(
+            model.layout.show_on_screen_keys,
+            "unplug should restore the piano strip"
+        );
+
+        model.apply_midi_ports(&MidiPortsReply {
+            inputs: vec![
+                "U2MIDI PRO:U2MIDI PRO MIDI 1 20:0".into(),
+                "MPK mini 3".into(),
+            ],
+            input_connected: "MPK mini 3".into(),
+            ..MidiPortsReply::default()
+        });
+        assert!(!model.layout.show_on_screen_keys);
     }
 
     #[test]
