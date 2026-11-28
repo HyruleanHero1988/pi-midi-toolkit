@@ -1,6 +1,6 @@
 # PiDI hardware build plan
 
-This document is the hardware source of truth for the PiDI appliance: board layout, power, audio, jacks, enclosure revisions, and build rules. Last updated: 2026-11-12 8:45 AM ET. Check this before answering hardware questions; update it when build decisions change.
+This document is the hardware source of truth for the PiDI appliance: board layout, power, audio, jacks, enclosure revisions, and build rules. Last updated: 2026-11-28 9:45 AM ET. Check this before answering hardware questions; update it when build decisions change.
 
 > **Note:** Paths under `/workspace/...` refer to files on an external working machine (enclosure CAD, handoff tarballs, wiring diagrams). Those paths are not in this repository.
 
