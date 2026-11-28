@@ -2223,7 +2223,8 @@ impl Layout {
         }
     }
 
-    pub const SYNTH_SLIDER_COUNT: usize = 9;
+    /// On-screen rows only (attack/release live on ENV; flange mix on FX).
+    pub const SYNTH_SLIDER_COUNT: usize = 6;
 
     fn synth_play_bottom(&self) -> i32 {
         self.synth_keys.y + self.synth_keys.h
@@ -2257,17 +2258,9 @@ impl Layout {
         }
     }
 
-    /// Horizontal track under the label, spanning the slider column.
-    /// The name is drawn just above `y`.
+    /// Full row hit target and bar geometry (label drawn inside the fill).
     pub fn synth_slider(&self, index: usize) -> Rect {
-        let cell = self.synth_slider_cell(index);
-        let label_h = 16;
-        Rect {
-            x: cell.x,
-            y: cell.y + label_h,
-            w: cell.w,
-            h: (cell.h - label_h - 2).max(8),
-        }
+        self.synth_slider_cell(index)
     }
 
     /// Opens the patch list. The label is the current patch name.
@@ -2478,7 +2471,7 @@ impl Layout {
     /// RATIO, OUT, FOLD, ENV (selected op) + WIDE, GLIDE (whole FM voice).
     pub const FM_SLIDER_COUNT: usize = 6;
 
-    pub fn fm_slider(&self, index: usize) -> Rect {
+    fn fm_slider_track(&self, index: usize) -> Rect {
         let n = Self::FM_SLIDER_COUNT as i32;
         let w = Self::FM_SLIDER_AREA_W / n;
         let area_x = Self::FM_SLIDER_AREA_X;
@@ -2486,33 +2479,37 @@ impl Layout {
         // Room for the clang-ratio label under the tracks when keys are gone.
         let pad = if self.show_on_screen_keys { 0 } else { 22 };
         Rect {
-            x: area_x + (index as i32) * w + 6,
+            x: area_x + (index as i32) * w + 2,
             y,
-            w: w - 12,
+            w: w - 4,
             h: self.fm_expanded_h(y, 132, pad),
         }
     }
 
-    /// Name strip above a FM slider: the full column cell, so a label can use
-    /// the whole cell width (the track is inset 6px each side) and never
-    /// reaches a neighbour's label.
+    /// Full FM column (label inside the fader).
+    pub fn fm_slider(&self, index: usize) -> Rect {
+        self.fm_slider_track(index)
+    }
+
+    /// Label band at the top of the FM fader column.
     pub fn fm_slider_label(&self, index: usize) -> Rect {
-        let track = self.fm_slider(index);
+        let track = self.fm_slider_track(index);
+        let label_h = 20.min((track.h / 3).max(16));
         Rect {
-            x: track.x - 6,
-            y: track.y - 18,
-            w: track.w + 12,
-            h: 16,
+            x: track.x,
+            y: track.y + 2,
+            w: track.w,
+            h: label_h,
         }
     }
 
     /// Clang-ratio readout under the RATIO track, one column wide.
     pub fn fm_ratio_readout(&self) -> Rect {
-        let track = self.fm_slider(0);
+        let track = self.fm_slider_track(0);
         Rect {
-            x: track.x - 6,
+            x: track.x,
             y: track.y + track.h + 4,
-            w: track.w + 12,
+            w: track.w,
             h: 16,
         }
     }
@@ -2545,10 +2542,10 @@ impl Layout {
         let n = 5i32;
         let w = self.kit_macros.w / n;
         Rect {
-            x: self.kit_macros.x + (index as i32) * w + 8,
-            y: self.kit_macros.y + 22,
-            w: w - 16,
-            h: self.kit_macros.h - 28,
+            x: self.kit_macros.x + (index as i32) * w,
+            y: self.kit_macros.y,
+            w,
+            h: self.kit_macros.h,
         }
     }
 
@@ -2584,10 +2581,7 @@ impl Layout {
     /// One-octave piano keyboard inside `synth_keys`.
     /// FX page: six insert sliders + KEYS / DRUMS / MIC mix levels.
     pub const FX_INSERT_COUNT: usize = 6;
-    pub const FX_SLIDER_COUNT: usize = 9;
-    pub const FX_KEYS_LEVEL: usize = 6;
-    pub const FX_DRUMS_LEVEL: usize = 7;
-    pub const FX_MIC_LEVEL: usize = 8;
+    pub const FX_SLIDER_COUNT: usize = Self::FX_INSERT_COUNT;
     pub const PUNCH_PAD_COUNT: usize = 8;
     /// Right-edge width (px) of the KAOSS↔Punch sculpt strip when a slot is linked.
     pub const KAOSS_PUNCH_STRIP_W: i32 = 56;
@@ -4119,25 +4113,9 @@ impl Layout {
         Hit::None
     }
 
-    /// Bottom mix-trim band height inside `settings_fx` (KEYS / DRUMS / MIC).
-    const FX_MIX_BAND_H: i32 = 112;
-    /// Gap between insert block and mix band (holds the divider line).
-    const FX_MIX_DIVIDER_GAP: i32 = 16;
-
-    /// Thin horizontal rule separating insert FX from global mix trims.
-    pub fn settings_fx_mix_divider(&self) -> Rect {
-        let area = self.settings_fx;
-        Rect {
-            x: area.x + 8,
-            y: area.y + area.h - Self::FX_MIX_BAND_H - Self::FX_MIX_DIVIDER_GAP / 2 - 1,
-            w: area.w - 16,
-            h: 2,
-        }
-    }
-
-    /// Height of the stacked insert rows above the KEYS/DRUMS/MIC band.
+    /// Height of the stacked insert rows (mix trims live on MIX, not here).
     fn settings_fx_insert_block_h(&self) -> i32 {
-        self.settings_fx.h - Self::FX_MIX_BAND_H - Self::FX_MIX_DIVIDER_GAP - 4
+        self.settings_fx.h - 8
     }
 
     fn settings_fx_insert_cell(&self, index: usize) -> Rect {
@@ -4154,32 +4132,9 @@ impl Layout {
         }
     }
 
-    /// Horizontal insert track (DRIVE … PHASER), synth-style rows.
+    /// Full slider row hit target on the FX page.
     pub fn settings_fx_slider(&self, index: usize) -> Rect {
-        let i = index % Self::FX_SLIDER_COUNT;
-        if i < Self::FX_INSERT_COUNT {
-            let cell = self.settings_fx_insert_cell(i);
-            let label_h = 16;
-            Rect {
-                x: cell.x,
-                y: cell.y + label_h,
-                w: cell.w,
-                h: (cell.h - label_h - 2).max(8),
-            }
-        } else {
-            let mix_i = (i - Self::FX_INSERT_COUNT) as i32;
-            let cols = 3;
-            let area = self.settings_fx;
-            let label_pad = 22;
-            let w = area.w / cols;
-            let band_y = area.y + area.h - Self::FX_MIX_BAND_H;
-            Rect {
-                x: area.x + mix_i * w + 6,
-                y: band_y + label_pad,
-                w: w - 12,
-                h: Self::FX_MIX_BAND_H - label_pad - 8,
-            }
-        }
+        self.settings_fx_insert_cell(index % Self::FX_INSERT_COUNT)
     }
 
     pub fn punch_tool(&self, index: i32) -> Rect {
@@ -4474,7 +4429,7 @@ impl Layout {
         }
     }
 
-    /// Four ADSR faders under the curve plot.
+    /// Four ADSR faders under the curve plot (full column, label inside).
     pub fn env_slider(&self, index: usize) -> Rect {
         let i = (index % Self::ENV_SLIDER_COUNT) as i32;
         let w = 72;
@@ -4482,7 +4437,7 @@ impl Layout {
         let total = Self::ENV_SLIDER_COUNT as i32 * w + (Self::ENV_SLIDER_COUNT as i32 - 1) * gap;
         let left = self.content.x + (self.content.w - total) / 2;
         let plot = self.env_plot();
-        let top = plot.y + plot.h + 36;
+        let top = plot.y + plot.h + 20;
         Rect {
             x: left + i * (w + gap),
             y: top,
@@ -4942,9 +4897,8 @@ mod tests {
             layout.hit(UiMode::Synth, scope.x + scope.w / 2, scope.y + scope.h / 2),
             Hit::ScopeMode
         );
-        const LABELS: [&str; Layout::SYNTH_SLIDER_COUNT] = [
-            "MORPH", "TONE", "LEVEL", "ATTACK", "RELEASE", "DRIFT", "FLANGE", "RATE", "WIDTH",
-        ];
+        const LABELS: [&str; Layout::SYNTH_SLIDER_COUNT] =
+            ["MORPH", "TONE", "LEVEL", "DRIFT", "RATE", "WIDTH"];
         for (index, label) in LABELS.iter().enumerate() {
             let track = layout.synth_slider(index);
             let label_w = label.len() as i32 * 12;
@@ -4953,10 +4907,6 @@ mod tests {
                 "{label} is {label_w}px and the bar is {}px",
                 track.w
             );
-            assert!(
-                track.y >= layout.synth_sliders.y + 16,
-                "{label} covers its name"
-            );
             assert_eq!(
                 track.x, layout.synth_sliders.x,
                 "{label} should span the column"
@@ -4964,10 +4914,7 @@ mod tests {
             assert_eq!(track.w, layout.synth_sliders.w);
             if index > 0 {
                 let prev = layout.synth_slider(index - 1);
-                assert!(
-                    prev.y + prev.h <= track.y,
-                    "{label} overlaps the bar above it"
-                );
+                assert!(prev.y + prev.h <= track.y, "{label} overlaps the row above");
             }
         }
         assert!(
@@ -5485,42 +5432,33 @@ mod tests {
         }
     }
 
+    /// Touch slider rows per page for the >8 audit in the thick-slider PR.
     #[test]
-    fn layout_audit_fx_mix_sliders_fit() {
+    fn touch_slider_counts_per_page() {
+        assert_eq!(Layout::SYNTH_SLIDER_COUNT, 6);
+        assert_eq!(Layout::FX_SLIDER_COUNT, 6);
+        assert_eq!(Layout::FM_SLIDER_COUNT, 6);
+        assert_eq!(Layout::ENV_SLIDER_COUNT, 4);
+        assert!(Layout::SYNTH_SLIDER_COUNT <= 8);
+        assert!(Layout::FX_SLIDER_COUNT <= 8);
+        assert!(Layout::FM_SLIDER_COUNT <= 8);
+        assert!(Layout::ENV_SLIDER_COUNT <= 8);
+        // Documented exceptions (not redesigned in thick-slider work):
+        const MIX_TOUCH_SLIDERS: usize = Layout::MIX_BUS_COUNT + 16;
+        const WAVE_SETUP_ROWS: usize = 3 * 6 + 1;
+        assert!(MIX_TOUCH_SLIDERS > 8, "MIX: {MIX_TOUCH_SLIDERS} faders");
+        assert!(WAVE_SETUP_ROWS > 8, "WAVE setup: {WAVE_SETUP_ROWS} rows");
+    }
+
+    #[test]
+    fn layout_audit_fx_insert_sliders_fit() {
         let layout = Layout::new();
         let first = layout.settings_fx_slider(0);
         let flange = layout.settings_fx_slider(Layout::FX_INSERT_COUNT - 1);
-        let keys = layout.settings_fx_slider(Layout::FX_KEYS_LEVEL);
-        let drums = layout.settings_fx_slider(Layout::FX_DRUMS_LEVEL);
-        let mic = layout.settings_fx_slider(Layout::FX_MIC_LEVEL);
-        let divider = layout.settings_fx_mix_divider();
         assert!(first.x >= layout.settings_fx.x);
         assert!(flange.x + flange.w <= layout.settings_fx.x + layout.settings_fx.w);
-        assert!(mic.x + mic.w <= layout.settings_fx.x + layout.settings_fx.w);
         assert!(first.y < flange.y, "insert FX stack in separate rows");
-        assert!(flange.y + flange.h <= keys.y - 8, "insert block clears mix band");
-        assert_eq!(keys.y, drums.y, "KEYS/DRUMS share the mix row");
-        assert_eq!(drums.y, mic.y, "DRUMS/MIC share the mix row");
-        assert!(
-            keys.y > flange.y + flange.h,
-            "mix trims sit below the insert block"
-        );
-        assert!(
-            divider.y > flange.y + flange.h && divider.y + divider.h < keys.y - 12,
-            "divider sits between insert FX and mix trims"
-        );
-        match layout.hit(UiMode::Fx, mic.x + 4, mic.y + mic.h / 2) {
-            Hit::FxSlider(i) if i == Layout::FX_MIC_LEVEL => {}
-            other => panic!("expected mic level slider, got {other:?}"),
-        }
-        match layout.hit(UiMode::Fx, drums.x + 4, drums.y + drums.h / 2) {
-            Hit::FxSlider(i) if i == Layout::FX_DRUMS_LEVEL => {}
-            other => panic!("expected drums level slider, got {other:?}"),
-        }
-        match layout.hit(UiMode::Fx, keys.x + 4, keys.y + keys.h / 2) {
-            Hit::FxSlider(i) if i == Layout::FX_KEYS_LEVEL => {}
-            other => panic!("expected keys level slider, got {other:?}"),
-        }
+        assert!(flange.y + flange.h <= layout.settings_fx.y + layout.settings_fx.h);
         for index in 0..Layout::FX_INSERT_COUNT {
             let track = layout.settings_fx_slider(index);
             match layout.hit(UiMode::Fx, track.x + 4, track.y + track.h / 2) {
