@@ -9,7 +9,7 @@ This document is the hardware source of truth for the PiDI appliance: board layo
 - Raspberry Pi synth/MIDI appliance. Repo: https://github.com/HyruleanHero1988/pi-midi-toolkit
 - Trello: https://trello.com/b/hrrSktTg/pi-midi-toolkit (enclosure card https://trello.com/c/T80UUNN4)
 - Enclosure files: /workspace/pidi-enclosure (OpenSCAD; latest versioned exports_v2xx/, handoff tarballs in /workspace/handoff/)
-- Long-term goal (11/11): replicate all 23 Clipper FM-1 synth engines + 407 voices (github.com/isod89/clipper-fm1, GPL-3.0-only). Backlog card P3: https://trello.com/c/9zcXwy0o. License route NOT final, but Ray is LEANING GPL-3 (11/11): he always meant PiDI to be fully open source, does not want anyone taking it closed and selling it, and picked MIT arbitrarily. Do not port Clipper code until he confirms. Repo relicense to GPL-3.0-or-later opened as PR https://github.com/HyruleanHero1988/pi-midi-toolkit/pull/91 (11/11, not merged yet).
+- Long-term goal (11/11): replicate all 23 Clipper FM-1 synth engines + 407 voices (github.com/isod89/clipper-fm1, GPL-3.0-only). Backlog card P3: https://trello.com/c/9zcXwy0o. License is final: GPL-3.0-or-later (relicense PR #91 merged 2026-11-11). Clipper (GPL-3.0-only) code is license-compatible to port; ported files stay GPL-3.0-only and keep their copyright notices.
 - Ray hopes to build a second unit for his brother. May sell units later (no hand-soldered boards in sold units).
 
 ## v1 scope
